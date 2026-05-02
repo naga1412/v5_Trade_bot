@@ -2,6 +2,9 @@ import hashlib
 import json
 from typing import Any
 
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
+
 GENESIS_HASH: str = "0" * 64
 
 
@@ -17,10 +20,6 @@ def canonical_row_json(row: dict[str, Any]) -> str:
 def compute_row_hash(prev_hash: str, row: dict[str, Any]) -> str:
     payload = (prev_hash + canonical_row_json(row)).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
-
-
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def _last_row_hash(session: AsyncSession, table: str) -> str:
