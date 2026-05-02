@@ -35,3 +35,32 @@ def test_chain_unbroken_across_three_rows() -> None:
     # mutating row 1 must invalidate h2 onward
     tampered = compute_row_hash(h0, {"id": 1, "v": "TAMPERED"})
     assert tampered != h1
+
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+
+from app.db.audit import insert_with_chain
+
+
+@pytest.mark.asyncio
+async def test_insert_with_chain_links_rows_correctly() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "data TEXT NOT NULL, prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+        ))
+    async with AsyncSession(engine) as session:
+        h1 = await insert_with_chain(session, "t", {"data": "first"})
+        h2 = await insert_with_chain(session, "t", {"data": "second"})
+        await session.commit()
+        rows = (await session.execute(
+            sa.text("SELECT id, data, prev_hash, row_hash FROM t ORDER BY id")
+        )).all()
+    assert len(rows) == 2
+    assert rows[0].prev_hash == GENESIS_HASH
+    assert rows[0].row_hash == h1
+    assert rows[1].prev_hash == h1
+    assert rows[1].row_hash == h2
