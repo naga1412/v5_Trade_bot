@@ -24,18 +24,20 @@ def make_jwt(*, aud: str, iss: str, secret: str, exp_offset: int = 3600,
     )
 
 
-def test_valid_jwt_returns_email(signing_key: str) -> None:
+@pytest.mark.asyncio
+async def test_valid_jwt_returns_email(signing_key: str) -> None:
     cfg = CFAccessConfig(team_domain="myteam.cloudflareaccess.com",
                          aud="my-app-aud", _algorithm="HS256",
                          _key_resolver=lambda _kid: signing_key)
     token = make_jwt(aud="my-app-aud",
                      iss="https://myteam.cloudflareaccess.com",
                      secret=signing_key)
-    user = verify_cf_access_jwt(token, cfg=cfg)
+    user = await verify_cf_access_jwt(token, cfg=cfg)
     assert user.email == "user@example.com"
 
 
-def test_wrong_aud_raises(signing_key: str) -> None:
+@pytest.mark.asyncio
+async def test_wrong_aud_raises(signing_key: str) -> None:
     cfg = CFAccessConfig(team_domain="myteam.cloudflareaccess.com",
                          aud="my-app-aud", _algorithm="HS256",
                          _key_resolver=lambda _kid: signing_key)
@@ -43,10 +45,11 @@ def test_wrong_aud_raises(signing_key: str) -> None:
                      iss="https://myteam.cloudflareaccess.com",
                      secret=signing_key)
     with pytest.raises(CFAccessError):
-        verify_cf_access_jwt(token, cfg=cfg)
+        await verify_cf_access_jwt(token, cfg=cfg)
 
 
-def test_expired_jwt_raises(signing_key: str) -> None:
+@pytest.mark.asyncio
+async def test_expired_jwt_raises(signing_key: str) -> None:
     cfg = CFAccessConfig(team_domain="myteam.cloudflareaccess.com",
                          aud="my-app-aud", _algorithm="HS256",
                          _key_resolver=lambda _kid: signing_key)
@@ -54,11 +57,12 @@ def test_expired_jwt_raises(signing_key: str) -> None:
                      iss="https://myteam.cloudflareaccess.com",
                      secret=signing_key, exp_offset=-1)
     with pytest.raises(CFAccessError):
-        verify_cf_access_jwt(token, cfg=cfg)
+        await verify_cf_access_jwt(token, cfg=cfg)
 
 
-def test_no_token_raises() -> None:
+@pytest.mark.asyncio
+async def test_no_token_raises() -> None:
     cfg = CFAccessConfig(team_domain="myteam.cloudflareaccess.com",
                          aud="my-app-aud")
     with pytest.raises(CFAccessError):
-        verify_cf_access_jwt("", cfg=cfg)
+        await verify_cf_access_jwt("", cfg=cfg)

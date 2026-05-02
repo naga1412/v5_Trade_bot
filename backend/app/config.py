@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     cf_access_aud: str = ""
 
     binance_use_testnet: bool = True
+    # When false, the live-prediction WS worker does not start in the lifespan.
+    # Default true for prod/dev; set false in test fixtures or CI.
+    worker_enabled: bool = True
 
 
 @lru_cache
