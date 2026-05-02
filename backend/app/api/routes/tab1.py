@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import httpx
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.schemas import LivePredictionOut
@@ -10,8 +10,9 @@ from app.core.dataquality.validator import Candle
 from app.core.predictor import build_prediction
 from app.data.adapters.binance import BinanceClient
 from app.data.universe import is_tradable
+from app.deps import require_cf_user
 
-router = APIRouter(prefix="/api/v1", tags=["tab1"])
+router = APIRouter(prefix="/api/v1", tags=["tab1"], dependencies=[Depends(require_cf_user)])
 
 _TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 
