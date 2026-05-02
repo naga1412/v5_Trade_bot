@@ -1,7 +1,11 @@
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import httpx
+import websockets
 
 from app.core.dataquality.validator import Candle
 from app.data.ratelimit import TokenBucket
@@ -60,5 +64,52 @@ class BinanceClient:
 
 
 class BinanceKlineStream:
-    """Subscribes to wss://stream.binance.com:9443/ws/<symbol>@kline_<tf>."""
-    pass  # next task implements
+    """Yields only CLOSED candles (k.x == True). Skips intra-bar updates.
+
+    Reconnect-with-backoff is handled here per §5.8.
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        base_ws_url: str = "wss://stream.binance.com:9443",
+        _connect: Callable[[str], AsyncIterator[str]] | None = None,
+    ) -> None:
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.base_ws_url = base_ws_url
+        self._connect = _connect
+        pair = symbol.lower()
+        self.url = f"{base_ws_url}/ws/{pair}@kline_{timeframe}"
+
+    async def _real_connect(self, url: str) -> AsyncIterator[str]:
+        async with websockets.connect(url, ping_interval=15, ping_timeout=10) as ws:
+            async for msg in ws:
+                yield msg if isinstance(msg, str) else msg.decode()
+
+    async def stream(self) -> AsyncIterator[Candle]:
+        connect = self._connect or self._real_connect
+        backoff = 1.0
+        while True:
+            try:
+                async for raw in connect(self.url):
+                    backoff = 1.0
+                    payload = json.loads(raw)
+                    kline = payload.get("k") if isinstance(payload, dict) else None
+                    if not kline or not kline.get("x"):
+                        continue
+                    yield Candle(
+                        symbol=_to_pair(kline["s"]),
+                        timeframe=kline["i"],
+                        ts=datetime.fromtimestamp(kline["t"] / 1000, tz=timezone.utc),
+                        open=float(kline["o"]),
+                        high=float(kline["h"]),
+                        low=float(kline["l"]),
+                        close=float(kline["c"]),
+                        volume=float(kline["v"]),
+                    )
+            except Exception:  # noqa: BLE001 — resilient WS loop
+                await asyncio.sleep(min(30.0, backoff))
+                backoff = min(30.0, backoff * 2)

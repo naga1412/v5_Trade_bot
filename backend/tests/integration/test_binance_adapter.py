@@ -46,3 +46,38 @@ async def test_fetch_klines_parses_binance_response() -> None:
     assert c.low == 64800.0
     assert c.close == 65300.0
     assert c.volume == 1234.56
+
+
+import asyncio
+import json
+
+from app.data.adapters.binance import BinanceKlineStream
+
+
+SAMPLE_WS_MSG = {
+    "e": "kline", "E": 1714525200000, "s": "BTCUSDT",
+    "k": {
+        "t": 1714521600000, "T": 1714525199999, "s": "BTCUSDT",
+        "i": "1h", "o": "65000.00", "c": "65300.00", "h": "65500.00",
+        "l": "64800.00", "v": "1234.56", "x": True
+    }
+}
+
+
+@pytest.mark.asyncio
+async def test_kline_stream_parses_closed_candles_only(monkeypatch) -> None:
+    msgs = [SAMPLE_WS_MSG, {**SAMPLE_WS_MSG, "k": {**SAMPLE_WS_MSG["k"], "x": False}}]
+
+    async def fake_iter(_url):
+        for m in msgs:
+            yield json.dumps(m)
+
+    stream = BinanceKlineStream(symbol="BTCUSDT", timeframe="1h", _connect=fake_iter)
+    received = []
+    async for candle in stream.stream():
+        received.append(candle)
+        if len(received) == 1:
+            break
+
+    assert len(received) == 1
+    assert received[0].close == 65300.0
