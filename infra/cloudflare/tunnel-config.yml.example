@@ -1,0 +1,19 @@
+# Place at /etc/cloudflared/config.yml on the Oracle host (or ~/.cloudflared/config.yml)
+tunnel: <YOUR_TUNNEL_UUID>
+credentials-file: /etc/cloudflared/<YOUR_TUNNEL_UUID>.json
+
+ingress:
+  # Frontend
+  - hostname: trading-radar.<yourdomain>
+    service: http://localhost:5173
+    originRequest:
+      noTLSVerify: true
+  # Backend API + WS — same hostname, path-routed
+  - hostname: trading-radar.<yourdomain>
+    path: /api/.*
+    service: http://localhost:8000
+  - hostname: trading-radar.<yourdomain>
+    path: /ws/.*
+    service: http://localhost:8000
+  # Default catch-all
+  - service: http_status:404
