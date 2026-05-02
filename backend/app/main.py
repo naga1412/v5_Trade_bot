@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.config import get_settings
+from app.api.routes import health
 
 
 @asynccontextmanager
@@ -17,6 +18,7 @@ def create_app() -> FastAPI:
         docs_url="/api/v1/docs",
         openapi_url="/api/v1/openapi.json",
     )
+    app.include_router(health.router)
     return app
 
 
