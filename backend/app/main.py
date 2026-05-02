@@ -3,12 +3,17 @@ from fastapi import FastAPI
 from app.config import get_settings
 from app.api.routes import health, tab1
 from app.api.routes import ws as ws_routes
+from app.ws.live_prediction import start_background_worker
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _ = get_settings()
-    yield
+    worker = start_background_worker()
+    try:
+        yield
+    finally:
+        worker.cancel()
 
 
 def create_app() -> FastAPI:
