@@ -41,7 +41,7 @@ class BinanceClient:
 
         binance_tf = _TF_TO_BINANCE[timeframe]
         url = f"{self.base_url}/api/v3/klines"
-        params = {"symbol": symbol, "interval": binance_tf, "limit": limit}
+        params: dict[str, str | int] = {"symbol": symbol, "interval": binance_tf, "limit": limit}
         response = await self.http.get(url, params=params, timeout=10.0)
         response.raise_for_status()
 

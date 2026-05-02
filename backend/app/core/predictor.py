@@ -1,7 +1,5 @@
 import hashlib
 import math
-from datetime import datetime
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -61,10 +59,10 @@ def _atr(bars: pd.DataFrame, period: int = 14) -> float:
     if len(bars) < period + 1:
         return 0.0
     h = bars["high"].to_numpy(dtype=float)
-    l = bars["low"].to_numpy(dtype=float)
+    lo = bars["low"].to_numpy(dtype=float)
     c = bars["close"].to_numpy(dtype=float)
     prev_close = np.concatenate([[c[0]], c[:-1]])
-    tr = np.maximum(h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close)))
+    tr = np.maximum(h - lo, np.maximum(np.abs(h - prev_close), np.abs(lo - prev_close)))
     return float(np.mean(tr[-period:]))
 
 
