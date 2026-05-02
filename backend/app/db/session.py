@@ -15,6 +15,7 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
+        # TODO(sp-7): make pool_size and max_overflow configurable via Settings.
         _engine = create_async_engine(
             get_settings().database_url,
             pool_size=10,

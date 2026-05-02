@@ -71,5 +71,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Remove TimescaleDB compression policy before dropping the hypertable so
+    # the bgw_job entry doesn't linger in _timescaledb_config.
+    op.execute("SELECT remove_compression_policy('ohlcv', if_exists => TRUE);")
     op.execute("DROP TABLE IF EXISTS watchlist;")
     op.execute("DROP TABLE IF EXISTS ohlcv;")
+    # Extensions (timescaledb, pgcrypto) intentionally not dropped — they are
+    # cluster-wide and may be used by other databases on the same instance.
