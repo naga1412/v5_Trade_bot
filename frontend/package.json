@@ -13,15 +13,16 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "lightweight-charts": "^4.2.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "lightweight-charts": "^4.2.1",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.1",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.19.17",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@typescript-eslint/eslint-plugin": "^8.18.2",

@@ -4,14 +4,12 @@ export class TradingRadarSocket {
   private ws: WebSocket | null = null;
   private listeners = new Set<Listener>();
   private backoff = 1000;
-  private clientId: string;
   private url: string;
   private subscription: { channel: string; params: Record<string, unknown> } | null = null;
   private alive = false;
   private heartbeatTimer?: number;
 
   constructor(clientId: string) {
-    this.clientId = clientId;
     const wsBase = (import.meta.env.VITE_WS_URL ?? "/ws/v1") as string;
     this.url = wsBase.startsWith("ws")
       ? `${wsBase}/${clientId}`

@@ -1,0 +1,9 @@
+# Build / framework config files — TS-checked via tsconfig.node.json,
+# not part of the application TS project.
+vite.config.ts
+playwright.config.ts
+tailwind.config.ts
+postcss.config.js
+.eslintrc.cjs
+node_modules
+dist
