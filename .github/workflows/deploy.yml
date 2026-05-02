@@ -1,0 +1,26 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy on Oracle
+        run: |
+          ssh -i ~/.ssh/oracle_key ubuntu@${{ secrets.ORACLE_HOST }} \
+            'cd ~/trading-radar && \
+             git fetch --all && \
+             git checkout main && git pull && \
+             docker compose up -d --build && \
+             docker compose exec -T backend alembic upgrade head && \
+             curl -fsS http://localhost:8000/api/v1/health'

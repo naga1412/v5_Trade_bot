@@ -26,6 +26,7 @@ eggs/
 .eggs/
 lib/
 lib64/
+!frontend/src/lib/
 parts/
 sdist/
 var/
@@ -102,6 +103,7 @@ postgres_data/
 redis_data/
 *.dump
 backup/
+!infra/backup/
 
 # --- Docker ---
 docker-compose.override.yml
