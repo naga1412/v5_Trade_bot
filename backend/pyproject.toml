@@ -1,0 +1,41 @@
+[project]
+name = "trading-radar-backend"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "sqlalchemy==2.0.36",
+    "asyncpg==0.30.0",
+    "alembic==1.14.0",
+    "redis==5.2.1",
+    "httpx==0.28.1",
+    "websockets==13.1",
+    "numpy==1.26.4",
+    "pandas==2.2.3",
+    "ccxt==4.4.40",
+    "PyJWT[crypto]==2.10.1",
+    "structlog==24.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-cov==6.0.0",
+    "anyio==4.7.0",
+    "freezegun==1.5.1",
+    "ruff==0.8.4",
+    "mypy==1.13.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers --cov=app --cov-report=term-missing --cov-fail-under=85"
+markers = [
+    "integration: requires database/redis",
+    "slow: takes more than 1s",
+]
