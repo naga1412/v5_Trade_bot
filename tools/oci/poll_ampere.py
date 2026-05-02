@@ -40,23 +40,22 @@ OCI_PROFILE = "DEFAULT"
 # Region — must match your Oracle home region. Hyderabad = ap-hyderabad-1.
 REGION = "ap-hyderabad-1"
 
-# Subnet OCID — get from OCI console: Networking > Virtual Cloud Networks >
-# (your VCN) > Subnets > (public subnet) > copy OCID.
-SUBNET_OCID = "PASTE_SUBNET_OCID_HERE"
+# Subnet OCID — public subnet of trading-radar-vcn in ap-hyderabad-1.
+SUBNET_OCID = "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaalbnpda2pugcwqfht6kbfijhfamtxlid7hc6aky46t3hkh3xdkvfq"
 
 # Image OCID — leave as None and the script will auto-pick the latest
 # Ubuntu 22.04 ARM64 image. Or set explicitly to pin a specific image.
 IMAGE_OCID: str | None = None
 
-# Compartment OCID — usually equals tenancy OCID for personal accounts.
-COMPARTMENT_OCID = "PASTE_TENANCY_OCID_HERE"
+# Compartment OCID — root tenancy compartment for nagarajan1998yuva.
+COMPARTMENT_OCID = "ocid1.tenancy.oc1..aaaaaaaarsxww3q57tsclevjxkhdb5asnsw66en7tau5oc3ocismyewqvdia"
 
 # Display name for the instance.
 INSTANCE_NAME = "trading-radar"
 
 # SSH public key — content of ~/.ssh/oracle_key.pub
 SSH_PUBLIC_KEY = (
-    "PASTE_SSH_PUBLIC_KEY_HERE"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJZj9FaBkmaLHHM8Jf0DWrW3oYkwaP3//LMjldBy5jd0 oracle-trading-radar"
 )
 
 # Shape config (Always Free max).
