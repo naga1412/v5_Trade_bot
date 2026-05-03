@@ -60,7 +60,7 @@ At $30/trade × 5 positions = $150 max capital deployed simultaneously. Even in 
 
 ### 2.6 Per-asset cooldown
 
-**60 minutes after closing a position on an asset, no re-entry on that asset.** Configurable: 0 / 30 / 60 / 240 minutes.
+**30 minutes after closing a position on an asset, no re-entry on that asset.** Configurable: 0 / 30 / 60 / 240 minutes.
 
 Rationale: prevents whipsaw re-entries after stop-outs.
 
