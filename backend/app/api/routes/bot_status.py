@@ -12,13 +12,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     BotOverviewOut,
     GateMetricOut,
     OpenPositionOut,
+    PerAssetStatOut,
     PromotionGateOut,
     WindowStatsOut,
 )
@@ -26,6 +27,7 @@ from app.db.session import get_session
 from app.deps import require_cf_user
 from app.shadow.stats import (
     Trade,
+    compute_avg_rr,
     compute_max_drawdown,
     compute_profit_factor,
     compute_sharpe_annualized,
@@ -306,6 +308,41 @@ async def open_positions(
             unrealized_pnl_pct=None,
             unrealized_pnl_usdt=None,
         ))
+    return out
+
+
+@router.get("/per-asset", response_model=list[PerAssetStatOut])
+async def per_asset(
+    days: int = Query(default=30, ge=1, le=365),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[PerAssetStatOut]:
+    """Per-asset rolling stats over the last `days` days, sorted by pnl_usdt desc."""
+    now = datetime.now(UTC)
+    since = now - timedelta(days=days)
+    sql = (
+        "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
+        "position_size_usdt, pnl_pct, pnl_usdt, closed_at "
+        "FROM shadow_trades "
+        "WHERE closed_at >= :since AND closed_at IS NOT NULL"
+    )
+    result = await session.execute(sa.text(sql), {"since": since.isoformat()})
+    by_symbol: dict[str, list[Any]] = {}
+    for r in result:
+        by_symbol.setdefault(r.symbol, []).append(r)
+
+    out: list[PerAssetStatOut] = []
+    for symbol, sym_rows in by_symbol.items():
+        trades = [_row_to_trade(r) for r in sym_rows]
+        sharpe = compute_sharpe_annualized(trades, days)
+        out.append(PerAssetStatOut(
+            symbol=symbol,
+            trades=len(trades),
+            win_rate=compute_win_rate(trades),
+            avg_rr=compute_avg_rr(trades),
+            pnl_usdt=float(sum(t.pnl_usdt for t in trades)),
+            sharpe_annualized=sharpe,
+        ))
+    out.sort(key=lambda e: e.pnl_usdt, reverse=True)
     return out
 
 
