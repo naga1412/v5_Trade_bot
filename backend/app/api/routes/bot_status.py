@@ -21,6 +21,7 @@ from app.api.schemas import (
     OpenPositionOut,
     PerAssetStatOut,
     PromotionGateOut,
+    RecentTradeOut,
     WindowStatsOut,
 )
 from app.db.session import get_session
@@ -343,6 +344,62 @@ async def per_asset(
             sharpe_annualized=sharpe,
         ))
     out.sort(key=lambda e: e.pnl_usdt, reverse=True)
+    return out
+
+
+def _normalize_symbol_path(s: str) -> str:
+    """BTC-USDT (URL-safe) -> BTC/USDT. Idempotent."""
+    return s.replace("-", "/").upper()
+
+
+@router.get("/recent-trades", response_model=list[RecentTradeOut])
+async def recent_trades(
+    limit: int = Query(default=100, ge=1, le=500),
+    symbol: str | None = Query(default=None),
+    direction: Literal["LONG", "SHORT"] | None = Query(default=None),
+    result: Literal["win", "loss"] | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[RecentTradeOut]:
+    """Paginated, filterable closed-trade history (closed_at DESC)."""
+    where: list[str] = ["closed_at IS NOT NULL"]
+    params: dict[str, Any] = {}
+    if symbol is not None:
+        where.append("symbol = :symbol")
+        params["symbol"] = _normalize_symbol_path(symbol)
+    if direction is not None:
+        where.append("direction = :direction")
+        params["direction"] = direction
+    if result == "win":
+        where.append("pnl_pct > 0")
+    elif result == "loss":
+        where.append("pnl_pct <= 0")
+
+    sql = (
+        "SELECT closed_at, symbol, direction, entry_price, exit_price, "
+        "pnl_pct, pnl_usdt, exit_reason, bars_held, signal_id "
+        "FROM shadow_trades "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY closed_at DESC LIMIT :limit"
+    )
+    params["limit"] = limit
+    rows = await session.execute(sa.text(sql), params)
+    out: list[RecentTradeOut] = []
+    for r in rows:
+        closed_at = r.closed_at
+        if isinstance(closed_at, str):
+            closed_at = datetime.fromisoformat(closed_at)
+        out.append(RecentTradeOut(
+            closed_at=closed_at,
+            symbol=r.symbol,
+            direction=r.direction,  # type: ignore[arg-type]
+            entry_price=r.entry_price,
+            exit_price=r.exit_price,
+            pnl_pct=r.pnl_pct,
+            pnl_usdt=r.pnl_usdt,
+            exit_reason=r.exit_reason,  # type: ignore[arg-type]
+            bars_held=r.bars_held,
+            signal_id=r.signal_id,
+        ))
     return out
 
 
