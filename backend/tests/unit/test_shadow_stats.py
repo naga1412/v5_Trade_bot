@@ -4,7 +4,9 @@ import pytest
 from app.shadow.stats import (
     Trade,
     compute_avg_rr,
+    compute_max_drawdown,
     compute_profit_factor,
+    compute_sharpe_annualized,
     compute_win_rate,
 )
 
@@ -45,3 +47,38 @@ def test_profit_factor_empty_returns_zero() -> None:
 def test_avg_rr_basic() -> None:
     trades = [make_trade(0, rr=2.0), make_trade(0, rr=1.5), make_trade(0, rr=2.5)]
     assert compute_avg_rr(trades) == pytest.approx(2.0)
+
+
+def test_sharpe_undefined_when_one_trade() -> None:
+    assert compute_sharpe_annualized([make_trade(2.0)], window_days=30) is None
+
+
+def test_sharpe_undefined_when_all_returns_identical() -> None:
+    trades = [make_trade(1.0) for _ in range(5)]
+    assert compute_sharpe_annualized(trades, window_days=30) is None
+
+
+def test_sharpe_basic_positive() -> None:
+    # 4 trades over 30 days, mean +1.5%, some variance — should give positive Sharpe
+    trades = [
+        make_trade(2.0), make_trade(1.0), make_trade(2.5), make_trade(0.5),
+    ]
+    sharpe = compute_sharpe_annualized(trades, window_days=30)
+    assert sharpe is not None
+    assert sharpe > 0
+
+
+def test_max_drawdown_basic() -> None:
+    trades = [
+        make_trade(2.0, pnl_usdt=10, ts=datetime(2026, 5, 1, tzinfo=UTC)),
+        make_trade(3.0, pnl_usdt=15, ts=datetime(2026, 5, 2, tzinfo=UTC)),
+        make_trade(-4.0, pnl_usdt=-12, ts=datetime(2026, 5, 3, tzinfo=UTC)),
+        make_trade(-1.0, pnl_usdt=-3, ts=datetime(2026, 5, 4, tzinfo=UTC)),
+    ]
+    # equity: 10, 25, 13, 10. peak = 25. trough after = 10. dd = (25-10)/25 = 0.6
+    dd = compute_max_drawdown(trades)
+    assert dd == pytest.approx(0.6)
+
+
+def test_max_drawdown_empty() -> None:
+    assert compute_max_drawdown([]) == 0.0
