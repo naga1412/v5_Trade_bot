@@ -49,3 +49,76 @@ def test_shadow_position_construction() -> None:
     assert pos.position_size_usdt == 30.0
     assert pos.bars_held == 0
     assert pos.opened_at == sig_ts
+
+
+def make_evaluator() -> SignalEvaluator:
+    return SignalEvaluator()
+
+
+def test_evaluator_long_above_threshold_with_high_confidence() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=0.45, confidence=0.72,
+        last_close=78250.0, atr=781.5,
+        layer_scores={"1": 0.6, "3": 0.5, "5": 0.4},
+        ts=datetime(2026, 5, 3, tzinfo=timezone.utc),
+    )
+    assert sig is not None
+    assert sig.direction is Direction.LONG
+    assert sig.entry_price == 78250.0
+    # SL = 78250 - 1.5 * 781.5 = 77077.75
+    assert sig.stop_loss == pytest.approx(77077.75)
+    # TP = 78250 + 3.0 * 781.5 = 80594.5
+    assert sig.take_profit == pytest.approx(80594.5)
+
+
+def test_evaluator_short_below_threshold_with_high_confidence() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="ETHUSDT", score=-0.61, confidence=0.68,
+        last_close=3950.0, atr=46.1,
+        layer_scores={"1": -0.7, "3": -0.5},
+        ts=datetime(2026, 5, 3, tzinfo=timezone.utc),
+    )
+    assert sig is not None
+    assert sig.direction is Direction.SHORT
+    # SL = 3950 + 1.5 * 46.1 = 4019.15
+    assert sig.stop_loss == pytest.approx(4019.15)
+    # TP = 3950 - 3.0 * 46.1 = 3811.7
+    assert sig.take_profit == pytest.approx(3811.7)
+
+
+def test_evaluator_returns_none_when_below_long_threshold() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=0.20, confidence=0.80,
+        last_close=78000.0, atr=500.0, layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is None
+
+
+def test_evaluator_returns_none_when_above_short_threshold() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=-0.30, confidence=0.80,
+        last_close=78000.0, atr=500.0, layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is None
+
+
+def test_evaluator_returns_none_when_confidence_too_low() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=0.80, confidence=0.40,  # high score but low confidence
+        last_close=78000.0, atr=500.0, layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is None
+
+
+def test_evaluator_returns_none_when_atr_zero() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=0.80, confidence=0.80,
+        last_close=78000.0, atr=0.0, layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is None
