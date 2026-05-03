@@ -53,12 +53,22 @@ export function RecentTrades() {
   const { data, error, filters, setFilters, refetch } = useRecentTrades();
   const [symbolInput, setSymbolInput] = useState<string>(filters.symbol ?? "");
 
-  function update(patch: Partial<RecentTradesFilters>) {
-    const next: RecentTradesFilters = { ...filters, ...patch };
-    // Strip empty optional values
-    if (next.symbol === "") delete next.symbol;
-    if (next.direction === undefined) delete next.direction;
-    if (next.result === undefined) delete next.result;
+  function setSymbol(symbol: string) {
+    const next: RecentTradesFilters = { ...filters };
+    if (symbol === "") delete next.symbol;
+    else next.symbol = symbol;
+    setFilters(next);
+  }
+  function setDirection(direction: "LONG" | "SHORT" | "") {
+    const next: RecentTradesFilters = { ...filters };
+    if (direction === "") delete next.direction;
+    else next.direction = direction;
+    setFilters(next);
+  }
+  function setResult(result: "win" | "loss" | "") {
+    const next: RecentTradesFilters = { ...filters };
+    if (result === "") delete next.result;
+    else next.result = result;
     setFilters(next);
   }
 
@@ -81,7 +91,7 @@ export function RecentTrades() {
             value={filters.direction ?? ""}
             onChange={(e) => {
               const v = e.target.value;
-              update({ direction: v === "" ? undefined : (v as "LONG" | "SHORT") });
+              if (v === "" || v === "LONG" || v === "SHORT") setDirection(v);
             }}
           >
             <option value="">All</option>
@@ -97,7 +107,7 @@ export function RecentTrades() {
             value={filters.result ?? ""}
             onChange={(e) => {
               const v = e.target.value;
-              update({ result: v === "" ? undefined : (v as "win" | "loss") });
+              if (v === "" || v === "win" || v === "loss") setResult(v);
             }}
           >
             <option value="">All</option>
@@ -114,8 +124,8 @@ export function RecentTrades() {
             className="bg-bg-elevated text-text-primary px-1 py-0.5 rounded border border-border text-[9px] w-[90px]"
             value={symbolInput}
             onChange={(e) => setSymbolInput(e.target.value)}
-            onBlur={() => update({ symbol: symbolInput })}
-            onKeyDown={(e) => { if (e.key === "Enter") update({ symbol: symbolInput }); }}
+            onBlur={() => setSymbol(symbolInput)}
+            onKeyDown={(e) => { if (e.key === "Enter") setSymbol(symbolInput); }}
           />
         </label>
       </div>

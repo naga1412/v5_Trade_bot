@@ -9,6 +9,26 @@ vi.mock("@/components/chart/TVChart", () => ({
 vi.mock("@/hooks/useLivePrediction", () => ({
   useLivePrediction: () => ({ data: null }),
 }));
+// BotStatus opens REST + a WS. Stub both so App can mount the second tab.
+vi.mock("@/lib/api", () => ({
+  api: {
+    botOverview: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+    promotionGate: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+    openPositions: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+    perAssetStats: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+    longShort: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+    equityCurve: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+    recentTrades: vi.fn().mockReturnValue(new Promise(() => { /* pending */ })),
+  },
+}));
+vi.mock("@/hooks/useShadowUpdates", () => ({
+  useShadowUpdates: () => ({
+    lastOpened: null,
+    lastClosed: null,
+    lastPnlTick: {},
+    lastUniverseRefresh: null,
+  }),
+}));
 
 beforeEach(() => {
   window.location.hash = "";
@@ -27,13 +47,12 @@ test("Live Prediction tab content renders by default", () => {
   expect(screen.queryByText(/under construction/i)).not.toBeInTheDocument();
 });
 
-test("hash #/bot-status renders BotStatus placeholder", () => {
+test("hash #/bot-status renders BotStatus tab", () => {
   render(<App />);
   act(() => {
     window.location.hash = "#/bot-status";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
-  expect(screen.getByText(/bot status \(under construction\)/i)).toBeInTheDocument();
-  // Tab1's symbol input should no longer be in the tree.
-  expect(screen.queryByLabelText(/symbol/i)).not.toBeInTheDocument();
+  // Each section panel renders its own title; "Promotion Gate" is unique to BotStatus.
+  expect(screen.getByText(/promotion gate/i)).toBeInTheDocument();
 });
