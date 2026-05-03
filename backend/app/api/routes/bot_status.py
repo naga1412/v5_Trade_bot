@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     BotOverviewOut,
+    GateMetricOut,
+    PromotionGateOut,
     WindowStatsOut,
 )
 from app.db.session import get_session
@@ -159,3 +161,124 @@ async def overview(
     )
 
     return BotOverviewOut(**blocks)
+
+
+# --- Promotion gate (autonomous spec §4.1, telegram-approve target) ---------
+
+# Thresholds for the rolling 30-day promotion-gate metrics.
+_GATE_DAYS_REQUIRED: int = 30
+_GATE_TRADES_REQUIRED: int = 100
+_GATE_SHARPE_MIN: float = 1.0
+_GATE_MAX_DD_MAX: float = 0.12
+_GATE_WIN_RATE_MIN: float = 0.40
+_GATE_PROFIT_FACTOR_MIN: float = 1.5
+
+
+def _passes(current: float | None, threshold: float, op: Literal[">=", "<="]) -> bool:
+    if current is None:
+        return False
+    if op == ">=":
+        return current >= threshold
+    return current <= threshold
+
+
+@router.get("/promotion-gate", response_model=PromotionGateOut)
+async def promotion_gate(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> PromotionGateOut:
+    """Return rolling-30-day promotion-gate state for telegram-approve mode."""
+    now = datetime.now(UTC)
+    since = now - timedelta(days=30)
+    rows = await _select_trades_since(session, since=since)
+    trades = [_row_to_trade(r) for r in rows]
+
+    n_trades = len(trades)
+    if trades:
+        # "Days since the first trade in the window, capped at 30." We round
+        # generously to the nearest day so wall-clock drift between trade
+        # timestamps and request time doesn't shave fractions off the count.
+        first_ts = min(t.closed_at for t in trades)
+        elapsed_days = (now - first_ts).total_seconds() / 86400.0
+        days_active = float(min(30, round(elapsed_days)))
+    else:
+        days_active = 0.0
+
+    sharpe = compute_sharpe_annualized(trades, 30)
+    max_dd = compute_max_drawdown(trades)
+    win_rate = compute_win_rate(trades) if trades else 0.0
+    pf = compute_profit_factor(trades) if trades else 0.0
+    if math.isinf(pf):
+        pf = _PROFIT_FACTOR_INF_CAP
+
+    metrics: list[GateMetricOut] = [
+        GateMetricOut(
+            name="continuous_paper_trading_days",
+            current=days_active,
+            threshold=float(_GATE_DAYS_REQUIRED),
+            operator=">=",
+            passing=_passes(days_active, _GATE_DAYS_REQUIRED, ">="),
+        ),
+        GateMetricOut(
+            name="closed_paper_trades",
+            current=float(n_trades),
+            threshold=float(_GATE_TRADES_REQUIRED),
+            operator=">=",
+            passing=_passes(float(n_trades), _GATE_TRADES_REQUIRED, ">="),
+        ),
+        GateMetricOut(
+            name="sharpe_annualized",
+            current=sharpe,
+            threshold=_GATE_SHARPE_MIN,
+            operator=">=",
+            passing=_passes(sharpe, _GATE_SHARPE_MIN, ">="),
+        ),
+        GateMetricOut(
+            name="max_drawdown",
+            current=max_dd,
+            threshold=_GATE_MAX_DD_MAX,
+            operator="<=",
+            passing=_passes(max_dd, _GATE_MAX_DD_MAX, "<="),
+        ),
+        GateMetricOut(
+            name="win_rate",
+            current=win_rate,
+            threshold=_GATE_WIN_RATE_MIN,
+            operator=">=",
+            passing=_passes(win_rate, _GATE_WIN_RATE_MIN, ">="),
+        ),
+        GateMetricOut(
+            name="profit_factor",
+            current=pf,
+            threshold=_GATE_PROFIT_FACTOR_MIN,
+            operator=">=",
+            passing=_passes(pf, _GATE_PROFIT_FACTOR_MIN, ">="),
+        ),
+    ]
+    all_passing = all(m.passing for m in metrics)
+    distance_summary = _build_distance_summary(
+        days_short=max(0.0, _GATE_DAYS_REQUIRED - days_active),
+        trades_short=max(0, _GATE_TRADES_REQUIRED - n_trades),
+        all_passing=all_passing,
+    )
+    return PromotionGateOut(
+        target_mode="telegram-approve",
+        metrics=metrics,
+        all_passing=all_passing,
+        distance_summary=distance_summary,
+    )
+
+
+def _build_distance_summary(
+    *, days_short: float, trades_short: int, all_passing: bool,
+) -> str:
+    if all_passing:
+        return "all gates passing"
+    parts: list[str] = []
+    if days_short > 0:
+        d = int(math.ceil(days_short))
+        parts.append(f"{d} day{'s' if d != 1 else ''}")
+    if trades_short > 0:
+        parts.append(f"{trades_short} trade{'s' if trades_short != 1 else ''}")
+    if not parts:
+        return "stat thresholds (sharpe / win-rate / drawdown / profit-factor) still failing"
+    return f"{' + '.join(parts)} to unlock"
