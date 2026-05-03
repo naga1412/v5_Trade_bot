@@ -1,25 +1,32 @@
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from app.config import get_settings
+
 from app.api.routes import health, tab1
 from app.api.routes import ws as ws_routes
+from app.config import get_settings
+from app.shadow.worker import start_shadow_worker
 from app.ws.live_prediction import start_background_worker
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings = get_settings()
-    # Skip the live worker in test/CI runs — pytest imports app.main and we don't
-    # want a Binance WS connection racing the test event loop. Set ENV=test (or
-    # WORKER_ENABLED=false) in pytest fixtures or CI to disable.
-    worker = None
+    # Skip background workers in test/CI runs — pytest imports app.main and we
+    # don't want Binance WS connections racing the test event loop. Set
+    # ENV=test (or WORKER_ENABLED=false) in pytest fixtures or CI to disable.
+    live_worker = None
+    shadow_worker = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
-        worker = start_background_worker()
+        live_worker = start_background_worker()
+        shadow_worker = start_shadow_worker()
     try:
         yield
     finally:
-        if worker is not None:
-            worker.cancel()
+        if live_worker is not None:
+            live_worker.cancel()
+        if shadow_worker is not None:
+            shadow_worker.cancel()
 
 
 def create_app() -> FastAPI:
