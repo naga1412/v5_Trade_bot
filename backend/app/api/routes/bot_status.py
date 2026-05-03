@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     BotOverviewOut,
+    EquityCurveOut,
+    EquityCurvePoint,
     GateMetricOut,
     LongShortBreakdownOut,
     OpenPositionOut,
@@ -445,6 +447,43 @@ async def long_vs_short(
             rows=short_rows, window_days=days,
         ),
     )
+
+
+@router.get("/equity-curve", response_model=EquityCurveOut)
+async def equity_curve(
+    days: int = Query(default=30, ge=1, le=365),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> EquityCurveOut:
+    """Cumulative PnL bucketed by UTC midnight day.
+
+    Days with no trades are skipped (sparkline interpolates client-side).
+    """
+    now = datetime.now(UTC)
+    since = now - timedelta(days=days)
+    sql = (
+        "SELECT pnl_usdt, closed_at FROM shadow_trades "
+        "WHERE closed_at >= :since AND closed_at IS NOT NULL "
+        "ORDER BY closed_at ASC"
+    )
+    rows = await session.execute(sa.text(sql), {"since": since.isoformat()})
+
+    by_day: dict[datetime, float] = {}
+    for r in rows:
+        closed_at = r.closed_at
+        if isinstance(closed_at, str):
+            closed_at = datetime.fromisoformat(closed_at)
+        bucket = datetime(
+            closed_at.year, closed_at.month, closed_at.day, tzinfo=UTC,
+        )
+        by_day[bucket] = by_day.get(bucket, 0.0) + float(r.pnl_usdt)
+
+    points: list[EquityCurvePoint] = []
+    cum = 0.0
+    for bucket in sorted(by_day):
+        cum += by_day[bucket]
+        points.append(EquityCurvePoint(date=bucket, cumulative_pnl_usdt=cum))
+
+    return EquityCurveOut(days=days, points=points)
 
 
 def _build_distance_summary(
