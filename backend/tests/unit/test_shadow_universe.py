@@ -38,3 +38,40 @@ async def test_fetch_top_n_usdt_futures_returns_sorted_usdt_only() -> None:
     assert entries[2].symbol == "SOLUSDT"
     # USDC excluded
     assert all(e.symbol.endswith("USDT") for e in entries)
+
+
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+
+from app.shadow.universe import save_universe_snapshot, load_current_universe
+
+
+@pytest.mark.asyncio
+async def test_save_and_load_universe_snapshot() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE asset_universe ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "quote_volume_usd_24h REAL NOT NULL, "
+            "rank INTEGER NOT NULL, "
+            "snapshot_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "UNIQUE (symbol, snapshot_at))"
+        ))
+
+    entries = [
+        AssetUniverseEntry("BTCUSDT", 1.2e9, 1),
+        AssetUniverseEntry("ETHUSDT", 9.8e8, 2),
+        AssetUniverseEntry("SOLUSDT", 5.4e8, 3),
+    ]
+    async with AsyncSession(engine) as session:
+        snapshot_at = await save_universe_snapshot(session, entries)
+        await session.commit()
+
+        current = await load_current_universe(session)
+
+    assert snapshot_at is not None
+    assert len(current) == 3
+    assert current[0].symbol == "BTCUSDT"
+    assert current[0].rank == 1
