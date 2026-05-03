@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.schemas import (
     BotOverviewOut,
     GateMetricOut,
+    LongShortBreakdownOut,
     OpenPositionOut,
     PerAssetStatOut,
     PromotionGateOut,
@@ -347,6 +348,22 @@ async def per_asset(
     return out
 
 
+# Window-day labels for the WindowStatsOut.window field.
+_DAYS_24H: int = 1
+_DAYS_7D: int = 7
+_DAYS_30D: int = 30
+
+
+def _window_label_for_days(days: int) -> Literal["24h", "7d", "30d", "lifetime"]:
+    if days <= _DAYS_24H:
+        return "24h"
+    if days <= _DAYS_7D:
+        return "7d"
+    if days <= _DAYS_30D:
+        return "30d"
+    return "lifetime"
+
+
 def _normalize_symbol_path(s: str) -> str:
     """BTC-USDT (URL-safe) -> BTC/USDT. Idempotent."""
     return s.replace("-", "/").upper()
@@ -401,6 +418,33 @@ async def recent_trades(
             signal_id=r.signal_id,
         ))
     return out
+
+
+@router.get("/long-vs-short", response_model=LongShortBreakdownOut)
+async def long_vs_short(
+    days: int = Query(default=30, ge=1, le=365),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> LongShortBreakdownOut:
+    """Side-by-side LONG vs SHORT stats over the last `days` days."""
+    now = datetime.now(UTC)
+    since = now - timedelta(days=days)
+
+    label = _window_label_for_days(days)
+
+    long_rows = await _select_trades_since(session, since=since, direction="LONG")
+    short_rows = await _select_trades_since(session, since=since, direction="SHORT")
+    return LongShortBreakdownOut(
+        long=_build_window_stats(
+            window=label,
+            trades=[_row_to_trade(r) for r in long_rows],
+            rows=long_rows, window_days=days,
+        ),
+        short=_build_window_stats(
+            window=label,
+            trades=[_row_to_trade(r) for r in short_rows],
+            rows=short_rows, window_days=days,
+        ),
+    )
 
 
 def _build_distance_summary(
