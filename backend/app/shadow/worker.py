@@ -16,7 +16,6 @@ publish over the WS once persistence succeeds (mirroring live_prediction.py).
 
 import asyncio
 import hashlib
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -46,6 +45,7 @@ from app.shadow.persistence import (
     set_cooldown,
 )
 from app.shadow.universe import load_current_universe
+from app.ws import shadow_updates
 
 log = logging.getLogger(__name__)
 
@@ -187,19 +187,18 @@ class ShadowWorker:
         self.cooldowns[candle.symbol] = cooldown_until
 
         pnl_pct, pnl_usdt = _pnl(pos, decision.exit_price)
-        await manager.publish(
-            channel="shadow_updates",
-            key={"symbol": candle.symbol, "type": "shadow_position_closed"},
-            payload={
-                "type": "shadow_position_closed",
-                "symbol": candle.symbol,
-                "signal_id": pos.signal_id,
-                "exit_reason": decision.reason.value,
-                "exit_price": decision.exit_price,
-                "pnl_pct": pnl_pct,
-                "pnl_usdt": pnl_usdt,
-                "closed_at": candle.ts.isoformat(),
-            },
+        await shadow_updates.publish_position_closed(
+            manager,
+            symbol=candle.symbol,
+            direction=pos.direction.value,
+            entry_price=pos.entry_price,
+            exit_price=decision.exit_price,
+            exit_reason=decision.reason.value,
+            pnl_pct=pnl_pct,
+            pnl_usdt=pnl_usdt,
+            bars_held=pos.bars_held,
+            signal_id=pos.signal_id,
+            closed_at=candle.ts,
         )
 
     async def _maybe_open_position(
@@ -255,21 +254,17 @@ class ShadowWorker:
 
         self.open_positions[candle.symbol] = position
 
-        await manager.publish(
-            channel="shadow_updates",
-            key={"symbol": candle.symbol, "type": "shadow_position_opened"},
-            payload={
-                "type": "shadow_position_opened",
-                "symbol": candle.symbol,
-                "signal_id": position.signal_id,
-                "direction": position.direction.value,
-                "entry_price": position.entry_price,
-                "stop_loss": position.stop_loss,
-                "take_profit": position.take_profit,
-                "position_size_usdt": position.position_size_usdt,
-                "opened_at": position.opened_at.isoformat(),
-                "layer_scores": json.dumps(layer_scores),
-            },
+        await shadow_updates.publish_position_opened(
+            manager,
+            symbol=candle.symbol,
+            direction=position.direction.value,
+            entry_price=position.entry_price,
+            stop_loss=position.stop_loss,
+            take_profit=position.take_profit,
+            signal_id=position.signal_id,
+            score=position.entry_score,
+            confidence=position.entry_confidence,
+            opened_at=position.opened_at,
         )
 
 
