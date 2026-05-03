@@ -122,3 +122,29 @@ def test_evaluator_returns_none_when_atr_zero() -> None:
         last_close=78000.0, atr=0.0, layer_scores={}, ts=datetime.now(timezone.utc),
     )
     assert sig is None
+
+
+from datetime import timedelta
+
+from app.shadow.engine import PositionGate
+
+
+def test_position_gate_blocks_when_already_open() -> None:
+    gate = PositionGate(open_symbols=set(["BTCUSDT"]), cooldowns={})
+    assert gate.is_blocked("BTCUSDT", now=datetime.now(timezone.utc)) is True
+    assert gate.is_blocked("ETHUSDT", now=datetime.now(timezone.utc)) is False
+
+
+def test_position_gate_blocks_during_cooldown() -> None:
+    now = datetime(2026, 5, 3, 14, 0, tzinfo=timezone.utc)
+    gate = PositionGate(
+        open_symbols=set(),
+        cooldowns={"BTCUSDT": now + timedelta(minutes=15)},
+    )
+    assert gate.is_blocked("BTCUSDT", now=now) is True
+    assert gate.is_blocked("BTCUSDT", now=now + timedelta(minutes=20)) is False
+
+
+def test_position_gate_allows_when_clear() -> None:
+    gate = PositionGate(open_symbols=set(), cooldowns={})
+    assert gate.is_blocked("BTCUSDT", now=datetime.now(timezone.utc)) is False
