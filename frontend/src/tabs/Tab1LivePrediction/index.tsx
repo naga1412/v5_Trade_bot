@@ -4,6 +4,7 @@ import { TimeframeRow } from "@/components/layout/TimeframeRow";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TVChart } from "@/components/chart/TVChart";
 import { useLivePrediction } from "@/hooks/useLivePrediction";
+import { useHashRoute } from "@/lib/useHashRoute";
 import { TradeStatusBar } from "./panels/TradeStatusBar";
 import { MasterBiasScore } from "./panels/MasterBiasScore";
 import { MomentumIndicators } from "./panels/MomentumIndicators";
@@ -16,7 +17,9 @@ export function Tab1LivePrediction() {
   const [timeframe, setTimeframe] = useState<Tf>("1h");
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const { data } = useLivePrediction(symbol, timeframe);
+  const { query } = useHashRoute();
+  const signalId = query.signal;
+  const { data } = useLivePrediction(symbol, timeframe, signalId);
 
   return (
     <div className="h-full flex flex-col min-h-0">
@@ -33,6 +36,7 @@ export function Tab1LivePrediction() {
             timeframe={timeframe}
             {...(data?.price != null ? { livePrice: data.price } : {})}
             {...(data?.ts != null ? { liveTs: data.ts } : {})}
+            signalMarkers={data?.signal_markers ?? null}
           />
         </div>
         <Sidebar open={drawerOpen} onClose={() => setDrawerOpen(false)}>

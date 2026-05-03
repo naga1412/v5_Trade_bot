@@ -80,4 +80,39 @@ describe("useHashRoute", () => {
     });
     expect(result.current.tab).toBe("bot-status");
   });
+
+  test("query is empty object when hash has no query string", () => {
+    window.location.hash = "#/live-prediction";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.query).toEqual({});
+  });
+
+  test("parses single query param after '?'", () => {
+    window.location.hash = "#/live-prediction?signal=abc123";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.tab).toBe("live-prediction");
+    expect(result.current.query).toEqual({ signal: "abc123" });
+  });
+
+  test("parses multiple query params", () => {
+    window.location.hash = "#/live-prediction?signal=xyz&foo=bar";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.query).toEqual({ signal: "xyz", foo: "bar" });
+  });
+
+  test("URL-decodes special characters in query values", () => {
+    window.location.hash = "#/live-prediction?signal=" + encodeURIComponent("a/b c");
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.query.signal).toBe("a/b c");
+  });
+
+  test("query updates on external hashchange", () => {
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.query).toEqual({});
+    act(() => {
+      window.location.hash = "#/live-prediction?signal=newid";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(result.current.query).toEqual({ signal: "newid" });
+  });
 });

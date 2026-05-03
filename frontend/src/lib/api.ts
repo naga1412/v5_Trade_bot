@@ -13,6 +13,18 @@ export interface LayerScore {
   notes: string;
 }
 
+export interface SignalMarkers {
+  signal_id: string;
+  direction: "LONG" | "SHORT";
+  entry_price: number;
+  stop_loss: number;
+  take_profit: number;
+  opened_at: string;          // ISO datetime
+  closed_at: string | null;
+  exit_price: number | null;
+  exit_reason: "TAKE_PROFIT" | "STOP_LOSS" | "TIMEOUT" | null;
+}
+
 export interface LivePrediction {
   symbol: string;
   timeframe: string;
@@ -40,6 +52,7 @@ export interface LivePrediction {
   };
   cold_start: boolean;
   inputs_hash: string;
+  signal_markers?: SignalMarkers | null;
 }
 
 // --- Bot Status types ---
@@ -150,8 +163,10 @@ export interface RecentTradesFilters {
 
 export const api = {
   health: () => fetchJson<{ status: string; version: string }>("/health"),
-  predict: (symbolPath: string, tf: string) =>
-    fetchJson<LivePrediction>(`/predict/${symbolPath}/${tf}`),
+  predict: (symbolPath: string, tf: string, signal?: string) => {
+    const qs = signal ? `?signal=${encodeURIComponent(signal)}` : "";
+    return fetchJson<LivePrediction>(`/predict/${symbolPath}/${tf}${qs}`);
+  },
   botOverview: () => fetchJson<BotOverview>("/bot-status/overview"),
   promotionGate: () => fetchJson<PromotionGate>("/bot-status/promotion-gate"),
   openPositions: () => fetchJson<OpenPosition[]>("/bot-status/open-positions"),

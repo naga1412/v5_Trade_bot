@@ -7,12 +7,14 @@ import {
   type Time,
 } from "lightweight-charts";
 import { useChartHistory, type ChartCandle } from "@/hooks/useChartHistory";
+import type { SignalMarkers } from "@/lib/api";
 
 interface Props {
   symbol: string;
   timeframe: string;
   livePrice?: number;
   liveTs?: string;
+  signalMarkers?: SignalMarkers | null;
 }
 
 const TR_GREEN = "#00d68f";
