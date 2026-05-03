@@ -136,9 +136,19 @@ def try_launch(client: oci.core.ComputeClient, *, ad: str, image_id: str) -> str
             log(f"  rate-limited; sleeping 600s")
             time.sleep(600)
             return None
-        # Real error — surface and stop
+        # Real Oracle service error — surface and stop
         log(f"  ERROR ({e.status}): {e.message}")
         raise
+    except oci.exceptions.RequestException as e:
+        # Transient network error (TCP drop, TLS reset, DNS blip, ISP hiccup).
+        # Common; safe to swallow and retry on the next loop iteration.
+        msg = str(e).split(":", 1)[-1].strip()[:120]
+        log(f"  network error (will retry): {msg}")
+        return None
+    except (ConnectionError, TimeoutError, OSError) as e:
+        # Lower-level network errors (e.g. socket reset) that bypass oci's wrapper.
+        log(f"  network error (will retry): {type(e).__name__}: {str(e)[:120]}")
+        return None
 
 
 def main() -> int:
