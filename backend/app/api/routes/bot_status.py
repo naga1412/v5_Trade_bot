@@ -16,6 +16,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    AssetUniverseEntryOut,
+    AssetUniverseOut,
     BotOverviewOut,
     EquityCurveOut,
     EquityCurvePoint,
@@ -484,6 +486,38 @@ async def equity_curve(
         points.append(EquityCurvePoint(date=bucket, cumulative_pnl_usdt=cum))
 
     return EquityCurveOut(days=days, points=points)
+
+
+@router.get("/asset-universe", response_model=AssetUniverseOut)
+async def asset_universe(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> AssetUniverseOut:
+    """Return the most recent `asset_universe` snapshot, ordered by rank."""
+    sql = (
+        "SELECT symbol, quote_volume_usd_24h, rank, snapshot_at "
+        "FROM asset_universe "
+        "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM asset_universe) "
+        "ORDER BY rank ASC"
+    )
+    result = await session.execute(sa.text(sql))
+    rows = result.all()
+    if not rows:
+        return AssetUniverseOut(snapshot_at=datetime.now(UTC), entries=[])
+
+    snapshot_at_raw = rows[0].snapshot_at
+    if isinstance(snapshot_at_raw, str):
+        snapshot_at = datetime.fromisoformat(snapshot_at_raw)
+    else:
+        snapshot_at = snapshot_at_raw
+    entries = [
+        AssetUniverseEntryOut(
+            symbol=r.symbol,
+            rank=r.rank,
+            quote_volume_24h_usdt=r.quote_volume_usd_24h,
+        )
+        for r in rows
+    ]
+    return AssetUniverseOut(snapshot_at=snapshot_at, entries=entries)
 
 
 def _build_distance_summary(
