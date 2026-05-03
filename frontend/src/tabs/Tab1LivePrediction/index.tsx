@@ -19,7 +19,7 @@ export function Tab1LivePrediction() {
   const { data } = useLivePrediction(symbol, timeframe);
 
   return (
-    <div className="h-screen flex flex-col">
+    <div className="h-full flex flex-col min-h-0">
       <TopNav
         symbol={symbol}
         onSymbolChange={(s) => setSymbol(s.includes("/") ? s : s.replace(/(USDT|USDC|BUSD)$/, "/$1"))}
