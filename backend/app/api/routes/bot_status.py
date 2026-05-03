@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.schemas import (
     BotOverviewOut,
     GateMetricOut,
+    OpenPositionOut,
     PromotionGateOut,
     WindowStatsOut,
 )
@@ -266,6 +267,46 @@ async def promotion_gate(
         all_passing=all_passing,
         distance_summary=distance_summary,
     )
+
+
+@router.get("/open-positions", response_model=list[OpenPositionOut])
+async def open_positions(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[OpenPositionOut]:
+    """Return the open shadow positions.
+
+    `current_price`, `unrealized_pnl_pct`, and `unrealized_pnl_usdt` are
+    intentionally returned as `None`. The Bot Status tab subscribes to the
+    WebSocket `shadow_pnl_tick` stream for live mark prices; this REST
+    endpoint exists only for cold-load / refresh fallback so we avoid an
+    expensive Binance round-trip on every page load.
+    """
+    sql = (
+        "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
+        "position_size_usdt, bars_held, opened_at, signal_id "
+        "FROM shadow_open_positions ORDER BY opened_at ASC"
+    )
+    result = await session.execute(sa.text(sql))
+    out: list[OpenPositionOut] = []
+    for r in result:
+        opened_at = r.opened_at
+        if isinstance(opened_at, str):
+            opened_at = datetime.fromisoformat(opened_at)
+        out.append(OpenPositionOut(
+            symbol=r.symbol,
+            direction=r.direction,  # type: ignore[arg-type]
+            entry_price=r.entry_price,
+            stop_loss=r.stop_loss,
+            take_profit=r.take_profit,
+            position_size_usdt=r.position_size_usdt,
+            bars_held=r.bars_held,
+            opened_at=opened_at,
+            signal_id=r.signal_id,
+            current_price=None,
+            unrealized_pnl_pct=None,
+            unrealized_pnl_usdt=None,
+        ))
+    return out
 
 
 def _build_distance_summary(
