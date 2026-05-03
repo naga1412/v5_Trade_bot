@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import health, tab1
+from app.api.routes import bot_status, health, tab1
 from app.api.routes import ws as ws_routes
 from app.config import get_settings
 from app.shadow.worker import start_shadow_worker
@@ -39,6 +39,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(tab1.router)
+    app.include_router(bot_status.router)
     app.include_router(ws_routes.router)
     return app
 

@@ -1,0 +1,161 @@
+"""REST endpoints powering the SP-0.5 Bot Status tab.
+
+All endpoints are read-only aggregations over `shadow_trades`,
+`shadow_open_positions`, and `asset_universe`. Auth is enforced at the
+router level via `require_cf_user`.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
+
+import sqlalchemy as sa
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.schemas import (
+    BotOverviewOut,
+    WindowStatsOut,
+)
+from app.db.session import get_session
+from app.deps import require_cf_user
+from app.shadow.stats import (
+    Trade,
+    compute_max_drawdown,
+    compute_profit_factor,
+    compute_sharpe_annualized,
+    compute_win_rate,
+)
+
+router = APIRouter(
+    prefix="/api/v1/bot-status",
+    tags=["bot-status"],
+    dependencies=[Depends(require_cf_user)],
+)
+
+# JSON cannot encode infinity. When the strategy has zero losses in a window,
+# `compute_profit_factor` returns inf — we cap it for transport.
+_PROFIT_FACTOR_INF_CAP: float = 999.0
+
+
+# --- Helpers ----------------------------------------------------------------
+
+
+def _risk_reward(direction: str, entry: float, sl: float, tp: float) -> float:
+    """RR matches ShadowSignal.risk_reward; returns 0 on degenerate inputs."""
+    if direction == "LONG":
+        risk = entry - sl
+        reward = tp - entry
+    else:
+        risk = sl - entry
+        reward = entry - tp
+    return reward / risk if risk > 0 else 0.0
+
+
+def _row_to_trade(row: Any) -> Trade:
+    closed_at = row.closed_at
+    if isinstance(closed_at, str):
+        closed_at = datetime.fromisoformat(closed_at)
+    return Trade(
+        pnl_pct=row.pnl_pct,
+        pnl_usdt=row.pnl_usdt,
+        risk_reward=_risk_reward(
+            row.direction, row.entry_price, row.stop_loss, row.take_profit,
+        ),
+        closed_at=closed_at,
+    )
+
+
+def _build_window_stats(
+    *,
+    window: Literal["24h", "7d", "30d", "lifetime"],
+    trades: list[Trade],
+    rows: list[Any],
+    window_days: int,
+) -> WindowStatsOut:
+    n = len(trades)
+    pnl_usdt = sum(t.pnl_usdt for t in trades)
+    if n == 0:
+        pnl_pct: float | None = None
+    else:
+        total_size = sum(r.position_size_usdt for r in rows)
+        pnl_pct = pnl_usdt / total_size if total_size > 0 else None
+
+    pf = compute_profit_factor(trades)
+    if math.isinf(pf):
+        pf = _PROFIT_FACTOR_INF_CAP
+
+    return WindowStatsOut(
+        window=window,
+        trades=n,
+        pnl_usdt=float(pnl_usdt),
+        pnl_pct=pnl_pct,
+        win_rate=compute_win_rate(trades),
+        sharpe_annualized=compute_sharpe_annualized(trades, window_days),
+        max_drawdown=compute_max_drawdown(trades),
+        profit_factor=pf,
+    )
+
+
+async def _select_trades_since(
+    session: AsyncSession, *, since: datetime, direction: str | None = None,
+) -> list[Any]:
+    """Return shadow_trades rows closed at/after `since`. Optional direction filter."""
+    sql = (
+        "SELECT direction, entry_price, stop_loss, take_profit, "
+        "position_size_usdt, pnl_pct, pnl_usdt, closed_at "
+        "FROM shadow_trades "
+        "WHERE closed_at >= :since AND closed_at IS NOT NULL "
+    )
+    params: dict[str, Any] = {"since": since.isoformat()}
+    if direction is not None:
+        sql += "AND direction = :direction "
+        params["direction"] = direction
+    sql += "ORDER BY closed_at ASC"
+    result = await session.execute(sa.text(sql), params)
+    return list(result.all())
+
+
+# --- Endpoints --------------------------------------------------------------
+
+
+@router.get("/overview", response_model=BotOverviewOut)
+async def overview(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> BotOverviewOut:
+    """Aggregate stats over rolling 24h / 7d / 30d (and 30d split by direction)."""
+    now = datetime.now(UTC)
+
+    cuts: dict[str, tuple[datetime, int, Literal["24h", "7d", "30d"]]] = {
+        "last_24h": (now - timedelta(hours=24), 1, "24h"),
+        "last_7d": (now - timedelta(days=7), 7, "7d"),
+        "last_30d": (now - timedelta(days=30), 30, "30d"),
+    }
+    blocks: dict[str, WindowStatsOut] = {}
+    for key, (since, days, label) in cuts.items():
+        rows = await _select_trades_since(session, since=since)
+        trades = [_row_to_trade(r) for r in rows]
+        blocks[key] = _build_window_stats(
+            window=label, trades=trades, rows=rows, window_days=days,
+        )
+
+    long_rows = await _select_trades_since(
+        session, since=now - timedelta(days=30), direction="LONG",
+    )
+    short_rows = await _select_trades_since(
+        session, since=now - timedelta(days=30), direction="SHORT",
+    )
+    blocks["long_only_30d"] = _build_window_stats(
+        window="30d",
+        trades=[_row_to_trade(r) for r in long_rows],
+        rows=long_rows, window_days=30,
+    )
+    blocks["short_only_30d"] = _build_window_stats(
+        window="30d",
+        trades=[_row_to_trade(r) for r in short_rows],
+        rows=short_rows, window_days=30,
+    )
+
+    return BotOverviewOut(**blocks)
