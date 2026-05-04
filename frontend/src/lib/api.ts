@@ -1,8 +1,27 @@
 const BASE = (import.meta.env.VITE_API_URL ?? "/api/v1") as string;
 
-export async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { credentials: "include" });
+export interface FetchOptions {
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  body?: unknown;
+}
+
+export async function fetchJson<T>(
+  path: string,
+  options?: FetchOptions,
+): Promise<T> {
+  const init: RequestInit = {
+    credentials: "include",
+    method: options?.method ?? "GET",
+  };
+  if (options?.body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(options.body);
+  }
+  const res = await fetch(`${BASE}${path}`, init);
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${path}`);
+  // 204 No Content → no body to parse; return undefined as T (callers should
+  // declare the response type as `void` for those endpoints).
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
@@ -161,6 +180,111 @@ export interface RecentTradesFilters {
   result?: "win" | "loss";
 }
 
+// --- SP-0.7 Phase H: /me types (mirrors backend MeOut Pydantic schema) ---
+
+export type TradingMode = "manual" | "telegram-approve" | "fully-auto";
+export type PositionSizingMode = "fixed" | "percentage";
+
+export interface MeOut {
+  id: number;
+  email: string;
+  display_name: string;
+  is_admin: boolean;
+  is_impersonating: boolean;
+  trading_mode: TradingMode;
+  position_sizing_mode: PositionSizingMode;
+  fixed_size_min_usdt: number | null;
+  fixed_size_max_usdt: number | null;
+  max_concurrent_positions: number | null;
+  max_leverage_cap: number | null;
+  quiet_hours_enabled: boolean;
+  quiet_hours_start: string | null;
+  quiet_hours_end: string | null;
+  binance_keys_configured: boolean;
+  telegram_configured: boolean;
+  totp_configured: boolean;
+}
+
+export interface MePatchIn {
+  display_name?: string;
+  quiet_hours_enabled?: boolean;
+  quiet_hours_start?: string | null;
+  quiet_hours_end?: string | null;
+  fixed_size_min_usdt?: number | null;
+  fixed_size_max_usdt?: number | null;
+  max_concurrent_positions?: number | null;
+  max_leverage_cap?: number | null;
+}
+
+export interface TotpSetupOut {
+  provisioning_uri: string;
+  secret_for_display: string;
+  backup_codes: string[];
+}
+
+export interface TotpVerifyOut {
+  ok: boolean;
+}
+
+// --- SP-0.7 Phase G: Admin types (mirrors backend Pydantic schemas) ---
+
+export interface AdminUser {
+  id: number;
+  email: string;
+  display_name: string;
+  is_admin: boolean;
+  is_active: boolean;
+  trading_mode: string;
+  last_login: string | null;
+  created_at: string;
+  invited_by: number | null;
+}
+
+export interface InvitationCreateIn {
+  email: string;
+  display_name?: string | null;
+  is_admin?: boolean;
+  notes?: string | null;
+}
+
+export interface Invitation {
+  id: number;
+  email: string;
+  display_name: string | null;
+  invited_by: number;
+  invited_at: string;
+  accepted_at: string | null;
+  cf_access_added: boolean;
+}
+
+export interface UserPatchIn {
+  is_active?: boolean;
+  is_admin?: boolean;
+  notes?: string;
+}
+
+export interface ImpersonationStartOut {
+  admin_user_id: number;
+  target_user_id: number;
+  started_at: string;
+}
+
+export interface AuditTrailEntry {
+  table_name: string;
+  row_id: number;
+  user_id: number | null;
+  ts: string;
+  summary: string;
+}
+
+export interface AuditTrailFilters {
+  user_id?: number;
+  table?: string;
+  since?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export const api = {
   health: () => fetchJson<{ status: string; version: string }>("/health"),
   predict: (symbolPath: string, tf: string, signal?: string) => {
@@ -188,4 +312,53 @@ export const api = {
   equityCurve: (days = 30) =>
     fetchJson<EquityCurve>(`/bot-status/equity-curve?days=${days}`),
   assetUniverse: () => fetchJson<AssetUniverse>("/bot-status/asset-universe"),
+
+  // --- SP-0.7 Phase H: self-service /me endpoints ---
+  me: () => fetchJson<MeOut>("/me"),
+  mePatch: (body: MePatchIn) =>
+    fetchJson<MeOut>("/me", { method: "PATCH", body }),
+  meBinanceKeys: (api_key: string, api_secret: string) =>
+    fetchJson<void>("/me/binance-keys", {
+      method: "POST",
+      body: { api_key, api_secret },
+    }),
+  meTelegram: (bot_token: string, chat_id: string) =>
+    fetchJson<void>("/me/telegram", {
+      method: "POST",
+      body: { bot_token, chat_id },
+    }),
+  meTotpSetup: () =>
+    fetchJson<TotpSetupOut>("/me/totp/setup", { method: "POST" }),
+  meTotpVerify: (code: string) =>
+    fetchJson<TotpVerifyOut>("/me/totp/verify", {
+      method: "POST",
+      body: { code },
+    }),
+
+  // --- SP-0.7 Phase G: admin endpoints ---
+  adminListUsers: () => fetchJson<AdminUser[]>("/admin/users"),
+  adminCreateInvitation: (body: InvitationCreateIn) =>
+    fetchJson<Invitation>("/admin/invitations", { method: "POST", body }),
+  adminPatchUser: (id: number, body: UserPatchIn) =>
+    fetchJson<AdminUser>(`/admin/users/${id}`, { method: "PATCH", body }),
+  adminDeleteUser: (id: number) =>
+    fetchJson<void>(`/admin/users/${id}`, { method: "DELETE" }),
+  adminImpersonate: (id: number) =>
+    fetchJson<ImpersonationStartOut>(`/admin/impersonate/${id}`, {
+      method: "POST",
+    }),
+  adminImpersonateClear: () =>
+    fetchJson<void>("/admin/impersonate", { method: "DELETE" }),
+  adminAuditTrail: (filters: AuditTrailFilters = {}) => {
+    const qs = new URLSearchParams();
+    if (filters.user_id != null) qs.set("user_id", String(filters.user_id));
+    if (filters.table) qs.set("table", filters.table);
+    if (filters.since) qs.set("since", filters.since);
+    if (filters.limit != null) qs.set("limit", String(filters.limit));
+    if (filters.offset != null) qs.set("offset", String(filters.offset));
+    const tail = qs.toString();
+    return fetchJson<AuditTrailEntry[]>(
+      `/admin/audit-trail${tail ? "?" + tail : ""}`,
+    );
+  },
 };
