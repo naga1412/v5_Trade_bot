@@ -22,12 +22,19 @@ from app.api.schemas import (
     MePatchIn,
     TelegramIn,
     TotpSetupOut,
+    TotpVerifyIn,
+    TotpVerifyOut,
 )
 from app.auth.deps import current_user_or_impersonated, require_user
 from app.auth.impersonation import get_active_target
 from app.auth.models import User
-from app.auth.secrets import encrypt_for_user, set_binance_keys, set_telegram
-from app.auth.totp import generate_backup_codes, generate_totp_setup
+from app.auth.secrets import (
+    decrypt_for_user,
+    encrypt_for_user,
+    set_binance_keys,
+    set_telegram,
+)
+from app.auth.totp import generate_backup_codes, generate_totp_setup, verify_totp
 from app.config import get_settings
 from app.db.session import get_session
 
@@ -249,3 +256,32 @@ async def setup_me_totp(
         secret_for_display=setup.secret,
         backup_codes=backup_codes,
     )
+
+
+@router.post("/totp/verify", response_model=TotpVerifyOut)
+async def verify_me_totp(
+    body: TotpVerifyIn,
+    request: Request,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> TotpVerifyOut:
+    """Verify a TOTP `code` against the user's stored secret."""
+    is_imp = await _is_currently_impersonating(request, actual_user, session)
+    _reject_during_impersonation(is_imp)
+
+    user = (
+        await session.execute(
+            sa.select(User).where(User.id == actual_user.id)
+        )
+    ).scalar_one()
+
+    if not user.totp_secret_encrypted:
+        raise HTTPException(
+            status_code=400, detail="TOTP not configured; call /me/totp/setup first",
+        )
+    secret = decrypt_for_user(
+        user.totp_secret_encrypted,
+        passphrase=get_settings().master_passphrase,
+        user_id=user.id,
+    )
+    return TotpVerifyOut(ok=verify_totp(secret, body.code))
