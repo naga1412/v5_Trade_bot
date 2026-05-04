@@ -1,8 +1,10 @@
 """REST endpoints powering the SP-0.5 Bot Status tab.
 
 All endpoints are read-only aggregations over `shadow_trades`,
-`shadow_open_positions`, and `asset_universe`. Auth is enforced at the
-router level via `require_cf_user`.
+`shadow_open_positions`, and `asset_universe`. Auth is resolved per-handler
+via `current_user_or_impersonated` so admins viewing through impersonation
+see the target user's data lens (Phase E adds the user_id query filters
+that complete data isolation; D8 wires the dep only).
 """
 
 from __future__ import annotations
@@ -29,8 +31,9 @@ from app.api.schemas import (
     RecentTradeOut,
     WindowStatsOut,
 )
+from app.auth.deps import current_user_or_impersonated
+from app.auth.models import User
 from app.db.session import get_session
-from app.deps import require_cf_user
 from app.shadow.stats import (
     Trade,
     compute_avg_rr,
@@ -43,7 +46,6 @@ from app.shadow.stats import (
 router = APIRouter(
     prefix="/api/v1/bot-status",
     tags=["bot-status"],
-    dependencies=[Depends(require_cf_user)],
 )
 
 # JSON cannot encode infinity. When the strategy has zero losses in a window,
@@ -134,6 +136,7 @@ async def _select_trades_since(
 
 @router.get("/overview", response_model=BotOverviewOut)
 async def overview(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> BotOverviewOut:
     """Aggregate stats over rolling 24h / 7d / 30d (and 30d split by direction)."""
@@ -193,6 +196,7 @@ def _passes(current: float | None, threshold: float, op: Literal[">=", "<="]) ->
 
 @router.get("/promotion-gate", response_model=PromotionGateOut)
 async def promotion_gate(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> PromotionGateOut:
     """Return rolling-30-day promotion-gate state for telegram-approve mode."""
@@ -279,6 +283,7 @@ async def promotion_gate(
 
 @router.get("/open-positions", response_model=list[OpenPositionOut])
 async def open_positions(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[OpenPositionOut]:
     """Return the open shadow positions.
@@ -320,6 +325,7 @@ async def open_positions(
 @router.get("/per-asset", response_model=list[PerAssetStatOut])
 async def per_asset(
     days: int = Query(default=30, ge=1, le=365),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[PerAssetStatOut]:
     """Per-asset rolling stats over the last `days` days, sorted by pnl_usdt desc."""
@@ -379,6 +385,7 @@ async def recent_trades(
     symbol: str | None = Query(default=None),
     direction: Literal["LONG", "SHORT"] | None = Query(default=None),
     result: Literal["win", "loss"] | None = Query(default=None),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[RecentTradeOut]:
     """Paginated, filterable closed-trade history (closed_at DESC)."""
@@ -427,6 +434,7 @@ async def recent_trades(
 @router.get("/long-vs-short", response_model=LongShortBreakdownOut)
 async def long_vs_short(
     days: int = Query(default=30, ge=1, le=365),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> LongShortBreakdownOut:
     """Side-by-side LONG vs SHORT stats over the last `days` days."""
@@ -454,6 +462,7 @@ async def long_vs_short(
 @router.get("/equity-curve", response_model=EquityCurveOut)
 async def equity_curve(
     days: int = Query(default=30, ge=1, le=365),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> EquityCurveOut:
     """Cumulative PnL bucketed by UTC midnight day.
@@ -490,6 +499,7 @@ async def equity_curve(
 
 @router.get("/asset-universe", response_model=AssetUniverseOut)
 async def asset_universe(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> AssetUniverseOut:
     """Return the most recent `asset_universe` snapshot, ordered by rank."""

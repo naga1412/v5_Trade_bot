@@ -2,12 +2,14 @@
 
 Provides:
 - `bot_status_engine`: an in-memory SQLite async engine with the shadow tables
-  created (matches the schema used in test_shadow_worker.py).
+  + the SP-0.7 `users` / `impersonation_state` tables created (matches the
+  schema used in test_shadow_worker.py).
 - `bot_status_factory`: a session factory bound to that engine.
 - `bot_status_client`: an httpx.AsyncClient pointed at the FastAPI app, with
-  `get_session` and `require_cf_user` overridden so endpoints under
-  /api/v1/bot-status can be exercised end-to-end without a real database
-  or Cloudflare Access.
+  `get_session`, `require_cf_user`, `require_user`, and
+  `current_user_or_impersonated` overridden so endpoints under
+  /api/v1/bot-status and /api/v1/predict can be exercised end-to-end without
+  a real database or Cloudflare Access.
 """
 
 from __future__ import annotations
@@ -24,6 +26,37 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 async def _create_shadow_tables(engine: Any) -> None:
     async with engine.begin() as conn:
+        # SP-0.7: users + impersonation_state must exist before any handler
+        # that depends on require_user is exercised. Seed user_id=1 as the
+        # bootstrap admin used by all legacy single-user fixtures.
+        await conn.execute(sa.text(
+            "CREATE TABLE users ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, "
+            "is_admin INTEGER NOT NULL DEFAULT 0, "
+            "is_active INTEGER NOT NULL DEFAULT 1, "
+            "trading_mode TEXT NOT NULL DEFAULT 'manual', "
+            "position_sizing_mode TEXT NOT NULL DEFAULT 'fixed', "
+            "fixed_size_min_usdt REAL, fixed_size_max_usdt REAL, "
+            "max_concurrent_positions INTEGER, max_leverage_cap INTEGER, "
+            "binance_api_key_encrypted TEXT, binance_api_secret_encrypted TEXT, "
+            "telegram_bot_token_encrypted TEXT, telegram_chat_id TEXT, "
+            "totp_secret_encrypted TEXT, totp_backup_codes_encrypted TEXT, "
+            "quiet_hours_start TEXT, quiet_hours_end TEXT, "
+            "quiet_hours_enabled INTEGER NOT NULL DEFAULT 1, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "last_login TEXT, invited_by INTEGER, notes TEXT)"
+        ))
+        await conn.execute(sa.text(
+            "INSERT INTO users (id, email, display_name, is_admin) "
+            "VALUES (1, 'test@local', 'Test', 1)"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE impersonation_state ("
+            "admin_user_id INTEGER PRIMARY KEY, "
+            "target_user_id INTEGER NOT NULL, "
+            "started_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_open_positions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -83,7 +116,9 @@ async def bot_status_factory(bot_status_engine: Any) -> async_sessionmaker[Async
 async def bot_status_client(
     bot_status_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[httpx.AsyncClient]:
-    """An ASGI client with get_session + require_cf_user overridden."""
+    """An ASGI client with all auth deps overridden to act as user_id=1."""
+    from app.auth.deps import current_user_or_impersonated, require_user
+    from app.auth.models import User
     from app.db.session import get_session
     from app.deps import CFAccessUser, require_cf_user
     from app.main import app
@@ -92,11 +127,23 @@ async def bot_status_client(
         async with bot_status_factory() as session:
             yield session
 
-    async def _override_user() -> CFAccessUser:
+    async def _override_cf_user() -> CFAccessUser:
         return CFAccessUser(email="test@local", sub="test", raw={})
 
+    async def _override_user() -> User:
+        # Build a detached User instance matching the seed in _create_shadow_tables.
+        return User(
+            id=1,
+            email="test@local",
+            display_name="Test",
+            is_admin=True,
+            is_active=True,
+        )
+
     app.dependency_overrides[get_session] = _override_session
-    app.dependency_overrides[require_cf_user] = _override_user
+    app.dependency_overrides[require_cf_user] = _override_cf_user
+    app.dependency_overrides[require_user] = _override_user
+    app.dependency_overrides[current_user_or_impersonated] = _override_user
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -104,6 +151,8 @@ async def bot_status_client(
     finally:
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(require_cf_user, None)
+        app.dependency_overrides.pop(require_user, None)
+        app.dependency_overrides.pop(current_user_or_impersonated, None)
 
 
 @pytest.fixture

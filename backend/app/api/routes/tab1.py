@@ -8,14 +8,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import LivePredictionOut, SignalMarkersOut
+from app.auth.deps import current_user_or_impersonated
+from app.auth.models import User
 from app.core.dataquality.validator import Candle
 from app.core.predictor import build_prediction
 from app.data.adapters.binance import BinanceClient
 from app.data.universe import is_tradable
 from app.db.session import get_session
-from app.deps import require_cf_user
 
-router = APIRouter(prefix="/api/v1", tags=["tab1"], dependencies=[Depends(require_cf_user)])
+router = APIRouter(prefix="/api/v1", tags=["tab1"])
 
 _TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 
@@ -50,7 +51,12 @@ def _candles_to_df(candles: list[Candle]) -> pd.DataFrame:
 
 
 @router.get("/candles/{symbol_path}/{timeframe}", response_model=list[CandleOut])
-async def candles(symbol_path: str, timeframe: str, limit: int = 500) -> list[CandleOut]:
+async def candles(
+    symbol_path: str,
+    timeframe: str,
+    limit: int = 500,
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+) -> list[CandleOut]:
     pair = _normalize_pair(symbol_path)
     if timeframe not in _TIMEFRAMES:
         raise HTTPException(400, f"Unsupported timeframe {timeframe}")
@@ -101,6 +107,7 @@ async def predict(
     symbol_path: str,
     timeframe: str,
     signal: str | None = None,
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> LivePredictionOut:
     pair = _normalize_pair(symbol_path)
