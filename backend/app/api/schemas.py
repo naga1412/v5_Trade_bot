@@ -46,6 +46,17 @@ class SignalMarkersOut(BaseModel):
     exit_reason: Literal["TAKE_PROFIT", "STOP_LOSS", "TIMEOUT"] | None = None
 
 
+class GhostOut(BaseModel):
+    """Predicted next-bar ghost candle + uncertainty band (SP-1)."""
+    open: float
+    high: float
+    low: float
+    close: float
+    p5_low: float
+    p95_high: float
+    uncertainty: float = Field(ge=0.0)
+
+
 class LivePredictionOut(BaseModel):
     symbol: str
     timeframe: str
@@ -58,6 +69,8 @@ class LivePredictionOut(BaseModel):
     cold_start: bool = True
     inputs_hash: str
     signal_markers: SignalMarkersOut | None = None
+    # SP-1: ghost candle prediction (None when no checkpoint loaded).
+    ghost: GhostOut | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---
