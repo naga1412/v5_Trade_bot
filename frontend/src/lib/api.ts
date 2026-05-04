@@ -44,6 +44,17 @@ export interface SignalMarkers {
   exit_reason: "TAKE_PROFIT" | "STOP_LOSS" | "TIMEOUT" | null;
 }
 
+// SP-1: predicted next-bar ghost candle + uncertainty band.
+export interface GhostCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  p5_low: number;
+  p95_high: number;
+  uncertainty: number; // [0, ∞), lower = more confident
+}
+
 export interface LivePrediction {
   symbol: string;
   timeframe: string;
@@ -72,6 +83,7 @@ export interface LivePrediction {
   cold_start: boolean;
   inputs_hash: string;
   signal_markers?: SignalMarkers | null;
+  ghost?: GhostCandle | null; // SP-1: null when no active ML checkpoint loaded.
 }
 
 // --- Bot Status types ---
