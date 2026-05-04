@@ -1,12 +1,22 @@
 import { useEffect, useState, useCallback } from "react";
 
-// SP-0.5 spec §9.1: URL-driven tab state. We avoid pulling in react-router-dom
-// for a two-tab nav. The hash format is "#/<tab-id>" optionally followed by
-// "?<query-string>". Anything else falls back to the default tab.
+// SP-0.5 spec §9.1 + SP-0.7 Phase I (task I3): URL-driven tab state. We avoid
+// pulling in react-router-dom for a four-tab nav. The hash format is
+// "#/<tab-id>" optionally followed by "?<query-string>". Anything else falls
+// back to the default tab.
 
-export type TabId = "live-prediction" | "bot-status";
+export type TabId =
+  | "live-prediction"
+  | "bot-status"
+  | "settings"
+  | "admin";
 
-const VALID: ReadonlySet<TabId> = new Set<TabId>(["live-prediction", "bot-status"]);
+const VALID: ReadonlySet<TabId> = new Set<TabId>([
+  "live-prediction",
+  "bot-status",
+  "settings",
+  "admin",
+]);
 
 export interface HashRouteState {
   tab: TabId;
