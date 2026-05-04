@@ -15,13 +15,19 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
+        url = get_settings().database_url
+        # SQLite uses a StaticPool that does not accept pool_size/max_overflow.
+        # In tests the URL is sqlite+aiosqlite, in prod it's postgres+asyncpg.
         # TODO(sp-7): make pool_size and max_overflow configurable via Settings.
-        _engine = create_async_engine(
-            get_settings().database_url,
-            pool_size=10,
-            max_overflow=5,
-            pool_pre_ping=True,
-        )
+        if url.startswith("sqlite"):
+            _engine = create_async_engine(url)
+        else:
+            _engine = create_async_engine(
+                url,
+                pool_size=10,
+                max_overflow=5,
+                pool_pre_ping=True,
+            )
     return _engine
 
 
