@@ -27,7 +27,7 @@ async def engine_with_tables() -> AsyncIterator[AsyncEngine]:
 @pytest.mark.asyncio
 async def test_first_user_becomes_admin(engine_with_tables: AsyncEngine) -> None:
     """Spec §4.2 case 1: empty users table -> first login is auto-admin."""
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         user = await get_or_create_user_from_email(
             session, email="first@example.com", display_name="First User",
         )
@@ -43,7 +43,7 @@ async def test_invited_user_login_creates_user_and_marks_invitation_accepted(
     engine_with_tables: AsyncEngine,
 ) -> None:
     """Spec §4.2 case 2: email present in pending_invitations."""
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         admin = User(email="admin@example.com", display_name="Admin", is_admin=True)
         session.add(admin)
         await session.commit()
@@ -56,13 +56,13 @@ async def test_invited_user_login_creates_user_and_marks_invitation_accepted(
         await session.commit()
         admin_id = admin.id
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         user = await get_or_create_user_from_email(
             session, email="friend@example.com", display_name="Friend From Google",
         )
         await session.commit()
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         loaded_inv = (await session.execute(
             sa.select(PendingInvitation).where(
                 PendingInvitation.email == "friend@example.com"
@@ -80,19 +80,19 @@ async def test_uninvited_user_login_raises_and_logs_auth_violation(
     engine_with_tables: AsyncEngine,
 ) -> None:
     """Spec §4.2 case 3: not in invitations + table not empty -> 403 + audit log."""
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         admin = User(email="admin@example.com", display_name="Admin", is_admin=True)
         session.add(admin)
         await session.commit()
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         with pytest.raises(UserNotInvitedError):
             await get_or_create_user_from_email(
                 session, email="hacker@evil.com", display_name="Hacker",
             )
         await session.commit()
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         violations = (
             await session.execute(sa.select(AuthViolation))
         ).scalars().all()
@@ -106,13 +106,13 @@ async def test_uninvited_user_login_raises_and_logs_auth_violation(
 async def test_returning_user_updates_last_login(
     engine_with_tables: AsyncEngine,
 ) -> None:
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         await get_or_create_user_from_email(
             session, email="alice@example.com", display_name="Alice",
         )
         await session.commit()
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         user2 = await get_or_create_user_from_email(
             session, email="alice@example.com", display_name="Alice",
         )
@@ -126,14 +126,14 @@ async def test_deactivated_user_helper_returns_row_not_flipped(
     engine_with_tables: AsyncEngine,
 ) -> None:
     """Helper preserves is_active=False; the dep layer (require_user) raises 403."""
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         user = User(
             email="banned@example.com", display_name="Banned", is_active=False,
         )
         session.add(user)
         await session.commit()
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         loaded = await get_or_create_user_from_email(
             session, email="banned@example.com", display_name="Banned",
         )
@@ -146,13 +146,13 @@ async def test_email_normalization_case_insensitive(
     engine_with_tables: AsyncEngine,
 ) -> None:
     """Spec ambiguity #1: email comparison MUST be case-insensitive."""
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         await get_or_create_user_from_email(
             session, email="MixedCase@Example.com", display_name="Mixed",
         )
         await session.commit()
 
-    async with AsyncSession(engine_with_tables) as session:
+    async with AsyncSession(engine_with_tables, expire_on_commit=False) as session:
         # Lookup via different casing -> same user, no duplicate row.
         again = await get_or_create_user_from_email(
             session, email="mixedcase@example.com", display_name="Mixed",
