@@ -15,6 +15,7 @@ from app.api.schemas import (
     InvitationCreateIn,
     InvitationOut,
     UserOut,
+    UserPatchIn,
 )
 from app.auth.deps import require_admin
 from app.auth.models import PendingInvitation, User
@@ -112,3 +113,36 @@ async def create_invitation(
     await session.commit()
     await session.refresh(inv)
     return _invitation_to_out(inv)
+
+
+@router.patch("/users/{user_id}", response_model=UserOut)
+async def patch_user(
+    user_id: int,
+    body: UserPatchIn,
+    current_admin: User = Depends(require_admin),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> UserOut:
+    """Toggle is_active / is_admin / notes on a user. Cannot demote self."""
+    target = await session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    # Self-protection: cannot demote yourself.
+    if (
+        body.is_admin is False
+        and current_admin.id == user_id
+    ):
+        raise HTTPException(
+            status_code=400, detail="cannot demote yourself from admin",
+        )
+
+    if body.is_active is not None:
+        target.is_active = body.is_active
+    if body.is_admin is not None:
+        target.is_admin = body.is_admin
+    if body.notes is not None:
+        target.notes = body.notes
+
+    await session.commit()
+    await session.refresh(target)
+    return _user_to_out(target)
