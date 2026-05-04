@@ -15,7 +15,13 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY pyproject.toml ./
-RUN pip install --upgrade pip && pip install -e ".[dev]"
+# Install torch CPU-only wheel BEFORE the project install so pip's resolver
+# uses the already-installed CPU build (~150 MB) instead of pulling the
+# default wheel (~1.5 GB with CUDA libs). torch==2.4.1 must match the
+# pyproject.toml pin so `pip install -e .` is a no-op for torch.
+RUN pip install --upgrade pip \
+    && pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1 \
+    && pip install -e ".[dev]"
 
 COPY . .
 
