@@ -56,6 +56,11 @@ HISTORY_BARS: int = 300
 MAX_BUFFERED_BARS: int = 1000
 SHADOW_TIMEFRAME: str = "1h"
 
+# SP-0.7: the single shadow worker writes rows on behalf of the bootstrap
+# admin (id=1, see migration 0005). SP-8 will spawn one worker per user
+# and parameterise this on the worker dataclass instance.
+BOOTSTRAP_ADMIN_USER_ID: int = 1
+
 
 class _StreamReader(Protocol):
     """Anything with an async ``stream()`` that yields MultiStreamCandle."""
@@ -79,13 +84,15 @@ class ShadowWorker:
     # ``setup()`` skips the REST fetch.
     seed_history: dict[str, pd.DataFrame] | None = None
     evaluator: SignalEvaluator = field(default_factory=SignalEvaluator)
+    # SP-0.7 single-worker default; SP-8 will populate per spawned user.
+    user_id: int = BOOTSTRAP_ADMIN_USER_ID
 
     async def setup(self) -> None:
         """Load open positions + cooldowns + seed REST history."""
         async with self.session_factory() as session:
-            for pos in await list_open_positions(session):
+            for pos in await list_open_positions(session, user_id=self.user_id):
                 self.open_positions[pos.symbol] = pos
-            self.cooldowns = await load_cooldowns(session)
+            self.cooldowns = await load_cooldowns(session, user_id=self.user_id)
 
         if self.seed_history is not None:
             for sym, df in self.seed_history.items():
@@ -168,14 +175,20 @@ class ShadowWorker:
             async with self.session_factory() as session:
                 await persist_closed_trade(
                     session, pos,
+                    user_id=self.user_id,
                     exit_price=decision.exit_price,
                     exit_reason=decision.reason,
                     closed_at=candle.ts,
                     bars_held=pos.bars_held,
                     inputs_hash=inputs_hash,
                 )
-                await delete_open_position(session, candle.symbol)
-                await set_cooldown(session, candle.symbol, cooldown_until)
+                await delete_open_position(
+                    session, user_id=self.user_id, symbol=candle.symbol,
+                )
+                await set_cooldown(
+                    session, user_id=self.user_id,
+                    symbol=candle.symbol, until=cooldown_until,
+                )
                 await session.commit()
         except Exception as e:
             log.error("persist close failed for %s; suppressing publish: %s",
@@ -245,7 +258,9 @@ class ShadowWorker:
 
         try:
             async with self.session_factory() as session:
-                await persist_open_position(session, position)
+                await persist_open_position(
+                    session, position, user_id=self.user_id,
+                )
                 await session.commit()
         except Exception as e:
             log.error("persist open failed for %s; suppressing publish: %s",

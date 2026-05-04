@@ -1,3 +1,15 @@
+"""Per-user shadow persistence helpers.
+
+Spec §7.1 — every row in `shadow_open_positions`, `shadow_trades`, and
+`shadow_cooldowns` is owned by exactly one user, and every read/mutation
+must filter by `user_id`. SP-0.7's bootstrap admin (id=1) owns all rows
+the single shadow worker produces; SP-8 will fan out workers per user.
+
+The runtime guard in `app.auth.query_guard` enforces this contract at the
+SQLAlchemy event layer so any future helper that forgets the predicate
+raises in dev.
+"""
+
 import json
 from datetime import datetime
 
@@ -9,16 +21,19 @@ from app.shadow.engine import Direction, ShadowPosition
 from app.shadow.exit_monitor import ExitReason
 
 
-async def persist_open_position(session: AsyncSession, pos: ShadowPosition) -> None:
+async def persist_open_position(
+    session: AsyncSession, pos: ShadowPosition, *, user_id: int,
+) -> None:
     await session.execute(
         sa.text(
             "INSERT INTO shadow_open_positions "
-            "(symbol, direction, entry_price, stop_loss, take_profit, "
+            "(user_id, symbol, direction, entry_price, stop_loss, take_profit, "
             "position_size_usdt, entry_score, entry_confidence, entry_atr, "
             "bars_held, opened_at, last_check_at, signal_id) "
-            "VALUES (:s, :d, :ep, :sl, :tp, :ps, :es, :ec, :ea, :bh, :oa, :lc, :sig)"
+            "VALUES (:uid, :s, :d, :ep, :sl, :tp, :ps, :es, :ec, :ea, :bh, :oa, :lc, :sig)"
         ),
         {
+            "uid": user_id,
             "s": pos.symbol, "d": pos.direction.value,
             "ep": pos.entry_price, "sl": pos.stop_loss, "tp": pos.take_profit,
             "ps": pos.position_size_usdt, "es": pos.entry_score,
@@ -30,9 +45,15 @@ async def persist_open_position(session: AsyncSession, pos: ShadowPosition) -> N
     )
 
 
-async def list_open_positions(session: AsyncSession) -> list[ShadowPosition]:
+async def list_open_positions(
+    session: AsyncSession, *, user_id: int,
+) -> list[ShadowPosition]:
     result = await session.execute(
-        sa.text("SELECT * FROM shadow_open_positions ORDER BY opened_at ASC")
+        sa.text(
+            "SELECT * FROM shadow_open_positions "
+            "WHERE user_id = :uid ORDER BY opened_at ASC"
+        ),
+        {"uid": user_id},
     )
     out: list[ShadowPosition] = []
     for r in result:
@@ -50,10 +71,15 @@ async def list_open_positions(session: AsyncSession) -> list[ShadowPosition]:
     return out
 
 
-async def delete_open_position(session: AsyncSession, symbol: str) -> None:
+async def delete_open_position(
+    session: AsyncSession, *, user_id: int, symbol: str,
+) -> None:
     await session.execute(
-        sa.text("DELETE FROM shadow_open_positions WHERE symbol = :s"),
-        {"s": symbol},
+        sa.text(
+            "DELETE FROM shadow_open_positions "
+            "WHERE user_id = :uid AND symbol = :s"
+        ),
+        {"uid": user_id, "s": symbol},
     )
 
 
@@ -61,13 +87,18 @@ async def persist_closed_trade(
     session: AsyncSession,
     pos: ShadowPosition,
     *,
+    user_id: int,
     exit_price: float,
     exit_reason: ExitReason,
     closed_at: datetime,
     bars_held: int,
     inputs_hash: str,
 ) -> str:
-    """Insert a row in shadow_trades, hash-chained per §5.14. Returns row_hash."""
+    """Insert a row in shadow_trades, hash-chained per §5.14. Returns row_hash.
+
+    Spec §13: user_id participates in the canonical row hash payload so any
+    cross-user tampering surfaces during chain verification.
+    """
     if pos.direction is Direction.LONG:
         pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
     else:
@@ -75,6 +106,7 @@ async def persist_closed_trade(
     pnl_usdt = pos.position_size_usdt * pnl_pct / 100.0
 
     payload = {
+        "user_id": user_id,
         "symbol": pos.symbol,
         "timeframe": "1h",
         "direction": pos.direction.value,
@@ -100,20 +132,34 @@ async def persist_closed_trade(
     return await insert_with_chain(session, "shadow_trades", payload)
 
 
-async def set_cooldown(session: AsyncSession, symbol: str, until: datetime) -> None:
-    """Upsert cooldown for an asset."""
+async def set_cooldown(
+    session: AsyncSession, *, user_id: int, symbol: str, until: datetime,
+) -> None:
+    """Upsert cooldown for an asset, scoped to (user_id, symbol).
+
+    PK is (user_id, symbol) — see migration 0005. ON CONFLICT targets that
+    composite so two users can hold independent cooldowns on the same
+    symbol without colliding.
+    """
     await session.execute(
         sa.text(
-            "INSERT INTO shadow_cooldowns (symbol, cooldown_until) "
-            "VALUES (:s, :u) "
-            "ON CONFLICT(symbol) DO UPDATE SET cooldown_until = excluded.cooldown_until"
+            "INSERT INTO shadow_cooldowns (user_id, symbol, cooldown_until) "
+            "VALUES (:uid, :s, :u) "
+            "ON CONFLICT(user_id, symbol) DO UPDATE SET "
+            "cooldown_until = excluded.cooldown_until"
         ),
-        {"s": symbol, "u": until.isoformat()},
+        {"uid": user_id, "s": symbol, "u": until.isoformat()},
     )
 
 
-async def load_cooldowns(session: AsyncSession) -> dict[str, datetime]:
+async def load_cooldowns(
+    session: AsyncSession, *, user_id: int,
+) -> dict[str, datetime]:
     result = await session.execute(
-        sa.text("SELECT symbol, cooldown_until FROM shadow_cooldowns")
+        sa.text(
+            "SELECT symbol, cooldown_until FROM shadow_cooldowns "
+            "WHERE user_id = :uid"
+        ),
+        {"uid": user_id},
     )
     return {r.symbol: datetime.fromisoformat(r.cooldown_until) for r in result}

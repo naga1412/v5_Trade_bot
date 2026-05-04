@@ -3,6 +3,11 @@ import type { TabId } from "@/lib/useHashRoute";
 interface TabNavProps {
   active: TabId;
   onChange: (id: TabId) => void;
+  /**
+   * Whether the Admin tab should be visible. Defaults to false. Settings is
+   * always visible (every user has settings) — only Admin is admin-gated.
+   */
+  adminVisible?: boolean;
 }
 
 interface TabDef {
@@ -10,20 +15,25 @@ interface TabDef {
   label: string;
 }
 
-// Order matters: spec §9.1 puts Live Prediction first, Bot Status second.
-const TABS: readonly TabDef[] = [
+// Order matters: spec §9.1 + SP-0.7 §I3 — Live Prediction → Bot Status →
+// Settings → Admin. Settings is always rendered; Admin is filtered out
+// when adminVisible is false.
+const ALL_TABS: readonly TabDef[] = [
   { id: "live-prediction", label: "Live Prediction" },
   { id: "bot-status", label: "Bot Status" },
+  { id: "settings", label: "Settings" },
+  { id: "admin", label: "Admin" },
 ];
 
-export function TabNav({ active, onChange }: TabNavProps) {
+export function TabNav({ active, onChange, adminVisible = false }: TabNavProps) {
+  const tabs = ALL_TABS.filter((t) => t.id !== "admin" || adminVisible);
   return (
     <div
       role="tablist"
       aria-label="Primary"
       className="flex bg-bg-elevated border-b border-border"
     >
-      {TABS.map((t) => {
+      {tabs.map((t) => {
         const isActive = t.id === active;
         return (
           <button

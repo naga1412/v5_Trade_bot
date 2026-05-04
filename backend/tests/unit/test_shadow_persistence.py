@@ -11,6 +11,7 @@ from app.shadow.persistence import (
     persist_closed_trade,
     set_cooldown,
     list_open_positions,
+    load_cooldowns,
 )
 
 
@@ -25,29 +26,61 @@ def make_signal() -> ShadowSignal:
     )
 
 
+# SP-0.7 Phase E2: per-user shadow tables. The test fixtures match the
+# production schema after migrations 0005/0006: user_id NOT NULL on each
+# row, shadow_cooldowns keyed by (user_id, symbol).
+_OPEN_POS_DDL = (
+    "CREATE TABLE shadow_open_positions ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "user_id INTEGER NOT NULL, "
+    "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
+    "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
+    "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
+    "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
+    "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
+    "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
+    "signal_id TEXT NOT NULL UNIQUE)"
+)
+
+_TRADES_DDL = (
+    "CREATE TABLE shadow_trades ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "user_id INTEGER NOT NULL, "
+    "symbol TEXT NOT NULL, "
+    "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
+    "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
+    "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
+    "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
+    "layer_scores TEXT NOT NULL, entry_atr REAL NOT NULL, "
+    "exit_price REAL, exit_reason TEXT, pnl_pct REAL, pnl_usdt REAL, "
+    "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
+    "inputs_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
+    "signal_id TEXT NOT NULL UNIQUE, "
+    "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+)
+
+_COOLDOWNS_DDL = (
+    "CREATE TABLE shadow_cooldowns ("
+    "user_id INTEGER NOT NULL, "
+    "symbol TEXT NOT NULL, "
+    "cooldown_until TEXT NOT NULL, "
+    "PRIMARY KEY (user_id, symbol))"
+)
+
+
 @pytest.mark.asyncio
 async def test_persist_and_retrieve_open_position() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        await conn.execute(sa.text(
-            "CREATE TABLE shadow_open_positions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
-            "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
-            "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
-            "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
-            "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
-            "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
-            "signal_id TEXT NOT NULL UNIQUE)"
-        ))
+        await conn.execute(sa.text(_OPEN_POS_DDL))
 
     sig = make_signal()
     pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
     async with AsyncSession(engine) as session:
-        await persist_open_position(session, pos)
+        await persist_open_position(session, pos, user_id=1)
         await session.commit()
 
-        loaded = await list_open_positions(session)
+        loaded = await list_open_positions(session, user_id=1)
     assert len(loaded) == 1
     assert loaded[0].symbol == "BTCUSDT"
     assert loaded[0].entry_price == 78250.0
@@ -55,23 +88,108 @@ async def test_persist_and_retrieve_open_position() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persist_closed_trade_with_audit_chain() -> None:
+async def test_persist_open_position_writes_user_id() -> None:
+    """Spec §7: user_id is the per-row owner; persist_open_position must store it."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
+        await conn.execute(sa.text(_OPEN_POS_DDL))
+
+    sig = make_signal()
+    pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
+    async with AsyncSession(engine) as session:
+        await persist_open_position(session, pos, user_id=7)
+        await session.commit()
+        row = (await session.execute(
+            sa.text("SELECT user_id FROM shadow_open_positions")
+        )).first()
+    assert row is not None
+    assert row.user_id == 7
+
+
+@pytest.mark.asyncio
+async def test_list_open_positions_filters_by_user() -> None:
+    """Two users have positions on different symbols — list_open_positions must isolate."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(_OPEN_POS_DDL))
+
+    pos1 = ShadowPosition.from_signal(make_signal(), position_size_usdt=30.0)
+    sig2 = ShadowSignal(
+        symbol="ETHUSDT", direction=Direction.LONG, score=0.65,
+        confidence=0.72, entry_price=2000.0, stop_loss=1900.0,
+        take_profit=2200.0, atr=20.0,
+        layer_scores={"1": 0.85, "3": 0.72, "5": 0.40},
+        ts=datetime(2026, 5, 3, 14, tzinfo=timezone.utc),
+        signal_id="user2-sig",
+    )
+    pos2 = ShadowPosition.from_signal(sig2, position_size_usdt=30.0)
+
+    async with AsyncSession(engine) as session:
+        await persist_open_position(session, pos1, user_id=1)
+        await persist_open_position(session, pos2, user_id=2)
+        await session.commit()
+
+        u1 = await list_open_positions(session, user_id=1)
+        u2 = await list_open_positions(session, user_id=2)
+    assert {p.symbol for p in u1} == {"BTCUSDT"}
+    assert {p.symbol for p in u2} == {"ETHUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_delete_open_position_filters_by_user() -> None:
+    """Deleting user 1's position must NOT touch user 2's row on the same symbol."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    # Note: production schema has UNIQUE(symbol) but per the multi-user spec
+    # SP-8 will replace it with UNIQUE(user_id, symbol). For now (single-worker
+    # bootstrap admin), this test exercises the user_id predicate explicitly
+    # using a relaxed schema.
+    async with engine.begin() as conn:
         await conn.execute(sa.text(
-            "CREATE TABLE shadow_trades ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
-            "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
+            "CREATE TABLE shadow_open_positions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "symbol TEXT NOT NULL, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
             "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
-            "layer_scores TEXT NOT NULL, entry_atr REAL NOT NULL, "
-            "exit_price REAL, exit_reason TEXT, pnl_pct REAL, pnl_usdt REAL, "
-            "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
-            "inputs_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
-            "signal_id TEXT NOT NULL UNIQUE, "
-            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+            "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
+            "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
+            "signal_id TEXT NOT NULL, "
+            "UNIQUE (user_id, symbol))"
         ))
+
+    sig = make_signal()
+    pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
+    async with AsyncSession(engine) as session:
+        await persist_open_position(session, pos, user_id=1)
+        # Use a distinct signal_id for user 2 since signal_id was UNIQUE on prod.
+        # (The single-user prod schema still enforces signal_id uniqueness.)
+        await session.execute(sa.text(
+            "INSERT INTO shadow_open_positions "
+            "(user_id, symbol, direction, entry_price, stop_loss, take_profit, "
+            "position_size_usdt, entry_score, entry_confidence, entry_atr, "
+            "bars_held, opened_at, last_check_at, signal_id) "
+            "VALUES (2, 'BTCUSDT', 'LONG', 78250.0, 77077.75, 80594.5, 30.0, "
+            "0.65, 0.72, 781.5, 0, '2026-05-03T14:00:00+00:00', "
+            "'2026-05-03T14:00:00+00:00', 'user2-sig')"
+        ))
+        await session.commit()
+
+        await delete_open_position(session, user_id=1, symbol="BTCUSDT")
+        await session.commit()
+
+        rows = (await session.execute(
+            sa.text("SELECT user_id, symbol FROM shadow_open_positions")
+        )).all()
+    assert len(rows) == 1
+    assert rows[0].user_id == 2
+
+
+@pytest.mark.asyncio
+async def test_persist_closed_trade_with_audit_chain() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(_TRADES_DDL))
 
     sig = make_signal()
     pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
@@ -79,7 +197,8 @@ async def test_persist_closed_trade_with_audit_chain() -> None:
 
     async with AsyncSession(engine) as session:
         row_hash = await persist_closed_trade(
-            session, pos, exit_price=80594.5, exit_reason=ExitReason.TAKE_PROFIT,
+            session, pos, user_id=1,
+            exit_price=80594.5, exit_reason=ExitReason.TAKE_PROFIT,
             closed_at=closed_at, bars_held=4, inputs_hash="deadbeef",
         )
         await session.commit()
@@ -88,6 +207,7 @@ async def test_persist_closed_trade_with_audit_chain() -> None:
         )).all()
     assert len(rows) == 1
     r = rows[0]
+    assert r.user_id == 1
     assert r.symbol == "BTCUSDT"
     assert r.exit_price == 80594.5
     assert r.exit_reason == "TAKE_PROFIT"
@@ -100,19 +220,40 @@ async def test_persist_closed_trade_with_audit_chain() -> None:
 async def test_set_and_check_cooldown() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        await conn.execute(sa.text(
-            "CREATE TABLE shadow_cooldowns ("
-            "symbol TEXT PRIMARY KEY, cooldown_until TEXT NOT NULL)"
-        ))
+        await conn.execute(sa.text(_COOLDOWNS_DDL))
 
     until = datetime(2026, 5, 3, 14, 30, tzinfo=timezone.utc)
     async with AsyncSession(engine) as session:
-        await set_cooldown(session, "BTCUSDT", until)
+        await set_cooldown(session, user_id=1, symbol="BTCUSDT", until=until)
         await session.commit()
-        # Set again — should upsert
-        await set_cooldown(session, "BTCUSDT", until + timedelta(minutes=10))
+        # Set again — should upsert on (user_id, symbol)
+        await set_cooldown(
+            session, user_id=1, symbol="BTCUSDT",
+            until=until + timedelta(minutes=10),
+        )
         await session.commit()
         rows = (await session.execute(
-            sa.text("SELECT symbol, cooldown_until FROM shadow_cooldowns")
+            sa.text("SELECT user_id, symbol, cooldown_until FROM shadow_cooldowns")
         )).all()
     assert len(rows) == 1
+    assert rows[0].user_id == 1
+
+
+@pytest.mark.asyncio
+async def test_cooldowns_isolated_per_user() -> None:
+    """Two users may hold cooldowns on the same symbol independently."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(_COOLDOWNS_DDL))
+
+    until1 = datetime(2026, 5, 3, 14, 30, tzinfo=timezone.utc)
+    until2 = datetime(2026, 5, 3, 15, 0, tzinfo=timezone.utc)
+    async with AsyncSession(engine) as session:
+        await set_cooldown(session, user_id=1, symbol="BTCUSDT", until=until1)
+        await set_cooldown(session, user_id=2, symbol="BTCUSDT", until=until2)
+        await session.commit()
+
+        u1 = await load_cooldowns(session, user_id=1)
+        u2 = await load_cooldowns(session, user_id=2)
+    assert u1 == {"BTCUSDT": until1}
+    assert u2 == {"BTCUSDT": until2}

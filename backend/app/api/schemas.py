@@ -158,3 +158,113 @@ class AssetUniverseEntryOut(BaseModel):
 class AssetUniverseOut(BaseModel):
     snapshot_at: datetime
     entries: list[AssetUniverseEntryOut]
+
+
+# --- SP-0.7 Phase G: Admin schemas ----------------------------------------
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    display_name: str
+    is_admin: bool
+    is_active: bool
+    trading_mode: str
+    last_login: datetime | None = None
+    created_at: datetime
+    invited_by: int | None = None
+
+
+class InvitationCreateIn(BaseModel):
+    email: str
+    display_name: str | None = None
+    is_admin: bool = False
+    notes: str | None = None
+
+
+class InvitationOut(BaseModel):
+    id: int
+    email: str
+    display_name: str | None = None
+    invited_by: int
+    invited_at: datetime
+    accepted_at: datetime | None = None
+    cf_access_added: bool
+
+
+class UserPatchIn(BaseModel):
+    is_active: bool | None = None
+    is_admin: bool | None = None
+    notes: str | None = None
+
+
+class ImpersonationStartOut(BaseModel):
+    admin_user_id: int
+    target_user_id: int
+    started_at: datetime
+
+
+class AuditTrailEntry(BaseModel):
+    table_name: str
+    row_id: int
+    user_id: int | None = None
+    ts: datetime
+    summary: str
+
+
+# --- SP-0.7 Phase H: /me schemas ------------------------------------------
+
+
+class MeOut(BaseModel):
+    id: int
+    email: str
+    display_name: str
+    is_admin: bool
+    is_impersonating: bool
+    trading_mode: str
+    position_sizing_mode: str
+    fixed_size_min_usdt: float | None = None
+    fixed_size_max_usdt: float | None = None
+    max_concurrent_positions: int | None = None
+    max_leverage_cap: int | None = None
+    quiet_hours_enabled: bool
+    quiet_hours_start: str | None = None
+    quiet_hours_end: str | None = None
+    binance_keys_configured: bool
+    telegram_configured: bool
+    totp_configured: bool
+
+
+class MePatchIn(BaseModel):
+    display_name: str | None = None
+    quiet_hours_enabled: bool | None = None
+    quiet_hours_start: str | None = None
+    quiet_hours_end: str | None = None
+    fixed_size_min_usdt: float | None = None
+    fixed_size_max_usdt: float | None = None
+    max_concurrent_positions: int | None = None
+    max_leverage_cap: int | None = None
+
+
+class BinanceKeysIn(BaseModel):
+    api_key: str
+    api_secret: str
+
+
+class TelegramIn(BaseModel):
+    bot_token: str
+    chat_id: str
+
+
+class TotpSetupOut(BaseModel):
+    provisioning_uri: str
+    secret_for_display: str
+    backup_codes: list[str]
+
+
+class TotpVerifyIn(BaseModel):
+    code: str
+
+
+class TotpVerifyOut(BaseModel):
+    ok: bool

@@ -56,7 +56,10 @@ T0 = datetime(2026, 5, 11, 0, tzinfo=UTC)
 
 # Columns of shadow_trades that participate in the row hash (i.e. everything
 # inserted via persist_closed_trade — see persistence.persist_closed_trade).
+# SP-0.7 §13: user_id is part of the canonical payload so cross-user tampering
+# surfaces during chain verification.
 SHADOW_TRADE_HASH_COLS: list[str] = [
+    "user_id",
     "symbol",
     "timeframe",
     "direction",
@@ -161,9 +164,11 @@ def _scripted_predictor(triggers: set[tuple[str, datetime]]) -> Any:
 
 async def _create_shadow_tables(engine: Any) -> None:
     async with engine.begin() as conn:
+        # SP-0.7 Phase E: per-user tables include user_id NOT NULL DEFAULT 1.
         await conn.execute(sa.text(
             "CREATE TABLE shadow_open_positions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
             "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
@@ -174,7 +179,9 @@ async def _create_shadow_tables(engine: Any) -> None:
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_trades ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, "
             "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
@@ -188,7 +195,9 @@ async def _create_shadow_tables(engine: Any) -> None:
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_cooldowns ("
-            "symbol TEXT PRIMARY KEY, cooldown_until TEXT NOT NULL)"
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, cooldown_until TEXT NOT NULL, "
+            "PRIMARY KEY (user_id, symbol))"
         ))
 
 
@@ -389,7 +398,7 @@ async def test_cooldown_blocks_reentry_in_pipeline(
     candle_ts = T0 + timedelta(hours=1)
     cooldown_until = candle_ts + timedelta(minutes=15)  # still active
     async with factory() as s:
-        await set_cooldown(s, sym, cooldown_until)
+        await set_cooldown(s, user_id=1, symbol=sym, until=cooldown_until)
         await s.commit()
 
     triggers = {(sym, candle_ts)}

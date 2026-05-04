@@ -1,8 +1,10 @@
 """REST endpoints powering the SP-0.5 Bot Status tab.
 
 All endpoints are read-only aggregations over `shadow_trades`,
-`shadow_open_positions`, and `asset_universe`. Auth is enforced at the
-router level via `require_cf_user`.
+`shadow_open_positions`, and `asset_universe`. Auth is resolved per-handler
+via `current_user_or_impersonated` so admins viewing through impersonation
+see the target user's data lens (Phase E adds the user_id query filters
+that complete data isolation; D8 wires the dep only).
 """
 
 from __future__ import annotations
@@ -29,8 +31,9 @@ from app.api.schemas import (
     RecentTradeOut,
     WindowStatsOut,
 )
+from app.auth.deps import current_user_or_impersonated
+from app.auth.models import User
 from app.db.session import get_session
-from app.deps import require_cf_user
 from app.shadow.stats import (
     Trade,
     compute_avg_rr,
@@ -43,7 +46,6 @@ from app.shadow.stats import (
 router = APIRouter(
     prefix="/api/v1/bot-status",
     tags=["bot-status"],
-    dependencies=[Depends(require_cf_user)],
 )
 
 # JSON cannot encode infinity. When the strategy has zero losses in a window,
@@ -111,16 +113,23 @@ def _build_window_stats(
 
 
 async def _select_trades_since(
-    session: AsyncSession, *, since: datetime, direction: str | None = None,
+    session: AsyncSession, *, user_id: int, since: datetime,
+    direction: str | None = None,
 ) -> list[Any]:
-    """Return shadow_trades rows closed at/after `since`. Optional direction filter."""
+    """Return shadow_trades rows closed at/after `since`. Optional direction filter.
+
+    Spec §7 — every per-user table query MUST filter by user_id. The runtime
+    query guard (app.auth.query_guard) enforces this at the SQLAlchemy event
+    level so any future helper that forgets the predicate raises in dev.
+    """
     sql = (
         "SELECT direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, pnl_pct, pnl_usdt, closed_at "
         "FROM shadow_trades "
-        "WHERE closed_at >= :since AND closed_at IS NOT NULL "
+        "WHERE user_id = :user_id "
+        "AND closed_at >= :since AND closed_at IS NOT NULL "
     )
-    params: dict[str, Any] = {"since": since}
+    params: dict[str, Any] = {"user_id": user_id, "since": since}
     if direction is not None:
         sql += "AND direction = :direction "
         params["direction"] = direction
@@ -134,6 +143,7 @@ async def _select_trades_since(
 
 @router.get("/overview", response_model=BotOverviewOut)
 async def overview(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> BotOverviewOut:
     """Aggregate stats over rolling 24h / 7d / 30d (and 30d split by direction)."""
@@ -146,17 +156,21 @@ async def overview(
     }
     blocks: dict[str, WindowStatsOut] = {}
     for key, (since, days, label) in cuts.items():
-        rows = await _select_trades_since(session, since=since)
+        rows = await _select_trades_since(
+            session, user_id=current_user.id, since=since,
+        )
         trades = [_row_to_trade(r) for r in rows]
         blocks[key] = _build_window_stats(
             window=label, trades=trades, rows=rows, window_days=days,
         )
 
     long_rows = await _select_trades_since(
-        session, since=now - timedelta(days=30), direction="LONG",
+        session, user_id=current_user.id,
+        since=now - timedelta(days=30), direction="LONG",
     )
     short_rows = await _select_trades_since(
-        session, since=now - timedelta(days=30), direction="SHORT",
+        session, user_id=current_user.id,
+        since=now - timedelta(days=30), direction="SHORT",
     )
     blocks["long_only_30d"] = _build_window_stats(
         window="30d",
@@ -193,12 +207,15 @@ def _passes(current: float | None, threshold: float, op: Literal[">=", "<="]) ->
 
 @router.get("/promotion-gate", response_model=PromotionGateOut)
 async def promotion_gate(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> PromotionGateOut:
     """Return rolling-30-day promotion-gate state for telegram-approve mode."""
     now = datetime.now(UTC)
     since = now - timedelta(days=30)
-    rows = await _select_trades_since(session, since=since)
+    rows = await _select_trades_since(
+        session, user_id=current_user.id, since=since,
+    )
     trades = [_row_to_trade(r) for r in rows]
 
     n_trades = len(trades)
@@ -279,6 +296,7 @@ async def promotion_gate(
 
 @router.get("/open-positions", response_model=list[OpenPositionOut])
 async def open_positions(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[OpenPositionOut]:
     """Return the open shadow positions.
@@ -292,9 +310,11 @@ async def open_positions(
     sql = (
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, bars_held, opened_at, signal_id "
-        "FROM shadow_open_positions ORDER BY opened_at ASC"
+        "FROM shadow_open_positions "
+        "WHERE user_id = :user_id "
+        "ORDER BY opened_at ASC"
     )
-    result = await session.execute(sa.text(sql))
+    result = await session.execute(sa.text(sql), {"user_id": current_user.id})
     out: list[OpenPositionOut] = []
     for r in result:
         opened_at = r.opened_at
@@ -320,6 +340,7 @@ async def open_positions(
 @router.get("/per-asset", response_model=list[PerAssetStatOut])
 async def per_asset(
     days: int = Query(default=30, ge=1, le=365),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[PerAssetStatOut]:
     """Per-asset rolling stats over the last `days` days, sorted by pnl_usdt desc."""
@@ -329,9 +350,12 @@ async def per_asset(
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, pnl_pct, pnl_usdt, closed_at "
         "FROM shadow_trades "
-        "WHERE closed_at >= :since AND closed_at IS NOT NULL"
+        "WHERE user_id = :user_id "
+        "AND closed_at >= :since AND closed_at IS NOT NULL"
     )
-    result = await session.execute(sa.text(sql), {"since": since})
+    result = await session.execute(
+        sa.text(sql), {"user_id": current_user.id, "since": since},
+    )
     by_symbol: dict[str, list[Any]] = {}
     for r in result:
         by_symbol.setdefault(r.symbol, []).append(r)
@@ -379,11 +403,12 @@ async def recent_trades(
     symbol: str | None = Query(default=None),
     direction: Literal["LONG", "SHORT"] | None = Query(default=None),
     result: Literal["win", "loss"] | None = Query(default=None),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[RecentTradeOut]:
     """Paginated, filterable closed-trade history (closed_at DESC)."""
-    where: list[str] = ["closed_at IS NOT NULL"]
-    params: dict[str, Any] = {}
+    where: list[str] = ["user_id = :user_id", "closed_at IS NOT NULL"]
+    params: dict[str, Any] = {"user_id": current_user.id}
     if symbol is not None:
         where.append("symbol = :symbol")
         params["symbol"] = _normalize_symbol_path(symbol)
@@ -427,6 +452,7 @@ async def recent_trades(
 @router.get("/long-vs-short", response_model=LongShortBreakdownOut)
 async def long_vs_short(
     days: int = Query(default=30, ge=1, le=365),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> LongShortBreakdownOut:
     """Side-by-side LONG vs SHORT stats over the last `days` days."""
@@ -435,8 +461,12 @@ async def long_vs_short(
 
     label = _window_label_for_days(days)
 
-    long_rows = await _select_trades_since(session, since=since, direction="LONG")
-    short_rows = await _select_trades_since(session, since=since, direction="SHORT")
+    long_rows = await _select_trades_since(
+        session, user_id=current_user.id, since=since, direction="LONG",
+    )
+    short_rows = await _select_trades_since(
+        session, user_id=current_user.id, since=since, direction="SHORT",
+    )
     return LongShortBreakdownOut(
         long=_build_window_stats(
             window=label,
@@ -454,6 +484,7 @@ async def long_vs_short(
 @router.get("/equity-curve", response_model=EquityCurveOut)
 async def equity_curve(
     days: int = Query(default=30, ge=1, le=365),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> EquityCurveOut:
     """Cumulative PnL bucketed by UTC midnight day.
@@ -464,10 +495,13 @@ async def equity_curve(
     since = now - timedelta(days=days)
     sql = (
         "SELECT pnl_usdt, closed_at FROM shadow_trades "
-        "WHERE closed_at >= :since AND closed_at IS NOT NULL "
+        "WHERE user_id = :user_id "
+        "AND closed_at >= :since AND closed_at IS NOT NULL "
         "ORDER BY closed_at ASC"
     )
-    rows = await session.execute(sa.text(sql), {"since": since})
+    rows = await session.execute(
+        sa.text(sql), {"user_id": current_user.id, "since": since},
+    )
 
     by_day: dict[datetime, float] = {}
     for r in rows:
@@ -490,6 +524,7 @@ async def equity_curve(
 
 @router.get("/asset-universe", response_model=AssetUniverseOut)
 async def asset_universe(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> AssetUniverseOut:
     """Return the most recent `asset_universe` snapshot, ordered by rank."""

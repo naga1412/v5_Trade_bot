@@ -111,9 +111,11 @@ def _build_in_memory_engine() -> Any:
 
 async def _create_shadow_tables(engine: Any) -> None:
     async with engine.begin() as conn:
+        # SP-0.7 Phase E: per-user tables include user_id NOT NULL DEFAULT 1.
         await conn.execute(sa.text(
             "CREATE TABLE shadow_open_positions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
             "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
@@ -124,7 +126,9 @@ async def _create_shadow_tables(engine: Any) -> None:
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_trades ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, "
             "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
@@ -138,7 +142,9 @@ async def _create_shadow_tables(engine: Any) -> None:
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_cooldowns ("
-            "symbol TEXT PRIMARY KEY, cooldown_until TEXT NOT NULL)"
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, cooldown_until TEXT NOT NULL, "
+            "PRIMARY KEY (user_id, symbol))"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE asset_universe ("
@@ -239,7 +245,7 @@ async def test_take_profit_exit(monkeypatch: pytest.MonkeyPatch) -> None:
         signal_id="seedsig0",
     )
     async with factory() as s:
-        await persist_open_position(s, pos)
+        await persist_open_position(s, pos, user_id=1)
         await s.commit()
 
     # Make build_prediction never fire a new signal (won't be reached anyway since
@@ -307,7 +313,7 @@ async def test_stop_loss_exit(monkeypatch: pytest.MonkeyPatch) -> None:
         signal_id="seedsig1",
     )
     async with factory() as s:
-        await persist_open_position(s, pos)
+        await persist_open_position(s, pos, user_id=1)
         await s.commit()
 
     _force_neutral_eval(monkeypatch)
@@ -361,7 +367,7 @@ async def test_timeout_exit(monkeypatch: pytest.MonkeyPatch) -> None:
         signal_id="seedsig2",
     )
     async with factory() as s:
-        await persist_open_position(s, pos)
+        await persist_open_position(s, pos, user_id=1)
         await s.commit()
 
     _force_neutral_eval(monkeypatch)
@@ -405,7 +411,7 @@ async def test_cooldown_blocks_new_entry(monkeypatch: pytest.MonkeyPatch) -> Non
     # Place an active cooldown on BTCUSDT.
     cooldown_until = datetime(2026, 5, 11, 12, tzinfo=UTC)
     async with factory() as s:
-        await set_cooldown(s, SYMBOL, cooldown_until)
+        await set_cooldown(s, user_id=1, symbol=SYMBOL, until=cooldown_until)
         await s.commit()
 
     _force_long_eval(monkeypatch)

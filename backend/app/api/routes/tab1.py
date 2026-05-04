@@ -8,14 +8,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import LivePredictionOut, SignalMarkersOut
+from app.auth.deps import current_user_or_impersonated
+from app.auth.models import User
 from app.core.dataquality.validator import Candle
 from app.core.predictor import build_prediction
 from app.data.adapters.binance import BinanceClient
 from app.data.universe import is_tradable
 from app.db.session import get_session
-from app.deps import require_cf_user
 
-router = APIRouter(prefix="/api/v1", tags=["tab1"], dependencies=[Depends(require_cf_user)])
+router = APIRouter(prefix="/api/v1", tags=["tab1"])
 
 _TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 
@@ -50,7 +51,12 @@ def _candles_to_df(candles: list[Candle]) -> pd.DataFrame:
 
 
 @router.get("/candles/{symbol_path}/{timeframe}", response_model=list[CandleOut])
-async def candles(symbol_path: str, timeframe: str, limit: int = 500) -> list[CandleOut]:
+async def candles(
+    symbol_path: str,
+    timeframe: str,
+    limit: int = 500,
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+) -> list[CandleOut]:
     pair = _normalize_pair(symbol_path)
     if timeframe not in _TIMEFRAMES:
         raise HTTPException(400, f"Unsupported timeframe {timeframe}")
@@ -65,15 +71,20 @@ async def candles(symbol_path: str, timeframe: str, limit: int = 500) -> list[Ca
 
 
 async def _load_signal_markers(
-    session: AsyncSession, signal_id: str,
+    session: AsyncSession, *, user_id: int, signal_id: str,
 ) -> SignalMarkersOut | None:
-    """Look up a closed shadow_trade by signal_id and return its chart markers."""
+    """Look up a closed shadow_trade by signal_id and return its chart markers.
+
+    Spec §7.3: queries against shadow_trades MUST filter by user_id so a
+    deeplink containing another user's signal_id 404s rather than leaking
+    chart markers across accounts.
+    """
     sql = (
         "SELECT signal_id, direction, entry_price, stop_loss, take_profit, "
         "opened_at, closed_at, exit_price, exit_reason "
-        "FROM shadow_trades WHERE signal_id = :sig LIMIT 1"
+        "FROM shadow_trades WHERE user_id = :uid AND signal_id = :sig LIMIT 1"
     )
-    result = await session.execute(sa.text(sql), {"sig": signal_id})
+    result = await session.execute(sa.text(sql), {"uid": user_id, "sig": signal_id})
     row = result.first()
     if row is None:
         return None
@@ -101,6 +112,7 @@ async def predict(
     symbol_path: str,
     timeframe: str,
     signal: str | None = None,
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> LivePredictionOut:
     pair = _normalize_pair(symbol_path)
@@ -111,7 +123,9 @@ async def predict(
 
     markers: SignalMarkersOut | None = None
     if signal is not None:
-        markers = await _load_signal_markers(session, signal)
+        markers = await _load_signal_markers(
+            session, user_id=current_user.id, signal_id=signal,
+        )
         if markers is None:
             raise HTTPException(404, f"Signal {signal} not found")
 

@@ -7,20 +7,38 @@ beforeEach(() => {
 });
 
 describe("TabNav", () => {
-  test("renders both tab labels in correct order", () => {
+  test("renders 3 tabs by default (admin hidden), Settings always visible", () => {
     const onChange = vi.fn();
     render(<TabNav active="live-prediction" onChange={onChange} />);
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(3);
     expect(buttons[0]).toHaveTextContent(/live prediction/i);
     expect(buttons[1]).toHaveTextContent(/bot status/i);
+    expect(buttons[2]).toHaveTextContent(/settings/i);
+    expect(screen.queryByRole("tab", { name: /admin/i })).toBeNull();
+  });
+
+  test("renders 4 tabs when adminVisible=true with Admin last", () => {
+    const onChange = vi.fn();
+    render(
+      <TabNav active="live-prediction" onChange={onChange} adminVisible />,
+    );
+    const buttons = screen.getAllByRole("tab");
+    expect(buttons).toHaveLength(4);
+    expect(buttons[3]).toHaveTextContent(/admin/i);
   });
 
   test("clicking a tab calls onChange with the right id", () => {
     const onChange = vi.fn();
-    render(<TabNav active="live-prediction" onChange={onChange} />);
+    render(<TabNav active="live-prediction" onChange={onChange} adminVisible />);
     fireEvent.click(screen.getByRole("tab", { name: /bot status/i }));
     expect(onChange).toHaveBeenCalledWith("bot-status");
+
+    fireEvent.click(screen.getByRole("tab", { name: /settings/i }));
+    expect(onChange).toHaveBeenCalledWith("settings");
+
+    fireEvent.click(screen.getByRole("tab", { name: /admin/i }));
+    expect(onChange).toHaveBeenCalledWith("admin");
 
     fireEvent.click(screen.getByRole("tab", { name: /live prediction/i }));
     expect(onChange).toHaveBeenCalledWith("live-prediction");
@@ -37,7 +55,7 @@ describe("TabNav", () => {
   });
 
   test("tab buttons meet 44px touch target (h-11)", () => {
-    render(<TabNav active="live-prediction" onChange={() => {}} />);
+    render(<TabNav active="live-prediction" onChange={() => {}} adminVisible />);
     for (const btn of screen.getAllByRole("tab")) {
       expect(btn.className).toMatch(/\bh-11\b/);
     }
@@ -114,5 +132,26 @@ describe("useHashRoute", () => {
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
     expect(result.current.query).toEqual({ signal: "newid" });
+  });
+
+  test("parses '#/settings' as the settings tab", () => {
+    window.location.hash = "#/settings";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.tab).toBe("settings");
+  });
+
+  test("parses '#/admin' as the admin tab", () => {
+    window.location.hash = "#/admin";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.tab).toBe("admin");
+  });
+
+  test("setTab('admin') writes the admin hash", () => {
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    act(() => {
+      result.current.setTab("admin");
+    });
+    expect(result.current.tab).toBe("admin");
+    expect(window.location.hash).toBe("#/admin");
   });
 });

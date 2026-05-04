@@ -18,6 +18,8 @@ dependencies = [
     "ccxt==4.4.40",
     "PyJWT[crypto]==2.10.1",
     "structlog==24.4.0",
+    "cryptography==46.0.7",
+    "pyotp==2.9.0",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +46,9 @@ markers = [
     "integration: requires database/redis",
     "slow: takes more than 1s",
 ]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
 
 [tool.mypy]
 python_version = "3.11"
