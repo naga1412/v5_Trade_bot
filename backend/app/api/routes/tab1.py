@@ -71,15 +71,20 @@ async def candles(
 
 
 async def _load_signal_markers(
-    session: AsyncSession, signal_id: str,
+    session: AsyncSession, *, user_id: int, signal_id: str,
 ) -> SignalMarkersOut | None:
-    """Look up a closed shadow_trade by signal_id and return its chart markers."""
+    """Look up a closed shadow_trade by signal_id and return its chart markers.
+
+    Spec §7.3: queries against shadow_trades MUST filter by user_id so a
+    deeplink containing another user's signal_id 404s rather than leaking
+    chart markers across accounts.
+    """
     sql = (
         "SELECT signal_id, direction, entry_price, stop_loss, take_profit, "
         "opened_at, closed_at, exit_price, exit_reason "
-        "FROM shadow_trades WHERE signal_id = :sig LIMIT 1"
+        "FROM shadow_trades WHERE user_id = :uid AND signal_id = :sig LIMIT 1"
     )
-    result = await session.execute(sa.text(sql), {"sig": signal_id})
+    result = await session.execute(sa.text(sql), {"uid": user_id, "sig": signal_id})
     row = result.first()
     if row is None:
         return None
@@ -118,7 +123,9 @@ async def predict(
 
     markers: SignalMarkersOut | None = None
     if signal is not None:
-        markers = await _load_signal_markers(session, signal)
+        markers = await _load_signal_markers(
+            session, user_id=current_user.id, signal_id=signal,
+        )
         if markers is None:
             raise HTTPException(404, f"Signal {signal} not found")
 

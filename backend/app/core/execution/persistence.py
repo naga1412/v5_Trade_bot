@@ -27,5 +27,12 @@ async def persist_trade(session: AsyncSession, trade: Trade) -> str:
 
 
 async def persist_prediction(session: AsyncSession, payload: dict) -> str:
-    """Caller is responsible for shaping `payload` to match the predictions schema."""
+    """Caller is responsible for shaping `payload` to match the predictions schema.
+
+    SP-0.7 §7.3: predictions is a per-user table. The payload MUST include a
+    `user_id` key — we raise eagerly so callers crash in tests rather than
+    relying on the SQLAlchemy NOT NULL constraint surfacing the bug late.
+    """
+    if "user_id" not in payload:
+        raise ValueError("persist_prediction payload missing user_id")
     return await insert_with_chain(session, "predictions", payload)

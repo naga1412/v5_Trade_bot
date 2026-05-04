@@ -13,6 +13,10 @@ from app.db.session import get_session_factory
 
 log = logging.getLogger(__name__)
 
+# SP-0.7: the singleton live-prediction worker writes rows on behalf of the
+# bootstrap admin (id=1, see migration 0005). SP-8 will fan out per user.
+BOOTSTRAP_ADMIN_USER_ID: int = 1
+
 
 async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h") -> None:
     """Seed REST history, subscribe to Binance WS, on each closed candle:
@@ -52,6 +56,7 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
         try:
             async with session_factory() as session:
                 await persist_prediction(session, {
+                    "user_id": BOOTSTRAP_ADMIN_USER_ID,
                     "symbol": pred.symbol,
                     "timeframe": pred.timeframe,
                     "ts": pred.ts.isoformat(),

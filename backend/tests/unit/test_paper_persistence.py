@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 
 from app.core.execution.paper_engine import PaperEngine
 from app.core.execution.persistence import persist_trade, persist_prediction
-from app.core.execution.types import Signal, ExitReason
+from app.core.execution.types import Signal
 from app.core.scoring.types import Direction
 
 
