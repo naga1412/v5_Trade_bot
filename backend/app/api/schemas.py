@@ -281,3 +281,37 @@ class TotpVerifyIn(BaseModel):
 
 class TotpVerifyOut(BaseModel):
     ok: bool
+
+
+# --- SP-1 Phase F: ML checkpoint admin schemas (spec §6.4) ----------------
+
+
+class MlCheckpointOut(BaseModel):
+    id: int
+    model_name: str
+    version: str
+    checkpoint_uri: str
+    sha256: str
+    trained_at: datetime
+    train_data_window: str
+    eval_results: dict
+    is_active: bool
+    activated_at: datetime | None = None
+    deactivated_at: datetime | None = None
+    notes: str | None = None
+
+
+class MlCheckpointCreateIn(BaseModel):
+    model_name: str
+    version: str
+    checkpoint_uri: str
+    sha256: str = Field(min_length=64, max_length=64)
+    trained_at: datetime
+    train_data_window: str
+    eval_results: dict
+    notes: str | None = None
+
+
+class MlCheckpointPatchIn(BaseModel):
+    is_active: bool | None = None
+    notes: str | None = None
