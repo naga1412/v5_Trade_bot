@@ -8,12 +8,16 @@ unified audit trail.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from datetime import datetime, timezone
+from datetime import timezone
+
+from datetime import datetime
+from typing import Any, Literal
 
 from app.api.schemas import (
+    AuditTrailEntry,
     ImpersonationStartOut,
     InvitationCreateIn,
     InvitationOut,
@@ -244,3 +248,135 @@ async def stop_impersonation(
         )
         await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# Tables exposed by the audit-trail endpoint. Each entry maps to a
+# (table_name, ts_column, summary_template, has_user_id) tuple. The
+# summary_template uses %s placeholders we substitute server-side.
+_AuditSrc = tuple[str, str, str, bool]
+_AUDIT_TABLES: dict[str, _AuditSrc] = {
+    "predictions": (
+        "predictions", "ts",
+        "{symbol} {timeframe} {direction} score={final_score}", True,
+    ),
+    "paper_trades": (
+        "paper_trades", "opened_at",
+        "{symbol} {direction} entry={entry_price}", True,
+    ),
+    "shadow_trades": (
+        "shadow_trades", "opened_at",
+        "{symbol} {timeframe} {direction}", True,
+    ),
+    "auth_violations": (
+        "auth_violations", "attempted_at",
+        "{attempted_email} reason={reason}", False,
+    ),
+    "impersonation_events": (
+        "impersonation_events", "ts",
+        "admin={admin_user_id} -> target={target_user_id} action={action}",
+        False,
+    ),
+}
+
+
+def _coerce_ts(value: Any) -> datetime:
+    """Coerce a DB ts (datetime or ISO string) to a tz-aware UTC datetime."""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _summarize(row: Any, template: str) -> str:
+    """Render the summary template by mapping the row's columns -> values."""
+    mapping = {k: getattr(row, k, "?") for k in row._mapping.keys()}
+    try:
+        return template.format(**mapping)
+    except Exception:  # noqa: BLE001
+        return template
+
+
+async def _select_audit_rows(
+    session: AsyncSession,
+    *,
+    table: str,
+    cols: list[str],
+    user_filter: int | None,
+    ts_col: str,
+    has_user_id: bool,
+    since: datetime | None,
+) -> list[Any]:
+    where_parts: list[str] = []
+    params: dict[str, Any] = {}
+    if since is not None:
+        where_parts.append(f"{ts_col} >= :since")
+        params["since"] = since
+    if user_filter is not None and has_user_id:
+        where_parts.append("user_id = :uid")
+        params["uid"] = user_filter
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    sql = (
+        f"SELECT id, {', '.join(cols)}, {ts_col} AS _ts "
+        f"FROM {table}{where_sql} ORDER BY {ts_col} DESC"
+    )
+    return list((await session.execute(sa.text(sql), params)).all())
+
+
+@router.get("/audit-trail", response_model=list[AuditTrailEntry])
+async def audit_trail(
+    user_id: int | None = Query(default=None),
+    table: Literal[
+        "predictions", "paper_trades", "shadow_trades",
+        "auth_violations", "impersonation_events",
+    ] | None = Query(default=None),
+    since: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[AuditTrailEntry]:
+    """Unified, sortable, paginated view across audit-relevant tables."""
+    targets = (
+        {table: _AUDIT_TABLES[table]} if table is not None else _AUDIT_TABLES
+    )
+
+    # When user_id filter is set, system-only tables (auth_violations,
+    # impersonation_events) are excluded since they aren't user-scoped.
+    if user_id is not None:
+        targets = {k: v for k, v in targets.items() if v[3]}
+
+    # Per-table column projections used both for selection + summary template
+    # variable resolution.
+    cols_by_table: dict[str, list[str]] = {
+        "predictions": ["user_id", "symbol", "timeframe", "direction", "final_score"],
+        "paper_trades": ["user_id", "symbol", "direction", "entry_price"],
+        "shadow_trades": ["user_id", "symbol", "timeframe", "direction"],
+        "auth_violations": ["attempted_email", "reason"],
+        "impersonation_events": ["admin_user_id", "target_user_id", "action"],
+    }
+
+    entries: list[AuditTrailEntry] = []
+    for key, (tname, ts_col, template, has_user_id) in targets.items():
+        rows = await _select_audit_rows(
+            session,
+            table=tname,
+            cols=cols_by_table[key],
+            user_filter=user_id,
+            ts_col=ts_col,
+            has_user_id=has_user_id,
+            since=since,
+        )
+        for r in rows:
+            uid_val = getattr(r, "user_id", None) if has_user_id else None
+            entries.append(AuditTrailEntry(
+                table_name=tname,
+                row_id=r.id,
+                user_id=uid_val,
+                ts=_coerce_ts(r._ts),
+                summary=_summarize(r, template),
+            ))
+
+    entries.sort(key=lambda e: e.ts, reverse=True)
+    return entries[offset : offset + limit]
