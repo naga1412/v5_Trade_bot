@@ -228,10 +228,15 @@ def _override_session_factory(
 def _detached_user(
     uid: int, email: str, *, is_admin: bool, is_active: bool = True,
 ) -> Any:
+    from datetime import datetime, timezone
+
     from app.auth.models import User
     return User(
         id=uid, email=email, display_name=email.split("@")[0],
         is_admin=is_admin, is_active=is_active,
+        trading_mode="manual", position_sizing_mode="fixed",
+        quiet_hours_enabled=True,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
 
