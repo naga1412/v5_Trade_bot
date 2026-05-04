@@ -21,7 +21,11 @@ from app.api.schemas import (
     UserPatchIn,
 )
 from app.auth.deps import require_admin
-from app.auth.impersonation import log_event, set_active_target
+from app.auth.impersonation import (
+    clear_active_target,
+    log_event,
+    set_active_target,
+)
 from app.auth.models import PendingInvitation, User
 from app.db.session import get_session
 
@@ -207,3 +211,36 @@ async def start_impersonation(
         target_user_id=target.id,
         started_at=datetime.now(timezone.utc),
     )
+
+
+@router.delete(
+    "/impersonate",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def stop_impersonation(
+    current_admin: User = Depends(require_admin),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    """Spec §9.2: clear impersonation_state + log stop event. Idempotent."""
+    # Best-effort: read previous target from state to label the event.
+    row = (
+        await session.execute(
+            sa.text(
+                "SELECT target_user_id FROM impersonation_state "
+                "WHERE admin_user_id = :a"
+            ),
+            {"a": current_admin.id},
+        )
+    ).first()
+    if row is not None:
+        await clear_active_target(session, admin_id=current_admin.id)
+        await log_event(
+            session,
+            admin_user_id=current_admin.id,
+            target_user_id=row.target_user_id,
+            action="stop",
+            request_path="/api/v1/admin/impersonate",
+        )
+        await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
