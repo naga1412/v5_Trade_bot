@@ -16,12 +16,18 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Final
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.auth.models import User
 
 _KEY_SIZE: Final[int] = 32  # AES-256
 _NONCE_SIZE: Final[int] = 12
@@ -88,3 +94,84 @@ def decrypt_for_user(ciphertext: str, *, passphrase: str, user_id: int) -> str:
             "decryption failed (wrong key or tampered ciphertext)"
         ) from e
     return pt.decode("utf-8")
+
+
+# --- F2: per-user secrets helpers (binance keys, telegram) ------------------
+
+
+@dataclass(frozen=True)
+class BinanceKeys:
+    api_key: str
+    api_secret: str
+
+
+@dataclass(frozen=True)
+class TelegramConfig:
+    bot_token: str
+    chat_id: str
+
+
+async def set_binance_keys(
+    session: AsyncSession,
+    *,
+    user: User,
+    api_key: str,
+    api_secret: str,
+    passphrase: str,
+) -> None:
+    """Encrypt + persist binance api_key + api_secret on a User row."""
+    user.binance_api_key_encrypted = encrypt_for_user(
+        api_key, passphrase=passphrase, user_id=user.id,
+    )
+    user.binance_api_secret_encrypted = encrypt_for_user(
+        api_secret, passphrase=passphrase, user_id=user.id,
+    )
+    await session.flush()
+
+
+def get_binance_keys(user: User, *, passphrase: str) -> BinanceKeys:
+    """Decrypt and return BinanceKeys for `user`. Raises if unconfigured."""
+    if not user.binance_api_key_encrypted or not user.binance_api_secret_encrypted:
+        raise SecretsConfigError("binance keys not configured for this user")
+    return BinanceKeys(
+        api_key=decrypt_for_user(
+            user.binance_api_key_encrypted,
+            passphrase=passphrase,
+            user_id=user.id,
+        ),
+        api_secret=decrypt_for_user(
+            user.binance_api_secret_encrypted,
+            passphrase=passphrase,
+            user_id=user.id,
+        ),
+    )
+
+
+async def set_telegram(
+    session: AsyncSession,
+    *,
+    user: User,
+    bot_token: str,
+    chat_id: str,
+    passphrase: str,
+) -> None:
+    """Encrypt + persist telegram bot_token; chat_id stored plain (not a secret)."""
+    user.telegram_bot_token_encrypted = encrypt_for_user(
+        bot_token, passphrase=passphrase, user_id=user.id,
+    )
+    user.telegram_chat_id = chat_id
+    await session.flush()
+
+
+def get_telegram(user: User, *, passphrase: str) -> TelegramConfig:
+    """Decrypt and return TelegramConfig for `user`. Raises if unconfigured."""
+    if not user.telegram_bot_token_encrypted or not user.telegram_chat_id:
+        raise SecretsConfigError("telegram not configured for this user")
+    return TelegramConfig(
+        bot_token=decrypt_for_user(
+            user.telegram_bot_token_encrypted,
+            passphrase=passphrase,
+            user_id=user.id,
+        ),
+        chat_id=user.telegram_chat_id,
+    )
