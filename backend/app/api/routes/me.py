@@ -18,11 +18,12 @@ from app.api.schemas import (
     BinanceKeysIn,
     MeOut,
     MePatchIn,
+    TelegramIn,
 )
 from app.auth.deps import current_user_or_impersonated, require_user
 from app.auth.impersonation import get_active_target
 from app.auth.models import User
-from app.auth.secrets import set_binance_keys
+from app.auth.secrets import set_binance_keys, set_telegram
 from app.config import get_settings
 from app.db.session import get_session
 
@@ -169,6 +170,38 @@ async def set_me_binance_keys(
         user=user,
         api_key=body.api_key,
         api_secret=body.api_secret,
+        passphrase=get_settings().master_passphrase,
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/telegram",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def set_me_telegram(
+    body: TelegramIn,
+    request: Request,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    """Encrypt + persist telegram bot_token; chat_id stored plain."""
+    is_imp = await _is_currently_impersonating(request, actual_user, session)
+    _reject_during_impersonation(is_imp)
+
+    user = (
+        await session.execute(
+            sa.select(User).where(User.id == actual_user.id)
+        )
+    ).scalar_one()
+
+    await set_telegram(
+        session,
+        user=user,
+        bot_token=body.bot_token,
+        chat_id=body.chat_id,
         passphrase=get_settings().master_passphrase,
     )
     await session.commit()
