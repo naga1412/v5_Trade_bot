@@ -8,7 +8,7 @@ unified audit trail.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
@@ -146,3 +146,24 @@ async def patch_user(
     await session.commit()
     await session.refresh(target)
     return _user_to_out(target)
+
+
+@router.delete(
+    "/users/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_user(
+    user_id: int,
+    current_admin: User = Depends(require_admin),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    """Soft-delete: set is_active=False. Cannot delete self."""
+    if user_id == current_admin.id:
+        raise HTTPException(status_code=400, detail="cannot delete yourself")
+    target = await session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    target.is_active = False
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
