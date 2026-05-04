@@ -1,0 +1,5 @@
+{
+  "model": "random_walk_baseline_v1",
+  "results": [],
+  "note": "regenerate via tools/ml/run_baseline_eval.py after bulk export — placeholder until historical OHLCV is available locally"
+}
