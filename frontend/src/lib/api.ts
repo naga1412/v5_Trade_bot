@@ -318,12 +318,12 @@ export const api = {
   mePatch: (body: MePatchIn) =>
     fetchJson<MeOut>("/me", { method: "PATCH", body }),
   meBinanceKeys: (api_key: string, api_secret: string) =>
-    fetchJson<void>("/me/binance-keys", {
+    fetchJson<undefined>("/me/binance-keys", {
       method: "POST",
       body: { api_key, api_secret },
     }),
   meTelegram: (bot_token: string, chat_id: string) =>
-    fetchJson<void>("/me/telegram", {
+    fetchJson<undefined>("/me/telegram", {
       method: "POST",
       body: { bot_token, chat_id },
     }),
@@ -342,13 +342,13 @@ export const api = {
   adminPatchUser: (id: number, body: UserPatchIn) =>
     fetchJson<AdminUser>(`/admin/users/${id}`, { method: "PATCH", body }),
   adminDeleteUser: (id: number) =>
-    fetchJson<void>(`/admin/users/${id}`, { method: "DELETE" }),
+    fetchJson<undefined>(`/admin/users/${id}`, { method: "DELETE" }),
   adminImpersonate: (id: number) =>
     fetchJson<ImpersonationStartOut>(`/admin/impersonate/${id}`, {
       method: "POST",
     }),
   adminImpersonateClear: () =>
-    fetchJson<void>("/admin/impersonate", { method: "DELETE" }),
+    fetchJson<undefined>("/admin/impersonate", { method: "DELETE" }),
   adminAuditTrail: (filters: AuditTrailFilters = {}) => {
     const qs = new URLSearchParams();
     if (filters.user_id != null) qs.set("user_id", String(filters.user_id));
