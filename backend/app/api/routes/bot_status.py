@@ -120,7 +120,7 @@ async def _select_trades_since(
         "FROM shadow_trades "
         "WHERE closed_at >= :since AND closed_at IS NOT NULL "
     )
-    params: dict[str, Any] = {"since": since.isoformat()}
+    params: dict[str, Any] = {"since": since}
     if direction is not None:
         sql += "AND direction = :direction "
         params["direction"] = direction
@@ -331,7 +331,7 @@ async def per_asset(
         "FROM shadow_trades "
         "WHERE closed_at >= :since AND closed_at IS NOT NULL"
     )
-    result = await session.execute(sa.text(sql), {"since": since.isoformat()})
+    result = await session.execute(sa.text(sql), {"since": since})
     by_symbol: dict[str, list[Any]] = {}
     for r in result:
         by_symbol.setdefault(r.symbol, []).append(r)
@@ -467,7 +467,7 @@ async def equity_curve(
         "WHERE closed_at >= :since AND closed_at IS NOT NULL "
         "ORDER BY closed_at ASC"
     )
-    rows = await session.execute(sa.text(sql), {"since": since.isoformat()})
+    rows = await session.execute(sa.text(sql), {"since": since})
 
     by_day: dict[datetime, float] = {}
     for r in rows:
