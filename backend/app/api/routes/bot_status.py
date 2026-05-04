@@ -113,16 +113,23 @@ def _build_window_stats(
 
 
 async def _select_trades_since(
-    session: AsyncSession, *, since: datetime, direction: str | None = None,
+    session: AsyncSession, *, user_id: int, since: datetime,
+    direction: str | None = None,
 ) -> list[Any]:
-    """Return shadow_trades rows closed at/after `since`. Optional direction filter."""
+    """Return shadow_trades rows closed at/after `since`. Optional direction filter.
+
+    Spec §7 — every per-user table query MUST filter by user_id. The runtime
+    query guard (app.auth.query_guard) enforces this at the SQLAlchemy event
+    level so any future helper that forgets the predicate raises in dev.
+    """
     sql = (
         "SELECT direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, pnl_pct, pnl_usdt, closed_at "
         "FROM shadow_trades "
-        "WHERE closed_at >= :since AND closed_at IS NOT NULL "
+        "WHERE user_id = :user_id "
+        "AND closed_at >= :since AND closed_at IS NOT NULL "
     )
-    params: dict[str, Any] = {"since": since}
+    params: dict[str, Any] = {"user_id": user_id, "since": since}
     if direction is not None:
         sql += "AND direction = :direction "
         params["direction"] = direction
@@ -149,17 +156,21 @@ async def overview(
     }
     blocks: dict[str, WindowStatsOut] = {}
     for key, (since, days, label) in cuts.items():
-        rows = await _select_trades_since(session, since=since)
+        rows = await _select_trades_since(
+            session, user_id=current_user.id, since=since,
+        )
         trades = [_row_to_trade(r) for r in rows]
         blocks[key] = _build_window_stats(
             window=label, trades=trades, rows=rows, window_days=days,
         )
 
     long_rows = await _select_trades_since(
-        session, since=now - timedelta(days=30), direction="LONG",
+        session, user_id=current_user.id,
+        since=now - timedelta(days=30), direction="LONG",
     )
     short_rows = await _select_trades_since(
-        session, since=now - timedelta(days=30), direction="SHORT",
+        session, user_id=current_user.id,
+        since=now - timedelta(days=30), direction="SHORT",
     )
     blocks["long_only_30d"] = _build_window_stats(
         window="30d",
@@ -202,7 +213,9 @@ async def promotion_gate(
     """Return rolling-30-day promotion-gate state for telegram-approve mode."""
     now = datetime.now(UTC)
     since = now - timedelta(days=30)
-    rows = await _select_trades_since(session, since=since)
+    rows = await _select_trades_since(
+        session, user_id=current_user.id, since=since,
+    )
     trades = [_row_to_trade(r) for r in rows]
 
     n_trades = len(trades)
@@ -297,9 +310,11 @@ async def open_positions(
     sql = (
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, bars_held, opened_at, signal_id "
-        "FROM shadow_open_positions ORDER BY opened_at ASC"
+        "FROM shadow_open_positions "
+        "WHERE user_id = :user_id "
+        "ORDER BY opened_at ASC"
     )
-    result = await session.execute(sa.text(sql))
+    result = await session.execute(sa.text(sql), {"user_id": current_user.id})
     out: list[OpenPositionOut] = []
     for r in result:
         opened_at = r.opened_at
@@ -335,9 +350,12 @@ async def per_asset(
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, pnl_pct, pnl_usdt, closed_at "
         "FROM shadow_trades "
-        "WHERE closed_at >= :since AND closed_at IS NOT NULL"
+        "WHERE user_id = :user_id "
+        "AND closed_at >= :since AND closed_at IS NOT NULL"
     )
-    result = await session.execute(sa.text(sql), {"since": since})
+    result = await session.execute(
+        sa.text(sql), {"user_id": current_user.id, "since": since},
+    )
     by_symbol: dict[str, list[Any]] = {}
     for r in result:
         by_symbol.setdefault(r.symbol, []).append(r)
@@ -389,8 +407,8 @@ async def recent_trades(
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[RecentTradeOut]:
     """Paginated, filterable closed-trade history (closed_at DESC)."""
-    where: list[str] = ["closed_at IS NOT NULL"]
-    params: dict[str, Any] = {}
+    where: list[str] = ["user_id = :user_id", "closed_at IS NOT NULL"]
+    params: dict[str, Any] = {"user_id": current_user.id}
     if symbol is not None:
         where.append("symbol = :symbol")
         params["symbol"] = _normalize_symbol_path(symbol)
@@ -443,8 +461,12 @@ async def long_vs_short(
 
     label = _window_label_for_days(days)
 
-    long_rows = await _select_trades_since(session, since=since, direction="LONG")
-    short_rows = await _select_trades_since(session, since=since, direction="SHORT")
+    long_rows = await _select_trades_since(
+        session, user_id=current_user.id, since=since, direction="LONG",
+    )
+    short_rows = await _select_trades_since(
+        session, user_id=current_user.id, since=since, direction="SHORT",
+    )
     return LongShortBreakdownOut(
         long=_build_window_stats(
             window=label,
@@ -473,10 +495,13 @@ async def equity_curve(
     since = now - timedelta(days=days)
     sql = (
         "SELECT pnl_usdt, closed_at FROM shadow_trades "
-        "WHERE closed_at >= :since AND closed_at IS NOT NULL "
+        "WHERE user_id = :user_id "
+        "AND closed_at >= :since AND closed_at IS NOT NULL "
         "ORDER BY closed_at ASC"
     )
-    rows = await session.execute(sa.text(sql), {"since": since})
+    rows = await session.execute(
+        sa.text(sql), {"user_id": current_user.id, "since": since},
+    )
 
     by_day: dict[datetime, float] = {}
     for r in rows:
