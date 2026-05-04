@@ -11,13 +11,17 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import datetime, timezone
+
 from app.api.schemas import (
+    ImpersonationStartOut,
     InvitationCreateIn,
     InvitationOut,
     UserOut,
     UserPatchIn,
 )
 from app.auth.deps import require_admin
+from app.auth.impersonation import log_event, set_active_target
 from app.auth.models import PendingInvitation, User
 from app.db.session import get_session
 
@@ -167,3 +171,39 @@ async def delete_user(
     target.is_active = False
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/impersonate/{user_id}", response_model=ImpersonationStartOut)
+async def start_impersonation(
+    user_id: int,
+    current_admin: User = Depends(require_admin),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ImpersonationStartOut:
+    """Spec §9.2: write impersonation_state row + log start event."""
+    if user_id == current_admin.id:
+        raise HTTPException(status_code=400, detail="cannot impersonate yourself")
+    target = await session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    if not target.is_active:
+        raise HTTPException(status_code=400, detail="target user is inactive")
+    if target.is_admin:
+        raise HTTPException(
+            status_code=400, detail="cannot impersonate another admin",
+        )
+    await set_active_target(
+        session, admin_id=current_admin.id, target_id=target.id,
+    )
+    await log_event(
+        session,
+        admin_user_id=current_admin.id,
+        target_user_id=target.id,
+        action="start",
+        request_path=f"/api/v1/admin/impersonate/{user_id}",
+    )
+    await session.commit()
+    return ImpersonationStartOut(
+        admin_user_id=current_admin.id,
+        target_user_id=target.id,
+        started_at=datetime.now(timezone.utc),
+    )
