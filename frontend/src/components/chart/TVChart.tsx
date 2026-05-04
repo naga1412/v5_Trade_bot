@@ -10,7 +10,7 @@ import {
   type Time,
 } from "lightweight-charts";
 import { useChartHistory, type ChartCandle } from "@/hooks/useChartHistory";
-import type { SignalMarkers } from "@/lib/api";
+import type { GhostCandle, SignalMarkers } from "@/lib/api";
 
 interface Props {
   symbol: string;
@@ -18,22 +18,38 @@ interface Props {
   livePrice?: number;
   liveTs?: string;
   signalMarkers?: SignalMarkers | null;
+  ghost?: GhostCandle | null; // SP-1: predicted next-bar candle + uncertainty wicks.
 }
 
 const TR_GREEN = "#00d68f";
 const TR_RED = "#ff3d71";
 const TR_NEUTRAL = "#c4c8d0";
 const TR_TIMEOUT = "#ffaa00";
+// SP-1 ghost colors — same hue as TR_GREEN/TR_RED, 50% alpha (8-digit hex).
+const TR_GREEN_GHOST = "#00d68f80";
+const TR_RED_GHOST = "#ff3d7180";
 
 function isoToUnix(iso: string): number {
   return Math.floor(new Date(iso).getTime() / 1000);
 }
 
-export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers }: Props) {
+function tfToSeconds(tf: string): number {
+  const m = tf.match(/^(\d+)([mhd])$/);
+  if (!m) return 3600;
+  const n = parseInt(m[1] ?? "1", 10);
+  const unit = m[2];
+  const mult = unit === "m" ? 60 : unit === "h" ? 3600 : 86400;
+  return n * mult;
+}
+
+export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, ghost }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  // SP-1: ghost candle series + its uncertainty-wick price lines.
+  const ghostSeriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
+  const ghostPriceLinesRef = useRef<IPriceLine[]>([]);
 
   const history = useChartHistory(symbol, timeframe);
 
@@ -173,6 +189,79 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers }:
       clearOverlay();
     };
   }, [signalMarkers]);
+
+  // SP-1: ghost candle effect. Adds a SECOND candlestick series one timeframe
+  // ahead of liveTs, with translucent fill and two dashed price lines for the
+  // P5/P95 uncertainty band. Cleared on unmount or when ghost becomes null.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    const clearGhost = (): void => {
+      const series = ghostSeriesRef.current;
+      if (series) {
+        for (const line of ghostPriceLinesRef.current) {
+          series.removePriceLine(line);
+        }
+        ghostPriceLinesRef.current = [];
+        chart.removeSeries(series);
+        ghostSeriesRef.current = null;
+      }
+    };
+
+    if (!ghost || !liveTs) {
+      clearGhost();
+      return;
+    }
+
+    // Always start fresh — the effect re-runs when ghost/liveTs/timeframe changes.
+    clearGhost();
+
+    const series = chart.addCandlestickSeries({
+      upColor: TR_GREEN_GHOST,
+      downColor: TR_RED_GHOST,
+      borderUpColor: TR_GREEN_GHOST,
+      borderDownColor: TR_RED_GHOST,
+      wickUpColor: TR_GREEN_GHOST,
+      wickDownColor: TR_RED_GHOST,
+      priceLineVisible: false,
+    });
+    ghostSeriesRef.current = series;
+
+    const ghostTs = (isoToUnix(liveTs) + tfToSeconds(timeframe)) as Time;
+    series.setData([
+      {
+        time: ghostTs,
+        open: ghost.open,
+        high: ghost.high,
+        low: ghost.low,
+        close: ghost.close,
+      },
+    ]);
+
+    ghostPriceLinesRef.current.push(
+      series.createPriceLine({
+        price: ghost.p5_low,
+        color: TR_RED_GHOST,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+        title: "P5",
+      }),
+    );
+    ghostPriceLinesRef.current.push(
+      series.createPriceLine({
+        price: ghost.p95_high,
+        color: TR_GREEN_GHOST,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+        title: "P95",
+      }),
+    );
+
+    return clearGhost;
+  }, [ghost, liveTs, timeframe]);
 
   return <div ref={containerRef} className="w-full h-full bg-bg-chart" />;
 }
