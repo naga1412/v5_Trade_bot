@@ -57,9 +57,13 @@ async def _create_shadow_tables(engine: Any) -> None:
             "target_user_id INTEGER NOT NULL, "
             "started_at TEXT NOT NULL DEFAULT (datetime('now')))"
         ))
+        # SP-0.7 Phase E: per-user tables include `user_id NOT NULL`. We default
+        # to 1 (bootstrap admin) so legacy fixture rows that omit user_id still
+        # satisfy the constraint.
         await conn.execute(sa.text(
             "CREATE TABLE shadow_open_positions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
             "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
@@ -70,7 +74,9 @@ async def _create_shadow_tables(engine: Any) -> None:
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_trades ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, "
             "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
@@ -84,7 +90,9 @@ async def _create_shadow_tables(engine: Any) -> None:
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_cooldowns ("
-            "symbol TEXT PRIMARY KEY, cooldown_until TEXT NOT NULL)"
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, cooldown_until TEXT NOT NULL, "
+            "PRIMARY KEY (user_id, symbol))"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE asset_universe ("
