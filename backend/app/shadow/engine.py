@@ -1,0 +1,149 @@
+import secrets
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+
+# --- Spec thresholds (§5.1) ---
+LONG_THRESHOLD: float = 0.30
+SHORT_THRESHOLD: float = -0.50
+MIN_CONFIDENCE: float = 0.50
+
+# --- ATR multipliers (matches predictor.py) ---
+SL_ATR_MULT: float = 1.5
+TP_ATR_MULT: float = 3.0
+
+
+class Direction(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
+def _gen_signal_id() -> str:
+    """Short URL-safe id for chart deeplinks."""
+    return secrets.token_urlsafe(6)
+
+
+@dataclass(frozen=True)
+class ShadowSignal:
+    symbol: str
+    direction: Direction
+    score: float
+    confidence: float
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    atr: float
+    layer_scores: dict[str, Any]
+    ts: datetime
+    signal_id: str = field(default_factory=_gen_signal_id)
+
+    @property
+    def risk_reward(self) -> float:
+        if self.direction is Direction.LONG:
+            risk = self.entry_price - self.stop_loss
+            reward = self.take_profit - self.entry_price
+        else:
+            risk = self.stop_loss - self.entry_price
+            reward = self.entry_price - self.take_profit
+        return reward / risk if risk > 0 else 0.0
+
+
+@dataclass
+class ShadowPosition:
+    symbol: str
+    direction: Direction
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    position_size_usdt: float
+    entry_score: float
+    entry_confidence: float
+    entry_atr: float
+    layer_scores: dict[str, Any]
+    bars_held: int
+    opened_at: datetime
+    last_check_at: datetime
+    signal_id: str
+
+    @classmethod
+    def from_signal(cls, sig: ShadowSignal, *, position_size_usdt: float) -> "ShadowPosition":
+        return cls(
+            symbol=sig.symbol,
+            direction=sig.direction,
+            entry_price=sig.entry_price,
+            stop_loss=sig.stop_loss,
+            take_profit=sig.take_profit,
+            position_size_usdt=position_size_usdt,
+            entry_score=sig.score,
+            entry_confidence=sig.confidence,
+            entry_atr=sig.atr,
+            layer_scores=sig.layer_scores,
+            bars_held=0,
+            opened_at=sig.ts,
+            last_check_at=sig.ts,
+            signal_id=sig.signal_id,
+        )
+
+
+@dataclass
+class SignalEvaluator:
+    """Pure decision logic. No DB or network. Test in isolation."""
+    long_threshold: float = LONG_THRESHOLD
+    short_threshold: float = SHORT_THRESHOLD
+    min_confidence: float = MIN_CONFIDENCE
+    sl_atr_mult: float = SL_ATR_MULT
+    tp_atr_mult: float = TP_ATR_MULT
+
+    def evaluate(
+        self,
+        *,
+        symbol: str,
+        score: float,
+        confidence: float,
+        last_close: float,
+        atr: float,
+        layer_scores: dict[str, Any],
+        ts: datetime,
+    ) -> ShadowSignal | None:
+        """Returns a ShadowSignal if entry conditions met, else None."""
+        if confidence < self.min_confidence:
+            return None
+        if atr <= 0:
+            return None  # can't compute SL/TP
+
+        if score > self.long_threshold:
+            sl = last_close - self.sl_atr_mult * atr
+            tp = last_close + self.tp_atr_mult * atr
+            return ShadowSignal(
+                symbol=symbol, direction=Direction.LONG,
+                score=score, confidence=confidence,
+                entry_price=last_close, stop_loss=sl, take_profit=tp,
+                atr=atr, layer_scores=layer_scores, ts=ts,
+            )
+        if score < self.short_threshold:
+            sl = last_close + self.sl_atr_mult * atr
+            tp = last_close - self.tp_atr_mult * atr
+            return ShadowSignal(
+                symbol=symbol, direction=Direction.SHORT,
+                score=score, confidence=confidence,
+                entry_price=last_close, stop_loss=sl, take_profit=tp,
+                atr=atr, layer_scores=layer_scores, ts=ts,
+            )
+        return None
+
+
+@dataclass
+class PositionGate:
+    """Snapshot of open positions + cooldowns at decision time. Pure function."""
+    open_symbols: set[str]
+    cooldowns: dict[str, datetime]   # symbol -> cooldown_until
+
+    def is_blocked(self, symbol: str, *, now: datetime) -> bool:
+        if symbol in self.open_symbols:
+            return True
+        cd = self.cooldowns.get(symbol)
+        if cd is not None and cd > now:
+            return True
+        return False
