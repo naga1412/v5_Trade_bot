@@ -1,15 +1,19 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import admin, bot_status, health, me, tab1
+from app.api.routes import admin, admin_ml, bot_status, health, me, tab1
 from app.api.routes import ws as ws_routes
 from app.auth.query_guard import attach_query_guard
 from app.config import get_settings
-from app.db.session import get_engine
+from app.db.session import get_engine, get_session_factory
+from app.ml.checkpoints import load_active_checkpoint
 from app.shadow.worker import start_shadow_worker
 from app.ws.live_prediction import start_background_worker
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -32,6 +36,15 @@ async def lifespan(_app: FastAPI):
     live_worker = None
     shadow_worker = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
+        # SP-1 §6.1: pin the active ML checkpoint at startup so the live
+        # worker can call predict_ghost_candle. No active row → log warning
+        # and continue (worker degrades to no-ghost mode automatically).
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                await load_active_checkpoint(session)
+        except Exception as e:  # noqa: BLE001
+            log.warning("load_active_checkpoint failed at startup: %s", e)
         live_worker = start_background_worker()
         shadow_worker = start_shadow_worker()
     try:
@@ -69,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(tab1.router)
     app.include_router(bot_status.router)
     app.include_router(admin.router)
+    app.include_router(admin_ml.router)
     app.include_router(me.router)
     app.include_router(ws_routes.router)
     return app

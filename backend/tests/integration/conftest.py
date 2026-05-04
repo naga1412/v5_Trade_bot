@@ -187,6 +187,21 @@ async def _create_auth_tables(engine: Any) -> None:
             "target_user_id INTEGER NOT NULL, "
             "started_at TEXT NOT NULL DEFAULT (datetime('now')))"
         ))
+        # SP-1 §6.4: ml_checkpoints registry. SQLite-friendly mirror of
+        # migration 0007 (no GENERATED accuracy / partial unique index —
+        # both are tested in integration suites that don't need them).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS ml_checkpoints ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "model_name TEXT NOT NULL, version TEXT NOT NULL, "
+            "checkpoint_uri TEXT NOT NULL, sha256 TEXT NOT NULL, "
+            "trained_at TEXT NOT NULL, "
+            "train_data_window TEXT NOT NULL, "
+            "eval_results TEXT NOT NULL, "
+            "is_active INTEGER NOT NULL DEFAULT 0, "
+            "activated_at TEXT, deactivated_at TEXT, notes TEXT, "
+            "UNIQUE (model_name, version))"
+        ))
         # Seed via raw SQL so created_at ordering is deterministic.
         await conn.execute(sa.text(
             "INSERT INTO users (id, email, display_name, is_admin, is_active, "

@@ -19,6 +19,15 @@ export function MasterBiasScore({ data }: Props) {
   const trackColor =
     label === "BULL" ? "bg-green" : label === "BEAR" ? "bg-red" : "bg-purple";
 
+  // SP-1: ghost candle preview (rendered only when ghost is non-null).
+  const ghost = data.ghost ?? null;
+  const ghostUsd = ghost ? Math.round(ghost.uncertainty * data.price) : 0;
+  const ghostPct = ghost ? (ghost.uncertainty * 100).toFixed(2) : "0";
+  const deltaPct = ghost
+    ? (((ghost.close - ghost.open) / ghost.open) * 100).toFixed(2)
+    : "0";
+  const deltaUp = ghost ? ghost.close >= ghost.open : false;
+
   return (
     <Panel title="Master Bias Score">
       <div className="flex justify-between mb-1">
@@ -32,6 +41,23 @@ export function MasterBiasScore({ data }: Props) {
           aria-label={`bias ${score.toFixed(2)}`}
         />
       </div>
+      {ghost && (
+        <div className="mt-3 pt-3 border-t border-border">
+          <div className="flex justify-between text-xs uppercase text-text-secondary tracking-wide">
+            <span>Ghost Candle</span>
+            <span>
+              ±${ghostUsd} / {ghostPct}%
+            </span>
+          </div>
+          <div className="text-xs mt-1 font-mono">
+            Open ${ghost.open.toFixed(2)} → Close ${ghost.close.toFixed(2)}{" "}
+            <span className={deltaUp ? "text-green" : "text-red"}>
+              ({deltaUp ? "+" : ""}
+              {deltaPct}%)
+            </span>
+          </div>
+        </div>
+      )}
     </Panel>
   );
 }

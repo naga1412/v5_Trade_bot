@@ -37,6 +37,7 @@ export function Tab1LivePrediction() {
             {...(data?.price != null ? { livePrice: data.price } : {})}
             {...(data?.ts != null ? { liveTs: data.ts } : {})}
             signalMarkers={data?.signal_markers ?? null}
+            ghost={data?.ghost ?? null}
           />
         </div>
         <Sidebar open={drawerOpen} onClose={() => setDrawerOpen(false)}>

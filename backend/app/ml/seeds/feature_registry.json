@@ -1,0 +1,14 @@
+[
+  {"name": "open",          "version": 1, "dtype": "float", "layer": null, "computation": "raw_ohlcv.open",  "description": "Raw bar open price"},
+  {"name": "high",          "version": 1, "dtype": "float", "layer": null, "computation": "raw_ohlcv.high",  "description": "Raw bar high price"},
+  {"name": "low",           "version": 1, "dtype": "float", "layer": null, "computation": "raw_ohlcv.low",   "description": "Raw bar low price"},
+  {"name": "close",         "version": 1, "dtype": "float", "layer": null, "computation": "raw_ohlcv.close", "description": "Raw bar close price"},
+  {"name": "volume",        "version": 1, "dtype": "float", "layer": null, "computation": "raw_ohlcv.volume","description": "Raw bar volume"},
+  {"name": "rsi_14",        "version": 1, "dtype": "float", "layer": 1,    "computation": "indicators.rsi(close, 14)",     "description": "Wilder RSI, period 14"},
+  {"name": "macd_line",     "version": 1, "dtype": "float", "layer": 1,    "computation": "indicators.macd(close).line",   "description": "MACD line (ema12 - ema26)"},
+  {"name": "macd_signal",   "version": 1, "dtype": "float", "layer": 1,    "computation": "indicators.macd(close).signal", "description": "MACD signal line (ema9 of macd_line)"},
+  {"name": "macd_hist",     "version": 1, "dtype": "float", "layer": 1,    "computation": "indicators.macd(close).hist",   "description": "MACD histogram"},
+  {"name": "atr_14",        "version": 1, "dtype": "float", "layer": 3,    "computation": "indicators.atr(high, low, close, 14)", "description": "Average True Range, period 14"},
+  {"name": "ema_20",        "version": 1, "dtype": "float", "layer": 5,    "computation": "indicators.ema(close, 20)",     "description": "EMA period 20"},
+  {"name": "ema_50",        "version": 1, "dtype": "float", "layer": 5,    "computation": "indicators.ema(close, 50)",     "description": "EMA period 50"}
+]

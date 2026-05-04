@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -52,6 +53,42 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
             log.warning("build_prediction failed: %s", e)
             continue
 
+        # SP-1: ghost candle prediction (additive, never blocks).
+        # `get_active_model_and_checkpoint` returns None when no active ML
+        # checkpoint is loaded — in that case we persist + publish exactly
+        # as before (ghost columns NULL, payload["ghost"] = None).
+        ghost_payload: dict[str, Any] = {}
+        try:
+            from app.ml.checkpoints import get_active_model_and_checkpoint
+            from app.ml.inference import predict_ghost_candle
+
+            active = get_active_model_and_checkpoint()
+        except ImportError:  # pragma: no cover — checkpoints module not present yet
+            active = None
+
+        if active is not None and len(bars) >= 256:
+            model, checkpoint = active
+            try:
+                ghost = predict_ghost_candle(
+                    model=model,
+                    bars=bars,
+                    last_close=float(bars["close"].iloc[-1]),
+                )
+                ghost_payload = {
+                    "ghost_open": ghost.open,
+                    "ghost_high": ghost.high,
+                    "ghost_low": ghost.low,
+                    "ghost_close": ghost.close,
+                    "ghost_p5_low": ghost.p5_low,
+                    "ghost_p95_high": ghost.p95_high,
+                    "ghost_uncertainty": ghost.uncertainty,
+                    "model_checkpoint_id": checkpoint.id,
+                }
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "predict_ghost_candle failed: %s; persisting without ghost", e
+                )
+
         # Persist BEFORE publishing — audit chain is the source of truth.
         try:
             async with session_factory() as session:
@@ -70,16 +107,31 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                     "inputs_hash": pred.inputs_hash,
                     "model_version": "sp-0",
                     "cold_start": pred.cold_start,
+                    **ghost_payload,
                 })
                 await session.commit()
         except Exception as e:  # noqa: BLE001
             log.error("persist_prediction failed; suppressing publish: %s", e)
             continue
 
+        # Extend WS payload with ghost (None when no active model).
+        payload = pred.model_dump(mode="json")
+        if ghost_payload:
+            payload["ghost"] = {
+                "open": ghost_payload["ghost_open"],
+                "high": ghost_payload["ghost_high"],
+                "low": ghost_payload["ghost_low"],
+                "close": ghost_payload["ghost_close"],
+                "p5_low": ghost_payload["ghost_p5_low"],
+                "p95_high": ghost_payload["ghost_p95_high"],
+                "uncertainty": ghost_payload["ghost_uncertainty"],
+            }
+        else:
+            payload["ghost"] = None
         await manager.publish(
             channel="live_prediction",
             key={"symbol": symbol_pair, "timeframe": timeframe},
-            payload=pred.model_dump(mode="json"),
+            payload=payload,
         )
 
 

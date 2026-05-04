@@ -44,6 +44,17 @@ export interface SignalMarkers {
   exit_reason: "TAKE_PROFIT" | "STOP_LOSS" | "TIMEOUT" | null;
 }
 
+// SP-1: predicted next-bar ghost candle + uncertainty band.
+export interface GhostCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  p5_low: number;
+  p95_high: number;
+  uncertainty: number; // [0, ∞), lower = more confident
+}
+
 export interface LivePrediction {
   symbol: string;
   timeframe: string;
@@ -72,6 +83,7 @@ export interface LivePrediction {
   cold_start: boolean;
   inputs_hash: string;
   signal_markers?: SignalMarkers | null;
+  ghost?: GhostCandle | null; // SP-1: null when no active ML checkpoint loaded.
 }
 
 // --- Bot Status types ---
@@ -285,6 +297,28 @@ export interface AuditTrailFilters {
   offset?: number;
 }
 
+// --- SP-1 Phase F: ML checkpoint admin types (mirrors backend §6.4) ---
+
+export interface MlCheckpoint {
+  id: number;
+  model_name: string;
+  version: string;
+  checkpoint_uri: string;
+  sha256: string;
+  trained_at: string;
+  train_data_window: string;
+  eval_results: Record<string, unknown>;
+  is_active: boolean;
+  activated_at: string | null;
+  deactivated_at: string | null;
+  notes: string | null;
+}
+
+export interface MlCheckpointPatchIn {
+  is_active?: boolean;
+  notes?: string;
+}
+
 export const api = {
   health: () => fetchJson<{ status: string; version: string }>("/health"),
   predict: (symbolPath: string, tf: string, signal?: string) => {
@@ -349,6 +383,17 @@ export const api = {
     }),
   adminImpersonateClear: () =>
     fetchJson<undefined>("/admin/impersonate", { method: "DELETE" }),
+  // --- SP-1 Phase F: admin ML checkpoint endpoints ---
+  adminListMlCheckpoints: () =>
+    fetchJson<MlCheckpoint[]>("/admin/ml-checkpoints"),
+  adminPatchMlCheckpoint: (id: number, body: MlCheckpointPatchIn) =>
+    fetchJson<MlCheckpoint>(`/admin/ml-checkpoints/${id}`, {
+      method: "PATCH",
+      body,
+    }),
+  adminDeleteMlCheckpoint: (id: number) =>
+    fetchJson<undefined>(`/admin/ml-checkpoints/${id}`, { method: "DELETE" }),
+
   adminAuditTrail: (filters: AuditTrailFilters = {}) => {
     const qs = new URLSearchParams();
     if (filters.user_id != null) qs.set("user_id", String(filters.user_id));
