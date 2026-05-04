@@ -72,8 +72,25 @@ def upgrade() -> None:
         "CREATE INDEX shadow_cooldowns_user_id_idx ON shadow_cooldowns (user_id);"
     )
 
+    # Step 5: shadow_cooldowns PK migrates from (symbol) to (user_id, symbol)
+    # so two users can hold independent cooldowns on the same asset
+    # (Spec §7.1, see app.shadow.persistence.set_cooldown ON CONFLICT target).
+    op.execute(
+        "ALTER TABLE shadow_cooldowns DROP CONSTRAINT shadow_cooldowns_pkey;"
+    )
+    op.execute(
+        "ALTER TABLE shadow_cooldowns ADD PRIMARY KEY (user_id, symbol);"
+    )
+
 
 def downgrade() -> None:
+    # Restore the single-column shadow_cooldowns PK before dropping user_id.
+    op.execute(
+        "ALTER TABLE shadow_cooldowns DROP CONSTRAINT shadow_cooldowns_pkey;"
+    )
+    op.execute(
+        "ALTER TABLE shadow_cooldowns ADD PRIMARY KEY (symbol);"
+    )
     for table in PER_USER_TABLES:
         op.execute(f"DROP INDEX IF EXISTS {table}_user_id_idx;")
         op.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS user_id;")

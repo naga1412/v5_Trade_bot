@@ -29,9 +29,15 @@ async def test_open_positions_returns_seeded_rows(
     bot_status_client: Any, bot_status_factory: Any,
 ) -> None:
     async with bot_status_factory() as session:
-        await persist_open_position(session, _pos("BTC/USDT", Direction.LONG, "sigA"))
-        await persist_open_position(session, _pos("ETH/USDT", Direction.SHORT, "sigB"))
-        await persist_open_position(session, _pos("SOL/USDT", Direction.LONG, "sigC"))
+        await persist_open_position(
+            session, _pos("BTC/USDT", Direction.LONG, "sigA"), user_id=1,
+        )
+        await persist_open_position(
+            session, _pos("ETH/USDT", Direction.SHORT, "sigB"), user_id=1,
+        )
+        await persist_open_position(
+            session, _pos("SOL/USDT", Direction.LONG, "sigC"), user_id=1,
+        )
         await session.commit()
 
     r = await bot_status_client.get("/api/v1/bot-status/open-positions")

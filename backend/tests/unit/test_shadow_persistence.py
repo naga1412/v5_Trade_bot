@@ -113,11 +113,15 @@ async def test_list_open_positions_filters_by_user() -> None:
     async with engine.begin() as conn:
         await conn.execute(sa.text(_OPEN_POS_DDL))
 
-    sig = make_signal()
-    pos1 = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
-    sig2 = make_signal()
-    sig2.symbol = "ETHUSDT"
-    sig2.signal_id = "user2-sig"
+    pos1 = ShadowPosition.from_signal(make_signal(), position_size_usdt=30.0)
+    sig2 = ShadowSignal(
+        symbol="ETHUSDT", direction=Direction.LONG, score=0.65,
+        confidence=0.72, entry_price=2000.0, stop_loss=1900.0,
+        take_profit=2200.0, atr=20.0,
+        layer_scores={"1": 0.85, "3": 0.72, "5": 0.40},
+        ts=datetime(2026, 5, 3, 14, tzinfo=timezone.utc),
+        signal_id="user2-sig",
+    )
     pos2 = ShadowPosition.from_signal(sig2, position_size_usdt=30.0)
 
     async with AsyncSession(engine) as session:
