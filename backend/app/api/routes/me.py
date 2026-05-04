@@ -14,16 +14,20 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json
+
 from app.api.schemas import (
     BinanceKeysIn,
     MeOut,
     MePatchIn,
     TelegramIn,
+    TotpSetupOut,
 )
 from app.auth.deps import current_user_or_impersonated, require_user
 from app.auth.impersonation import get_active_target
 from app.auth.models import User
-from app.auth.secrets import set_binance_keys, set_telegram
+from app.auth.secrets import encrypt_for_user, set_binance_keys, set_telegram
+from app.auth.totp import generate_backup_codes, generate_totp_setup
 from app.config import get_settings
 from app.db.session import get_session
 
@@ -206,3 +210,42 @@ async def set_me_telegram(
     )
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/totp/setup", response_model=TotpSetupOut)
+async def setup_me_totp(
+    request: Request,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> TotpSetupOut:
+    """Generate a fresh TOTP secret + backup codes; encrypt + persist.
+
+    Returns the secret and backup codes once (only at setup time) so the UI
+    can render the QR + display recovery codes for the user to save.
+    """
+    is_imp = await _is_currently_impersonating(request, actual_user, session)
+    _reject_during_impersonation(is_imp)
+
+    user = (
+        await session.execute(
+            sa.select(User).where(User.id == actual_user.id)
+        )
+    ).scalar_one()
+
+    setup = generate_totp_setup(account_email=user.email)
+    backup_codes = generate_backup_codes()
+    passphrase = get_settings().master_passphrase
+
+    user.totp_secret_encrypted = encrypt_for_user(
+        setup.secret, passphrase=passphrase, user_id=user.id,
+    )
+    user.totp_backup_codes_encrypted = encrypt_for_user(
+        json.dumps(backup_codes), passphrase=passphrase, user_id=user.id,
+    )
+    await session.commit()
+
+    return TotpSetupOut(
+        provisioning_uri=setup.provisioning_uri,
+        secret_for_display=setup.secret,
+        backup_codes=backup_codes,
+    )
