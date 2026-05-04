@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
 from app.db.audit import insert_with_chain
 
 
@@ -156,3 +157,38 @@ async def test_overview_empty_db(
     assert body["last_24h"]["pnl_usdt"] == pytest.approx(0.0)
     assert body["last_24h"]["pnl_pct"] is None
     assert body["last_24h"]["sharpe_annualized"] is None
+
+
+@pytest.mark.asyncio
+async def test_overview_does_not_leak_other_users_trades(
+    bot_status_client: Any, bot_status_factory: Any,
+) -> None:
+    """Seed user 2 with a closed trade; user 1's overview must show zero."""
+    async with bot_status_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO users (id, email, display_name, is_admin) "
+            "VALUES (2, 'other@local', 'Other', 0)"
+        ))
+        await session.commit()
+
+    now = datetime.now(UTC)
+    payload = {
+        **_trade_payload(
+            symbol="BTC/USDT", direction="LONG",
+            entry=100.0, sl=95.0, tp=110.0, exit_price=110.0,
+            exit_reason="TAKE_PROFIT",
+            closed_at=now - timedelta(hours=1),
+            signal_id="other-user-1",
+        ),
+        "user_id": 2,
+    }
+    async with bot_status_factory() as session:
+        await insert_with_chain(session, "shadow_trades", payload)
+        await session.commit()
+
+    # bot_status_client is bound to user_id=1 — the other user's trade must NOT leak.
+    r = await bot_status_client.get("/api/v1/bot-status/overview")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["last_24h"]["trades"] == 0
+    assert body["last_30d"]["trades"] == 0
