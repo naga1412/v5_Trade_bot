@@ -167,3 +167,145 @@ async def bot_status_client(
 def fixed_now_iso() -> str:
     """A deterministic 'now' for fixture rows."""
     return "2026-05-03T00:00:00+00:00"
+
+
+# --- SP-0.7 Phase G/H shared admin/me fixtures ----------------------------
+
+
+async def _create_auth_tables(engine: Any) -> None:
+    """Create the SP-0.7 auth tables (users, pending_invitations, ...) and
+    seed three users: admin@x.com (id=1, admin), friend@x.com (id=2),
+    deact@x.com (id=3, is_active=False).
+    """
+    from app.auth.models import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS impersonation_state ("
+            "admin_user_id INTEGER PRIMARY KEY, "
+            "target_user_id INTEGER NOT NULL, "
+            "started_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        ))
+        # Seed via raw SQL so created_at ordering is deterministic.
+        await conn.execute(sa.text(
+            "INSERT INTO users (id, email, display_name, is_admin, is_active, "
+            "trading_mode, position_sizing_mode, quiet_hours_enabled, "
+            "created_at) VALUES "
+            "(1, 'admin@x.com', 'Admin', 1, 1, 'manual', 'fixed', 1, "
+            " '2026-01-01T00:00:00+00:00'), "
+            "(2, 'friend@x.com', 'Friend', 0, 1, 'manual', 'fixed', 1, "
+            " '2026-01-02T00:00:00+00:00'), "
+            "(3, 'deact@x.com', 'Deact', 0, 0, 'manual', 'fixed', 1, "
+            " '2026-01-03T00:00:00+00:00')"
+        ))
+
+
+@pytest_asyncio.fixture
+async def auth_engine() -> AsyncIterator[Any]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await _create_auth_tables(engine)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def auth_factory(auth_engine: Any) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(auth_engine, expire_on_commit=False)
+
+
+def _override_session_factory(
+    factory: async_sessionmaker[AsyncSession],
+) -> Any:
+    async def _gen() -> AsyncIterator[AsyncSession]:
+        async with factory() as s:
+            yield s
+    return _gen
+
+
+def _detached_user(
+    uid: int, email: str, *, is_admin: bool, is_active: bool = True,
+) -> Any:
+    from app.auth.models import User
+    return User(
+        id=uid, email=email, display_name=email.split("@")[0],
+        is_admin=is_admin, is_active=is_active,
+    )
+
+
+@pytest_asyncio.fixture
+async def admin_client(
+    auth_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[httpx.AsyncClient]:
+    """ASGI client acting as user_id=1 (admin)."""
+    from app.auth.deps import (
+        current_user_or_impersonated,
+        require_admin,
+        require_user,
+    )
+    from app.db.session import get_session
+    from app.deps import CFAccessUser, require_cf_user
+    from app.main import app
+
+    user = _detached_user(1, "admin@x.com", is_admin=True)
+
+    async def _cf() -> CFAccessUser:
+        return CFAccessUser(email="admin@x.com", sub="admin", raw={})
+
+    async def _u() -> Any:
+        return user
+
+    app.dependency_overrides[get_session] = _override_session_factory(auth_factory)
+    app.dependency_overrides[require_cf_user] = _cf
+    app.dependency_overrides[require_user] = _u
+    app.dependency_overrides[require_admin] = _u
+    app.dependency_overrides[current_user_or_impersonated] = _u
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        for d in (
+            get_session, require_cf_user, require_user,
+            require_admin, current_user_or_impersonated,
+        ):
+            app.dependency_overrides.pop(d, None)
+
+
+@pytest_asyncio.fixture
+async def friend_client(
+    auth_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[httpx.AsyncClient]:
+    """ASGI client acting as user_id=2 (non-admin friend).
+
+    Real require_admin is left in place so admin-only routes return 403.
+    """
+    from app.auth.deps import current_user_or_impersonated, require_user
+    from app.db.session import get_session
+    from app.deps import CFAccessUser, require_cf_user
+    from app.main import app
+
+    user = _detached_user(2, "friend@x.com", is_admin=False)
+
+    async def _cf() -> CFAccessUser:
+        return CFAccessUser(email="friend@x.com", sub="friend", raw={})
+
+    async def _u() -> Any:
+        return user
+
+    app.dependency_overrides[get_session] = _override_session_factory(auth_factory)
+    app.dependency_overrides[require_cf_user] = _cf
+    app.dependency_overrides[require_user] = _u
+    app.dependency_overrides[current_user_or_impersonated] = _u
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        for d in (
+            get_session, require_cf_user, require_user,
+            current_user_or_impersonated,
+        ):
+            app.dependency_overrides.pop(d, None)
