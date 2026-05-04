@@ -65,7 +65,7 @@ describe("UserRowMenu", () => {
     expect(screen.getByRole("menuitem", { name: /delete/i })).toBeInTheDocument();
   });
 
-  test("View as user calls api.adminImpersonate(id) and triggers full reload (J4)", async () => {
+  test("View as user calls api.adminImpersonate(id)", async () => {
     mockedImpersonate.mockResolvedValueOnce({
       admin_user_id: 1,
       target_user_id: 7,
@@ -77,7 +77,23 @@ describe("UserRowMenu", () => {
     await waitFor(() => {
       expect(mockedImpersonate).toHaveBeenCalledWith(7);
     });
-    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("J4: impersonate triggers a full window.location.reload after the API call", async () => {
+    mockedImpersonate.mockResolvedValueOnce({
+      admin_user_id: 1,
+      target_user_id: 7,
+      started_at: "2026-05-04T00:00:00Z",
+    });
+    render(<UserRowMenu user={userSample()} onChanged={() => {}} />);
+    fireEvent.click(screen.getByTestId("row-menu-trigger-7"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /view as user/i }));
+    // Wait for the impersonate API to settle, then assert reload fired.
+    await waitFor(() => {
+      expect(reloadSpy).toHaveBeenCalledTimes(1);
+    });
+    // Reload happens AFTER the API call, never before.
+    expect(mockedImpersonate).toHaveBeenCalledTimes(1);
   });
 
   test("Deactivate calls adminPatchUser with is_active toggled to false", async () => {
