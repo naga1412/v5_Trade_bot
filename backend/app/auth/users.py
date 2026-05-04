@@ -25,6 +25,13 @@ class UserDeactivatedError(Exception):
     """User exists but `is_active=False`."""
 
 
+# Spec §4.4: dev bypass user. Always allowed in ENV=development; auto-created
+# as admin if the row doesn't exist (regardless of whether the users table is
+# otherwise empty — the migration seed of the bootstrap admin would otherwise
+# starve dev@local out of case 1).
+DEV_BYPASS_EMAIL = "dev@local"
+
+
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
@@ -56,8 +63,10 @@ async def get_or_create_user_from_email(
         await session.execute(sa.select(sa.func.count()).select_from(User))
     ).scalar_one()
 
-    if n_users == 0:
-        # Spec §4.2 case 1: bootstrap admin.
+    if n_users == 0 or norm_email == DEV_BYPASS_EMAIL:
+        # Spec §4.2 case 1 (bootstrap) OR §4.4 (dev bypass).
+        # The dev bypass branch ensures `dev@local` always gets an admin row even
+        # when the migration has already seeded the production bootstrap admin.
         new_user = User(
             email=norm_email,
             display_name=display_name or norm_email,
