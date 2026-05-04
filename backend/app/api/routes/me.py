@@ -11,13 +11,19 @@ from __future__ import annotations
 from datetime import time
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import MeOut, MePatchIn
+from app.api.schemas import (
+    BinanceKeysIn,
+    MeOut,
+    MePatchIn,
+)
 from app.auth.deps import current_user_or_impersonated, require_user
 from app.auth.impersonation import get_active_target
 from app.auth.models import User
+from app.auth.secrets import set_binance_keys
+from app.config import get_settings
 from app.db.session import get_session
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
@@ -135,3 +141,35 @@ async def patch_me(
     await session.commit()
     await session.refresh(user)
     return _user_to_me(user, is_impersonating=False)
+
+
+@router.post(
+    "/binance-keys",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def set_me_binance_keys(
+    body: BinanceKeysIn,
+    request: Request,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    """Encrypt + persist binance api_key + api_secret for the current user."""
+    is_imp = await _is_currently_impersonating(request, actual_user, session)
+    _reject_during_impersonation(is_imp)
+
+    user = (
+        await session.execute(
+            sa.select(User).where(User.id == actual_user.id)
+        )
+    ).scalar_one()
+
+    await set_binance_keys(
+        session,
+        user=user,
+        api_key=body.api_key,
+        api_secret=body.api_secret,
+        passphrase=get_settings().master_passphrase,
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
