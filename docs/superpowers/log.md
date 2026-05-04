@@ -72,3 +72,98 @@ backed by this cross-check.
 
 **Next:** ship Q1 (PR sp-0.5/main → main) and Q2 (tag `sp-0.5`). Then begin SP-0.7 (multi-user wrapper) per the meta-plan.
 
+---
+
+## 2026-05-03 — SP-0.7 Multi-User Wrapper: SHIPPED
+
+**Scope:** wrapped the single-user SP-0.5 codebase in a real multi-user
+identity layer. Cloudflare Access JWT continues to gate the network edge;
+inside the app every per-user table now carries `user_id NOT NULL` and every
+read endpoint filters by an effective user resolved from the JWT (or the
+admin impersonation target when active). Adds AES-256-GCM-encrypted per-user
+secrets (Binance keys, Telegram, TOTP), an admin invitation flow with a
+two-step Cloudflare-Access reminder modal, an impersonation banner with
+`page_view` audit logging, and a runtime SQLAlchemy query guard that raises
+in dev when a per-user table is queried without `user_id`.
+
+**Delivered (56 commits on branch `sp-0.7/main`, excluding base merge):**
+
+| Phase | Sub-system                                                                                  | Commits |
+|-------|---------------------------------------------------------------------------------------------|---------|
+| B     | Migrations 0004 + 0005 + 0006 (users + per-user `user_id NOT NULL`)                          | 3       |
+| C     | Auth ORM models (User, PendingInvitation, AuthViolation, ImpersonationEvent) — RED + GREEN  | 2       |
+| D     | User loader + `require_user`/`require_admin` + impersonation store                          | 5       |
+| E     | Bot Status + tab1 routes wired to `current_user_or_impersonated`                            | 2       |
+| F     | Per-user filter on all `/bot-status` endpoints + cross-user leak test                       | 2       |
+| G     | Shadow persistence + worker scoped to user_id (RED + GREEN)                                 | 2       |
+| H     | persist_prediction + tab1 signal markers scoped to user_id (RED + GREEN)                    | 2       |
+| I     | Query guard event listener (warn in prod, raise in dev) + lifespan wiring                   | 3       |
+| J     | AES-256-GCM secrets + per-user secret helpers + TOTP (pyotp)                                | 3       |
+| K     | Admin REST: scaffold + GET users + POST invitations + PATCH/DELETE users + impersonate × 2 + audit-trail | 8 |
+| K'    | /me REST: GET/PATCH profile + binance-keys + telegram + TOTP setup/verify                   | 5       |
+| K''   | Frontend: api.ts + useCurrentUser + TabNav + ImpersonationBanner + Admin (Users/InviteModal/RowMenu/AuditTrail) + impersonate-reload + Settings (Profile/Trading/Secrets) | 12 |
+| —     | Maintenance: `fetchJson` generic narrowed from `void` to `undefined`                        | 1       |
+| L     | E2E verification: data isolation + invitation flow + impersonation read-only + query guard coverage + Playwright admin-users + log entry | 6 |
+
+**Test counts at ship:**
+- Backend: **309 passing** (was 199 at SP-0.5; +110 new)
+- Frontend Vitest: **167 passing** (was 88 at SP-0.5; +79 new)
+- Frontend Playwright: 3 specs × 2 device projects = 14 cases listed clean
+
+**Surprises / decisions worth flagging:**
+
+- **Email comparison case-insensitive:** spec ambiguity #1 — Cloudflare Access
+  does not lowercase emails before signing them, so `Friend@x.com` and
+  `friend@x.com` would otherwise create two distinct users. `_normalize_email`
+  in `app.auth.users` lowercases on every read + write so the constraint is
+  load-bearing rather than nominal.
+- **Impersonation is strictly read-only.** `/me` mutations (binance-keys,
+  telegram, TOTP setup/verify, PATCH profile) call `_reject_during_impersonation`
+  and 403 — the alternative ("write to admin's row but use target's lens for
+  reads") is too easy to misread as "admin secretly editing the friend's
+  account." Verified end-to-end in `test_impersonation_readonly.py`.
+- **Dev-mode query guard raises; prod warns.** Trading off availability for
+  fail-fast in dev: `MissingUserIdFilterError` will tank a request locally
+  but only emits a `log.warning` in production. The Phase L4 parametric
+  coverage now pins all 5 per-user tables (`predictions`, `paper_trades`,
+  `shadow_trades`, `shadow_open_positions`, `shadow_cooldowns`) plus a
+  `test_per_user_tables_set_is_complete` contract test that fails the build
+  if anyone removes a table from `PER_USER_TABLES` without touching the spec.
+- **AES-256-GCM with per-user salt + master passphrase.** Settings carries
+  `master_passphrase` (env-loaded). `encrypt_for_user` mixes user_id into
+  the salt so that even if the same plaintext is encrypted for two users
+  the ciphertexts differ. Round-trip covered in
+  `test_api_me_binance_keys.py::test_post_me_binance_keys_round_trip`.
+- **Two-step CF Access modal is on purpose.** The backend cannot add the
+  invitee to the Cloudflare team policy automatically (no API token flowing
+  through the app). The InviteUserModal step-2 panel exists to remind the
+  admin to do that out-of-band, with a clipboard-copy button on the email.
+- **Bootstrap admin via empty `users` table.** First JWT to hit
+  `require_user` when the `users` table is empty is auto-promoted to admin
+  (`is_admin=True`). This is how `dev@local` becomes a usable admin in
+  development without any bootstrap script. After that first hit, the
+  invitation gate is in force.
+- **Frontend cache via `useSyncExternalStore`.** `useCurrentUser` exposes
+  a single shared snapshot of `/api/v1/me` across App, TabNav,
+  ImpersonationBanner, Admin, and Settings — so the visibility of the
+  Admin tab is consistent and cheap. `__resetCurrentUserForTests` is a
+  test-only escape hatch.
+- **Playwright admin-users spec is shape-only.** It depends on the dev-mode
+  bypass that promotes the first hit to admin, plus the in-memory dev SQLite.
+  It does NOT exercise the real Cloudflare Access policy update — that step
+  is by design out of scope for E2E and is the human's responsibility per
+  the InviteUserModal step-2 prompt.
+
+**Manual checklist (for the human after deploy):**
+- [ ] Migration 0004→0006 applies cleanly on the staging Postgres
+- [ ] First production JWT hit creates the bootstrap admin row (verify `users` count = 1, `is_admin = true`)
+- [ ] Invite a friend → friend receives Cloudflare Access policy update → friend's first login flips `accepted_at` on the invitation row
+- [ ] Admin starts impersonation → ImpersonationBanner renders → /me mutations return 403 → reads show target's data lens
+- [ ] Admin stops impersonation → banner clears → reads back to admin's lens
+- [ ] AuditTrail tab shows `start` + `stop` events plus any `page_view` events captured during the impersonation
+- [ ] `auth_violations` row appears for any uninvited email that hits the gate
+
+**Next:** ship L7 (PR `sp-0.7/main` → `main`) and tag `sp-0.7`. Then begin
+SP-0.8 (real Binance trade execution + Telegram approve flow) per the
+meta-plan.
+
