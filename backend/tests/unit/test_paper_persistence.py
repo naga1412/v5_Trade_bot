@@ -55,15 +55,19 @@ async def test_persist_trade_writes_with_hash_chain() -> None:
 async def test_persist_prediction_writes_with_hash_chain() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
+        # SP-0.7 Phase E3: predictions has user_id NOT NULL.
         await conn.execute(sa.text(
             "CREATE TABLE predictions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, timeframe TEXT, "
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "symbol TEXT, timeframe TEXT, "
             "ts TEXT, layer_scores TEXT, final_score REAL, direction TEXT, "
             "confidence REAL, inputs_hash TEXT, model_version TEXT, "
             "cold_start INTEGER, prev_hash TEXT, row_hash TEXT UNIQUE)"
         ))
 
     payload = dict(
+        user_id=1,
         symbol="BTC/USDT", timeframe="1h",
         ts=datetime(2026,5,1, tzinfo=timezone.utc).isoformat(),
         layer_scores='{"1":"long"}',
@@ -75,8 +79,28 @@ async def test_persist_prediction_writes_with_hash_chain() -> None:
         h = await persist_prediction(session, payload)
         await session.commit()
         row = (await session.execute(sa.text(
-            "SELECT prev_hash, row_hash FROM predictions"
+            "SELECT prev_hash, row_hash, user_id FROM predictions"
         ))).first()
 
     assert row.prev_hash == "0" * 64
     assert row.row_hash == h
+    assert row.user_id == 1
+
+
+@pytest.mark.asyncio
+async def test_persist_prediction_rejects_missing_user_id() -> None:
+    """Spec §7.3: persist_prediction is the per-user write path; user_id MUST be present."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE predictions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "symbol TEXT, prev_hash TEXT, row_hash TEXT UNIQUE)"
+        ))
+
+    payload = dict(symbol="BTC/USDT")
+
+    async with AsyncSession(engine) as session:
+        with pytest.raises(ValueError, match="user_id"):
+            await persist_prediction(session, payload)

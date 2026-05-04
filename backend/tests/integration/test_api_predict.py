@@ -75,6 +75,7 @@ async def test_predict_with_valid_signal_attaches_markers(
 
     closed_at = datetime(2026, 5, 2, 12, tzinfo=UTC)
     payload = {
+        "user_id": 1,
         "symbol": "BTC/USDT", "timeframe": "1h", "direction": "LONG",
         "entry_price": 100.0, "stop_loss": 95.0, "take_profit": 110.0,
         "position_size_usdt": 30.0,
@@ -105,6 +106,56 @@ async def test_predict_with_valid_signal_attaches_markers(
     assert sm["take_profit"] == pytest.approx(110.0)
     assert sm["exit_reason"] == "TAKE_PROFIT"
     assert sm["exit_price"] == pytest.approx(110.0)
+
+
+@pytest.mark.asyncio
+async def test_predict_signal_markers_isolated_per_user(
+    monkeypatch, bot_status_client, bot_status_factory,
+) -> None:
+    """User 1 must NOT see user 2's signal markers when querying ?signal=."""
+    import json
+    from datetime import UTC
+
+    import sqlalchemy as sa
+    from app.db.audit import insert_with_chain
+
+    async def fake_fetch(symbol: str, timeframe: str, *, limit: int = 500):
+        return _fake_candles(min(limit, 250))
+
+    monkeypatch.setattr(tab1, "_fetch_recent_candles", fake_fetch)
+
+    # Seed user 2 + a shadow trade for them with a unique signal_id.
+    async with bot_status_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO users (id, email, display_name, is_admin) "
+            "VALUES (2, 'other@local', 'Other', 0)"
+        ))
+        await session.commit()
+
+    closed_at = datetime(2026, 5, 2, 12, tzinfo=UTC)
+    payload = {
+        "user_id": 2,
+        "symbol": "BTC/USDT", "timeframe": "1h", "direction": "LONG",
+        "entry_price": 100.0, "stop_loss": 95.0, "take_profit": 110.0,
+        "position_size_usdt": 30.0,
+        "entry_score": 0.6, "entry_confidence": 0.7,
+        "layer_scores": json.dumps({}), "entry_atr": 1.0,
+        "exit_price": 110.0, "exit_reason": "TAKE_PROFIT",
+        "pnl_pct": 10.0, "pnl_usdt": 3.0, "bars_held": 4,
+        "opened_at": (closed_at - pd.Timedelta(hours=4)).isoformat(),
+        "closed_at": closed_at.isoformat(),
+        "inputs_hash": "h" * 64, "model_version": "sp-0.5",
+        "signal_id": "user2-only-sig",
+    }
+    async with bot_status_factory() as session:
+        await insert_with_chain(session, "shadow_trades", payload)
+        await session.commit()
+
+    # bot_status_client is bound to user 1 — must 404 on user 2's signal_id.
+    r = await bot_status_client.get(
+        "/api/v1/predict/BTC-USDT/1h?signal=user2-only-sig"
+    )
+    assert r.status_code == 404
 
 
 @pytest.mark.asyncio
