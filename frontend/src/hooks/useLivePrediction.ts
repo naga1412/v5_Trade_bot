@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { api, type LivePrediction } from "@/lib/api";
 import { TradingRadarSocket } from "@/lib/ws";
 
-export function useLivePrediction(symbol: string, timeframe: string) {
+export function useLivePrediction(symbol: string, timeframe: string, signalId?: string) {
   const [data, setData] = useState<LivePrediction | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const sockRef = useRef<TradingRadarSocket | null>(null);
@@ -11,7 +11,7 @@ export function useLivePrediction(symbol: string, timeframe: string) {
     let cancelled = false;
     const symbolPath = symbol.replace("/", "-");
 
-    api.predict(symbolPath, timeframe).then(
+    api.predict(symbolPath, timeframe, signalId).then(
       (d) => { if (!cancelled) setData(d); },
       (e: Error) => { if (!cancelled) setErr(e.message); },
     );
@@ -33,7 +33,7 @@ export function useLivePrediction(symbol: string, timeframe: string) {
       off();
       sock.close();
     };
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, signalId]);
 
   return { data, err };
 }
