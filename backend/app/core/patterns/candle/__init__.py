@@ -47,3 +47,5 @@ from app.core.patterns.candle.gravestone_doji import GravestoneDojiPattern
 CANDLE_PATTERNS.append(GravestoneDojiPattern())
 from app.core.patterns.candle.long_legged_doji import LongLeggedDojiPattern
 CANDLE_PATTERNS.append(LongLeggedDojiPattern())
+from app.core.patterns.candle.marubozu import MarubozuPattern
+CANDLE_PATTERNS.append(MarubozuPattern())
