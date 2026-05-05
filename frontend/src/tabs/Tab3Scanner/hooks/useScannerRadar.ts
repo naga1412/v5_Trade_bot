@@ -39,11 +39,15 @@ export function useScannerRadar(
   const refetch = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const r = await api.scannerRadar({
-        market: optsRef.current.market,
-        tf: optsRef.current.tf,
-        limit: optsRef.current.limit,
-      });
+      // Build the args object incrementally so undefined keys aren't passed —
+      // tsconfig has `exactOptionalPropertyTypes` enabled, so `{ market: undefined }`
+      // is a type error against `ScannerRadarOptions`.
+      const args: ScannerRadarOptions = {};
+      const cur = optsRef.current;
+      if (cur.market !== undefined) args.market = cur.market;
+      if (cur.tf !== undefined) args.tf = cur.tf;
+      if (cur.limit !== undefined) args.limit = cur.limit;
+      const r = await api.scannerRadar(args);
       setData(r);
       setError(null);
     } catch (e) {
