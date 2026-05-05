@@ -77,3 +77,5 @@ from app.core.patterns.candle.three_outside_up_down import ThreeOutsideUpDownPat
 CANDLE_PATTERNS.append(ThreeOutsideUpDownPattern())
 from app.core.patterns.candle.three_stars_in_south import ThreeStarsInSouthPattern
 CANDLE_PATTERNS.append(ThreeStarsInSouthPattern())
+from app.core.patterns.candle.three_line_strike import ThreeLineStrikePattern
+CANDLE_PATTERNS.append(ThreeLineStrikePattern())
