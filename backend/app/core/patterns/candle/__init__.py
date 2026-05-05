@@ -93,3 +93,5 @@ from app.core.patterns.candle.gap_side_side_white import GapSideSideWhitePattern
 CANDLE_PATTERNS.append(GapSideSideWhitePattern())
 from app.core.patterns.candle.homing_pigeon import HomingPigeonPattern
 CANDLE_PATTERNS.append(HomingPigeonPattern())
+from app.core.patterns.candle.identical_three_crows import IdenticalThreeCrowsPattern
+CANDLE_PATTERNS.append(IdenticalThreeCrowsPattern())
