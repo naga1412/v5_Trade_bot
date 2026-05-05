@@ -115,3 +115,5 @@ from app.core.patterns.candle.thrusting import ThrustingPattern
 CANDLE_PATTERNS.append(ThrustingPattern())
 from app.core.patterns.candle.two_crows import TwoCrowsPattern
 CANDLE_PATTERNS.append(TwoCrowsPattern())
+from app.core.patterns.candle.unique_3_river import Unique3RiverPattern
+CANDLE_PATTERNS.append(Unique3RiverPattern())
