@@ -17,6 +17,7 @@ from app.api.routes import (
 from app.api.routes import ws as ws_routes
 from app.auth.query_guard import attach_query_guard
 from app.config import get_settings
+from app.data.adapter_health import start_health_pinger_task
 from app.data.adapters import aclose_all as _aclose_adapters
 from app.data.universe_sync import start_universe_sync_task
 from app.db.session import get_engine, get_session_factory
@@ -47,6 +48,7 @@ async def lifespan(_app: FastAPI):
     live_worker = None
     shadow_worker = None
     universe_sync_task = None
+    health_pinger_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -63,6 +65,9 @@ async def lifespan(_app: FastAPI):
         # adapters. Skipped in test/ci so the test event loop isn't racing
         # background tasks.
         universe_sync_task = start_universe_sync_task(get_session_factory())
+        # SP-3 Phase F: every 5 min ping each adapter's health endpoint and
+        # write to adapter_health (read by /api/v1/admin/adapters/health).
+        health_pinger_task = start_health_pinger_task(get_session_factory())
     try:
         yield
     finally:
@@ -72,6 +77,8 @@ async def lifespan(_app: FastAPI):
             shadow_worker.cancel()
         if universe_sync_task is not None:
             universe_sync_task.cancel()
+        if health_pinger_task is not None:
+            health_pinger_task.cancel()
         await _aclose_adapters()
 
 
