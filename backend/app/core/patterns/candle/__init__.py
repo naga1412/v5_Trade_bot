@@ -71,3 +71,5 @@ from app.core.patterns.candle.three_white_soldiers import ThreeWhiteSoldiersPatt
 CANDLE_PATTERNS.append(ThreeWhiteSoldiersPattern())
 from app.core.patterns.candle.three_black_crows import ThreeBlackCrowsPattern
 CANDLE_PATTERNS.append(ThreeBlackCrowsPattern())
+from app.core.patterns.candle.three_inside_up_down import ThreeInsideUpDownPattern
+CANDLE_PATTERNS.append(ThreeInsideUpDownPattern())
