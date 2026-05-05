@@ -69,3 +69,5 @@ from app.core.patterns.candle.separating_lines import SeparatingLinesPattern
 CANDLE_PATTERNS.append(SeparatingLinesPattern())
 from app.core.patterns.candle.three_white_soldiers import ThreeWhiteSoldiersPattern
 CANDLE_PATTERNS.append(ThreeWhiteSoldiersPattern())
+from app.core.patterns.candle.three_black_crows import ThreeBlackCrowsPattern
+CANDLE_PATTERNS.append(ThreeBlackCrowsPattern())
