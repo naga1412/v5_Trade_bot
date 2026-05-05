@@ -1,20 +1,37 @@
-"""Point-in-time universe (§5.2).
+"""Point-in-time universe (§5.2) — SP-3 DB-backed implementation.
 
-SP-0 hardcodes BTC/USDT only. SP-3 will populate from a `universe_history`
-table fetched from exchange listings APIs.
+Replaces the SP-0 hardcoded shortcut. ``is_tradable(session, symbol, ts)``
+queries ``universe_history`` and returns True iff ANY exchange has a row
+where ``listed_at <= ts AND (delisted_at IS NULL OR ts < delisted_at)``.
+
+The function is async + takes an AsyncSession because the universe table is
+a moving target (daily syncs); we query at call time, not at import.
 """
 from datetime import datetime
 
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
+
 BTC_USDT: str = "BTC/USDT"
 
-_SP0_HARDCODED = {
-    BTC_USDT: (datetime(2017, 8, 17, tzinfo=None),),  # listed_at; no delisted_at
-}
 
+async def is_tradable(
+    session: AsyncSession, symbol: str, ts: datetime,
+) -> bool:
+    """Return True if ``symbol`` was tradable on at least one exchange at ``ts``.
 
-def is_tradable(symbol: str, ts: datetime) -> bool:
-    entry = _SP0_HARDCODED.get(symbol)
-    if entry is None:
-        return False
-    listed_at = entry[0]
-    return ts.replace(tzinfo=None) >= listed_at
+    Spec §2 decision #10: "Returns ``True`` only if a ``universe_history`` row
+    exists with ``listed_at <= ts < (delisted_at OR +infinity)`` for ANY
+    exchange."
+    """
+    row = (await session.execute(
+        sa.text(
+            "SELECT 1 FROM universe_history "
+            "WHERE symbol = :s "
+            "  AND listed_at <= :ts "
+            "  AND (delisted_at IS NULL OR :ts < delisted_at) "
+            "LIMIT 1"
+        ),
+        {"s": symbol, "ts": ts},
+    )).first()
+    return row is not None

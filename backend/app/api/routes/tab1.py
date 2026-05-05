@@ -56,11 +56,12 @@ async def candles(
     timeframe: str,
     limit: int = 500,
     current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[CandleOut]:
     pair = _normalize_pair(symbol_path)
     if timeframe not in _TIMEFRAMES:
         raise HTTPException(400, f"Unsupported timeframe {timeframe}")
-    if not is_tradable(pair, datetime.now(timezone.utc)):
+    if not await is_tradable(session, pair, datetime.now(timezone.utc)):
         raise HTTPException(404, f"Unknown symbol {pair}")
     cs = await _fetch_recent_candles(pair, timeframe, limit=min(1000, limit))
     return [
@@ -118,7 +119,7 @@ async def predict(
     pair = _normalize_pair(symbol_path)
     if timeframe not in _TIMEFRAMES:
         raise HTTPException(400, f"Unsupported timeframe {timeframe}")
-    if not is_tradable(pair, datetime.now(timezone.utc)):
+    if not await is_tradable(session, pair, datetime.now(timezone.utc)):
         raise HTTPException(404, f"Unknown symbol {pair}")
 
     markers: SignalMarkersOut | None = None
