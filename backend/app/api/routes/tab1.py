@@ -38,10 +38,27 @@ def _to_binance_symbol(pair: str) -> str:
     return pair.replace("/", "")
 
 
-async def _fetch_recent_candles(symbol: str, timeframe: str, *, limit: int = 500) -> list[Candle]:
+async def _fetch_recent_candles(
+    symbol: str, timeframe: str, *, limit: int = 500,
+) -> list[Candle]:
+    """Fetch klines via the canonical Binance adapter, then re-wrap as the
+    validator-flavoured ``Candle`` (which carries the extra ``symbol`` /
+    ``timeframe`` metadata downstream consumers — predictor, charting layer —
+    expect).
+    """
     async with httpx.AsyncClient() as http:
         client = BinanceClient(http=http)
-        return await client.fetch_klines(_to_binance_symbol(symbol), timeframe, limit=limit)
+        bars = await client.fetch_klines(
+            _to_binance_symbol(symbol), timeframe, limit=limit,
+        )
+    return [
+        Candle(
+            symbol=symbol, timeframe=timeframe,
+            ts=b.ts, open=b.open, high=b.high,
+            low=b.low, close=b.close, volume=b.volume,
+        )
+        for b in bars
+    ]
 
 
 def _candles_to_df(candles: list[Candle]) -> pd.DataFrame:
