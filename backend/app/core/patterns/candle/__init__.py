@@ -81,3 +81,5 @@ from app.core.patterns.candle.three_line_strike import ThreeLineStrikePattern
 CANDLE_PATTERNS.append(ThreeLineStrikePattern())
 from app.core.patterns.candle.abandoned_baby import AbandonedBabyPattern
 CANDLE_PATTERNS.append(AbandonedBabyPattern())
+from app.core.patterns.candle.advance_block import AdvanceBlockPattern
+CANDLE_PATTERNS.append(AdvanceBlockPattern())
