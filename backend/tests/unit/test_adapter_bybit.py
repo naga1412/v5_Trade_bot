@@ -155,16 +155,39 @@ async def test_list_symbols_filters_non_trading_status() -> None:
 @pytest.mark.asyncio
 async def test_dual_buckets_routed_correctly() -> None:
     """Spot endpoint drains spot bucket; perp endpoint drains derivs bucket."""
+    from app.data.ratelimit import RateLimitedClient
+
+    class _CountingBucket:
+        def __init__(self) -> None:
+            self.acquired = 0.0
+
+        @property
+        def tokens(self) -> float:
+            return 1000.0  # never empty
+
+        async def acquire(self, weight: float = 1.0) -> None:
+            self.acquired += weight
+
+    spot_bucket = _CountingBucket()
+    derivs_bucket = _CountingBucket()
+    default_bucket = _CountingBucket()
+
     async with httpx.AsyncClient() as http, respx.mock(
         base_url="https://api.bybit.com"
     ) as router:
         router.get("/v5/market/kline").mock(
             return_value=httpx.Response(200, json=SAMPLE_KLINE_RESPONSE)
         )
-        adapter = BybitAdapter(http=http)
-        assert adapter.rate_client is not None
-        before_spot = adapter.rate_client.buckets["spot"].tokens
-        before_derivs = adapter.rate_client.buckets["derivs"].tokens
+        rate_client = RateLimitedClient(
+            exchange="bybit",
+            http=http,
+            buckets={
+                "default": default_bucket,
+                "spot": spot_bucket,
+                "derivs": derivs_bucket,
+            },
+        )
+        adapter = BybitAdapter(http=http, rate_client=rate_client)
 
         await adapter.fetch_klines(
             symbol="BTC/USDT", timeframe="1h", _category="spot",
@@ -173,8 +196,10 @@ async def test_dual_buckets_routed_correctly() -> None:
             symbol="ETH/USDT", timeframe="1h", _category="linear",
         )
 
-        assert adapter.rate_client.buckets["spot"].tokens < before_spot
-        assert adapter.rate_client.buckets["derivs"].tokens < before_derivs
+    assert spot_bucket.acquired > 0
+    assert derivs_bucket.acquired > 0
+    # Default must NOT be touched — spot/linear route to their dedicated buckets.
+    assert default_bucket.acquired == 0
 
 
 @pytest.mark.parametrize("tf, expected", [
