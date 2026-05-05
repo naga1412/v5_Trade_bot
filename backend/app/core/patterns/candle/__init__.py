@@ -83,3 +83,5 @@ from app.core.patterns.candle.abandoned_baby import AbandonedBabyPattern
 CANDLE_PATTERNS.append(AbandonedBabyPattern())
 from app.core.patterns.candle.advance_block import AdvanceBlockPattern
 CANDLE_PATTERNS.append(AdvanceBlockPattern())
+from app.core.patterns.candle.breakaway import BreakawayPattern
+CANDLE_PATTERNS.append(BreakawayPattern())
