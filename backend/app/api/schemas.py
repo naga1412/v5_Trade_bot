@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -71,6 +71,11 @@ class LivePredictionOut(BaseModel):
     signal_markers: SignalMarkersOut | None = None
     # SP-1: ghost candle prediction (None when no checkpoint loaded).
     ghost: GhostOut | None = None
+    # SP-5 Phase F1: enriched payload (traps fired, raw scores, tier) the
+    # persistence sites merge into ``predictions.layer_scores`` JSONB. Kept
+    # off the strict ``layer_scores`` field so the API response shape stays
+    # backwards compatible — frontend reads from ``layer_scores`` only.
+    prediction_extras: dict[str, Any] | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---
