@@ -49,3 +49,5 @@ from app.core.patterns.candle.long_legged_doji import LongLeggedDojiPattern
 CANDLE_PATTERNS.append(LongLeggedDojiPattern())
 from app.core.patterns.candle.marubozu import MarubozuPattern
 CANDLE_PATTERNS.append(MarubozuPattern())
+from app.core.patterns.candle.spinning_top import SpinningTopPattern
+CANDLE_PATTERNS.append(SpinningTopPattern())
