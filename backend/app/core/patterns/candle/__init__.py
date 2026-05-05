@@ -67,3 +67,5 @@ from app.core.patterns.candle.rise_fall_3_methods import RiseFall3MethodsPattern
 CANDLE_PATTERNS.append(RiseFall3MethodsPattern())
 from app.core.patterns.candle.separating_lines import SeparatingLinesPattern
 CANDLE_PATTERNS.append(SeparatingLinesPattern())
+from app.core.patterns.candle.three_white_soldiers import ThreeWhiteSoldiersPattern
+CANDLE_PATTERNS.append(ThreeWhiteSoldiersPattern())
