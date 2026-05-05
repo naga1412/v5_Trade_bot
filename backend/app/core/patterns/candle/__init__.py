@@ -17,3 +17,5 @@ from app.core.patterns.candle.engulfing import EngulfingPattern
 CANDLE_PATTERNS.append(EngulfingPattern())
 from app.core.patterns.candle.dark_cloud_cover import DarkCloudCoverPattern
 CANDLE_PATTERNS.append(DarkCloudCoverPattern())
+from app.core.patterns.candle.piercing import PiercingPattern
+CANDLE_PATTERNS.append(PiercingPattern())
