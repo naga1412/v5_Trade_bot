@@ -315,3 +315,29 @@ class MlCheckpointCreateIn(BaseModel):
 class MlCheckpointPatchIn(BaseModel):
     is_active: bool | None = None
     notes: str | None = None
+
+
+# --- SP-2 Phase E: Pattern admin schemas (spec §3.2/§5) -------------------
+
+
+class PatternEntryOut(BaseModel):
+    """One row for the admin list view of all 158 patterns."""
+
+    pattern_id: str
+    pattern_type: Literal["candle", "chart"]
+    symbol: str = "*"
+    timeframe: str = "*"
+    enabled: bool = True
+    disabled_reason: str | None = None
+
+
+class PatternToggleIn(BaseModel):
+    """Body for /disable and /enable. All fields optional.
+
+    Defaulting ``symbol`` and ``timeframe`` to ``"*"`` matches the global-scope
+    convention used by ``pattern_enabled``.
+    """
+
+    symbol: str | None = None
+    timeframe: str | None = None
+    reason: str | None = None
