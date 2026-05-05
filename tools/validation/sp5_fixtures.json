@@ -1,0 +1,2008 @@
+[
+  {
+    "name": "all_long_1_layer",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.42,
+    "expected_raw_final": 0.42,
+    "expected_final": 0.42,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_long_3_layers",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.56,
+    "expected_final": 0.56,
+    "expected_direction": "LONG",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "all_long_5_layers",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.42,
+    "expected_raw_final": 0.42,
+    "expected_final": 0.42,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_long_7_layers",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "6": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "7": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.3,
+    "expected_raw_final": 0.3,
+    "expected_final": 0.3,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_long_9_layers",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "7": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "8": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "9": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.56,
+    "expected_final": 0.56,
+    "expected_direction": "LONG",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "all_long_9_layers_max",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "2": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "3": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "4": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "5": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "6": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "7": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "8": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "9": {
+        "d": "LONG",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 1.0,
+    "expected_raw_final": 1.0,
+    "expected_final": 1.0,
+    "expected_direction": "LONG",
+    "expected_tier": "A+"
+  },
+  {
+    "name": "all_long_3_layers_weak",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.15,
+    "expected_raw_final": 0.15,
+    "expected_final": 0.15,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_long_4_even_layers",
+    "layer_scores": {
+      "1": null,
+      "2": {
+        "d": "LONG",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "3": null,
+      "4": {
+        "d": "LONG",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "5": null,
+      "6": {
+        "d": "LONG",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "7": null,
+      "8": {
+        "d": "LONG",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.765,
+    "expected_raw_final": 0.765,
+    "expected_final": 0.765,
+    "expected_direction": "LONG",
+    "expected_tier": "STANDARD"
+  },
+  {
+    "name": "all_short_1_layer",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.42,
+    "expected_raw_final": -0.42,
+    "expected_final": -0.399,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_short_3_layers",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.56,
+    "expected_raw_final": -0.56,
+    "expected_final": -0.532,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_short_5_layers",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.42,
+    "expected_raw_final": -0.42,
+    "expected_final": -0.399,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_short_7_layers",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "6": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "7": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.3,
+    "expected_raw_final": -0.3,
+    "expected_final": -0.285,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_short_9_layers",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "7": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "8": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "9": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.56,
+    "expected_raw_final": -0.56,
+    "expected_final": -0.532,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_short_9_layers_max",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "6": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "7": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "8": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "9": {
+        "d": "SHORT",
+        "s": 1.0,
+        "c": 1.0
+      },
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -1.0,
+    "expected_raw_final": -1.0,
+    "expected_final": -0.95,
+    "expected_direction": "SHORT",
+    "expected_tier": "A+"
+  },
+  {
+    "name": "all_short_3_layers_weak",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "2": null,
+      "3": {
+        "d": "SHORT",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "4": null,
+      "5": {
+        "d": "SHORT",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.15,
+    "expected_raw_final": -0.15,
+    "expected_final": -0.1425,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "all_short_4_even_layers",
+    "layer_scores": {
+      "1": null,
+      "2": {
+        "d": "SHORT",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "3": null,
+      "4": {
+        "d": "SHORT",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "5": null,
+      "6": {
+        "d": "SHORT",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "7": null,
+      "8": {
+        "d": "SHORT",
+        "s": 0.85,
+        "c": 0.9
+      },
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.765,
+    "expected_raw_final": -0.765,
+    "expected_final": -0.72675,
+    "expected_direction": "SHORT",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "mixed_dominant_long",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.9
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.4,
+        "c": 0.6
+      },
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.24,
+    "expected_raw_final": 0.24,
+    "expected_final": 0.24,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_dominant_short",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.9
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.4,
+        "c": 0.6
+      },
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.24,
+    "expected_raw_final": -0.24,
+    "expected_final": -0.228,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_balanced_cancel",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "2": null,
+      "3": {
+        "d": "SHORT",
+        "s": 0.6,
+        "c": 0.7
+      },
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.0,
+    "expected_raw_final": 0.0,
+    "expected_final": 0.0,
+    "expected_direction": "NEUTRAL",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_2long_1short_net_long",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.9,
+        "c": 0.9
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.406667,
+    "expected_raw_final": 0.406667,
+    "expected_final": 0.406667,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_2short_1long_net_short",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.9,
+        "c": 0.9
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.3,
+        "c": 0.5
+      },
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.406667,
+    "expected_raw_final": -0.406667,
+    "expected_final": -0.386333,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_3long_2short_net_long",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.7
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.7
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.7
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.174,
+    "expected_raw_final": 0.174,
+    "expected_final": 0.174,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_3short_2long_net_short",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.7
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.7
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.6
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 0.7
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.174,
+    "expected_raw_final": -0.174,
+    "expected_final": -0.1653,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "mixed_perfect_cancel",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.5
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.5
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.5,
+        "c": 0.5
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.5,
+        "c": 0.5
+      },
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.0,
+    "expected_raw_final": 0.0,
+    "expected_final": 0.0,
+    "expected_direction": "NEUTRAL",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_long_1_fired",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "pre_news_event",
+        "severity": "high",
+        "side": "both"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.64,
+    "expected_raw_final": 0.544,
+    "expected_final": 0.544,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_long_2_fired",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "pre_news_event",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "liquidity_sweep",
+        "severity": "high",
+        "side": "both"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.64,
+    "expected_raw_final": 0.4624,
+    "expected_final": 0.4624,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_long_3_fired",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "friday_weekend",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "counter_weekly",
+        "severity": "high",
+        "side": "long"
+      },
+      {
+        "trap_id": "pattern_in_pattern",
+        "severity": "high",
+        "side": "both"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.64,
+    "expected_raw_final": 0.39304,
+    "expected_final": 0.39304,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_long_4_fired_at_cap",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "friday_weekend",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "counter_weekly",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "pattern_in_pattern",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "thin_orderbook",
+        "severity": "high",
+        "side": "both"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.64,
+    "expected_raw_final": 0.334084,
+    "expected_final": 0.334084,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_long_5_fired_above_cap",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "LONG",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "friday_weekend",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "counter_weekly",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "pattern_in_pattern",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "thin_orderbook",
+        "severity": "high",
+        "side": "both"
+      },
+      {
+        "trap_id": "price_extreme",
+        "severity": "high",
+        "side": "both"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.64,
+    "expected_raw_final": 0.334084,
+    "expected_final": 0.334084,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_short_1_fired",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "short_squeeze_cascade",
+        "severity": "high",
+        "side": "short"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.64,
+    "expected_raw_final": -0.544,
+    "expected_final": -0.5168,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_short_3_fired",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "short_squeeze_cascade",
+        "severity": "high",
+        "side": "short"
+      },
+      {
+        "trap_id": "funding_rate_decay",
+        "severity": "high",
+        "side": "short"
+      },
+      {
+        "trap_id": "borrow_rate",
+        "severity": "high",
+        "side": "short"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.64,
+    "expected_raw_final": -0.39304,
+    "expected_final": -0.373388,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "trap_short_5_fired_above_cap",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "2": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "3": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "4": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "5": {
+        "d": "SHORT",
+        "s": 0.8,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [
+      {
+        "trap_id": "short_squeeze_cascade",
+        "severity": "high",
+        "side": "short"
+      },
+      {
+        "trap_id": "funding_rate_decay",
+        "severity": "high",
+        "side": "short"
+      },
+      {
+        "trap_id": "borrow_rate",
+        "severity": "high",
+        "side": "short"
+      },
+      {
+        "trap_id": "unlimited_upside_risk",
+        "severity": "high",
+        "side": "short"
+      },
+      {
+        "trap_id": "regulatory_short_ban",
+        "severity": "high",
+        "side": "short"
+      }
+    ],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.64,
+    "expected_raw_final": -0.334084,
+    "expected_final": -0.31738,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "tier_boundary_long_54p9_no_signal",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.549,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.549,
+    "expected_raw_final": 0.549,
+    "expected_final": 0.549,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "tier_boundary_long_55p1_paper",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.551,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.551,
+    "expected_raw_final": 0.551,
+    "expected_final": 0.551,
+    "expected_direction": "LONG",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "tier_boundary_long_64p9_paper",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.649,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.649,
+    "expected_raw_final": 0.649,
+    "expected_final": 0.649,
+    "expected_direction": "LONG",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "tier_boundary_long_65p1_small",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.651,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.651,
+    "expected_raw_final": 0.651,
+    "expected_final": 0.651,
+    "expected_direction": "LONG",
+    "expected_tier": "SMALL"
+  },
+  {
+    "name": "tier_boundary_short_static_0p683_no_signal",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.683158,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.683158,
+    "expected_raw_final": -0.683158,
+    "expected_final": -0.649,
+    "expected_direction": "SHORT",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "tier_boundary_short_static_0p685_paper",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.685263,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.685263,
+    "expected_raw_final": -0.685263,
+    "expected_final": -0.651,
+    "expected_direction": "SHORT",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "asym_long_at_70pct_small",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.7,
+    "expected_raw_final": 0.7,
+    "expected_final": 0.7,
+    "expected_direction": "LONG",
+    "expected_tier": "SMALL"
+  },
+  {
+    "name": "asym_short_at_70pct_paper_after_0p95",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.7,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.7,
+    "expected_raw_final": -0.7,
+    "expected_final": -0.665,
+    "expected_direction": "SHORT",
+    "expected_tier": "PAPER"
+  },
+  {
+    "name": "asym_long_at_90pct_a_plus",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.9,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": 0.9,
+    "expected_raw_final": 0.9,
+    "expected_final": 0.9,
+    "expected_direction": "LONG",
+    "expected_tier": "A+"
+  },
+  {
+    "name": "asym_short_at_90pct",
+    "layer_scores": {
+      "1": {
+        "d": "SHORT",
+        "s": 0.9,
+        "c": 1.0
+      },
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.0,
+    "expected_static": -0.9,
+    "expected_raw_final": -0.9,
+    "expected_final": -0.855,
+    "expected_direction": "SHORT",
+    "expected_tier": "STANDARD"
+  },
+  {
+    "name": "brain_adjust_0p5",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 0.5,
+    "news_multiplier": 1.0,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.28,
+    "expected_final": 0.28,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "brain_adjust_0p8",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 0.8,
+    "news_multiplier": 1.0,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.448,
+    "expected_final": 0.448,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "brain_adjust_1p2",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.2,
+    "news_multiplier": 1.0,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.672,
+    "expected_final": 0.672,
+    "expected_direction": "LONG",
+    "expected_tier": "SMALL"
+  },
+  {
+    "name": "brain_adjust_1p5",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.5,
+    "news_multiplier": 1.0,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.84,
+    "expected_final": 0.84,
+    "expected_direction": "LONG",
+    "expected_tier": "STANDARD"
+  },
+  {
+    "name": "news_multiplier_0p5",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 0.5,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.28,
+    "expected_final": 0.28,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "news_multiplier_0p8",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 0.8,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.448,
+    "expected_final": 0.448,
+    "expected_direction": "LONG",
+    "expected_tier": "NO_SIGNAL"
+  },
+  {
+    "name": "news_multiplier_1p2",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.2,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.672,
+    "expected_final": 0.672,
+    "expected_direction": "LONG",
+    "expected_tier": "SMALL"
+  },
+  {
+    "name": "news_multiplier_1p5",
+    "layer_scores": {
+      "1": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "2": null,
+      "3": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "4": null,
+      "5": {
+        "d": "LONG",
+        "s": 0.7,
+        "c": 0.8
+      },
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "trap_fires": [],
+    "brain_adjust": 1.0,
+    "news_multiplier": 1.5,
+    "expected_static": 0.56,
+    "expected_raw_final": 0.84,
+    "expected_final": 0.84,
+    "expected_direction": "LONG",
+    "expected_tier": "STANDARD"
+  }
+]
