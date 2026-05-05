@@ -5,9 +5,11 @@ Phases C and D append concrete trap instances. The orchestrator
 filters by `enabled_set` (per-symbol/per-TF admin disables) at run time.
 """
 from app.core.scoring.traps.base import Trap, TrapContext, TrapFire  # noqa: F401
+from app.core.scoring.traps.liquidity_sweep import LiquiditySweepTrap
 from app.core.scoring.traps.pre_news_event import PreNewsEventTrap
 
 ALL_TRAPS: list[Trap] = [
     PreNewsEventTrap(),
+    LiquiditySweepTrap(),
 ]
 """Filled by Phase C (12 main traps) + Phase D (5 short-only)."""
