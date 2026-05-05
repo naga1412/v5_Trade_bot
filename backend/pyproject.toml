@@ -28,6 +28,18 @@ dependencies = [
     "scipy==1.13.1",
 ]
 
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# Pre-existing CI break on `main`: setuptools auto-discovery sees
+# ``app/``, ``data/``, ``alembic/`` as three top-level packages and refuses
+# to build the editable install. Restrict discovery to ``app*`` only —
+# ``alembic/versions`` and ``data/`` are runtime resources, not import roots.
+include = ["app*"]
+exclude = ["data*", "alembic*", "tests*", "tools*"]
+
 [project.optional-dependencies]
 dev = [
     "pytest==8.3.4",
