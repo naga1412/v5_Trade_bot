@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -71,6 +71,11 @@ class LivePredictionOut(BaseModel):
     signal_markers: SignalMarkersOut | None = None
     # SP-1: ghost candle prediction (None when no checkpoint loaded).
     ghost: GhostOut | None = None
+    # SP-5 Phase F1: enriched payload (traps fired, raw scores, tier) the
+    # persistence sites merge into ``predictions.layer_scores`` JSONB. Kept
+    # off the strict ``layer_scores`` field so the API response shape stays
+    # backwards compatible — frontend reads from ``layer_scores`` only.
+    prediction_extras: dict[str, Any] | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---
@@ -337,6 +342,33 @@ class PatternToggleIn(BaseModel):
     Defaulting ``symbol`` and ``timeframe`` to ``"*"`` matches the global-scope
     convention used by ``pattern_enabled``.
     """
+
+    symbol: str | None = None
+    timeframe: str | None = None
+    reason: str | None = None
+
+
+# --- SP-5 Phase F2: Trap admin schemas ------------------------------------
+
+
+class TrapEntryOut(BaseModel):
+    """One row for the admin list view of all 17 trap detectors.
+
+    Mirrors :class:`PatternEntryOut`: per-(trap_id, symbol, timeframe) row
+    where the absence of a ``trap_enabled`` row means default-enabled.
+    """
+
+    trap_id: str
+    severity: Literal["medium", "high", "extreme"]
+    side: Literal["long", "short", "both"]
+    symbol: str = "*"
+    timeframe: str = "*"
+    enabled: bool = True
+    disabled_reason: str | None = None
+
+
+class TrapToggleIn(BaseModel):
+    """Body for /traps/{id}/disable and /traps/{id}/enable."""
 
     symbol: str | None = None
     timeframe: str | None = None

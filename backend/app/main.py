@@ -9,6 +9,7 @@ from app.api.routes import (
     admin_adapters,
     admin_ml,
     admin_patterns,
+    admin_traps,
     bot_status,
     health,
     me,
@@ -111,6 +112,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_adapters.router)
     app.include_router(admin_ml.router)
     app.include_router(admin_patterns.router)
+    app.include_router(admin_traps.router)
     app.include_router(me.router)
     app.include_router(ws_routes.router)
     return app

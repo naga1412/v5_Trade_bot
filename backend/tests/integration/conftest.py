@@ -237,6 +237,21 @@ async def _create_auth_tables(engine: Any) -> None:
             "updated_by INTEGER, "
             "UNIQUE (pattern_id, symbol, timeframe))"
         ))
+        # SP-5 Phase F2: trap_enabled. SQLite-friendly mirror of migration
+        # 0011 (BIGSERIAL → INTEGER AUTOINCREMENT, BOOLEAN → INTEGER,
+        # TIMESTAMPTZ → TEXT).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS trap_enabled ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "trap_id TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "enabled INTEGER NOT NULL DEFAULT 1, "
+            "disabled_reason TEXT, "
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "updated_by INTEGER, "
+            "UNIQUE (trap_id, symbol, timeframe))"
+        ))
         # SP-3 Phase F: universe_history + adapter_health. SQLite-friendly
         # mirrors of migration 0010 (TIMESTAMPTZ → TEXT, JSONB → TEXT).
         await conn.execute(sa.text(

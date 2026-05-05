@@ -108,15 +108,21 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
         # Persist BEFORE publishing — audit chain is the source of truth.
         try:
             async with session_factory() as session:
+                # SP-5 Phase F1: merge prediction_extras (traps_fired, tier,
+                # raw scores, multipliers, final) into the persisted JSONB so
+                # downstream backtest replays + audit can recover full state.
+                _layer_payload: dict[str, Any] = {
+                    k: (v.model_dump() if v else None)
+                    for k, v in pred.layer_scores.items()
+                }
+                if pred.prediction_extras is not None:
+                    _layer_payload.update(pred.prediction_extras)
                 await persist_prediction(session, {
                     "user_id": BOOTSTRAP_ADMIN_USER_ID,
                     "symbol": pred.symbol,
                     "timeframe": pred.timeframe,
                     "ts": pred.ts.isoformat(),
-                    "layer_scores": json.dumps({
-                        k: (v.model_dump() if v else None)
-                        for k, v in pred.layer_scores.items()
-                    }),
+                    "layer_scores": json.dumps(_layer_payload),
                     "final_score": pred.final.score,
                     "direction": pred.final.direction,
                     "confidence": pred.final.confidence,

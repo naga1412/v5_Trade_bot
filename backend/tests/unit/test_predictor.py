@@ -74,3 +74,101 @@ def test_layer2_score_respects_disabled_patterns() -> None:
     assert layer2 is not None
     assert layer2.direction == "NEUTRAL"
     assert layer2.strength == 0.0
+
+
+# --- SP-5 Phase F1: full 10-layer + traps + tier wiring ----------------------
+
+
+def test_build_prediction_includes_all_ten_layer_slots() -> None:
+    """All 10 layer slots are present (some may be None — placeholders)."""
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    for i in range(1, 11):
+        assert str(i) in pred.layer_scores
+
+
+def test_build_prediction_exposes_extras_payload_for_persistence() -> None:
+    """SP-5 Phase F1: ``prediction_extras`` carries tier + trap fires + raw scores
+    for the JSONB persistence site to merge into ``predictions.layer_scores``.
+    """
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    extras = pred.prediction_extras
+    assert extras is not None
+    # Required fields per Phase F1 spec.
+    assert "traps_fired" in extras
+    assert isinstance(extras["traps_fired"], list)
+    assert "static_score" in extras
+    assert "brain_adjust" in extras and extras["brain_adjust"] == 1.0
+    assert "trap_factor" in extras and 0.0 < extras["trap_factor"] <= 1.0
+    assert "news_multiplier" in extras and extras["news_multiplier"] == 1.0
+    assert "direction_penalty" in extras
+    assert "final" in extras
+    assert "tier" in extras
+    assert extras["tier"] in {"NO_SIGNAL", "PAPER", "SMALL", "STANDARD", "A+"}
+
+
+def test_build_prediction_layer4_smc_runs_when_enough_bars() -> None:
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    # L4 needs >= 60 bars; with 300 bars on a clean uptrend, it should produce
+    # a non-None LayerScore (direction may vary).
+    assert pred.layer_scores["4"] is not None
+
+
+def test_build_prediction_layer6_micro_runs() -> None:
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    # L6 always returns a score for non-empty bars.
+    assert pred.layer_scores["6"] is not None
+
+
+def test_build_prediction_placeholder_layers_are_none() -> None:
+    """L7 (XGBoost), L9 (news), L10 (brain) are all placeholders — return None."""
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    assert pred.layer_scores["7"] is None
+    assert pred.layer_scores["9"] is None
+    assert pred.layer_scores["10"] is None
+
+
+def test_build_prediction_layer8_is_none_without_ghost() -> None:
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    assert pred.layer_scores["8"] is None
+
+
+def test_build_prediction_layer8_runs_with_ghost_input() -> None:
+    """Pass a GhostInput so L8 fires."""
+    from app.core.scoring.layer8_convlstm import GhostInput
+
+    bars = make_bars(300)
+    last = float(bars["close"].iloc[-1])
+    ghost = GhostInput(ghost_close=last * 1.02, ghost_uncertainty=0.2)
+    pred = build_prediction(
+        symbol="BTC/USDT", timeframe="1h", bars=bars, ghost=ghost,
+    )
+    assert pred.layer_scores["8"] is not None
+
+
+def test_build_prediction_extras_tier_matches_final_score() -> None:
+    """The tier in extras matches what classify_tier(final) returns."""
+    from app.api.schemas import FinalScoreOut
+    from app.core.scoring.tiers import classify_tier
+    from app.core.scoring.types import Direction, FinalScore
+
+    bars = make_bars(300)
+    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    extras = pred.prediction_extras
+    assert extras is not None
+
+    # Reconstruct a FinalScore matching the persisted final + direction
+    # to verify the tier derivation is consistent.
+    assert isinstance(pred.final, FinalScoreOut)
+    final_obj = FinalScore(
+        score=pred.final.score,
+        direction=Direction(pred.final.direction),
+        confidence=pred.final.confidence,
+        layer_results={},
+    )
+    assert extras["tier"] == classify_tier(final_obj)
