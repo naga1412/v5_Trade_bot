@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 from app.core.scoring.layer5_volume import score
 from app.core.scoring.types import Direction

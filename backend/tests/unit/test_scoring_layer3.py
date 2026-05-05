@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from app.core.scoring.layer3_momentum import score
 from app.core.scoring.types import Direction

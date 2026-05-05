@@ -1,5 +1,4 @@
 import time
-from unittest.mock import patch
 
 import jwt as pyjwt
 import pytest

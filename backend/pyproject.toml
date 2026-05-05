@@ -65,6 +65,16 @@ markers = [
     "slow: takes more than 1s",
 ]
 
+[tool.ruff]
+# Colab notebooks are interactive scratch space — semicolon chains, multi-imports,
+# and other "loose" Jupyter idioms shouldn't trip the strict lint we apply to .py.
+extend-exclude = ["tools/ml/colab/*.ipynb"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests routinely interleave imports with fixtures / pytest.importorskip checks,
+# and dead local assignments are common in arrange-act-assert blocks.
+"tests/**/*.py" = ["E402", "F841"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
