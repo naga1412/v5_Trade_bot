@@ -348,6 +348,33 @@ class PatternToggleIn(BaseModel):
     reason: str | None = None
 
 
+# --- SP-5 Phase F2: Trap admin schemas ------------------------------------
+
+
+class TrapEntryOut(BaseModel):
+    """One row for the admin list view of all 17 trap detectors.
+
+    Mirrors :class:`PatternEntryOut`: per-(trap_id, symbol, timeframe) row
+    where the absence of a ``trap_enabled`` row means default-enabled.
+    """
+
+    trap_id: str
+    severity: Literal["medium", "high", "extreme"]
+    side: Literal["long", "short", "both"]
+    symbol: str = "*"
+    timeframe: str = "*"
+    enabled: bool = True
+    disabled_reason: str | None = None
+
+
+class TrapToggleIn(BaseModel):
+    """Body for /traps/{id}/disable and /traps/{id}/enable."""
+
+    symbol: str | None = None
+    timeframe: str | None = None
+    reason: str | None = None
+
+
 # --- SP-3 Phase F: adapter / universe schemas ---------------------------------
 
 
