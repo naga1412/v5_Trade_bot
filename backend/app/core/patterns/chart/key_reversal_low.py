@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 
 
 class KeyReversalLowPattern:
-    pattern_id = "key_reversal_low"
-    pattern_type = "chart"
+    pattern_id: str = "key_reversal_low"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 20
 
     def detect(

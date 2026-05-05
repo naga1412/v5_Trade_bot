@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
 
 
 class ExpandingTrianglePattern:
-    pattern_id = "expanding_triangle"
-    pattern_type = "chart"
+    pattern_id: str = "expanding_triangle"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
 
     def detect(
@@ -35,7 +35,7 @@ class ExpandingTrianglePattern:
         # Direction: signal direction of resolved breakout (current close vs mean)
         cur_close = float(win["close"].iloc[-1])
         mid = float((peak_vals.mean() + trough_vals.mean()) / 2)
-        direction = "LONG" if cur_close > mid else "SHORT"
+        direction: Direction = "LONG" if cur_close > mid else "SHORT"
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,

@@ -4,12 +4,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 
 
 class InverseCupAndHandlePattern:
-    pattern_id = "inverse_cup_and_handle"
-    pattern_type = "chart"
+    pattern_id: str = "inverse_cup_and_handle"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 100
 
     def detect(

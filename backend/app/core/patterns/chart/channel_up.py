@@ -4,13 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 from app.core.patterns.chart._helpers import fit_trend_line
 
 
 class ChannelUpPattern:
-    pattern_id = "channel_up"
-    pattern_type = "chart"
+    pattern_id: str = "channel_up"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(

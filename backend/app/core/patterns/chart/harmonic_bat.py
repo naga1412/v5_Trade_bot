@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._harmonic_helpers import (
     find_xabcd_pivots,
     ratio_in_band,
@@ -12,8 +12,8 @@ from app.core.patterns.chart._harmonic_helpers import (
 
 
 class HarmonicBatPattern:
-    pattern_id = "harmonic_bat"
-    pattern_type = "chart"
+    pattern_id: str = "harmonic_bat"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
 
     def detect(
@@ -40,7 +40,7 @@ class HarmonicBatPattern:
         if not ratio_in_band(safe_ratio(ad, xa), 0.886, tol=0.1):
             return None
         if x[1] == "high" and d[1] == "low":
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif x[1] == "low" and d[1] == "high":
             direction = "SHORT"
         else:

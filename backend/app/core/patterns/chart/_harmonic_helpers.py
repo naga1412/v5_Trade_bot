@@ -8,7 +8,6 @@ specific Fibonacci ratios. We tolerate ±5% on each ratio.
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows

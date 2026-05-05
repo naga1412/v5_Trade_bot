@@ -4,13 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
 
 
 class ParallelChannelPattern:
-    pattern_id = "parallel_channel"
-    pattern_type = "chart"
+    pattern_id: str = "parallel_channel"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(
@@ -38,7 +38,7 @@ class ParallelChannelPattern:
         # Material slope
         if abs(avg) * len(win) < float(highs.max() - lows.min()) * 0.1:
             return None
-        direction = "LONG" if avg > 0 else "SHORT"
+        direction: Direction = "LONG" if avg > 0 else "SHORT"
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,

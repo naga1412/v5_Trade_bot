@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class CommonGapPattern:
-    pattern_id = "common_gap"
-    pattern_type = "chart"
+    pattern_id: str = "common_gap"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 30
 
     def detect(
@@ -32,7 +32,7 @@ class CommonGapPattern:
         gap_down = prior_low - cur_open
         # Common gap: small (between 0.2 and 1 ATR), within range
         if 0.2 * atr < gap_up < 1.0 * atr:
-            direction = "LONG"
+            direction: Direction = "LONG"
             gap_size = gap_up
         elif 0.2 * atr < gap_down < 1.0 * atr:
             direction = "SHORT"

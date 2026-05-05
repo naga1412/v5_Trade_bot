@@ -4,13 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class BearishPennantPattern:
-    pattern_id = "bearish_pennant"
-    pattern_type = "chart"
+    pattern_id: str = "bearish_pennant"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 30
 
     def detect(

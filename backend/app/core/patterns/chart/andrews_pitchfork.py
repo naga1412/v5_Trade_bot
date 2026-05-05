@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
 
 
 class AndrewsPitchforkPattern:
-    pattern_id = "andrews_pitchfork"
-    pattern_type = "chart"
+    pattern_id: str = "andrews_pitchfork"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
 
     def detect(
@@ -42,7 +42,7 @@ class AndrewsPitchforkPattern:
         p1 = p1_candidates[0]
         # Direction: P2 vs P0 (uptrend if higher peak, downtrend if lower)
         if highs[p2] > highs[p0]:
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif highs[p2] < highs[p0]:
             direction = "SHORT"
         else:

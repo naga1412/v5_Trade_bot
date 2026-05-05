@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import (
     find_swing_highs,
     find_swing_lows,
@@ -17,8 +17,8 @@ from app.core.patterns.chart._helpers import (
 
 
 class GannFanSignalPattern:
-    pattern_id = "gann_fan_signal"
-    pattern_type = "chart"
+    pattern_id: str = "gann_fan_signal"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
 
     def detect(
@@ -53,7 +53,7 @@ class GannFanSignalPattern:
         if from_trough:
             if cur_close < line_price + atr:
                 return None
-            direction = "LONG"
+            direction: Direction = "LONG"
         else:
             if cur_close > line_price - atr:
                 return None

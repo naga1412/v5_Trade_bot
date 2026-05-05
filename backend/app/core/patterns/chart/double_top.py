@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs
 
 
 class DoubleTopPattern:
-    pattern_id = "double_top"
-    pattern_type = "chart"
+    pattern_id: str = "double_top"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(

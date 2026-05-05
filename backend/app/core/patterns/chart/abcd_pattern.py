@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._harmonic_helpers import find_xabcd_pivots
 
 
 class AbcdPatternPattern:
-    pattern_id = "abcd_pattern"
-    pattern_type = "chart"
+    pattern_id: str = "abcd_pattern"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(
@@ -33,7 +33,7 @@ class AbcdPatternPattern:
         if abs(ab - cd) / ab > 0.15:
             return None
         if a[1] == "high" and d[1] == "low":
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif a[1] == "low" and d[1] == "high":
             direction = "SHORT"
         else:

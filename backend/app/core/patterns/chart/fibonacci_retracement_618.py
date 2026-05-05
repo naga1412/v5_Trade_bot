@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
 
 
 class FibonacciRetracement618Pattern:
-    pattern_id = "fibonacci_retracement_618"
-    pattern_type = "chart"
+    pattern_id: str = "fibonacci_retracement_618"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
     TOL = 0.02
 
@@ -37,7 +37,7 @@ class FibonacciRetracement618Pattern:
         if last_peak > last_trough:
             # Up move (low → high). 61.8% retrace = high - 0.618 × range. LONG bounce.
             level = swing_high - 0.618 * (swing_high - swing_low)
-            direction = "LONG"
+            direction: Direction = "LONG"
         else:
             # Down move (high → low). 61.8% retrace up = low + 0.618 × range. SHORT.
             level = swing_low + 0.618 * (swing_high - swing_low)

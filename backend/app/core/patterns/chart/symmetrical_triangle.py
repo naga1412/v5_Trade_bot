@@ -4,13 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
 
 
 class SymmetricalTrianglePattern:
-    pattern_id = "symmetrical_triangle"
-    pattern_type = "chart"
+    pattern_id: str = "symmetrical_triangle"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 50
 
     def detect(
@@ -43,7 +43,7 @@ class SymmetricalTrianglePattern:
         cur_low = float(win["low"].iloc[-1])
         # Need a clear break — close beyond ±0.5% of window mid-range
         if cur_close > mid_price * 1.005 and cur_close > cur_low:
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif cur_close < mid_price * 0.995 and cur_close < cur_high:
             direction = "SHORT"
         else:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 
 
 def _ema(arr: np.ndarray, period: int) -> float:
@@ -18,8 +18,8 @@ def _ema(arr: np.ndarray, period: int) -> float:
 
 
 class MultiTfConfluenceShortPattern:
-    pattern_id = "multi_tf_confluence_short"
-    pattern_type = "chart"
+    pattern_id: str = "multi_tf_confluence_short"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 200
 
     def detect(

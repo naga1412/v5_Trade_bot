@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class MeanReversionToMaPattern:
-    pattern_id = "mean_reversion_to_ma"
-    pattern_type = "chart"
+    pattern_id: str = "mean_reversion_to_ma"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(
@@ -31,7 +31,7 @@ class MeanReversionToMaPattern:
         deviation = cur_close - sma
         if abs(deviation) < 2 * atr:
             return None
-        direction = "SHORT" if deviation > 0 else "LONG"
+        direction: Direction = "SHORT" if deviation > 0 else "LONG"
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,

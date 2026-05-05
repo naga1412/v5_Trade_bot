@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_lows
 
 
 class ThreeDrivesBottomPattern:
-    pattern_id = "three_drives_bottom"
-    pattern_type = "chart"
+    pattern_id: str = "three_drives_bottom"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(

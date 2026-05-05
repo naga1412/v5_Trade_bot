@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class WeeklyPivotBreakPattern:
-    pattern_id = "weekly_pivot_break"
-    pattern_type = "chart"
+    pattern_id: str = "weekly_pivot_break"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 168
 
     def detect(
@@ -29,7 +29,7 @@ class WeeklyPivotBreakPattern:
         wk_low = float(prev_window["low"].min())
         cur_close = float(bars["close"].iloc[current_idx])
         if cur_close > wk_high + 0.3 * atr:
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif cur_close < wk_low - 0.3 * atr:
             direction = "SHORT"
         else:

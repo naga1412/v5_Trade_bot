@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
 
 
 class FibonacciRetracement50Pattern:
-    pattern_id = "fibonacci_retracement_50"
-    pattern_type = "chart"
+    pattern_id: str = "fibonacci_retracement_50"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
     TOL = 0.02  # ±2% around 50%
 
@@ -39,7 +39,7 @@ class FibonacciRetracement50Pattern:
             return None
         # If peak came AFTER trough → up swing, expect bounce LONG.
         # If trough came AFTER peak → down swing, expect rejection SHORT.
-        direction = "LONG" if last_peak > last_trough else "SHORT"
+        direction: Direction = "LONG" if last_peak > last_trough else "SHORT"
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,

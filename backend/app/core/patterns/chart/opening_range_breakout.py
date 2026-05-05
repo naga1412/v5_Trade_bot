@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class OpeningRangeBreakoutPattern:
-    pattern_id = "opening_range_breakout"
-    pattern_type = "chart"
+    pattern_id: str = "opening_range_breakout"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 30
 
     def detect(
@@ -30,7 +30,7 @@ class OpeningRangeBreakoutPattern:
         or_low = float(opening["low"].min())
         cur_close = float(win["close"].iloc[-1])
         if cur_close > or_high + 0.3 * atr:
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif cur_close < or_low - 0.3 * atr:
             direction = "SHORT"
         else:

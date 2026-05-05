@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class EndOfDayReversalPattern:
-    pattern_id = "end_of_day_reversal"
-    pattern_type = "chart"
+    pattern_id: str = "end_of_day_reversal"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 20
 
     def detect(
@@ -31,7 +31,7 @@ class EndOfDayReversalPattern:
         cur_body = float(cur["close"] - cur["open"])
         # Drift up but current bar is bearish ≥ 1 ATR → SHORT reversal
         if prior_drift > 0.5 * atr and cur_body < -atr:
-            direction = "SHORT"
+            direction: Direction = "SHORT"
         elif prior_drift < -0.5 * atr and cur_body > atr:
             direction = "LONG"
         else:

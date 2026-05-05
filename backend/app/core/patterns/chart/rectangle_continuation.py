@@ -4,13 +4,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class RectangleContinuationPattern:
-    pattern_id = "rectangle_continuation"
-    pattern_type = "chart"
+    pattern_id: str = "rectangle_continuation"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(
@@ -25,7 +25,6 @@ class RectangleContinuationPattern:
         n = len(win)
         # Pre-rectangle (first 1/3) must show directional move
         pre = closes[: n // 3]
-        rect = closes[n // 3 :]
         atr = recent_atr(bars, current_idx, period=14)
         if atr <= 0:
             return None
@@ -41,7 +40,7 @@ class RectangleContinuationPattern:
         rect_range = rect_highs.max() - rect_lows.min()
         if rect_range == 0 or abs(s_h) > rect_range / len(xs) or abs(s_l) > rect_range / len(xs):
             return None
-        direction = "LONG" if prior_move > 0 else "SHORT"
+        direction: Direction = "LONG" if prior_move > 0 else "SHORT"
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,

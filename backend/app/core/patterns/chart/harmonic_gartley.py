@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._harmonic_helpers import (
     find_xabcd_pivots,
     ratio_in_band,
@@ -12,8 +12,8 @@ from app.core.patterns.chart._harmonic_helpers import (
 
 
 class HarmonicGartleyPattern:
-    pattern_id = "harmonic_gartley"
-    pattern_type = "chart"
+    pattern_id: str = "harmonic_gartley"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
 
     def detect(
@@ -37,7 +37,7 @@ class HarmonicGartleyPattern:
             return None
         # Direction: bullish Gartley if X is high and D is low (price drops to D)
         if x[1] == "high" and d[1] == "low":
-            direction = "LONG"
+            direction: Direction = "LONG"
         elif x[1] == "low" and d[1] == "high":
             direction = "SHORT"
         else:

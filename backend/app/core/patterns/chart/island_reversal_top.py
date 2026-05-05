@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 
 
 class IslandReversalTopPattern:
-    pattern_id = "island_reversal_top"
-    pattern_type = "chart"
+    pattern_id: str = "island_reversal_top"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 30
 
     def detect(

@@ -4,12 +4,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, PatternType
 
 
 class RoundingTopPattern:
-    pattern_id = "rounding_top"
-    pattern_type = "chart"
+    pattern_id: str = "rounding_top"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 80
 
     def detect(

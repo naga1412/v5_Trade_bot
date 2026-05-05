@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 from app.core.patterns.chart._helpers import recent_atr
 
 
 class MidTermConsolidationPattern:
-    pattern_id = "mid_term_consolidation"
-    pattern_type = "chart"
+    pattern_id: str = "mid_term_consolidation"
+    pattern_type: PatternType = "chart"
     LOOKBACK = 60
 
     def detect(
@@ -30,7 +30,7 @@ class MidTermConsolidationPattern:
         early_move = float(early_win["close"].iloc[-1] - early_win["close"].iloc[0])
         if abs(early_move) < 5 * atr:
             return None
-        direction = "LONG" if early_move > 0 else "SHORT"
+        direction: Direction = "LONG" if early_move > 0 else "SHORT"
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,
