@@ -11,6 +11,7 @@ from app.core.scoring.traps.counter_weekly import CounterWeeklyTrap
 from app.core.scoring.traps.friday_weekend import FridayWeekendTrap
 from app.core.scoring.traps.liquidity_sweep import LiquiditySweepTrap
 from app.core.scoring.traps.parabolic_blowoff import ParabolicBlowoffTrap
+from app.core.scoring.traps.pattern_in_pattern import PatternInPatternTrap
 from app.core.scoring.traps.pre_news_event import PreNewsEventTrap
 from app.core.scoring.traps.volume_no_followthrough import VolumeNoFollowthroughTrap
 
@@ -23,5 +24,6 @@ ALL_TRAPS: list[Trap] = [
     AllIndicatorExtremeTrap(),
     AltBtcIndecisionTrap(),
     VolumeNoFollowthroughTrap(),
+    PatternInPatternTrap(),
 ]
 """Filled by Phase C (12 main traps) + Phase D (5 short-only)."""
