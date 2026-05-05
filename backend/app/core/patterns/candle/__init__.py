@@ -19,3 +19,5 @@ from app.core.patterns.candle.dark_cloud_cover import DarkCloudCoverPattern
 CANDLE_PATTERNS.append(DarkCloudCoverPattern())
 from app.core.patterns.candle.piercing import PiercingPattern
 CANDLE_PATTERNS.append(PiercingPattern())
+from app.core.patterns.candle.morning_star import MorningStarPattern
+CANDLE_PATTERNS.append(MorningStarPattern())
