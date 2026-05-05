@@ -89,3 +89,5 @@ from app.core.patterns.candle.concealing_baby_swallow import ConcealingBabySwall
 CANDLE_PATTERNS.append(ConcealingBabySwallowPattern())
 from app.core.patterns.candle.counterattack import CounterattackPattern
 CANDLE_PATTERNS.append(CounterattackPattern())
+from app.core.patterns.candle.gap_side_side_white import GapSideSideWhitePattern
+CANDLE_PATTERNS.append(GapSideSideWhitePattern())
