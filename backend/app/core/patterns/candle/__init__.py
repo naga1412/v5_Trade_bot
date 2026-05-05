@@ -21,3 +21,5 @@ from app.core.patterns.candle.piercing import PiercingPattern
 CANDLE_PATTERNS.append(PiercingPattern())
 from app.core.patterns.candle.morning_star import MorningStarPattern
 CANDLE_PATTERNS.append(MorningStarPattern())
+from app.core.patterns.candle.evening_star import EveningStarPattern
+CANDLE_PATTERNS.append(EveningStarPattern())
