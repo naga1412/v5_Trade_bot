@@ -119,3 +119,5 @@ from app.core.patterns.candle.unique_3_river import Unique3RiverPattern
 CANDLE_PATTERNS.append(Unique3RiverPattern())
 from app.core.patterns.candle.upside_gap_two_crows import UpsideGapTwoCrowsPattern
 CANDLE_PATTERNS.append(UpsideGapTwoCrowsPattern())
+from app.core.patterns.candle.xside_gap_3_methods import XsideGap3MethodsPattern
+CANDLE_PATTERNS.append(XsideGap3MethodsPattern())
