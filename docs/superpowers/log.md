@@ -281,3 +281,121 @@ to a TA-Lib-derived reference and exits 0 on a clean match.
 - **SP-5** — full scoring engine that fuses L1–L10 layers into the final
   signal score with calibrated weights.
 
+---
+
+## 2026-05-03 — SP-3 Data Adapters + Universe: SHIPPED
+
+**Scope:** stood up the SP-3 multi-source data layer — a uniform
+`ExchangeAdapter` Protocol with four concrete adapters (Binance, Bybit,
+Yahoo, TwelveData), per-exchange rate-limited HTTP plumbing
+(`RateLimitedClient` + dual buckets where exchanges expose two limits),
+cross-exchange canonical symbol normalisation (`to_native` / `from_native`
++ `is_supported`), a `universe_history` migration (0010) that records every
+symbol's listed/delisted window per exchange, a daily 02:00-UTC
+`sync_universe` background loop that diffs the API against the table, a
+five-minute `adapter_health` pinger, three admin REST endpoints
+(`/admin/adapters/health`, `POST /admin/adapters/{ex}/sync`,
+`/admin/universe`), and a DB-backed `is_tradable(session, symbol, ts)`
+that replaces the SP-0 hardcoded BTC/USDT shortcut. Yahoo + TwelveData
+universes are seeded manually via `tools/data/seed_*_symbols.py`; bulk
+historical OHLCV import (`tools/data/bulk_import_binance.py`) ships as a
+one-shot CLI stub for SP-7.
+
+**Delivered (~24 commits on branch `sp-3/main`):**
+
+| Phase | Sub-system                                                                                                | Commits |
+|-------|-----------------------------------------------------------------------------------------------------------|---------|
+| A     | Worktree + migration 0010 (`universe_history` + `adapter_health`) + spec/plan                             | 4       |
+| B     | `ExchangeAdapter` Protocol + `Candle` + `SymbolInfo` + cross-exchange `to_native` / `from_native` + pin   | 3       |
+| B/C   | `RateLimitedClient` + `DailyCounterBucket` + per-exchange weight config + Binance refactor                | 2       |
+| C     | BybitAdapter (v5 REST, spot + linear, dual rate buckets)                                                  | 2       |
+| D     | YahooAdapter (yfinance, self-throttle 1 req/sec, manual seed)                                             | 3       |
+| E     | TwelveDataAdapter (httpx, daily counter 800/day, manual seed)                                             | 3       |
+| F     | Adapter registry + `sync_universe` + DB-backed `is_tradable` + admin schemas + admin REST + lifespan + health pinger + bulk-import stub + ship/log/tag | 9 |
+
+**Test counts at ship:**
+- Backend: **1154 passing** (was 1127 at start of Phase F; +27 new across
+  adapter registry, `sync_universe`, `universe_history`, admin schemas,
+  admin endpoints, E2E sync flow, and `adapter_health` pinger). The two
+  pre-existing Windows-only `test_ml_checkpoints` failures
+  (`Path('.')` permission error, surfaced before SP-2) remain pre-existing
+  and unrelated.
+- Frontend: 187 (unchanged — SP-3 has no frontend surface; admin sub-page
+  deferred to SP-6 alongside the SP-2 patterns admin UI).
+
+**Surprises / decisions worth flagging:**
+
+- **`is_tradable()` flipped from sync to async.** Plan F3 noted only
+  `tests/unit/test_universe.py` called the SP-0 stub; the live audit found
+  `app/api/routes/tab1.py` also calls it (the `/candles` and `/predict`
+  routes 404 unknown symbols via this path). Both call sites were migrated
+  to `await is_tradable(session, ...)`, and the `bot_status_factory`
+  fixture's `_create_shadow_tables` was extended to seed a single
+  `universe_history` row for `BTC/USDT` so the existing predict-route
+  integration tests keep passing without per-test fixture changes.
+- **Adapter registry construction is lazy.** Adapters are instantiated on
+  first `get_adapter()` call rather than at module import — so test
+  imports do not trigger Yahoo / TwelveData library loading and a single
+  shared `httpx.AsyncClient` is held across the registry, closed via
+  `aclose_all()` from app shutdown.
+- **`HealthProbe` is a runtime-checkable Protocol.** Adapters opt in to
+  the 5-min health pinger by exposing `async health_check() -> HealthResult`.
+  Adapters without it are reported as healthy with an explanatory note
+  (`"adapter <name> has no health_check"`) — the plan's spec did not
+  mandate per-adapter health probes, so this is an additive surface ready
+  for individual adapters to fill in (Binance `/api/v3/ping`, Bybit
+  `/v5/market/time`, etc.) in follow-ups without breaking existing call
+  sites.
+- **Yahoo + TwelveData `list_symbols()` returns `[]`.** Both adapters' free
+  tiers do not expose a list-all endpoint, so the universe must be seeded
+  manually via `tools/data/seed_yahoo_symbols.py` and
+  `tools/data/seed_twelvedata_symbols.py`. `sync_universe` short-circuits
+  on `[]` with `skip_if_empty=True` (default) so the manual seeds are not
+  flipped to delisted by a no-op API response.
+- **Background sync + health pinger are gated off in test/CI.** The
+  `lifespan` block checks `settings.env not in {"test", "ci"}` and
+  `settings.worker_enabled` before spawning either task; the `aclose_all()`
+  cleanup runs unconditionally on shutdown so the shared httpx client is
+  always closed.
+- **Bulk historical OHLCV import is a one-shot CLI, not a cron job.** Per
+  meta-plan §5.15, `tools/data/bulk_import_binance.py` is a manual script
+  the operator runs once to backfill `ohlcv` from `universe_history`'s
+  active symbols. Cron scheduling is deferred to SP-7.
+- **Admin endpoints under `Depends(require_admin)`.** All three new
+  routes inherit `require_admin` from SP-0.7 at the router level, mirror
+  the SP-2 `admin_patterns.py` style. Non-admin clients get 403 (verified
+  in `test_health_endpoint_403_for_non_admin`); unknown exchanges on
+  `POST /admin/adapters/{ex}/sync` get 404.
+- **`universe_history` is the source of truth for `is_tradable`.** Spec
+  §2 #10: "tradable if ANY exchange has a row with `listed_at <= ts <
+  (delisted_at OR +infinity)`." Implementation matches verbatim — a
+  single `SELECT 1 ... LIMIT 1` per call. No ISO-string SQLite bug:
+  `last_synced_at` / `listed_at` / `delisted_at` are always passed as
+  `datetime` objects, never `.isoformat()` strings.
+
+**Manual checklist (for the human after deploy):**
+- [ ] Migration 0010 (`universe_history` + `adapter_health`) applies
+      cleanly on the staging Postgres
+- [ ] `python -m tools.data.seed_yahoo_symbols` and
+      `python -m tools.data.seed_twelvedata_symbols` run cleanly on a
+      fresh DB and populate ~22 manual seed rows
+- [ ] `curl -X POST .../api/v1/admin/adapters/binance/sync` returns
+      `{"exchange":"binance","added":N,"still_active":0,"newly_delisted":0}`
+      with N ≈ 400 spot pairs on the first call
+- [ ] `curl .../api/v1/admin/universe?exchange=binance&active=true&limit=5`
+      shows the freshly inserted rows
+- [ ] After ~5 min of uptime, `curl .../api/v1/admin/adapters/health`
+      returns rows for at least one exchange (the others stay
+      `is_healthy=true, error_message="adapter X has no health_check"`
+      until per-adapter `health_check` methods land)
+- [ ] Grep production logs for `sync_universe(binance) done: added=...`
+      after 02:00 UTC the next day
+
+**Next:** ship F11 (PR `sp-3/main` → `main`) and tag `sp-3`. Then either
+- **SP-1.1** — train the Conv-LSTM checkpoint that makes `ghost_*` columns
+  non-null in production, or
+- **SP-4** — point-in-time `is_tradable` audit hook in the prediction
+  pipeline + survivorship-bias backtest validator, or
+- **SP-5** — full scoring engine that fuses L1–L10 layers into the final
+  signal score with calibrated weights.
+
