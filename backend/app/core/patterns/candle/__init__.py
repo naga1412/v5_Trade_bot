@@ -87,3 +87,5 @@ from app.core.patterns.candle.breakaway import BreakawayPattern
 CANDLE_PATTERNS.append(BreakawayPattern())
 from app.core.patterns.candle.concealing_baby_swallow import ConcealingBabySwallowPattern
 CANDLE_PATTERNS.append(ConcealingBabySwallowPattern())
+from app.core.patterns.candle.counterattack import CounterattackPattern
+CANDLE_PATTERNS.append(CounterattackPattern())
