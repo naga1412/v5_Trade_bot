@@ -14,6 +14,7 @@ from app.core.scoring.traps.parabolic_blowoff import ParabolicBlowoffTrap
 from app.core.scoring.traps.pattern_in_pattern import PatternInPatternTrap
 from app.core.scoring.traps.pre_news_event import PreNewsEventTrap
 from app.core.scoring.traps.price_extreme import PriceExtremeTrap
+from app.core.scoring.traps.short_only.borrow_rate import BorrowRateTrap
 from app.core.scoring.traps.short_only.funding_rate_decay import (
     FundingRateDecayTrap,
 )
@@ -40,5 +41,6 @@ ALL_TRAPS: list[Trap] = [
     # Phase D — short-only traps
     ShortSqueezeCascadeTrap(),
     FundingRateDecayTrap(),
+    BorrowRateTrap(),
 ]
 """Filled by Phase C (12 main traps) + Phase D (5 short-only)."""
