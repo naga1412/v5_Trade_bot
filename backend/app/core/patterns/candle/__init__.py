@@ -43,3 +43,5 @@ from app.core.patterns.candle.doji_star import DojiStarPattern
 CANDLE_PATTERNS.append(DojiStarPattern())
 from app.core.patterns.candle.dragonfly_doji import DragonflyDojiPattern
 CANDLE_PATTERNS.append(DragonflyDojiPattern())
+from app.core.patterns.candle.gravestone_doji import GravestoneDojiPattern
+CANDLE_PATTERNS.append(GravestoneDojiPattern())
