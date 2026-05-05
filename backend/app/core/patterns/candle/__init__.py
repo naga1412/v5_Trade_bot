@@ -37,3 +37,5 @@ from app.core.patterns.candle.kicking import KickingPattern
 CANDLE_PATTERNS.append(KickingPattern())
 from app.core.patterns.candle.belt_hold import BeltHoldPattern
 CANDLE_PATTERNS.append(BeltHoldPattern())
+from app.core.patterns.candle.doji import DojiPattern
+CANDLE_PATTERNS.append(DojiPattern())
