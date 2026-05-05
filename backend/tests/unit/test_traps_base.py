@@ -6,6 +6,7 @@ from dataclasses import is_dataclass
 import pandas as pd
 import pytest
 
+from app.core.scoring.traps import ALL_TRAPS
 from app.core.scoring.traps.base import (
     Trap,
     TrapContext,
@@ -66,3 +67,18 @@ def test_trap_protocol_runtime_check() -> None:
 
     f = FakeTrap()
     assert isinstance(f, Trap)
+
+
+def test_all_traps_phase_c_count() -> None:
+    """Phase C ships exactly 12 main traps."""
+    assert len(ALL_TRAPS) == 12
+
+
+def test_all_traps_have_unique_trap_ids() -> None:
+    ids = [t.trap_id for t in ALL_TRAPS]
+    assert len(ids) == len(set(ids)), f"duplicate trap_ids: {ids}"
+
+
+def test_all_traps_implement_protocol() -> None:
+    for t in ALL_TRAPS:
+        assert isinstance(t, Trap), f"{t!r} does not satisfy Trap protocol"
