@@ -111,3 +111,5 @@ from app.core.patterns.candle.takuri import TakuriPattern
 CANDLE_PATTERNS.append(TakuriPattern())
 from app.core.patterns.candle.tasuki_gap import TasukiGapPattern
 CANDLE_PATTERNS.append(TasukiGapPattern())
+from app.core.patterns.candle.thrusting import ThrustingPattern
+CANDLE_PATTERNS.append(ThrustingPattern())
