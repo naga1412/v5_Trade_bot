@@ -17,6 +17,8 @@ from app.api.routes import (
 from app.api.routes import ws as ws_routes
 from app.auth.query_guard import attach_query_guard
 from app.config import get_settings
+from app.data.adapters import aclose_all as _aclose_adapters
+from app.data.universe_sync import start_universe_sync_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
 from app.shadow.worker import start_shadow_worker
@@ -44,6 +46,7 @@ async def lifespan(_app: FastAPI):
     # ENV=test (or WORKER_ENABLED=false) in pytest fixtures or CI to disable.
     live_worker = None
     shadow_worker = None
+    universe_sync_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -56,6 +59,10 @@ async def lifespan(_app: FastAPI):
             log.warning("load_active_checkpoint failed at startup: %s", e)
         live_worker = start_background_worker()
         shadow_worker = start_shadow_worker()
+        # SP-3 Phase F: daily 02:00 UTC universe sync across all registered
+        # adapters. Skipped in test/ci so the test event loop isn't racing
+        # background tasks.
+        universe_sync_task = start_universe_sync_task(get_session_factory())
     try:
         yield
     finally:
@@ -63,6 +70,9 @@ async def lifespan(_app: FastAPI):
             live_worker.cancel()
         if shadow_worker is not None:
             shadow_worker.cancel()
+        if universe_sync_task is not None:
+            universe_sync_task.cancel()
+        await _aclose_adapters()
 
 
 def create_app() -> FastAPI:
