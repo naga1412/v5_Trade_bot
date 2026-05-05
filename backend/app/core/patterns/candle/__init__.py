@@ -1,9 +1,9 @@
 """Candle pattern registry — extended by individual pattern modules at import.
 
 SP-2 Phase C wires 60 TA-Lib wrappers + 1 composite (``hammer_or_hanging``)
-for a total of 61 candle patterns. Each pattern module is imported here and
-its instance appended to :data:`CANDLE_PATTERNS`. Hand-rolled "strict" variants
-(patterns 62-82 in the plan) are deferred to a follow-up tick.
+plus 21 hand-rolled "strict" / context-gated variants (patterns 62-82) for a
+total of 82 candle patterns. Each pattern module is imported here and its
+instance appended to :data:`CANDLE_PATTERNS`.
 """
 from app.core.patterns.base import Pattern
 
@@ -76,6 +76,37 @@ from app.core.patterns.candle.hikkake import HikkakePattern
 from app.core.patterns.candle.hikkake_modified import HikkakeModifiedPattern
 from app.core.patterns.candle.hammer_or_hanging import HammerOrHangingPattern
 
+# --- batch 5 (hand-rolled strict / context-gated patterns 62-82) ---
+from app.core.patterns.candle.bearish_kicker_volume import BearishKickerVolumePattern
+from app.core.patterns.candle.bullish_kicker_volume import BullishKickerVolumePattern
+from app.core.patterns.candle.gap_fill_reversal_long import GapFillReversalLongPattern
+from app.core.patterns.candle.gap_fill_reversal_short import GapFillReversalShortPattern
+from app.core.patterns.candle.inside_bar_breakout_long import InsideBarBreakoutLongPattern
+from app.core.patterns.candle.inside_bar_breakout_short import InsideBarBreakoutShortPattern
+from app.core.patterns.candle.inside_doji_at_swing_high import InsideDojiAtSwingHighPattern
+from app.core.patterns.candle.inside_doji_at_swing_low import InsideDojiAtSwingLowPattern
+from app.core.patterns.candle.key_reversal_long import KeyReversalLongPattern
+from app.core.patterns.candle.key_reversal_short import KeyReversalShortPattern
+from app.core.patterns.candle.outside_bar_reversal_long import OutsideBarReversalLongPattern
+from app.core.patterns.candle.outside_bar_reversal_short import OutsideBarReversalShortPattern
+from app.core.patterns.candle.pinbar_long import PinbarLongPattern
+from app.core.patterns.candle.pinbar_short import PinbarShortPattern
+from app.core.patterns.candle.rejection_wick_at_resistance import (
+    RejectionWickAtResistancePattern,
+)
+from app.core.patterns.candle.rejection_wick_at_support import (
+    RejectionWickAtSupportPattern,
+)
+from app.core.patterns.candle.strict_three_black_crows import (
+    StrictThreeBlackCrowsPattern,
+)
+from app.core.patterns.candle.strict_three_white_soldiers import (
+    StrictThreeWhiteSoldiersPattern,
+)
+from app.core.patterns.candle.tweezer_bottom_strict import TweezerBottomStrictPattern
+from app.core.patterns.candle.tweezer_top_strict import TweezerTopStrictPattern
+from app.core.patterns.candle.wide_range_engulf import WideRangeEngulfPattern
+
 CANDLE_PATTERNS: list[Pattern] = [
     # batch 1
     HammerPattern(),
@@ -142,4 +173,26 @@ CANDLE_PATTERNS: list[Pattern] = [
     HikkakePattern(),
     HikkakeModifiedPattern(),
     HammerOrHangingPattern(),
+    # batch 5 (hand-rolled, patterns 62-82)
+    StrictThreeWhiteSoldiersPattern(),
+    StrictThreeBlackCrowsPattern(),
+    TweezerTopStrictPattern(),
+    TweezerBottomStrictPattern(),
+    WideRangeEngulfPattern(),
+    BullishKickerVolumePattern(),
+    BearishKickerVolumePattern(),
+    InsideBarBreakoutLongPattern(),
+    InsideBarBreakoutShortPattern(),
+    OutsideBarReversalLongPattern(),
+    OutsideBarReversalShortPattern(),
+    PinbarLongPattern(),
+    PinbarShortPattern(),
+    KeyReversalLongPattern(),
+    KeyReversalShortPattern(),
+    RejectionWickAtResistancePattern(),
+    RejectionWickAtSupportPattern(),
+    GapFillReversalLongPattern(),
+    GapFillReversalShortPattern(),
+    InsideDojiAtSwingLowPattern(),
+    InsideDojiAtSwingHighPattern(),
 ]

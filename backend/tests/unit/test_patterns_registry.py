@@ -23,11 +23,11 @@ def test_initially_empty_until_subpackages_populate() -> None:
     assert isinstance(ALL_PATTERNS, list)  # tautology that doc-checks the contract
 
 
-def test_61_talib_candle_patterns_registered() -> None:
-    """SP-2 Phase C wires 60 TA-Lib wrappers + 1 composite (hammer_or_hanging)."""
-    assert len(CANDLE_PATTERNS) == 61
+def test_82_candle_patterns_registered() -> None:
+    """SP-2 Phase C: 60 TA-Lib + 1 composite (hammer_or_hanging) + 21 hand-rolled."""
+    assert len(CANDLE_PATTERNS) == 82
     ids = {p.pattern_id for p in CANDLE_PATTERNS}
-    assert len(ids) == 61, f"duplicate pattern_ids in CANDLE_PATTERNS: {ids}"
+    assert len(ids) == 82, f"duplicate pattern_ids in CANDLE_PATTERNS: {ids}"
 
 
 def test_all_candle_patterns_are_type_candle() -> None:
