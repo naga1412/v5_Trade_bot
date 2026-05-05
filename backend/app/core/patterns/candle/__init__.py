@@ -97,3 +97,5 @@ from app.core.patterns.candle.identical_three_crows import IdenticalThreeCrowsPa
 CANDLE_PATTERNS.append(IdenticalThreeCrowsPattern())
 from app.core.patterns.candle.in_neck import InNeckPattern
 CANDLE_PATTERNS.append(InNeckPattern())
+from app.core.patterns.candle.kicking_by_length import KickingByLengthPattern
+CANDLE_PATTERNS.append(KickingByLengthPattern())
