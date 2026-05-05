@@ -99,3 +99,5 @@ from app.core.patterns.candle.in_neck import InNeckPattern
 CANDLE_PATTERNS.append(InNeckPattern())
 from app.core.patterns.candle.kicking_by_length import KickingByLengthPattern
 CANDLE_PATTERNS.append(KickingByLengthPattern())
+from app.core.patterns.candle.ladder_bottom import LadderBottomPattern
+CANDLE_PATTERNS.append(LadderBottomPattern())
