@@ -51,3 +51,5 @@ from app.core.patterns.candle.marubozu import MarubozuPattern
 CANDLE_PATTERNS.append(MarubozuPattern())
 from app.core.patterns.candle.spinning_top import SpinningTopPattern
 CANDLE_PATTERNS.append(SpinningTopPattern())
+from app.core.patterns.candle.closing_marubozu import ClosingMarubozuPattern
+CANDLE_PATTERNS.append(ClosingMarubozuPattern())
