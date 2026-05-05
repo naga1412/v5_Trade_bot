@@ -13,6 +13,7 @@ from app.api.routes import (
     bot_status,
     health,
     me,
+    scanner,  # SP-6 Phase A4
     tab1,
 )
 from app.api.routes import ws as ws_routes
@@ -114,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_patterns.router)
     app.include_router(admin_traps.router)
     app.include_router(me.router)
+    app.include_router(scanner.router)  # SP-6
     app.include_router(ws_routes.router)
     return app
 

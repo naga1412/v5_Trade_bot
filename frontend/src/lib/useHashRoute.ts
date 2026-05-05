@@ -8,12 +8,14 @@ import { useEffect, useState, useCallback } from "react";
 export type TabId =
   | "live-prediction"
   | "bot-status"
+  | "scanner"
   | "settings"
   | "admin";
 
 const VALID: ReadonlySet<TabId> = new Set<TabId>([
   "live-prediction",
   "bot-status",
+  "scanner",
   "settings",
   "admin",
 ]);

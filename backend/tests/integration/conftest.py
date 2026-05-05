@@ -124,6 +124,22 @@ async def _create_shadow_tables(engine: Any) -> None:
             "VALUES ('binance', 'BTC/USDT', 'crypto', "
             "'2017-08-17T00:00:00+00:00', '2026-05-01T00:00:00+00:00')"
         ))
+        # SP-6 Phase A2: predictions table mirror so scanner radar tests can
+        # seed per-symbol prediction rows. Schema mirrors the post-SP-5
+        # production layout: id, user_id (NOT NULL), symbol, timeframe, ts,
+        # price, layer_scores (TEXT/JSON), inputs_hash. Hash-chain columns
+        # omitted (this fixture exercises read-only endpoints).
+        await conn.execute(sa.text(
+            "CREATE TABLE predictions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "ts TEXT NOT NULL, "
+            "price REAL, "
+            "layer_scores TEXT NOT NULL, "
+            "inputs_hash TEXT NOT NULL DEFAULT '')"
+        ))
 
 
 @pytest_asyncio.fixture

@@ -21,7 +21,7 @@ export function Settings() {
       <div
         role="tablist"
         aria-label="Settings sections"
-        className="flex bg-bg-elevated border-b border-border"
+        className="flex bg-bg-elevated border-b border-border overflow-x-auto"
       >
         {SUB_TABS.map((t) => {
           const active = t.id === sub;
@@ -35,7 +35,7 @@ export function Settings() {
               onClick={() => setSub(t.id)}
               className={[
                 "h-11 md:h-9 px-4 text-xs font-mono uppercase tracking-wide",
-                "border-b-2 -mb-px transition-colors",
+                "border-b-2 -mb-px transition-colors whitespace-nowrap",
                 active
                   ? "text-text-primary border-text-primary bg-bg-base"
                   : "text-text-secondary border-transparent hover:text-text-primary",

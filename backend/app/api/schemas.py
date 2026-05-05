@@ -411,3 +411,67 @@ class SyncResultOut(BaseModel):
     added: int
     still_active: int
     newly_delisted: int
+
+
+# --- SP-6 Phase A3: Tab 3 Scanner Radar schemas (spec §3.6) -----------------
+
+
+class SignalCardScores(BaseModel):
+    """Per-card mini score breakdown (rendered as 4 chips on row 5)."""
+
+    smc: int = 0
+    wyckoff: int = 0
+    microstructure: int = 0
+    momentum: int = 0
+
+
+class SignalCardOut(BaseModel):
+    """One row in the bullish or bearish column of Tab 3 Scanner Radar.
+
+    Mirrors MASTER_PLAN §9 line 327 signal-card spec: 5 rows of metadata that
+    the frontend renders as star/symbol/sparkline + tag row + pct + conf bar
+    + score chips.
+    """
+
+    symbol: str
+    full_name: str = ""
+    is_favorite: bool = False
+    points: int = 0
+    pct_change: float = 0.0
+    direction: Literal["LONG", "SHORT"]
+    htf_direction: Literal["LONG", "SHORT", "NEUTRAL"] = "NEUTRAL"
+    signal_tier: Literal["NO_SIGNAL", "PAPER", "SMALL", "STANDARD", "A+"]
+    hybrid_flag: Literal["LONG", "SHORT", None] = None
+    ai_score: int  # may be negative for SHORT cards (rendered as ±N)
+    wyckoff_phase: str = "unknown"
+    confidence: int = Field(ge=0, le=100)  # already scaled to 0..100
+    scores: SignalCardScores
+    sparkline: list[float] = Field(default_factory=list, max_length=20)
+
+
+class ScannerFilterCounts(BaseModel):
+    """Counts for each filter pill (rendered in the toolbar)."""
+
+    all: int = 0
+    confirmed: int = 0
+    probable: int = 0
+    weak: int = 0
+    diverging: int = 0
+
+
+class SupervisorProgress(BaseModel):
+    done: int = Field(ge=0, default=0)
+    total: int = Field(ge=1, default=8)
+
+
+class ScannerRadarOut(BaseModel):
+    """Top-level Tab 3 Scanner Radar payload (spec §3.6)."""
+
+    scanned_at: datetime
+    market: Literal["crypto", "stock", "fx", "commodity", "index"]
+    timeframe: str
+    scanned_count: int
+    filter_counts: ScannerFilterCounts
+    supervisor_progress: SupervisorProgress = Field(default_factory=SupervisorProgress)
+    bullish: list[SignalCardOut] = Field(default_factory=list)
+    bearish: list[SignalCardOut] = Field(default_factory=list)
