@@ -91,3 +91,5 @@ from app.core.patterns.candle.counterattack import CounterattackPattern
 CANDLE_PATTERNS.append(CounterattackPattern())
 from app.core.patterns.candle.gap_side_side_white import GapSideSideWhitePattern
 CANDLE_PATTERNS.append(GapSideSideWhitePattern())
+from app.core.patterns.candle.homing_pigeon import HomingPigeonPattern
+CANDLE_PATTERNS.append(HomingPigeonPattern())
