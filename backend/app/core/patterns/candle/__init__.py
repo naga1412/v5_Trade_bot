@@ -95,3 +95,5 @@ from app.core.patterns.candle.homing_pigeon import HomingPigeonPattern
 CANDLE_PATTERNS.append(HomingPigeonPattern())
 from app.core.patterns.candle.identical_three_crows import IdenticalThreeCrowsPattern
 CANDLE_PATTERNS.append(IdenticalThreeCrowsPattern())
+from app.core.patterns.candle.in_neck import InNeckPattern
+CANDLE_PATTERNS.append(InNeckPattern())
