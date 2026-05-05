@@ -31,3 +31,5 @@ from app.core.patterns.candle.harami import HaramiPattern
 CANDLE_PATTERNS.append(HaramiPattern())
 from app.core.patterns.candle.harami_cross import HaramiCrossPattern
 CANDLE_PATTERNS.append(HaramiCrossPattern())
+from app.core.patterns.candle.tweezer_top import TweezerTopPattern
+CANDLE_PATTERNS.append(TweezerTopPattern())
