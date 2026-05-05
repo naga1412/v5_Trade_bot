@@ -63,3 +63,5 @@ from app.core.patterns.candle.rickshaw_man import RickshawManPattern
 CANDLE_PATTERNS.append(RickshawManPattern())
 from app.core.patterns.candle.mat_hold import MatHoldPattern
 CANDLE_PATTERNS.append(MatHoldPattern())
+from app.core.patterns.candle.rise_fall_3_methods import RiseFall3MethodsPattern
+CANDLE_PATTERNS.append(RiseFall3MethodsPattern())
