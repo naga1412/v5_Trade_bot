@@ -121,3 +121,5 @@ from app.core.patterns.candle.upside_gap_two_crows import UpsideGapTwoCrowsPatte
 CANDLE_PATTERNS.append(UpsideGapTwoCrowsPattern())
 from app.core.patterns.candle.xside_gap_3_methods import XsideGap3MethodsPattern
 CANDLE_PATTERNS.append(XsideGap3MethodsPattern())
+from app.core.patterns.candle.hikkake import HikkakePattern
+CANDLE_PATTERNS.append(HikkakePattern())
