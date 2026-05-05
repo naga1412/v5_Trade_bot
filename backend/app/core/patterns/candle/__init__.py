@@ -11,3 +11,5 @@ from app.core.patterns.candle.inverted_hammer import InvertedHammerPattern
 CANDLE_PATTERNS.append(InvertedHammerPattern())
 from app.core.patterns.candle.hanging_man import HangingManPattern
 CANDLE_PATTERNS.append(HangingManPattern())
+from app.core.patterns.candle.shooting_star import ShootingStarPattern
+CANDLE_PATTERNS.append(ShootingStarPattern())
