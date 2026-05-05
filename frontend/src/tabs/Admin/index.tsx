@@ -2,16 +2,29 @@ import { useState } from "react";
 import { Users } from "@/tabs/Admin/Users";
 import { AuditTrail } from "@/tabs/Admin/AuditTrail";
 import { MlCheckpoints } from "@/tabs/Admin/MlCheckpoints";
+import { PatternsAdmin } from "@/tabs/Admin/PatternsAdmin";
+import { AdaptersAdmin } from "@/tabs/Admin/AdaptersAdmin";
+import { TrapsAdmin } from "@/tabs/Admin/TrapsAdmin";
 
-type SubTab = "users" | "audit" | "ml-checkpoints";
+type SubTab =
+  | "users"
+  | "audit"
+  | "ml-checkpoints"
+  | "patterns"
+  | "adapters"
+  | "traps";
 
 const SUB_TABS: readonly { id: SubTab; label: string }[] = [
   { id: "users", label: "Users" },
   { id: "audit", label: "Audit Trail" },
   { id: "ml-checkpoints", label: "ML Checkpoints" },
+  { id: "patterns", label: "Patterns" },
+  { id: "adapters", label: "Adapters" },
+  { id: "traps", label: "Traps" },
 ];
 
-// SP-0.7 Phase J + SP-1 Phase F: Admin tab — Users / AuditTrail / MlCheckpoints.
+// SP-0.7 Phase J + SP-1 Phase F + SP-6 Phase E: Admin tab —
+// Users / AuditTrail / MlCheckpoints / Patterns / Adapters / Traps.
 export function Admin() {
   const [sub, setSub] = useState<SubTab>("users");
   return (
@@ -19,7 +32,7 @@ export function Admin() {
       <div
         role="tablist"
         aria-label="Admin sections"
-        className="flex bg-bg-elevated border-b border-border"
+        className="flex bg-bg-elevated border-b border-border overflow-x-auto"
       >
         {SUB_TABS.map((t) => {
           const active = t.id === sub;
@@ -33,7 +46,7 @@ export function Admin() {
               onClick={() => setSub(t.id)}
               className={[
                 "h-11 md:h-9 px-4 text-xs font-mono uppercase tracking-wide",
-                "border-b-2 -mb-px transition-colors",
+                "border-b-2 -mb-px transition-colors whitespace-nowrap",
                 active
                   ? "text-text-primary border-text-primary bg-bg-base"
                   : "text-text-secondary border-transparent hover:text-text-primary",
@@ -49,8 +62,14 @@ export function Admin() {
           <Users />
         ) : sub === "audit" ? (
           <AuditTrail />
-        ) : (
+        ) : sub === "ml-checkpoints" ? (
           <MlCheckpoints />
+        ) : sub === "patterns" ? (
+          <PatternsAdmin />
+        ) : sub === "adapters" ? (
+          <AdaptersAdmin />
+        ) : (
+          <TrapsAdmin />
         )}
       </div>
     </div>

@@ -62,9 +62,9 @@ describe("Admin/TrapsAdmin page", () => {
       expect(screen.getByText("a")).toBeInTheDocument();
     });
     const pills = screen.getAllByTestId("trap-severity-pill");
-    expect(pills[0].className).toMatch(/yellow/);
-    expect(pills[1].className).toMatch(/orange/);
-    expect(pills[2].className).toMatch(/red/);
+    expect(pills[0]?.className).toMatch(/yellow/);
+    expect(pills[1]?.className).toMatch(/orange/);
+    expect(pills[2]?.className).toMatch(/red/);
   });
 
   test("clicking Disable calls adminToggleTrap with reason from window.prompt", async () => {
@@ -146,11 +146,11 @@ describe("Admin/TrapsAdmin page", () => {
     await waitFor(() => {
       expect(screen.getByText("a")).toBeInTheDocument();
     });
-    const aRow = screen.getByText("a").closest("tr")!;
-    const bRow = screen.getByText("b").closest("tr")!;
-    const cRow = screen.getByText("c").closest("tr")!;
-    expect(aRow.textContent).toContain("long");
-    expect(bRow.textContent).toContain("short");
-    expect(cRow.textContent).toContain("both");
+    const aRow = screen.getByText("a").closest("tr");
+    const bRow = screen.getByText("b").closest("tr");
+    const cRow = screen.getByText("c").closest("tr");
+    expect(aRow?.textContent).toContain("long");
+    expect(bRow?.textContent).toContain("short");
+    expect(cRow?.textContent).toContain("both");
   });
 });

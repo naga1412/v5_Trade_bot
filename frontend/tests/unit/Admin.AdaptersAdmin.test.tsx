@@ -80,7 +80,7 @@ describe("Admin/AdaptersAdmin page", () => {
     // The bybit row should contain an em-dash for latency.
     const bybitRow = screen.getByText("bybit").closest("tr");
     expect(bybitRow).not.toBeNull();
-    expect(bybitRow!.textContent).toContain("—");
+    expect(bybitRow?.textContent).toContain("—");
   });
 
   test("Sync button calls adminSyncAdapter and reloads list, displays SyncResult", async () => {
