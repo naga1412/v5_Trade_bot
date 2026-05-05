@@ -125,3 +125,5 @@ from app.core.patterns.candle.hikkake import HikkakePattern
 CANDLE_PATTERNS.append(HikkakePattern())
 from app.core.patterns.candle.hikkake_modified import HikkakeModifiedPattern
 CANDLE_PATTERNS.append(HikkakeModifiedPattern())
+from app.core.patterns.candle.hammer_or_hanging import HammerOrHangingPattern
+CANDLE_PATTERNS.append(HammerOrHangingPattern())
