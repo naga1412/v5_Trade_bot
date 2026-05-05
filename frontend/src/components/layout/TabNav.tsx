@@ -15,12 +15,13 @@ interface TabDef {
   label: string;
 }
 
-// Order matters: spec §9.1 + SP-0.7 §I3 — Live Prediction → Bot Status →
-// Settings → Admin. Settings is always rendered; Admin is filtered out
-// when adminVisible is false.
+// Order matters: spec §9.1 + SP-0.7 §I3 + SP-6 Phase A6 — Live Prediction →
+// Bot Status → Scanner → Settings → Admin. Settings + Scanner are always
+// rendered; Admin is filtered out when adminVisible is false.
 const ALL_TABS: readonly TabDef[] = [
   { id: "live-prediction", label: "Live Prediction" },
   { id: "bot-status", label: "Bot Status" },
+  { id: "scanner", label: "Scanner" },
   { id: "settings", label: "Settings" },
   { id: "admin", label: "Admin" },
 ];

@@ -60,7 +60,7 @@ describe("api admin patterns / adapters / traps helpers", () => {
   test("adminTogglePattern POST .../disable when enable=false", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({}));
     await api.adminTogglePattern("doji", false, "noisy");
-    const call = fetchMock.mock.calls[0]!;
+    const call = fetchMock.mock.calls[0] ?? [];
     expect(String(call[0])).toBe(`${BASE}/admin/patterns/doji/disable`);
     expect((call[1] as RequestInit).method).toBe("POST");
   });
@@ -86,7 +86,7 @@ describe("api admin patterns / adapters / traps helpers", () => {
       exchange: "binance", added: 0, still_active: 0, newly_delisted: 0,
     }));
     await api.adminSyncAdapter("binance");
-    const call = fetchMock.mock.calls[0]!;
+    const call = fetchMock.mock.calls[0] ?? [];
     expect(String(call[0])).toBe(`${BASE}/admin/adapters/binance/sync`);
     expect((call[1] as RequestInit).method).toBe("POST");
   });

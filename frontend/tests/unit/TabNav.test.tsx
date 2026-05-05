@@ -7,25 +7,40 @@ beforeEach(() => {
 });
 
 describe("TabNav", () => {
-  test("renders 3 tabs by default (admin hidden), Settings always visible", () => {
+  test("renders 4 tabs by default (admin hidden), Scanner + Settings visible", () => {
     const onChange = vi.fn();
     render(<TabNav active="live-prediction" onChange={onChange} />);
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(3);
+    expect(buttons).toHaveLength(4);
     expect(buttons[0]).toHaveTextContent(/live prediction/i);
     expect(buttons[1]).toHaveTextContent(/bot status/i);
-    expect(buttons[2]).toHaveTextContent(/settings/i);
+    expect(buttons[2]).toHaveTextContent(/scanner/i);
+    expect(buttons[3]).toHaveTextContent(/settings/i);
     expect(screen.queryByRole("tab", { name: /admin/i })).toBeNull();
   });
 
-  test("renders 4 tabs when adminVisible=true with Admin last", () => {
+  test("renders 5 tabs when adminVisible=true with Admin last", () => {
     const onChange = vi.fn();
     render(
       <TabNav active="live-prediction" onChange={onChange} adminVisible />,
     );
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(4);
-    expect(buttons[3]).toHaveTextContent(/admin/i);
+    expect(buttons).toHaveLength(5);
+    expect(buttons[4]).toHaveTextContent(/admin/i);
+  });
+
+  test("renders Scanner tab between Bot Status and Settings", () => {
+    const onChange = vi.fn();
+    render(<TabNav active="live-prediction" onChange={onChange} adminVisible={false} />);
+    const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
+    expect(tabs).toEqual([
+      "Live Prediction", "Bot Status", "Scanner", "Settings",
+    ]);
+  });
+
+  test("Scanner tab is always visible (not admin-gated)", () => {
+    render(<TabNav active="scanner" onChange={vi.fn()} adminVisible={false} />);
+    expect(screen.getByRole("tab", { name: /scanner/i })).toBeVisible();
   });
 
   test("clicking a tab calls onChange with the right id", () => {
@@ -33,6 +48,9 @@ describe("TabNav", () => {
     render(<TabNav active="live-prediction" onChange={onChange} adminVisible />);
     fireEvent.click(screen.getByRole("tab", { name: /bot status/i }));
     expect(onChange).toHaveBeenCalledWith("bot-status");
+
+    fireEvent.click(screen.getByRole("tab", { name: /scanner/i }));
+    expect(onChange).toHaveBeenCalledWith("scanner");
 
     fireEvent.click(screen.getByRole("tab", { name: /settings/i }));
     expect(onChange).toHaveBeenCalledWith("settings");
@@ -144,6 +162,28 @@ describe("useHashRoute", () => {
     window.location.hash = "#/admin";
     const { result } = renderHook(() => useHashRoute("live-prediction"));
     expect(result.current.tab).toBe("admin");
+  });
+
+  test("parses '#/scanner' as the scanner tab", () => {
+    window.location.hash = "#/scanner";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.tab).toBe("scanner");
+  });
+
+  test("setTab('scanner') writes the scanner hash", () => {
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    act(() => {
+      result.current.setTab("scanner");
+    });
+    expect(result.current.tab).toBe("scanner");
+    expect(window.location.hash).toBe("#/scanner");
+  });
+
+  test("?signal=X deeplink still works after Scanner addition", () => {
+    window.location.hash = "#/live-prediction?signal=abc123";
+    const { result } = renderHook(() => useHashRoute("live-prediction"));
+    expect(result.current.tab).toBe("live-prediction");
+    expect(result.current.query).toEqual({ signal: "abc123" });
   });
 
   test("setTab('admin') writes the admin hash", () => {
