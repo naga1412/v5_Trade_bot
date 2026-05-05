@@ -107,3 +107,5 @@ from app.core.patterns.candle.stalled_pattern import StalledPatternPattern
 CANDLE_PATTERNS.append(StalledPatternPattern())
 from app.core.patterns.candle.stick_sandwich import StickSandwichPattern
 CANDLE_PATTERNS.append(StickSandwichPattern())
+from app.core.patterns.candle.takuri import TakuriPattern
+CANDLE_PATTERNS.append(TakuriPattern())
