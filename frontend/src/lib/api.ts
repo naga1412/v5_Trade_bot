@@ -319,6 +319,97 @@ export interface MlCheckpointPatchIn {
   notes?: string;
 }
 
+// --- SP-6 Phase A5: Scanner + admin sub-page types ---
+
+export interface SignalCardScores {
+  smc: number;
+  wyckoff: number;
+  microstructure: number;
+  momentum: number;
+}
+
+export interface SignalCard {
+  symbol: string;
+  full_name: string;
+  is_favorite: boolean;
+  points: number;
+  pct_change: number;
+  direction: "LONG" | "SHORT";
+  htf_direction: "LONG" | "SHORT" | "NEUTRAL";
+  signal_tier: "NO_SIGNAL" | "PAPER" | "SMALL" | "STANDARD" | "A+";
+  hybrid_flag: "LONG" | "SHORT" | null;
+  ai_score: number;
+  wyckoff_phase: string;
+  confidence: number;
+  scores: SignalCardScores;
+  sparkline: number[];
+}
+
+export interface ScannerFilterCounts {
+  all: number;
+  confirmed: number;
+  probable: number;
+  weak: number;
+  diverging: number;
+}
+
+export interface SupervisorProgress {
+  done: number;
+  total: number;
+}
+
+export interface ScannerRadar {
+  scanned_at: string;
+  market: "crypto" | "stock" | "fx" | "commodity" | "index";
+  timeframe: string;
+  scanned_count: number;
+  filter_counts: ScannerFilterCounts;
+  supervisor_progress: SupervisorProgress;
+  bullish: SignalCard[];
+  bearish: SignalCard[];
+}
+
+export interface ScannerRadarOptions {
+  market?: ScannerRadar["market"];
+  tf?: string;
+  limit?: number;
+}
+
+export interface PatternEntry {
+  pattern_id: string;
+  pattern_type: "candle" | "chart";
+  symbol: string;
+  timeframe: string;
+  enabled: boolean;
+  disabled_reason: string | null;
+}
+
+export interface TrapEntry {
+  trap_id: string;
+  severity: "medium" | "high" | "extreme";
+  side: "long" | "short" | "both";
+  symbol: string;
+  timeframe: string;
+  enabled: boolean;
+  disabled_reason: string | null;
+}
+
+export interface AdapterHealth {
+  exchange: string;
+  checked_at: string;
+  is_healthy: boolean;
+  latency_ms: number | null;
+  error_message: string | null;
+  quota_used_pct: number | null;
+}
+
+export interface SyncResult {
+  exchange: string;
+  added: number;
+  still_active: number;
+  newly_delisted: number;
+}
+
 export const api = {
   health: () => fetchJson<{ status: string; version: string }>("/health"),
   predict: (symbolPath: string, tf: string, signal?: string) => {
@@ -406,4 +497,34 @@ export const api = {
       `/admin/audit-trail${tail ? "?" + tail : ""}`,
     );
   },
+
+  // --- SP-6 Phase A5: scanner ---
+  scannerRadar: (opts: ScannerRadarOptions = {}) => {
+    const market = opts.market ?? "crypto";
+    const tf = opts.tf ?? "1h";
+    const limit = opts.limit ?? 200;
+    return fetchJson<ScannerRadar>(
+      `/scanner/radar?market=${market}&tf=${tf}&limit=${limit}`,
+    );
+  },
+
+  // --- SP-6 Phase A5: admin sub-pages ---
+  adminListPatterns: () => fetchJson<PatternEntry[]>("/admin/patterns"),
+  adminTogglePattern: (id: string, enable: boolean, reason?: string) =>
+    fetchJson<PatternEntry>(
+      `/admin/patterns/${encodeURIComponent(id)}/${enable ? "enable" : "disable"}`,
+      { method: "POST", body: enable ? {} : { reason: reason ?? "" } },
+    ),
+  adminListAdapters: () => fetchJson<AdapterHealth[]>("/admin/adapters/health"),
+  adminSyncAdapter: (exchange: string) =>
+    fetchJson<SyncResult>(
+      `/admin/adapters/${encodeURIComponent(exchange)}/sync`,
+      { method: "POST" },
+    ),
+  adminListTraps: () => fetchJson<TrapEntry[]>("/admin/traps"),
+  adminToggleTrap: (id: string, enable: boolean, reason?: string) =>
+    fetchJson<TrapEntry>(
+      `/admin/traps/${encodeURIComponent(id)}/${enable ? "enable" : "disable"}`,
+      { method: "POST", body: enable ? {} : { reason: reason ?? "" } },
+    ),
 };
