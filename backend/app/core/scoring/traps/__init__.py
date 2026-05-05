@@ -21,6 +21,9 @@ from app.core.scoring.traps.short_only.funding_rate_decay import (
 from app.core.scoring.traps.short_only.short_squeeze_cascade import (
     ShortSqueezeCascadeTrap,
 )
+from app.core.scoring.traps.short_only.unlimited_upside_risk import (
+    UnlimitedUpsideRiskTrap,
+)
 from app.core.scoring.traps.thin_orderbook import ThinOrderbookTrap
 from app.core.scoring.traps.volatility_regime_change import VolatilityRegimeChangeTrap
 from app.core.scoring.traps.volume_no_followthrough import VolumeNoFollowthroughTrap
@@ -42,5 +45,6 @@ ALL_TRAPS: list[Trap] = [
     ShortSqueezeCascadeTrap(),
     FundingRateDecayTrap(),
     BorrowRateTrap(),
+    UnlimitedUpsideRiskTrap(),
 ]
 """Filled by Phase C (12 main traps) + Phase D (5 short-only)."""

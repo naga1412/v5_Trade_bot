@@ -71,7 +71,7 @@ def test_trap_protocol_runtime_check() -> None:
 
 def test_all_traps_phase_c_count() -> None:
     """Phase C ships 12 main traps; Phase D appends 5 short-only (final = 17)."""
-    assert len(ALL_TRAPS) == 15
+    assert len(ALL_TRAPS) == 16
 
 
 def test_all_traps_have_unique_trap_ids() -> None:
