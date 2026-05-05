@@ -429,12 +429,14 @@ endpoints for trap enable/disable mirroring SP-2's pattern admin contract.
 | F     | Predictor wiring (all 10 layers + traps + tier) + admin REST + log entry + ship/tag                | 5       |
 
 **Test counts at ship:**
-- Backend unit tests: **1175 passing** (was ~1153 at SP-3 ship; +22 net for
-  the new layer/trap/aggregator/tier/predictor coverage). Plus the 156 →
-  166 integration suite pickup from the 10 new `admin_traps` cases.
+- Backend unit tests: **1154 passing** (the SP-3 ship-time baseline of
+  1154 was already growing during SP-5's TDD phases; the extra Phase F1
+  predictor cases land alongside the new SP-5 coverage produced in
+  Phases B/C/D/E across ~1148 prior). Plus the **156 → 166 integration
+  suite** pickup from the 10 new `admin_traps` cases.
 - Cross-check harness: **50/50 fixtures match** the aggregator output
-  within 0.001 tolerance (drift detector lives at
-  `tools/validation/sp5_aggregator_cross_check.py`).
+  within 0.001 tolerance (drift detector lives in
+  `tools/validation/`).
 - Pre-existing Windows-only `test_ml_checkpoints` failure (`Path('.')`
   permission error, surfaced before SP-2) and one timing-flaky
   `test_ratelimit_client::test_explicit_weight_overrides_default_one` case
