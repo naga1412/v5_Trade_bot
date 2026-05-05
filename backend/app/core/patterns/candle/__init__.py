@@ -61,3 +61,5 @@ from app.core.patterns.candle.high_wave import HighWavePattern
 CANDLE_PATTERNS.append(HighWavePattern())
 from app.core.patterns.candle.rickshaw_man import RickshawManPattern
 CANDLE_PATTERNS.append(RickshawManPattern())
+from app.core.patterns.candle.mat_hold import MatHoldPattern
+CANDLE_PATTERNS.append(MatHoldPattern())
