@@ -79,3 +79,5 @@ from app.core.patterns.candle.three_stars_in_south import ThreeStarsInSouthPatte
 CANDLE_PATTERNS.append(ThreeStarsInSouthPattern())
 from app.core.patterns.candle.three_line_strike import ThreeLineStrikePattern
 CANDLE_PATTERNS.append(ThreeLineStrikePattern())
+from app.core.patterns.candle.abandoned_baby import AbandonedBabyPattern
+CANDLE_PATTERNS.append(AbandonedBabyPattern())
