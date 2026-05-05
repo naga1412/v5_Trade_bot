@@ -14,7 +14,7 @@ from typing import cast
 import pandas as pd
 import talib  # type: ignore[import-untyped]
 
-from app.core.patterns.base import Direction, PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 
 
 def make_talib_wrapper(
@@ -38,7 +38,7 @@ def make_talib_wrapper(
     func = getattr(talib, talib_func_name)
 
     class _TalibPattern:
-        pattern_type: str = "candle"
+        pattern_type: PatternType = "candle"
 
         def __init__(self) -> None:
             self.pattern_id: str = pattern_id

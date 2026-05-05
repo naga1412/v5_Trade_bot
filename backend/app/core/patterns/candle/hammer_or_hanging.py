@@ -18,14 +18,14 @@ from __future__ import annotations
 import pandas as pd
 import talib  # type: ignore[import-untyped]
 
-from app.core.patterns.base import Direction, PatternFire
+from app.core.patterns.base import Direction, PatternFire, PatternType
 
 _SMA_LOOKBACK = 20
 _CONFIDENCE = 0.7
 
 
 class HammerOrHangingPattern:
-    pattern_type: str = "candle"
+    pattern_type: PatternType = "candle"
 
     def __init__(self) -> None:
         self.pattern_id: str = "hammer_or_hanging"
