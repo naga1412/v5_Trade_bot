@@ -103,3 +103,5 @@ from app.core.patterns.candle.ladder_bottom import LadderBottomPattern
 CANDLE_PATTERNS.append(LadderBottomPattern())
 from app.core.patterns.candle.on_neck import OnNeckPattern
 CANDLE_PATTERNS.append(OnNeckPattern())
+from app.core.patterns.candle.stalled_pattern import StalledPatternPattern
+CANDLE_PATTERNS.append(StalledPatternPattern())
