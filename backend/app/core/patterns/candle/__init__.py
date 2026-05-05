@@ -29,3 +29,5 @@ from app.core.patterns.candle.evening_doji_star import EveningDojiStarPattern
 CANDLE_PATTERNS.append(EveningDojiStarPattern())
 from app.core.patterns.candle.harami import HaramiPattern
 CANDLE_PATTERNS.append(HaramiPattern())
+from app.core.patterns.candle.harami_cross import HaramiCrossPattern
+CANDLE_PATTERNS.append(HaramiCrossPattern())
