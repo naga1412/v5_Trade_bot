@@ -113,3 +113,5 @@ from app.core.patterns.candle.tasuki_gap import TasukiGapPattern
 CANDLE_PATTERNS.append(TasukiGapPattern())
 from app.core.patterns.candle.thrusting import ThrustingPattern
 CANDLE_PATTERNS.append(ThrustingPattern())
+from app.core.patterns.candle.two_crows import TwoCrowsPattern
+CANDLE_PATTERNS.append(TwoCrowsPattern())
