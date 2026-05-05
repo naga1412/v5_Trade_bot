@@ -12,8 +12,14 @@ from app.data.adapters.yahoo import YahooAdapter
 
 
 def _fake_df(rows: list[tuple]) -> pd.DataFrame:
+    """Build a yfinance-shaped DataFrame.
+
+    Each row is `(day, open, high, low, close, adj_close, volume)` where
+    `day` becomes the row's DatetimeIndex entry (May 2026) and the
+    remaining six values populate the OHLC + Adj Close + Volume columns.
+    """
     return pd.DataFrame(
-        rows,
+        [r[1:] for r in rows],
         columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"],
         index=pd.DatetimeIndex(
             [datetime(2026, 5, r[0], tzinfo=timezone.utc) for r in rows],
