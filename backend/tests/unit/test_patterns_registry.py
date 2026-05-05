@@ -1,6 +1,7 @@
 from app.core.patterns import ALL_PATTERNS
 from app.core.patterns.base import Pattern
 from app.core.patterns.candle import CANDLE_PATTERNS
+from app.core.patterns.chart import CHART_PATTERNS
 
 
 def test_all_patterns_is_a_list() -> None:
@@ -33,3 +34,20 @@ def test_82_candle_patterns_registered() -> None:
 def test_all_candle_patterns_are_type_candle() -> None:
     for p in CANDLE_PATTERNS:
         assert p.pattern_type == "candle"
+
+
+def test_76_chart_patterns_registered() -> None:
+    """SP-2 Phase D: 76 chart patterns across batches D1-D5."""
+    assert len(CHART_PATTERNS) == 76
+    ids = {p.pattern_id for p in CHART_PATTERNS}
+    assert len(ids) == 76, f"duplicate pattern_ids in CHART_PATTERNS: {ids}"
+
+
+def test_all_chart_patterns_are_type_chart() -> None:
+    for p in CHART_PATTERNS:
+        assert p.pattern_type == "chart"
+
+
+def test_grand_total_158_patterns() -> None:
+    """Phase C (82 candle) + Phase D (76 chart) = 158 total patterns."""
+    assert len(ALL_PATTERNS) == 158
