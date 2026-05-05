@@ -105,3 +105,5 @@ from app.core.patterns.candle.on_neck import OnNeckPattern
 CANDLE_PATTERNS.append(OnNeckPattern())
 from app.core.patterns.candle.stalled_pattern import StalledPatternPattern
 CANDLE_PATTERNS.append(StalledPatternPattern())
+from app.core.patterns.candle.stick_sandwich import StickSandwichPattern
+CANDLE_PATTERNS.append(StickSandwichPattern())
