@@ -35,3 +35,5 @@ from app.core.patterns.candle.tweezer_top import TweezerTopPattern
 CANDLE_PATTERNS.append(TweezerTopPattern())
 from app.core.patterns.candle.kicking import KickingPattern
 CANDLE_PATTERNS.append(KickingPattern())
+from app.core.patterns.candle.belt_hold import BeltHoldPattern
+CANDLE_PATTERNS.append(BeltHoldPattern())
