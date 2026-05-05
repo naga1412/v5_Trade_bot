@@ -11,6 +11,7 @@ from app.core.indicators.macd import macd
 from app.core.indicators.rsi import rsi
 from app.core.scoring.aggregator import aggregate
 from app.core.scoring.layer1_macro import score as score_l1
+from app.core.scoring.layer2_patterns import PatternStatsLookup, score as score_l2
 from app.core.scoring.layer3_momentum import score as score_l3
 from app.core.scoring.layer5_volume import score as score_l5
 from app.core.scoring.types import Direction, LayerScore
@@ -67,10 +68,29 @@ def _atr(bars: pd.DataFrame, period: int = 14) -> float:
 
 
 def build_prediction(
-    *, symbol: str, timeframe: str, bars: pd.DataFrame
+    *,
+    symbol: str,
+    timeframe: str,
+    bars: pd.DataFrame,
+    pattern_stats_lookup: PatternStatsLookup | None = None,
+    enabled_patterns: set[str] | None = None,
 ) -> LivePredictionOut:
+    """Compose L1/L3/L5 scores (always) plus L2 (when ``pattern_stats_lookup`` provided).
+
+    SP-2 Phase E E3: L2 is opt-in via ``pattern_stats_lookup`` so existing
+    callers (and tests) that don't yet hold a lookup keep working unchanged.
+    The live + shadow workers cache one ``PatternStatsLookup`` per
+    ``(symbol, timeframe)`` and pass it on every closed candle.
+    """
     layer_results: dict[int, LayerScore | None] = {i: None for i in range(1, 11)}
     layer_results[1] = score_l1(bars)
+    if pattern_stats_lookup is not None and len(bars) > 0:
+        layer_results[2] = score_l2(
+            bars,
+            current_idx=len(bars) - 1,
+            stats=pattern_stats_lookup,
+            enabled_patterns=enabled_patterns,
+        )
     layer_results[3] = score_l3(bars)
     layer_results[5] = score_l5(bars)
 
