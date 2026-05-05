@@ -341,3 +341,41 @@ class PatternToggleIn(BaseModel):
     symbol: str | None = None
     timeframe: str | None = None
     reason: str | None = None
+
+
+# --- SP-3 Phase F: adapter / universe schemas ---------------------------------
+
+
+class AdapterHealthOut(BaseModel):
+    """Latest health-probe row for a data adapter (returned by admin route)."""
+
+    exchange: str
+    checked_at: datetime
+    is_healthy: bool
+    latency_ms: int | None = None
+    error_message: str | None = None
+    quota_used_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class UniverseEntryOut(BaseModel):
+    """A single ``universe_history`` row exposed by the admin universe route."""
+
+    exchange: str
+    symbol: str
+    asset_class: Literal["crypto", "stock", "fx", "commodity", "index"]
+    listed_at: datetime
+    delisted_at: datetime | None
+    last_synced_at: datetime
+
+    @property
+    def is_active(self) -> bool:
+        return self.delisted_at is None
+
+
+class SyncResultOut(BaseModel):
+    """Per-exchange counters returned by the admin sync trigger route."""
+
+    exchange: str
+    added: int
+    still_active: int
+    newly_delisted: int

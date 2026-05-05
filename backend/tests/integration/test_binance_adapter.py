@@ -38,8 +38,8 @@ async def test_fetch_klines_parses_binance_response() -> None:
 
     assert len(candles) == 1
     c = candles[0]
-    assert c.symbol == "BTC/USDT"
-    assert c.timeframe == "1h"
+    # SP-3 Phase B: Candle is bare OHLCV — symbol/timeframe live on the
+    # SymbolInfo + caller context now, not on every bar.
     assert c.ts == datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
     assert c.open == 65000.0
     assert c.high == 65500.0

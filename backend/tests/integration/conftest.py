@@ -103,6 +103,27 @@ async def _create_shadow_tables(engine: Any) -> None:
             "snapshot_at TEXT NOT NULL DEFAULT (datetime('now')), "
             "UNIQUE (symbol, snapshot_at))"
         ))
+        # SP-3 Phase F: universe_history is the point-in-time tradable
+        # universe queried by app.data.universe.is_tradable. Seed BTC/USDT
+        # so the legacy SP-0 predict-route tests (which just expect "BTC/USDT
+        # is always tradable") keep passing without new fixture changes.
+        await conn.execute(sa.text(
+            "CREATE TABLE universe_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "exchange TEXT NOT NULL, symbol TEXT NOT NULL, "
+            "asset_class TEXT NOT NULL, "
+            "listed_at TEXT NOT NULL, "
+            "delisted_at TEXT, "
+            "last_synced_at TEXT NOT NULL, "
+            "metadata TEXT, "
+            "UNIQUE (exchange, symbol))"
+        ))
+        await conn.execute(sa.text(
+            "INSERT INTO universe_history "
+            "(exchange, symbol, asset_class, listed_at, last_synced_at) "
+            "VALUES ('binance', 'BTC/USDT', 'crypto', "
+            "'2017-08-17T00:00:00+00:00', '2026-05-01T00:00:00+00:00')"
+        ))
 
 
 @pytest_asyncio.fixture
@@ -215,6 +236,28 @@ async def _create_auth_tables(engine: Any) -> None:
             "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
             "updated_by INTEGER, "
             "UNIQUE (pattern_id, symbol, timeframe))"
+        ))
+        # SP-3 Phase F: universe_history + adapter_health. SQLite-friendly
+        # mirrors of migration 0010 (TIMESTAMPTZ → TEXT, JSONB → TEXT).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS universe_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "exchange TEXT NOT NULL, symbol TEXT NOT NULL, "
+            "asset_class TEXT NOT NULL, "
+            "listed_at TEXT NOT NULL, "
+            "delisted_at TEXT, "
+            "last_synced_at TEXT NOT NULL, "
+            "metadata TEXT, "
+            "UNIQUE (exchange, symbol))"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS adapter_health ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "exchange TEXT NOT NULL, "
+            "checked_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "is_healthy INTEGER NOT NULL, "
+            "latency_ms INTEGER, error_message TEXT, "
+            "quota_used_pct REAL)"
         ))
         # Seed via raw SQL so created_at ordering is deterministic.
         await conn.execute(sa.text(

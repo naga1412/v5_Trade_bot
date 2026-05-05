@@ -38,10 +38,27 @@ def _to_binance_symbol(pair: str) -> str:
     return pair.replace("/", "")
 
 
-async def _fetch_recent_candles(symbol: str, timeframe: str, *, limit: int = 500) -> list[Candle]:
+async def _fetch_recent_candles(
+    symbol: str, timeframe: str, *, limit: int = 500,
+) -> list[Candle]:
+    """Fetch klines via the canonical Binance adapter, then re-wrap as the
+    validator-flavoured ``Candle`` (which carries the extra ``symbol`` /
+    ``timeframe`` metadata downstream consumers — predictor, charting layer —
+    expect).
+    """
     async with httpx.AsyncClient() as http:
         client = BinanceClient(http=http)
-        return await client.fetch_klines(_to_binance_symbol(symbol), timeframe, limit=limit)
+        bars = await client.fetch_klines(
+            _to_binance_symbol(symbol), timeframe, limit=limit,
+        )
+    return [
+        Candle(
+            symbol=symbol, timeframe=timeframe,
+            ts=b.ts, open=b.open, high=b.high,
+            low=b.low, close=b.close, volume=b.volume,
+        )
+        for b in bars
+    ]
 
 
 def _candles_to_df(candles: list[Candle]) -> pd.DataFrame:
@@ -56,11 +73,12 @@ async def candles(
     timeframe: str,
     limit: int = 500,
     current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[CandleOut]:
     pair = _normalize_pair(symbol_path)
     if timeframe not in _TIMEFRAMES:
         raise HTTPException(400, f"Unsupported timeframe {timeframe}")
-    if not is_tradable(pair, datetime.now(timezone.utc)):
+    if not await is_tradable(session, pair, datetime.now(timezone.utc)):
         raise HTTPException(404, f"Unknown symbol {pair}")
     cs = await _fetch_recent_candles(pair, timeframe, limit=min(1000, limit))
     return [
@@ -118,7 +136,7 @@ async def predict(
     pair = _normalize_pair(symbol_path)
     if timeframe not in _TIMEFRAMES:
         raise HTTPException(400, f"Unsupported timeframe {timeframe}")
-    if not is_tradable(pair, datetime.now(timezone.utc)):
+    if not await is_tradable(session, pair, datetime.now(timezone.utc)):
         raise HTTPException(404, f"Unknown symbol {pair}")
 
     markers: SignalMarkersOut | None = None
