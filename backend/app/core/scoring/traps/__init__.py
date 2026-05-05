@@ -5,6 +5,7 @@ Phases C and D append concrete trap instances. The orchestrator
 filters by `enabled_set` (per-symbol/per-TF admin disables) at run time.
 """
 from app.core.scoring.traps.all_indicator_extreme import AllIndicatorExtremeTrap
+from app.core.scoring.traps.alt_btc_indecision import AltBtcIndecisionTrap
 from app.core.scoring.traps.base import Trap, TrapContext, TrapFire  # noqa: F401
 from app.core.scoring.traps.counter_weekly import CounterWeeklyTrap
 from app.core.scoring.traps.friday_weekend import FridayWeekendTrap
@@ -19,5 +20,6 @@ ALL_TRAPS: list[Trap] = [
     FridayWeekendTrap(),
     CounterWeeklyTrap(),
     AllIndicatorExtremeTrap(),
+    AltBtcIndecisionTrap(),
 ]
 """Filled by Phase C (12 main traps) + Phase D (5 short-only)."""
