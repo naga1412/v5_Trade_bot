@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.routes.ws import manager
 from app.core.predictor import _atr, build_prediction
+from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
 from app.shadow.engine import (
@@ -224,9 +225,27 @@ class ShadowWorker:
         if gate.is_blocked(candle.symbol, now=candle.ts):
             return
 
+        # SP-2 Phase E E4: cached PatternStatsLookup keyed by (symbol, timeframe).
+        # First closed candle per symbol triggers a single DB read; subsequent
+        # candles read from the in-process cache.
+        try:
+            async with self.session_factory() as stats_session:
+                stats_lookup = await pattern_stats_cache.get_or_load(
+                    stats_session,
+                    symbol=candle.symbol,
+                    timeframe=SHADOW_TIMEFRAME,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "pattern_stats lookup failed for %s; running without L2: %s",
+                candle.symbol, e,
+            )
+            stats_lookup = None
+
         try:
             pred = build_prediction(
                 symbol=candle.symbol, timeframe=SHADOW_TIMEFRAME, bars=buf,
+                pattern_stats_lookup=stats_lookup,
             )
         except Exception as e:
             log.warning("build_prediction failed for %s: %s", candle.symbol, e)

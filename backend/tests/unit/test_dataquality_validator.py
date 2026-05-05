@@ -1,8 +1,7 @@
-from datetime import datetime, timedelta, timezone
-import pytest
+from datetime import datetime, timezone
 
 from app.core.dataquality.validator import (
-    Candle, ValidationResult, validate
+    Candle, validate
 )
 
 

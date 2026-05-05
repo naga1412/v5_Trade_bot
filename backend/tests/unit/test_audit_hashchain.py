@@ -1,4 +1,3 @@
-import json
 import hashlib
 
 import pytest
@@ -37,7 +36,6 @@ def test_chain_unbroken_across_three_rows() -> None:
     assert tampered != h1
 
 
-import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 

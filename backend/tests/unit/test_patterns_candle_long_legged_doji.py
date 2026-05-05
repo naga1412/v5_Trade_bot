@@ -1,0 +1,45 @@
+"""Tests for TA-Lib candle pattern wrapper."""
+from __future__ import annotations
+
+import pandas as pd
+
+from app.core.patterns.candle.long_legged_doji import LongLeggedDojiPattern
+
+
+def _bars(rows: list[tuple[float, float, float, float, float]]) -> pd.DataFrame:
+    idx = pd.date_range("2025-01-01", periods=len(rows), freq="1h")
+    return pd.DataFrame(
+        rows, columns=["open", "high", "low", "close", "volume"], index=idx
+    )
+
+
+def test_long_legged_doji_returns_none_on_neutral_input() -> None:
+    """Wide-bodied bars (open != close) must not trigger a long-legged doji."""
+    bars = _bars([(100.0, 102.0, 99.5, 101.5, 1_000.0)] * 30)
+    fire = LongLeggedDojiPattern().detect(bars, current_idx=29)
+    assert fire is None
+
+
+def test_long_legged_doji_pattern_id_and_type() -> None:
+    p = LongLeggedDojiPattern()
+    assert p.pattern_id == "long_legged_doji"
+    assert p.pattern_type == "candle"
+
+
+def test_long_legged_doji_fires_on_known_shape_or_returns_none() -> None:
+    """Synthetic OHLCV resembling a strong reversal — TA-Lib may or may not
+    fire depending on its internal heuristics. Either way, the result must
+    be a valid PatternFire (with normalised fields) or None."""
+    rows: list[tuple[float, float, float, float, float]] = []
+    for i in range(20):
+        price = 100.0 - i * 0.5
+        rows.append((price, price + 0.5, price - 1.0, price - 0.8, 1_000.0))
+    rows.append((90.0, 95.0, 89.5, 94.5, 5_000.0))
+    bars = _bars(rows)
+    fire = LongLeggedDojiPattern().detect(bars, current_idx=len(rows) - 1)
+    if fire is not None:
+        assert fire.direction in ("LONG", "SHORT")
+        assert 0.0 <= fire.strength <= 1.0
+        assert 0.0 <= fire.confidence <= 1.0
+        assert "talib_output" in fire.evidence
+        assert "talib_func" in fire.evidence

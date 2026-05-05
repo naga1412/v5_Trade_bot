@@ -48,7 +48,6 @@ async def test_fetch_klines_parses_binance_response() -> None:
     assert c.volume == 1234.56
 
 
-import asyncio
 import json
 
 from app.data.adapters.binance import BinanceKlineStream

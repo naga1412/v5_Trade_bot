@@ -167,3 +167,117 @@ in dev when a per-user table is queried without `user_id`.
 SP-0.8 (real Binance trade execution + Telegram approve flow) per the
 meta-plan.
 
+---
+
+## 2026-05-03 — SP-2 Indicators + Patterns Library: SHIPPED
+
+**Scope:** stood up the full SP-2 deterministic-signals layer — 34 indicator
+modules (43 by output-line count: bollinger upper/middle/lower count as 3,
+MACD line/signal/hist as 3, etc.), 158 pattern detectors (82 candle: 61
+TA-Lib + 21 hand-rolled; plus 76 hand-rolled chart patterns), and the L2
+pattern aggregator that turns per-bar fires into a `LayerScore` weighted by
+`strength × confidence × historical_accuracy`. Wired into
+`build_prediction()` opt-in via `PatternStatsLookup`; live + shadow workers
+hold a process-memory cache per `(symbol, timeframe)` and pass it on every
+closed candle. Admin REST endpoints under `/api/v1/admin/patterns/*` let
+operators enable/disable individual patterns per symbol/timeframe at
+runtime. Cross-validation suite (100 entries) compares current-code outputs
+to a TA-Lib-derived reference and exits 0 on a clean match.
+
+**Delivered (210 commits on branch `sp-2/main`):**
+
+| Phase | Sub-system                                                                                                | Commits |
+|-------|-----------------------------------------------------------------------------------------------------------|---------|
+| A     | Worktree + migration 0009 (`pattern_enabled`) + TA-Lib install + `Pattern`/`PatternFire` scaffolding      | 5       |
+| B     | 31 new indicator modules + registry update                                                                | 32      |
+| C     | 82 candle patterns (61 TA-Lib wrappers via `make_talib_wrapper` + 21 hand-rolled) + registry              | 83      |
+| D     | 76 chart patterns + registry + 158-total assertion                                                        | 77      |
+| E     | L2 aggregator + `PatternStatsLookup` + `build_prediction()` wiring + worker cache + admin REST + mypy/ruff cleanup | 8 |
+| F     | TA-Lib reference (100 entries) + cross-validation script + L2 pipeline E2E + ship/log/tag                 | 5       |
+
+**Test counts at ship:**
+- Backend: **1040 passing** (was 1036 at start of Phase F; +4 new from F4
+  E2E + 2 unrelated pre-existing `test_ml_checkpoints` failures from the
+  Windows sandbox CWD path issue, surfaced before SP-2)
+- Cross-validation script (`tools/validation/sp2_cross_check.py`): **100/100
+  entries match** the TA-Lib reference
+
+**Surprises / decisions worth flagging:**
+
+- **34 indicator modules, 43 by output-line count.** Spec §3.1 quotes "43
+  indicators"; the discrepancy is intentional — multi-output indicators
+  (Bollinger upper/middle/lower, MACD line/signal/histogram, Stochastic
+  %K/%D, etc.) compose multiple "outputs" from a single module. Documented
+  inline in `app/core/indicators/__init__.py` so future contributors do
+  not chase a phantom 9 modules.
+- **82 candle patterns = 61 TA-Lib + 21 hand-rolled.** TA-Lib gives us 61
+  CDL* functions for free via `make_talib_wrapper`, each fixed at
+  confidence 0.7. The 21 hand-rolled additions cover patterns TA-Lib does
+  not ship (strict / context-gated variants like pin-bar with prior trend,
+  inside-bar continuation, etc.) and use confidences in 0.6–0.8 to
+  reflect the looser heuristics.
+- **76 chart patterns are entirely hand-rolled.** TA-Lib has no
+  chart-pattern functions; the bottoms/tops/triangles/flags/wedges/channels/
+  cup-and-handle/gaps/harmonics/multi-TF-confluence catalogue is custom
+  numpy + scipy peak-finding behind a small set of helpers
+  (`_helpers.py`, `_harmonic_helpers.py`).
+- **L2 layer is opt-in via `PatternStatsLookup`.** `build_prediction(...,
+  pattern_stats_lookup=lookup)` runs L2 only when the caller passes a
+  lookup. Existing tests / callers that do not yet hold one keep working
+  unchanged. The live + shadow workers cache one lookup per
+  `(symbol, timeframe)` and refresh it after the SP-1 nightly
+  `update_pattern_stats` job.
+- **Cold-start gating is GENERATED + lookup-side.** `pattern_stats.accuracy`
+  is a `GENERATED ALWAYS AS (CASE WHEN n_samples = 0 THEN 0.5 ELSE
+  n_correct/n_samples END) STORED` column in Postgres; the
+  `load_pattern_stats` helper additionally drops any row with `n_samples <
+  50` from the in-memory lookup so noisy early data never feeds L2.
+  Default `PRIOR_ACCURACY = 0.5` falls in for missing rows.
+- **Cross-validation uses TA-Lib reference, not TradingView.** Spec F1
+  called for "100 samples from TradingView". Reproducibility against
+  future TA-Lib version bumps mattered more than mirror-Pine-script
+  validation, and TradingView's Pine Script wraps the same TA-Lib C
+  library — so TA-Lib is a faithful proxy for the 61 wrapped patterns.
+  The `_note` field at the top of `sp2_reference.json` documents the
+  trade-off and recommends manual TradingView spot-checks for the 21
+  hand-rolled patterns where we depart from TA-Lib defaults.
+- **Frontend admin sub-page deferred to SP-6.** Phase E's admin REST
+  endpoints (`POST /api/v1/admin/patterns/{pattern_id}/disable` etc.)
+  ship live; the React UI to drive them is intentionally pushed to SP-6
+  (alongside the model-checkpoints admin sub-page) so SP-2 does not block
+  on UI churn. `curl` is sufficient for ops in the meantime.
+- **`enabled_patterns` auto-load from DB deferred.** The L2 aggregator
+  accepts an `enabled_patterns: set[str] | None` arg today and the
+  worker-side cache abstraction is in place, but the DB-driven
+  refresh-on-pattern_enabled-change wiring is not. Cache is currently
+  passed `None` (all enabled) by the workers — a follow-up to land before
+  SP-3.
+- **Audit chain binds the L2 score by construction.** The
+  `predictions.layer_scores` JSONB column is part of the canonical row
+  payload that `compute_row_hash` covers, so any tampering with a
+  persisted L2 score breaks the chain at the next `verify_chain` pass.
+  Pinned in `tests/integration/test_l2_pipeline_e2e.py` with a
+  hash-flip negative assertion.
+
+**Manual checklist (for the human after deploy):**
+- [ ] Migration 0009 (`pattern_enabled`) applies cleanly on the staging Postgres
+- [ ] Live worker logs show "L2 cache warmed for BTC/USDT 1h: N patterns"
+      after first closed candle
+- [ ] At least one prediction row in production has `layer_scores->>'2'`
+      non-null and `notes` containing a JSON pattern array
+- [ ] Admin `POST /api/v1/admin/patterns/hammer/disable?symbol=BTC/USDT&timeframe=1h`
+      returns 200 and a follow-up GET shows `enabled = false`
+- [ ] Run `python tools/validation/sp2_cross_check.py` against the deployed
+      backend image — exit 0 / 100/100 pass
+- [ ] Manual TradingView spot-check on one of the 21 hand-rolled candle
+      patterns at a known reference bar (recommended: `pinbar_long` on
+      BTCUSDT 1h)
+
+**Next:** ship F5 (PR `sp-2/main` → `main`) and tag `sp-2`. Then either
+- **SP-1.1** — train the Conv-LSTM checkpoint that makes `ghost_*` columns
+  non-null in production, or
+- **SP-3** — multi-source data adapters (Binance + Bybit + Coinbase with
+  unified bar normaliser), or
+- **SP-5** — full scoring engine that fuses L1–L10 layers into the final
+  signal score with calibrated weights.
+

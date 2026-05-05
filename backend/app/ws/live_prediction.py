@@ -9,6 +9,7 @@ import pandas as pd
 from app.api.routes.ws import manager
 from app.core.execution.persistence import persist_prediction
 from app.core.predictor import build_prediction
+from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.session import get_session_factory
 
@@ -47,8 +48,23 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
         )
         bars = pd.concat([bars, new_row]).iloc[-1000:]
 
+        # SP-2 Phase E E4: load PatternStatsLookup once per (symbol, timeframe)
+        # so the L2 aggregator can run on every closed candle without an extra
+        # DB round-trip. Cache miss path opens a short-lived session.
         try:
-            pred = build_prediction(symbol=symbol_pair, timeframe=timeframe, bars=bars)
+            async with session_factory() as stats_session:
+                stats_lookup = await pattern_stats_cache.get_or_load(
+                    stats_session, symbol=symbol_pair, timeframe=timeframe,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("pattern_stats lookup failed; running without L2: %s", e)
+            stats_lookup = None
+
+        try:
+            pred = build_prediction(
+                symbol=symbol_pair, timeframe=timeframe, bars=bars,
+                pattern_stats_lookup=stats_lookup,
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("build_prediction failed: %s", e)
             continue

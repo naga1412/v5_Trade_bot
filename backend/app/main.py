@@ -4,7 +4,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import admin, admin_ml, bot_status, health, me, tab1
+from app.api.routes import (
+    admin,
+    admin_ml,
+    admin_patterns,
+    bot_status,
+    health,
+    me,
+    tab1,
+)
 from app.api.routes import ws as ws_routes
 from app.auth.query_guard import attach_query_guard
 from app.config import get_settings
@@ -83,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(bot_status.router)
     app.include_router(admin.router)
     app.include_router(admin_ml.router)
+    app.include_router(admin_patterns.router)
     app.include_router(me.router)
     app.include_router(ws_routes.router)
     return app

@@ -202,6 +202,20 @@ async def _create_auth_tables(engine: Any) -> None:
             "activated_at TEXT, deactivated_at TEXT, notes TEXT, "
             "UNIQUE (model_name, version))"
         ))
+        # SP-2 Phase E E5: pattern_enabled. SQLite-friendly mirror of
+        # migration 0009 (BIGSERIAL → INTEGER AUTOINCREMENT, BOOLEAN → INTEGER).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS pattern_enabled ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "pattern_id TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "enabled INTEGER NOT NULL DEFAULT 1, "
+            "disabled_reason TEXT, "
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "updated_by INTEGER, "
+            "UNIQUE (pattern_id, symbol, timeframe))"
+        ))
         # Seed via raw SQL so created_at ordering is deterministic.
         await conn.execute(sa.text(
             "INSERT INTO users (id, email, display_name, is_admin, is_active, "

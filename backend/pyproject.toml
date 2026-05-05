@@ -24,7 +24,21 @@ dependencies = [
     "pyarrow==17.0.0",
     "boto3==1.35.0",
     "duckdb==1.1.3",
+    "ta-lib==0.6.5",
+    "scipy==1.13.1",
 ]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# Pre-existing CI break on `main`: setuptools auto-discovery sees
+# ``app/``, ``data/``, ``alembic/`` as three top-level packages and refuses
+# to build the editable install. Restrict discovery to ``app*`` only —
+# ``alembic/versions`` and ``data/`` are runtime resources, not import roots.
+include = ["app*"]
+exclude = ["data*", "alembic*", "tests*", "tools*"]
 
 [project.optional-dependencies]
 dev = [
@@ -50,6 +64,16 @@ markers = [
     "integration: requires database/redis",
     "slow: takes more than 1s",
 ]
+
+[tool.ruff]
+# Colab notebooks are interactive scratch space — semicolon chains, multi-imports,
+# and other "loose" Jupyter idioms shouldn't trip the strict lint we apply to .py.
+extend-exclude = ["tools/ml/colab/*.ipynb"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests routinely interleave imports with fixtures / pytest.importorskip checks,
+# and dead local assignments are common in arrange-act-assert blocks.
+"tests/**/*.py" = ["E402", "F841"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
