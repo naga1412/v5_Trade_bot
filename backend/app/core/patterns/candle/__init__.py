@@ -25,3 +25,5 @@ from app.core.patterns.candle.evening_star import EveningStarPattern
 CANDLE_PATTERNS.append(EveningStarPattern())
 from app.core.patterns.candle.morning_doji_star import MorningDojiStarPattern
 CANDLE_PATTERNS.append(MorningDojiStarPattern())
+from app.core.patterns.candle.evening_doji_star import EveningDojiStarPattern
+CANDLE_PATTERNS.append(EveningDojiStarPattern())
