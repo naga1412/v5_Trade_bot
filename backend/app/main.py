@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import (
     admin,
+    admin_adapters,
     admin_ml,
     admin_patterns,
     bot_status,
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(tab1.router)
     app.include_router(bot_status.router)
     app.include_router(admin.router)
+    app.include_router(admin_adapters.router)
     app.include_router(admin_ml.router)
     app.include_router(admin_patterns.router)
     app.include_router(me.router)

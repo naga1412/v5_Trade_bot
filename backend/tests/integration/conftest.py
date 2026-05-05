@@ -237,6 +237,28 @@ async def _create_auth_tables(engine: Any) -> None:
             "updated_by INTEGER, "
             "UNIQUE (pattern_id, symbol, timeframe))"
         ))
+        # SP-3 Phase F: universe_history + adapter_health. SQLite-friendly
+        # mirrors of migration 0010 (TIMESTAMPTZ → TEXT, JSONB → TEXT).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS universe_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "exchange TEXT NOT NULL, symbol TEXT NOT NULL, "
+            "asset_class TEXT NOT NULL, "
+            "listed_at TEXT NOT NULL, "
+            "delisted_at TEXT, "
+            "last_synced_at TEXT NOT NULL, "
+            "metadata TEXT, "
+            "UNIQUE (exchange, symbol))"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS adapter_health ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "exchange TEXT NOT NULL, "
+            "checked_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "is_healthy INTEGER NOT NULL, "
+            "latency_ms INTEGER, error_message TEXT, "
+            "quota_used_pct REAL)"
+        ))
         # Seed via raw SQL so created_at ordering is deterministic.
         await conn.execute(sa.text(
             "INSERT INTO users (id, email, display_name, is_admin, is_active, "
