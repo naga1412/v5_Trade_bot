@@ -81,8 +81,13 @@ async def test_load_active_returns_none_when_no_active_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_active_downloads_and_loads_state_dict(tmp_path: Path) -> None:
+async def test_load_active_downloads_and_loads_state_dict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When an active row exists, download the checkpoint, sha-verify, load it."""
+    # Default ML_CACHE_DIR is /app/data/ml-cache (prod container path); CI
+    # workers can't write there. Point it at tmp_path so the loader can mkdir.
+    monkeypatch.setenv("ML_CACHE_DIR", str(tmp_path / "ml-cache"))
     clear_active()
     # Build a real ConvLSTMPredictor checkpoint to use as the "downloaded" file.
     ck_path = tmp_path / "ckpt.pt"
@@ -121,8 +126,11 @@ async def test_load_active_downloads_and_loads_state_dict(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_load_active_returns_none_on_sha_mismatch(tmp_path: Path) -> None:
+async def test_load_active_returns_none_on_sha_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If sha256 doesn't match what the row says, refuse to load."""
+    monkeypatch.setenv("ML_CACHE_DIR", str(tmp_path / "ml-cache"))
     clear_active()
     ck_path = tmp_path / "ckpt.pt"
     m = ConvLSTMPredictor()
