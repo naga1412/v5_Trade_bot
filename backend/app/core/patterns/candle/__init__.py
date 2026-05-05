@@ -55,3 +55,5 @@ from app.core.patterns.candle.closing_marubozu import ClosingMarubozuPattern
 CANDLE_PATTERNS.append(ClosingMarubozuPattern())
 from app.core.patterns.candle.long_line import LongLinePattern
 CANDLE_PATTERNS.append(LongLinePattern())
+from app.core.patterns.candle.short_line import ShortLinePattern
+CANDLE_PATTERNS.append(ShortLinePattern())
