@@ -4,6 +4,7 @@ Phases C and D append concrete trap instances. The orchestrator
 `app/core/scoring/run_traps.py:check_all_traps()` iterates this list and
 filters by `enabled_set` (per-symbol/per-TF admin disables) at run time.
 """
+from app.core.scoring.traps.all_indicator_extreme import AllIndicatorExtremeTrap
 from app.core.scoring.traps.base import Trap, TrapContext, TrapFire  # noqa: F401
 from app.core.scoring.traps.counter_weekly import CounterWeeklyTrap
 from app.core.scoring.traps.friday_weekend import FridayWeekendTrap
@@ -17,5 +18,6 @@ ALL_TRAPS: list[Trap] = [
     ParabolicBlowoffTrap(),
     FridayWeekendTrap(),
     CounterWeeklyTrap(),
+    AllIndicatorExtremeTrap(),
 ]
 """Filled by Phase C (12 main traps) + Phase D (5 short-only)."""
