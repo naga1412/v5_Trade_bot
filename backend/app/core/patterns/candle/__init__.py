@@ -45,3 +45,5 @@ from app.core.patterns.candle.dragonfly_doji import DragonflyDojiPattern
 CANDLE_PATTERNS.append(DragonflyDojiPattern())
 from app.core.patterns.candle.gravestone_doji import GravestoneDojiPattern
 CANDLE_PATTERNS.append(GravestoneDojiPattern())
+from app.core.patterns.candle.long_legged_doji import LongLeggedDojiPattern
+CANDLE_PATTERNS.append(LongLeggedDojiPattern())
