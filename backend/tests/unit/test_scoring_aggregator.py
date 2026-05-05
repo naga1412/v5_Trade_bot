@@ -33,9 +33,10 @@ def test_single_layer_can_drive_direction() -> None:
     scores: dict[int, LayerScore | None] = {i: None for i in range(1, 11)}
     scores[3] = L(Direction.SHORT, 1.0, confidence=1.0)
     fs = aggregate(scores)
-    # Only L3 present; weight redistributes to 1.0
+    # Only L3 present; weight redistributes to 1.0. SP-5 applies the 0.95
+    # asymmetric SHORT direction penalty (CLAUDE.md rule 9), so |final|=0.95.
     assert fs.direction is Direction.SHORT
-    assert fs.score == pytest.approx(-1.0)
+    assert fs.score == pytest.approx(-0.95)
 
 
 def test_no_layers_present_returns_neutral_zero() -> None:
