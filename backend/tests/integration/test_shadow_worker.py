@@ -90,7 +90,7 @@ def _force_eval(monkeypatch: pytest.MonkeyPatch, *, score: float,
     pred = _StubPred(final=_StubFinal(score=score, confidence=confidence,
                                        direction=direction))
 
-    def fake_build(*, symbol: str, timeframe: str, bars: pd.DataFrame) -> Any:  # noqa: ARG001
+    def fake_build(*, symbol: str, timeframe: str, bars: pd.DataFrame, **_: Any) -> Any:  # noqa: ARG001
         return pred
 
     monkeypatch.setattr("app.shadow.worker.build_prediction", fake_build)
