@@ -15,7 +15,6 @@ Stop with Ctrl+C. The script handles "out of capacity" gracefully and retries.
 """
 from __future__ import annotations
 
-import os
 import sys
 import time
 import traceback
@@ -60,12 +59,33 @@ SSH_PUBLIC_KEY = (
 
 # Shape config (Always Free max).
 SHAPE = "VM.Standard.A1.Flex"
-OCPUS = 4
-MEMORY_GB = 24
 BOOT_VOLUME_GB = 100
 
 # Poll interval seconds.
 POLL_INTERVAL = 60
+
+# Capacity-fallback ladder. After SHAPE_FALLBACK_AFTER_ATTEMPTS failed attempts
+# at the primary (4 OCPU / 24 GB) shape, drop to the next entry which has a
+# bigger capacity pool per AD. Always Free allows up to 4 OCPU + 24 GB total
+# across instances, so a 2 OCPU instance leaves room to add a second 2 OCPU
+# later (or resize the first one in-place — Oracle supports flex resize without
+# reboot for A1).
+SHAPE_FALLBACK_AFTER_ATTEMPTS = 50  # ~50 minutes at POLL_INTERVAL=60
+SHAPE_FALLBACK_LADDER: list[tuple[int, int]] = [
+    (4, 24),  # primary — full Always Free max
+    (2, 12),  # half — leaves room for a second 2 OCPU instance later
+    (1, 6),   # minimum useful — DB only, less than ideal
+]
+
+# Multi-region rotation. Add (region, subnet_ocid) tuples for additional
+# regions to triple capacity hit rate (Mumbai + Singapore + Hyderabad have
+# independent pools). To add: subscribe tenancy to region in Oracle Console ->
+# Account Mgmt -> Region Management, create a VCN + public subnet via the
+# Network Wizard, then paste here. Compartment OCID is tenancy-global — same.
+EXTRA_REGION_SUBNETS: list[tuple[str, str]] = [
+    # ("ap-mumbai-1",    "ocid1.subnet.oc1.ap-mumbai-1.aaaaaaaa..."),
+    # ("ap-singapore-1", "ocid1.subnet.oc1.ap-singapore-1.aaaaaaaa..."),
+]
 
 # ====================================================================
 # Script body — no need to edit below.
@@ -104,18 +124,26 @@ def list_ads(identity_client: oci.identity.IdentityClient, compartment: str) -> 
     return [ad.name for ad in ads]
 
 
-def try_launch(client: oci.core.ComputeClient, *, ad: str, image_id: str) -> str | None:
+def try_launch(
+    client: oci.core.ComputeClient,
+    *,
+    ad: str,
+    image_id: str,
+    subnet_ocid: str,
+    ocpus: int,
+    memory_gb: int,
+) -> str | None:
     details = oci.core.models.LaunchInstanceDetails(
         availability_domain=ad,
         compartment_id=COMPARTMENT_OCID,
         shape=SHAPE,
         shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
-            ocpus=OCPUS,
-            memory_in_gbs=MEMORY_GB,
+            ocpus=ocpus,
+            memory_in_gbs=memory_gb,
         ),
         display_name=INSTANCE_NAME,
         create_vnic_details=oci.core.models.CreateVnicDetails(
-            subnet_id=SUBNET_OCID,
+            subnet_id=subnet_ocid,
             assign_public_ip=True,
         ),
         source_details=oci.core.models.InstanceSourceViaImageDetails(
@@ -128,12 +156,13 @@ def try_launch(client: oci.core.ComputeClient, *, ad: str, image_id: str) -> str
         resp = client.launch_instance(launch_instance_details=details)
         return resp.data.id
     except oci.exceptions.ServiceError as e:
-        if e.status in (500, 503) and "out of capacity" in (e.message or "").lower():
+        msg = (e.message or "").lower()
+        if e.status in (500, 503) and "out of capacity" in msg:
             return None
-        if e.status == 500 and "Out of host capacity" in (e.message or ""):
+        if e.status == 500 and "out of host capacity" in msg:
             return None
         if e.status == 429:  # too many requests
-            log(f"  rate-limited; sleeping 600s")
+            log("  rate-limited; sleeping 600s")
             time.sleep(600)
             return None
         # Real Oracle service error — surface and stop
@@ -151,6 +180,57 @@ def try_launch(client: oci.core.ComputeClient, *, ad: str, image_id: str) -> str
         return None
 
 
+def _build_region_context(base_config: dict, region: str, subnet_ocid: str) -> dict:
+    """Build per-region clients + cached AD list + image OCID."""
+    region_config = {**base_config, "region": region}
+    compute = oci.core.ComputeClient(region_config)
+    identity = oci.identity.IdentityClient(region_config)
+    ads = list_ads(identity, COMPARTMENT_OCID)
+    log(f"  region {region}: ADs = {ads}")
+    image_id = IMAGE_OCID or find_ubuntu_arm_image(compute, COMPARTMENT_OCID)
+    return {
+        "region": region,
+        "config": region_config,
+        "compute": compute,
+        "ads": ads,
+        "image_id": image_id,
+        "subnet_ocid": subnet_ocid,
+    }
+
+
+def _report_success(ctx: dict, instance_id: str) -> None:
+    """Wait for RUNNING, then look up and print the public IP + SSH command."""
+    log("=" * 60)
+    log("SUCCESS! Instance provisioning started.")
+    log(f"Region:        {ctx['region']}")
+    log(f"Instance OCID: {instance_id}")
+    log("Waiting for it to reach RUNNING state...")
+    compute: oci.core.ComputeClient = ctx["compute"]
+    try:
+        oci.wait_until(
+            compute,
+            compute.get_instance(instance_id),
+            "lifecycle_state",
+            "RUNNING",
+            max_wait_seconds=600,
+        )
+    except Exception:  # noqa: BLE001
+        log("Could not wait for RUNNING; check OCI console manually.")
+        log(f"Instance OCID: {instance_id}")
+        return
+
+    vnic_attachments = compute.list_vnic_attachments(
+        compartment_id=COMPARTMENT_OCID,
+        instance_id=instance_id,
+    ).data
+    if vnic_attachments:
+        network = oci.core.VirtualNetworkClient(ctx["config"])
+        vnic = network.get_vnic(vnic_attachments[0].vnic_id).data
+        log(f"PUBLIC IP: {vnic.public_ip}")
+        log(f"SSH: ssh -i ~/.ssh/oracle_key ubuntu@{vnic.public_ip}")
+    log("=" * 60)
+
+
 def main() -> int:
     if not Path(OCI_CONFIG_FILE).exists():
         print(f"ERROR: OCI config not found at {OCI_CONFIG_FILE}", file=sys.stderr)
@@ -162,64 +242,70 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    config = oci.config.from_file(file_location=OCI_CONFIG_FILE, profile_name=OCI_PROFILE)
-    config["region"] = REGION  # override in case CLI default differs
-    oci.config.validate_config(config)
+    base_config = oci.config.from_file(file_location=OCI_CONFIG_FILE, profile_name=OCI_PROFILE)
+    base_config["region"] = REGION
+    oci.config.validate_config(base_config)
 
-    compute = oci.core.ComputeClient(config)
-    identity = oci.identity.IdentityClient(config)
+    # Build a context per region. EXTRA_REGION_SUBNETS expands the search pool;
+    # each region has independent capacity, so 3 regions ≈ 3× hit rate.
+    region_pairs: list[tuple[str, str]] = [(REGION, SUBNET_OCID), *EXTRA_REGION_SUBNETS]
+    log(f"Initializing {len(region_pairs)} region(s): {[r for r, _ in region_pairs]}")
+    contexts = [_build_region_context(base_config, region, subnet) for region, subnet in region_pairs]
 
-    ads = list_ads(identity, COMPARTMENT_OCID)
-    log(f"Region {REGION} availability domains: {ads}")
-
-    image_id = IMAGE_OCID or find_ubuntu_arm_image(compute, COMPARTMENT_OCID)
-
-    log(f"Polling for Ampere {OCPUS} OCPU / {MEMORY_GB} GB capacity, every {POLL_INTERVAL}s...")
+    log(f"Polling for Ampere capacity every {POLL_INTERVAL}s.")
+    log(f"Shape ladder: {SHAPE_FALLBACK_LADDER} (drops one rung after "
+        f"{SHAPE_FALLBACK_AFTER_ATTEMPTS} failed attempts at the current rung).")
     log("Press Ctrl+C to stop.")
 
     attempt = 0
+    shape_idx = 0
+    attempts_at_current_shape = 0
+
     while True:
         attempt += 1
-        for ad in ads:
-            try:
-                instance_id = try_launch(compute, ad=ad, image_id=image_id)
-            except Exception:  # noqa: BLE001
-                log(f"  attempt {attempt} ad={ad}: hard error\n{traceback.format_exc()}")
-                time.sleep(POLL_INTERVAL)
-                continue
+        attempts_at_current_shape += 1
+        ocpus, memory_gb = SHAPE_FALLBACK_LADDER[shape_idx]
 
-            if instance_id:
-                log("=" * 60)
-                log("SUCCESS! Instance provisioning started.")
-                log(f"Instance OCID: {instance_id}")
-                log("Waiting for it to reach RUNNING state...")
+        for ctx in contexts:
+            for ad in ctx["ads"]:
                 try:
-                    instance = oci.wait_until(
-                        compute,
-                        compute.get_instance(instance_id),
-                        "lifecycle_state",
-                        "RUNNING",
-                        max_wait_seconds=600,
-                    ).data
+                    instance_id = try_launch(
+                        ctx["compute"],
+                        ad=ad,
+                        image_id=ctx["image_id"],
+                        subnet_ocid=ctx["subnet_ocid"],
+                        ocpus=ocpus,
+                        memory_gb=memory_gb,
+                    )
                 except Exception:  # noqa: BLE001
-                    log(f"Could not wait for RUNNING; check OCI console manually.\n"
-                        f"Instance OCID: {instance_id}")
+                    log(f"  attempt {attempt} region={ctx['region']} ad={ad}: hard error\n"
+                        f"{traceback.format_exc()}")
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+                if instance_id:
+                    _report_success(ctx, instance_id)
                     return 0
 
-                # Get the public IP
-                vnic_attachments = compute.list_vnic_attachments(
-                    compartment_id=COMPARTMENT_OCID,
-                    instance_id=instance_id,
-                ).data
-                if vnic_attachments:
-                    network = oci.core.VirtualNetworkClient(config)
-                    vnic = network.get_vnic(vnic_attachments[0].vnic_id).data
-                    log(f"PUBLIC IP: {vnic.public_ip}")
-                    log(f"SSH: ssh -i ~/.ssh/oracle_key ubuntu@{vnic.public_ip}")
-                log("=" * 60)
-                return 0
+                log(f"  attempt {attempt} region={ctx['region']} ad={ad} "
+                    f"shape={ocpus}/{memory_gb}: out of capacity")
 
-            log(f"  attempt {attempt} ad={ad}: out of capacity")
+        # Promote to the next shape rung if we've been stuck long enough
+        # at the current one and a smaller fallback is available.
+        if (
+            attempts_at_current_shape >= SHAPE_FALLBACK_AFTER_ATTEMPTS
+            and shape_idx < len(SHAPE_FALLBACK_LADDER) - 1
+        ):
+            shape_idx += 1
+            attempts_at_current_shape = 0
+            new_ocpus, new_mem = SHAPE_FALLBACK_LADDER[shape_idx]
+            log("=" * 60)
+            log(f"FALLBACK: dropping to {new_ocpus} OCPU / {new_mem} GB after "
+                f"{SHAPE_FALLBACK_AFTER_ATTEMPTS} failed attempts at "
+                f"{ocpus} OCPU / {memory_gb} GB.")
+            log(f"You can flex-resize back up to {SHAPE_FALLBACK_LADDER[0]} once "
+                f"capacity returns (no reboot needed for A1).")
+            log("=" * 60)
 
         time.sleep(POLL_INTERVAL)
 
