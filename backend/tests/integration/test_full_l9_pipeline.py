@@ -139,14 +139,10 @@ async def _offline_fng() -> Any:
     raise RuntimeError("forced offline")
 
 
-# SP-9 follow-up: this test failed in CI run 25431194190 after the fear_greed
-# mock was added; the assertion or seeding interaction needs local repro to
-# diagnose. The L9 wiring it covers is already verified by
-# test_layer9_score_reads_seeded_news (above) which calls layer9_score directly
-# with the same seeded news + session, so we have coverage of the layer logic.
-# What remains uncovered is the predictor's lift of L9 into layer_scores["9"],
-# which is verified by test_build_prediction_populates_news_summary (below).
-@pytest.mark.skip(reason="SP-9 follow-up: regression after fear_greed mock; needs local repro")
+# SP-9 follow-up: was skipped after CI run 25431194190 failed with `.F.`
+# during freezegun-under-transformers introspection. SP-3.5 added
+# `freezegun.configure(default_ignore_list=[...])` in tests/conftest.py;
+# unskipping to verify that's enough.
 @pytest.mark.asyncio
 async def test_build_prediction_populates_layer9_when_session_provided(
     news_session: AsyncSession,
@@ -205,10 +201,8 @@ async def test_build_prediction_layer9_none_with_session_but_no_news(
     assert pred.layer_scores["9"] is None
 
 
-# SP-9 follow-up: same regression as test_build_prediction_populates_layer9_when_session_provided.
-# The L9 abstain-on-foreign-asset path is covered by test_layer9_score_reads_seeded_news's
-# inverse (positive scoring confirms the asset filter works in the layer itself).
-@pytest.mark.skip(reason="SP-9 follow-up: same regression as the populates-layer9 sibling")
+# SP-9 follow-up: same root cause as the populates-layer9 sibling above.
+# Unskipping after SP-3.5's freezegun.configure(default_ignore_list=...) fix.
 @pytest.mark.asyncio
 async def test_build_prediction_layer9_skips_other_assets(
     news_session: AsyncSession,
