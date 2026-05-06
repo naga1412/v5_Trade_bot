@@ -18,6 +18,7 @@ __all__ = [
     "ExchangeAdapter",
     "aclose_all",
     "get_adapter",
+    "get_intermarket_adapter",
     "list_registered",
 ]
 
@@ -87,8 +88,27 @@ def get_adapter(name: str) -> ExchangeAdapter:
 
 async def aclose_all() -> None:
     """Close the shared httpx client + clear cached adapter instances."""
-    global _HTTP
+    global _HTTP, _INTERMARKET_INSTANCE
     _INSTANCES.clear()
+    _INTERMARKET_INSTANCE = None
     if _HTTP is not None:
         await _HTTP.aclose()
         _HTTP = None
+
+
+# --- SP-3.5: intermarket adapter registry --------------------------------
+
+from app.data.adapters.binance_futures_intermarket import (
+    BinanceFuturesIntermarketAdapter,
+)
+
+
+_INTERMARKET_INSTANCE: BinanceFuturesIntermarketAdapter | None = None
+
+
+def get_intermarket_adapter() -> BinanceFuturesIntermarketAdapter:
+    """Return the cached BinanceFuturesIntermarketAdapter singleton."""
+    global _INTERMARKET_INSTANCE
+    if _INTERMARKET_INSTANCE is None:
+        _INTERMARKET_INSTANCE = BinanceFuturesIntermarketAdapter(http=_shared_http())
+    return _INTERMARKET_INSTANCE
