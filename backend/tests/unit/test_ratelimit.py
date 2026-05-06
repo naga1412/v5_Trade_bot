@@ -5,17 +5,11 @@ import pytest
 from app.data.ratelimit import TokenBucket
 
 
-# SP-9 follow-up: the first test in this file deterministically hangs in CI
-# (selector.poll, never returns) when the suite reaches it after running
-# test_predictor.py. The hang reproduces with both pytest-timeout=60s and
-# 120s, and with the predictor tests as both sync(asyncio.run) AND native
-# async — so it's NOT loop-policy churn. The hang does NOT reproduce when
-# this file runs in isolation. Cross-file CI-env state leak; needs local
-# repro with the full postgres+redis stack to bisect (~1h investigation).
-# Skipping all three so SP-9 can ship; tests have passed on main for months
-# and the rate-limiter logic itself is exercised indirectly by every adapter
-# test that wraps RateLimitedClient (see test_ratelimit_client.py).
-pytestmark = pytest.mark.skip(reason="SP-9 follow-up: CI cross-file hang on first async test; passes in isolation")
+# SP-9 follow-up: was skipped because the first test deterministically hung
+# in selector.poll when reached after test_predictor.py. Two SP-3.5 changes
+# might have fixed this: (a) test_predictor converted to native async, and
+# (b) freezegun.configure(default_ignore_list=...) global. Unskipping to
+# verify; if still hung, this needs proper local repro.
 
 
 @pytest.mark.asyncio
