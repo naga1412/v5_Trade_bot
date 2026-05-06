@@ -74,3 +74,11 @@ async def test_bot_status_returns_200_when_paused(admin_client, friend_client) -
     )
     resp = await friend_client.get("/api/v1/bot-status/overview")
     assert resp.status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_resume_when_already_resumed_is_idempotent(admin_client) -> None:
+    resp = await admin_client.post("/api/v1/admin/system/resume", json={})
+    assert resp.status_code == 200
+    assert resp.json()["paused"] is False
