@@ -2,18 +2,21 @@ import { useState } from "react";
 import { Profile } from "@/tabs/Settings/Profile";
 import { Trading } from "@/tabs/Settings/Trading";
 import { Secrets } from "@/tabs/Settings/Secrets";
+import { SystemPauseControl } from "@/tabs/Settings/SystemPauseControl";
 
-type SubTab = "profile" | "trading" | "secrets";
+type SubTab = "profile" | "trading" | "secrets" | "system";
 
 const SUB_TABS: readonly { id: SubTab; label: string }[] = [
   { id: "profile", label: "Profile" },
   { id: "trading", label: "Trading" },
   { id: "secrets", label: "Secrets" },
+  { id: "system", label: "System" },
 ];
 
 // SP-0.7 Phase K: Settings tab assembles three sub-pages with internal nav.
 // The hash router only manages the top-level tab; sub-tab is local state so
 // going back to Settings from another tab lands on the same sub-tab.
+// SP-PAUSE: 4th sub-tab "System" hosts SystemPauseControl.
 export function Settings() {
   const [sub, setSub] = useState<SubTab>("profile");
   return (
@@ -49,7 +52,8 @@ export function Settings() {
       <div className="flex-1 min-h-0 overflow-auto p-3">
         {sub === "profile" ? <Profile /> :
          sub === "trading" ? <Trading /> :
-         <Secrets />}
+         sub === "secrets" ? <Secrets /> :
+         <SystemPauseControl />}
       </div>
     </div>
   );
