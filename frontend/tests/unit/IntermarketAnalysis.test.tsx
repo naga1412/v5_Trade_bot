@@ -1,30 +1,68 @@
-import { render, screen } from "@testing-library/react";
-import { IntermarketAnalysis } from "@/tabs/Tab1LivePrediction/panels/IntermarketAnalysis";
-import type { LayerScore } from "@/lib/api";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import { vi } from "vitest";
 
-const base = {
-  symbol: "BTC/USDT", timeframe: "1h", ts: "2026-05-01T12:00:00Z",
-  price: 100,
-  final: { score: 0, direction: "NEUTRAL" as const, confidence: 0, contributing_layers: [] },
-  layer_scores: {} as Record<string, LayerScore | null>,
-  trade_setup: { direction: "NEUTRAL" as const, entry: null, stop_loss: null, take_profit: null, risk_reward: null },
+import { IntermarketAnalysis } from "@/tabs/Tab1LivePrediction/panels/IntermarketAnalysis";
+import * as api from "@/lib/api";
+import type { LivePrediction } from "@/lib/api";
+
+
+const base: LivePrediction = {
+  symbol: "BTC/USDT", timeframe: "1h", ts: "2026-05-06T12:00:00Z",
+  price: 70000,
+  final: { score: 0, direction: "NEUTRAL", confidence: 0, contributing_layers: [] },
+  layer_scores: {} as never,
+  trade_setup: { direction: "NEUTRAL", entry: null, stop_loss: null,
+                 take_profit: null, risk_reward: null },
   momentum: { rsi: null, macd_line: null, macd_signal: null, macd_hist: null },
   cold_start: false, inputs_hash: "x",
 };
 
-test("renders 'no data' when data is null", () => {
-  render(<IntermarketAnalysis data={null} />);
-  expect(screen.getAllByText("no data").length).toBeGreaterThan(0);
+
+function wrap(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>;
+}
+
+
+test("renders DXY + Gold 30d correlations when API returns values", async () => {
+  vi.spyOn(api, "getIntermarket").mockResolvedValue({
+    symbol: "BTC/USDT", funding_rate: null, mark_price: null,
+    open_interest: null, open_interest_delta_24h_pct: null,
+    dxy_correlation_30d: -0.42, gold_correlation_30d: 0.18,
+    captured_at: "2026-05-06T12:00:00Z",
+  });
+  render(wrap(<IntermarketAnalysis data={base} />));
+  await waitFor(() => {
+    expect(screen.getByText("-0.42")).toBeInTheDocument();
+    expect(screen.getByText("0.18")).toBeInTheDocument();
+  });
 });
 
-test("renders 'no data' for DXY/Gold correlation cells (placeholder until backend wires)", () => {
-  render(<IntermarketAnalysis data={base} />);
-  // both DXY corr and Gold corr should show "no data"
-  expect(screen.getAllByText("no data").length).toBe(2);
+
+test("strong correlation (|corr| > 0.5) uses red color class", async () => {
+  vi.spyOn(api, "getIntermarket").mockResolvedValue({
+    symbol: "BTC/USDT", funding_rate: null, mark_price: null,
+    open_interest: null, open_interest_delta_24h_pct: null,
+    dxy_correlation_30d: -0.65, gold_correlation_30d: 0.10,
+    captured_at: "2026-05-06T12:00:00Z",
+  });
+  const { container } = render(wrap(<IntermarketAnalysis data={base} />));
+  await waitFor(() => {
+    expect(container.querySelector(".text-red-400")).not.toBeNull();
+  });
 });
 
-test("renders DXY and Gold labels", () => {
-  render(<IntermarketAnalysis data={base} />);
-  expect(screen.getByText(/DXY/i)).toBeInTheDocument();
-  expect(screen.getByText(/Gold/i)).toBeInTheDocument();
+
+test("renders 'no data' when correlations are null", async () => {
+  vi.spyOn(api, "getIntermarket").mockResolvedValue({
+    symbol: "BTC/USDT", funding_rate: null, mark_price: null,
+    open_interest: null, open_interest_delta_24h_pct: null,
+    dxy_correlation_30d: null, gold_correlation_30d: null,
+    captured_at: "2026-05-06T12:00:00Z",
+  });
+  render(wrap(<IntermarketAnalysis data={base} />));
+  await waitFor(() => {
+    expect(screen.getAllByText("no data").length).toBe(2);
+  });
 });
