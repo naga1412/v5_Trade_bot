@@ -49,7 +49,10 @@ async def test_list_returns_all_checkpoints(admin_client) -> None:
 
 @pytest.mark.asyncio
 async def test_patch_activate_deactivates_previous(admin_client) -> None:
-    # Create v0.1.0, activate it.
+    # Create v0.1.0, activate it. ``?force=true`` bypasses the SP-7 G2
+    # champion-challenger gate (see test_api_admin_ml_checkpoints_gate.py
+    # for the full gate coverage); this test is exercising atomic
+    # deactivation of the previous active row, not the gate.
     r1 = await admin_client.post("/api/v1/admin/ml-checkpoints", json={
         "model_name": "conv_lstm_predictor", "version": "0.1.0",
         "checkpoint_uri": "b2://x/v1.pt", "sha256": "a" * 64,
@@ -58,7 +61,8 @@ async def test_patch_activate_deactivates_previous(admin_client) -> None:
     })
     id1 = r1.json()["id"]
     r_act1 = await admin_client.patch(
-        f"/api/v1/admin/ml-checkpoints/{id1}", json={"is_active": True},
+        f"/api/v1/admin/ml-checkpoints/{id1}?force=true",
+        json={"is_active": True},
     )
     assert r_act1.status_code == 200, r_act1.text
     assert r_act1.json()["is_active"] is True
@@ -72,7 +76,8 @@ async def test_patch_activate_deactivates_previous(admin_client) -> None:
     })
     id2 = r2.json()["id"]
     await admin_client.patch(
-        f"/api/v1/admin/ml-checkpoints/{id2}", json={"is_active": True},
+        f"/api/v1/admin/ml-checkpoints/{id2}?force=true",
+        json={"is_active": True},
     )
 
     r_list = await admin_client.get("/api/v1/admin/ml-checkpoints")
