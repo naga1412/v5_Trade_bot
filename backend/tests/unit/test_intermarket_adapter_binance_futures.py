@@ -94,3 +94,30 @@ async def test_fetch_snapshot_translates_canonical_symbol_to_native() -> None:
             await adapter.fetch_snapshot("BTC/USDT")
     assert premium.calls.last.request.url.params["symbol"] == "BTCUSDT"
     assert oi.calls.last.request.url.params["symbol"] == "BTCUSDT"
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_returns_none_on_429() -> None:
+    async with httpx.AsyncClient() as http:
+        adapter = BinanceFuturesIntermarketAdapter(http=http)
+        with respx.mock() as mock:
+            mock.get("https://fapi.binance.com/fapi/v1/premiumIndex").mock(
+                return_value=httpx.Response(429, headers={"Retry-After": "1"},
+                                            json={"code": -1003, "msg": "Too many requests"})
+            )
+            snap = await adapter.fetch_snapshot("BTC/USDT")
+    assert snap is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_returns_none_on_invalid_symbol() -> None:
+    """Binance Futures: HTTP 400 + {code:-1121, msg:'Invalid symbol.'}."""
+    async with httpx.AsyncClient() as http:
+        adapter = BinanceFuturesIntermarketAdapter(http=http)
+        with respx.mock() as mock:
+            mock.get("https://fapi.binance.com/fapi/v1/premiumIndex").mock(
+                return_value=httpx.Response(400,
+                    json={"code": -1121, "msg": "Invalid symbol."})
+            )
+            snap = await adapter.fetch_snapshot("FAKECOIN/USDT")
+    assert snap is None
