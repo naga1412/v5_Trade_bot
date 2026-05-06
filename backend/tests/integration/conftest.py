@@ -140,6 +140,35 @@ async def _create_shadow_tables(engine: Any) -> None:
             "layer_scores TEXT NOT NULL, "
             "inputs_hash TEXT NOT NULL DEFAULT '')"
         ))
+        # SP-7 Phase B4: backtests table. SQLite-friendly mirror of
+        # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT,
+        # JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the persistence
+        # helper test in tests/integration/test_backtests_persisted.py
+        # and the admin REST endpoint tests.
+        await conn.execute(sa.text(
+            "CREATE TABLE backtests ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "triggered_by INTEGER, "
+            "triggered_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "start_ts TEXT NOT NULL, "
+            "end_ts TEXT NOT NULL, "
+            "layer_weights TEXT, "
+            "enabled_layers TEXT, "
+            "enabled_traps TEXT, "
+            "initial_balance REAL NOT NULL, "
+            "n_trades INTEGER NOT NULL DEFAULT 0, "
+            "win_rate REAL, "
+            "profit_factor REAL, "
+            "sharpe REAL, "
+            "max_drawdown REAL, "
+            "equity_curve_uri TEXT, "
+            "trade_log_uri TEXT, "
+            "params_hash TEXT NOT NULL, "
+            "status TEXT NOT NULL DEFAULT 'completed', "
+            "error_message TEXT)"
+        ))
 
 
 @pytest_asyncio.fixture
@@ -289,6 +318,34 @@ async def _create_auth_tables(engine: Any) -> None:
             "is_healthy INTEGER NOT NULL, "
             "latency_ms INTEGER, error_message TEXT, "
             "quota_used_pct REAL)"
+        ))
+        # SP-7 Phase B4/B5: backtests table. SQLite-friendly mirror of
+        # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT,
+        # JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the admin REST
+        # endpoint tests in test_api_admin_backtest.py.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS backtests ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "triggered_by INTEGER, "
+            "triggered_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "start_ts TEXT NOT NULL, "
+            "end_ts TEXT NOT NULL, "
+            "layer_weights TEXT, "
+            "enabled_layers TEXT, "
+            "enabled_traps TEXT, "
+            "initial_balance REAL NOT NULL, "
+            "n_trades INTEGER NOT NULL DEFAULT 0, "
+            "win_rate REAL, "
+            "profit_factor REAL, "
+            "sharpe REAL, "
+            "max_drawdown REAL, "
+            "equity_curve_uri TEXT, "
+            "trade_log_uri TEXT, "
+            "params_hash TEXT NOT NULL, "
+            "status TEXT NOT NULL DEFAULT 'completed', "
+            "error_message TEXT)"
         ))
         # Seed via raw SQL so created_at ordering is deterministic.
         await conn.execute(sa.text(

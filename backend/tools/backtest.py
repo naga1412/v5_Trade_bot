@@ -25,6 +25,8 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.predictor import build_prediction
 from app.core.scoring.aggregator import aggregate
@@ -468,3 +470,74 @@ def _default_bars_loader(
 # from monkeypatch-based tests that want to swap the aggregator out without
 # importing app.core.scoring.aggregator directly.
 _aggregate = aggregate
+
+
+async def persist_backtest_result(
+    session: AsyncSession,
+    *,
+    result: BacktestResult,
+    triggered_by_user_id: int | None = None,
+) -> int:
+    """Insert a BacktestResult into the ``backtests`` table; returns the new id.
+
+    Caller commits the session — this lets the helper compose with larger
+    admin transactions that may want to roll the whole thing back. The
+    equity_curve / trade_log are NOT persisted inline here; spec §5.16
+    pins them to ``equity_curve_uri`` / ``trade_log_uri`` (B2 upload).
+    For Phase B4 those URIs stay NULL — the in-memory curve / trade log
+    are still available on the returned ``BacktestResult``.
+
+    ``profit_factor`` of ``math.inf`` (no losing trades) is coerced to NULL
+    to keep the DOUBLE PRECISION column typed correctly across Postgres
+    and SQLite.
+    """
+    layer_weights_json: str | None = (
+        json.dumps({str(k): v for k, v in result.layer_weights.items()})
+        if result.layer_weights else None
+    )
+    enabled_layers_json: str | None = (
+        json.dumps(sorted(result.enabled_layers))
+        if result.enabled_layers else None
+    )
+    enabled_traps_json: str | None = (
+        json.dumps(sorted(result.enabled_traps))
+        if result.enabled_traps else None
+    )
+    profit_factor_db: float | None = (
+        None if (
+            result.profit_factor == math.inf
+            or not math.isfinite(result.profit_factor)
+        )
+        else result.profit_factor
+    )
+
+    insert_sql = sa.text(
+        "INSERT INTO backtests "
+        "(triggered_by, symbol, timeframe, start_ts, end_ts, "
+        "layer_weights, enabled_layers, enabled_traps, initial_balance, "
+        "n_trades, win_rate, profit_factor, sharpe, max_drawdown, "
+        "params_hash, status) "
+        "VALUES (:tb, :sym, :tf, :s, :e, :lw, :el, :et, :ib, "
+        ":nt, :wr, :pf, :sh, :md, :ph, 'completed')"
+    )
+    await session.execute(insert_sql, {
+        "tb": triggered_by_user_id, "sym": result.symbol,
+        "tf": result.timeframe, "s": result.start_ts, "e": result.end_ts,
+        "lw": layer_weights_json, "el": enabled_layers_json,
+        "et": enabled_traps_json, "ib": result.initial_balance,
+        "nt": result.n_trades, "wr": result.win_rate,
+        "pf": profit_factor_db,
+        "sh": result.sharpe, "md": result.max_drawdown,
+        "ph": result.params_hash,
+    })
+    # Read the new id back via params_hash + symbol + timeframe + start_ts
+    # so the helper avoids RETURNING (which is DB-dialect dependent and the
+    # in-memory aiosqlite path used in tests doesn't always emit it cleanly).
+    row = (await session.execute(sa.text(
+        "SELECT id FROM backtests "
+        "WHERE params_hash = :ph AND symbol = :sym AND timeframe = :tf "
+        "ORDER BY id DESC LIMIT 1"
+    ), {"ph": result.params_hash, "sym": result.symbol, "tf": result.timeframe})).first()
+    if row is None:  # pragma: no cover — should never happen post-INSERT
+        raise RuntimeError("persist_backtest_result: row not visible after insert")
+    return int(row.id)
