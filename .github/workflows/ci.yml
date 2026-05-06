@@ -58,7 +58,7 @@ jobs:
           # ENV=development for the cf-access dev bypass + DB pool config, but
           # disable workers so tests don't pile up on outbound network calls.
           WORKER_ENABLED: "false"
-        run: pytest -v
+        run: pytest -v --timeout=60 --timeout-method=thread
 
   frontend:
     runs-on: ubuntu-latest

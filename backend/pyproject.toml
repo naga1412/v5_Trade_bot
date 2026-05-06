@@ -75,6 +75,9 @@ dev = [
     "mypy==1.13.0",
     "aiosqlite==0.20.0",
     "respx==0.22.0",
+    # SP-9 ops: fail-fast any test that hangs > 60s so CI surfaces the
+    # culprit's traceback instead of consuming the full job timeout.
+    "pytest-timeout==2.3.1",
 ]
 
 [tool.pytest.ini_options]
