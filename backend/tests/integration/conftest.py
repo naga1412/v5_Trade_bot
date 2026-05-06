@@ -169,6 +169,28 @@ async def _create_shadow_tables(engine: Any) -> None:
             "status TEXT NOT NULL DEFAULT 'completed', "
             "error_message TEXT)"
         ))
+        # SP-7 Phase C3: hyperopt_studies table. SQLite-friendly mirror of
+        # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT, TSTZRANGE
+        # -> TEXT, JSONB -> TEXT, TIMESTAMPTZ -> TEXT). The status CHECK
+        # constraint is preserved verbatim (SQLite honours it).
+        await conn.execute(sa.text(
+            "CREATE TABLE hyperopt_studies ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "triggered_by INTEGER, "
+            "triggered_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "completed_at TEXT, "
+            "n_trials INTEGER NOT NULL, "
+            "train_window TEXT NOT NULL, "
+            "val_window TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "best_weights TEXT, "
+            "best_sharpe REAL, "
+            "mlflow_run_id TEXT, "
+            "status TEXT NOT NULL "
+            "  CHECK (status IN ('running','completed','failed')), "
+            "error_message TEXT)"
+        ))
 
 
 @pytest_asyncio.fixture
@@ -345,6 +367,28 @@ async def _create_auth_tables(engine: Any) -> None:
             "trade_log_uri TEXT, "
             "params_hash TEXT NOT NULL, "
             "status TEXT NOT NULL DEFAULT 'completed', "
+            "error_message TEXT)"
+        ))
+        # SP-7 Phase C3/C4: hyperopt_studies table. SQLite-friendly mirror
+        # of migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT, TSTZRANGE
+        # -> TEXT, JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the admin
+        # REST endpoint tests in test_api_admin_hyperopt.py.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS hyperopt_studies ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "triggered_by INTEGER, "
+            "triggered_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "completed_at TEXT, "
+            "n_trials INTEGER NOT NULL, "
+            "train_window TEXT NOT NULL, "
+            "val_window TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, "
+            "best_weights TEXT, "
+            "best_sharpe REAL, "
+            "mlflow_run_id TEXT, "
+            "status TEXT NOT NULL "
+            "  CHECK (status IN ('running','completed','failed')), "
             "error_message TEXT)"
         ))
         # Seed via raw SQL so created_at ordering is deterministic.
