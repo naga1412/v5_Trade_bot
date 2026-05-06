@@ -1,0 +1,36 @@
+# SP-7 Phase F2: Prometheus scrape config for the trading-radar stack.
+#
+# Scrapes:
+#   - prometheus itself (sanity)
+#   - backend FastAPI /metrics (exposed by app/ops/monitoring.py:instrument_app)
+#   - loki /metrics (Loki exposes its own Prometheus-format metrics on :3100)
+#
+# Alert rules live in alert_rules.yml in this same directory.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: trading-radar
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: trading-radar-backend
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - backend:8000
+
+  - job_name: loki
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - loki:3100
