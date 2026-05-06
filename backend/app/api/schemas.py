@@ -547,3 +547,29 @@ class IntermarketSnapshotOut(BaseModel):
     dxy_correlation_30d: float | None = Field(default=None, ge=-1.0, le=1.0)
     gold_correlation_30d: float | None = Field(default=None, ge=-1.0, le=1.0)
     captured_at: datetime
+
+
+# --- SP-PAUSE: master pause/resume -----------------------------------
+
+class SystemPauseRequest(BaseModel):
+    """Body for POST /api/v1/admin/system/pause. Reason is required."""
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class SystemPauseStateOut(BaseModel):
+    paused: bool
+    since: datetime | None = None
+    by_email: str | None = None
+    reason: str | None = None
+
+
+class SystemPauseEventOut(BaseModel):
+    id: int
+    kind: Literal["system_paused", "system_resumed"]
+    by_email: str
+    at: datetime
+    reason: str | None = None
+
+
+class SystemPauseEventListOut(BaseModel):
+    events: list[SystemPauseEventOut]
