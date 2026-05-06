@@ -16,6 +16,7 @@ from app.api.routes import (
     admin_traps,
     bot_status,
     health,
+    intermarket,  # SP-3.5 Phase E2
     me,
     scanner,  # SP-6 Phase A4
     tab1,
@@ -164,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_traps.router)
     app.include_router(me.router)
     app.include_router(scanner.router)  # SP-6
+    app.include_router(intermarket.router)  # SP-3.5
     app.include_router(ws_routes.router)
     # SP-7 Phase F4: Prometheus instrumentation must happen AFTER every
     # router is added so every route is observed by the middleware.
