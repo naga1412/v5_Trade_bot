@@ -49,12 +49,25 @@ def test_alerts_exposes_alert_admin_coroutine_signature() -> None:
     assert params["severity"].default == "warning"
 
 
+# SP-7 Phase D1 retired the `alert_admin` stub assertion — the function is
+# now a working SMTP dispatcher with a logger fallback (see
+# tests/unit/test_ops_alerts.py for the live contract). The scaffolding
+# test below now asserts the post-D1 behaviour: the call returns False
+# (signalling "not delivered") rather than raising.
+
+
 @pytest.mark.asyncio
-async def test_alerts_alert_admin_is_a_stub() -> None:
+async def test_alerts_alert_admin_returns_false_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.ops.alerts import alert_admin
 
-    with pytest.raises(NotImplementedError, match="Phase D1"):
-        await alert_admin("hello")
+    for k in (
+        "SMTP_HOST", "SMTP_PORT", "SMTP_USER",
+        "SMTP_PASSWORD", "ALERT_RECIPIENT_EMAIL",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    assert (await alert_admin("hello")) is False
 
 
 def test_verifier_scheduler_exposes_loop_and_task_starters() -> None:
