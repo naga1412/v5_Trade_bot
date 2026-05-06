@@ -162,7 +162,35 @@ async def get_state() -> SystemPauseState:
 async def pause_event_log(  # type: ignore[no-untyped-def]
     session, *, limit: int = 50,
 ) -> list[PauseEvent]:
-    raise NotImplementedError("SP-PAUSE Phase B2")
+    import sqlalchemy as sa
+    rows = (await session.execute(sa.text("""
+        SELECT id, attempted_email, attempted_at, reason
+        FROM auth_violations
+        WHERE reason LIKE 'system_paused%' OR reason = 'system_resumed'
+        ORDER BY id DESC
+        LIMIT :limit
+    """), {"limit": limit})).all()
+    out: list[PauseEvent] = []
+    for r in rows:
+        if r.reason == "system_resumed":
+            kind = "system_resumed"
+            msg: str | None = None
+        else:
+            kind = "system_paused"
+            # Strip "system_paused: " prefix; empty -> None.
+            after = r.reason[len("system_paused:"):].strip()
+            msg = after if after else None
+        at = r.attempted_at
+        if isinstance(at, str):
+            try:
+                at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        out.append(PauseEvent(
+            id=int(r.id), kind=kind, by_email=r.attempted_email,
+            at=at, reason=msg,
+        ))
+    return out
 
 
 __all__ = [
