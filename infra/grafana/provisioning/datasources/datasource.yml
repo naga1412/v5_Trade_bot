@@ -1,0 +1,20 @@
+# SP-7 Phase F3: Grafana datasource provisioning.
+#
+# Wires both Prometheus (metrics) and Loki (logs) as default datasources so
+# the JSON dashboards under ../../dashboards/ resolve their queries without
+# the operator having to click through the UI on first boot.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
