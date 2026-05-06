@@ -104,6 +104,9 @@ redis_data/
 *.dump
 backup/
 !infra/backup/
+# SP-7 Phase A5: tools/backup/ is source code (snapshot/upload_b2/etc CLI
+# wrappers), not a data-backup directory. Whitelist it back in.
+!backend/tools/backup/
 
 # --- Docker ---
 docker-compose.override.yml
