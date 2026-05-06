@@ -57,11 +57,11 @@ def test_upload_b2_exposes_upload_to_b2_callable() -> None:
     assert "source" in sig.parameters or len(sig.parameters) >= 1
 
 
-def test_upload_b2_is_a_stub() -> None:
+def test_upload_b2_is_callable() -> None:
+    """Phase E2 replaced the stub with a real boto3 + AESGCM uploader."""
     from tools.backup.upload_b2 import upload_to_b2
 
-    with pytest.raises(NotImplementedError, match="Phase E2"):
-        upload_to_b2(Path("/tmp/snap.tar.zst"), dest_prefix="backups/2026/")
+    assert callable(upload_to_b2)
 
 
 def test_rsync_laptop_exposes_rsync_to_laptop_callable() -> None:
