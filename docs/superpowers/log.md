@@ -620,3 +620,138 @@ CI scaffolding ready for the operator to enable.
 - **SP-1.5** — train L7 XGBoost + wire inference, or
 - **SP-4** — train L10 RL meta-brain (PPO) + wire BRAIN_ADJUST live.
 
+## 2026-05-05 — SP-7 Ops Hardening: SHIPPED
+
+**Scope:** the operator-facing trifecta — proof the strategy works
+(deterministic backtests + Bayesian hyperopt of layer weights),
+proof the data hasn't been tampered with (nightly audit-chain
+verifier + admin alerts), and proof the box can survive a disk
+failure (four-script DR backup pipeline). Plus a Prometheus + Grafana
++ Loki + Promtail monitoring stack wired into the existing
+docker-compose, `/metrics` exposed from the FastAPI app, and a
+champion-challenger gate that prevents an admin from accidentally
+promoting a worse ML checkpoint over the live one.
+
+**Delivered (~32 commits on branch `sp-7/main`):**
+
+| Phase | Sub-system                                                                                                                                                       | Commits |
+|-------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| A     | Migration 0012 (`backtests` + `hyperopt_studies` + `backup_runs`) + optuna/prometheus deps + scaffolds (`app/ops/`, `tools/backup/`, `champion_challenger` stub) | 4 |
+| B     | Native Python backtester — `BacktestResult` + bar-by-bar `build_prediction` simulator (SL/TP/TIMEOUT, Sharpe/PF/MDD) + persistence + admin REST endpoints        | 4 |
+| C     | Optuna TPE `hyperopt_layer_weights` (stddev regularization) + persistence to `hyperopt_studies` + admin REST endpoints (202 + background task)                   | 4 |
+| D     | `alert_admin` SMTP dispatcher (best-effort) + nightly audit-chain verifier loop (`verify_chain` + alert + `auth_violations` row on break) + lifespan wiring + integration test | 5 |
+| E     | DR backup pipeline — `pg_basebackup` snapshot + AES-256-GCM B2 upload + rsync to laptop SSD + recovery rehearsal + `record_backup_run` metrics + operator README | 6 |
+| F     | docker-compose adds Prometheus / Grafana / Loki / Promtail + dashboards + alert rules + `instrument_app` wires `/metrics` into `create_app`                       | 5 |
+| G     | `evaluate_challenger` (5% improvement bar) + admin checkpoint activation gated by champion-challenger (`?force=true` bypass) + admin monitoring health endpoint + log entry + ship | 4 |
+
+**Test counts at ship:**
+- Backend: **1450 passing** (was 1433 at SP-6 ship; +17 across G1
+  champion-challenger unit tests, G2 admin-gate integration tests,
+  and G3 monitoring-health integration tests).
+- 4 pre-existing Windows-only test failures unchanged from the SP-6
+  baseline: `test_ml_checkpoints` (2 — relative-path resolution),
+  `test_ratelimit_client` (1 — wall-clock sensitive), and
+  `test_api_bot_status_equity_curve` (1 — date-grouping). Documented
+  in CI as "expected on Windows; track via #TBD".
+
+**Surprises / decisions worth flagging:**
+
+- **freqtrade deferred — native backtester instead.** The pinned
+  `freqtrade==2024.10` transitively requires `pandas-ta`, which has
+  no PyPI wheel for the project's `>=3.11,<3.12` range. Rather than
+  upgrade to py3.12 (would touch the entire CI matrix and the torch
+  pin), Phase B implemented the simulator natively against the
+  existing `build_prediction` → SL/TP/TIMEOUT exit path. We already
+  needed a custom data path anyway (freqtrade assumes its own SQLite
+  schema), and this gave us strict determinism over the simulator
+  parameters that hyperopt searches over. Revisit when `pandas-ta`
+  ships a 3.11 wheel or the project moves to 3.12.
+- **Audit violations land in SP-0.7's `auth_violations`, not a new
+  `audit_violations` table.** Migration 0002's `auth_violations` is
+  already a per-row append-only audit signal — verifier-detected
+  chain breaks reuse it with `attempted_email='system'` and a
+  parseable `reason='audit_chain_broken:<table>:<row_id>'`. Avoids a
+  duplicate table + duplicate admin UI pane. Documented in
+  `app/ops/verifier_scheduler._record_violation`.
+- **Backup encryption uses AES-256-GCM with `BACKUP_ENCRYPTION_KEY`
+  env var (system-wide, not per-user).** The DR pipeline encrypts
+  basebackups before pushing to B2 (and before rsyncing to the
+  laptop SSD when rsync is enabled), with the key stored in the
+  Oracle box's secret store and never written to disk. Per-user
+  encryption was out of scope — the backup is a snapshot of the
+  whole DB, not of a single user's data, so a single system key is
+  the right granularity.
+- **Champion-challenger uses a 5% improvement bar; `?force=true`
+  bypasses for SP-1.1.** A challenger must improve on the active
+  champion's MAE by ≥5% (`challenger_mae < champion_mae * 0.95`)
+  before the admin promotion route swaps it in. The first-ever
+  checkpoint has no champion to beat, so the operator passes
+  `?force=true` once on PATCH `is_active=true` (logged at WARNING
+  for the audit trail). The bypass also covers emergency rollbacks.
+- **Monitoring stack (Prometheus + Grafana + Loki + Promtail)
+  configured but NOT a hard ship gate.** The four services land in
+  `docker-compose.yml`, dashboards/alert rules ship in `infra/`, and
+  `instrument_app` exposes `/metrics`, but the operator brings the
+  monitoring side of the stack up separately (`docker compose up -d
+  prometheus grafana loki promtail`). Keeps the trading hot-path
+  startup independent of the observability stack — if Grafana is
+  down, predictions still flow.
+- **`/metrics` is NOT auth-gated at the FastAPI layer.** Cloudflare
+  Access at the tunnel layer covers admin-style routes; `/metrics`
+  is intentionally left open to the local Prometheus scraper inside
+  the docker network. If the operator exposes the box on a public
+  IP without Cloudflare, they MUST add an nginx allowlist or
+  re-gate `/metrics` behind `Depends(require_admin)`.
+- **Pre-existing 4 Windows test failures are unrelated to SP-7.**
+  `test_ml_checkpoints` (2x), `test_ratelimit_client` (1x), and
+  `test_api_bot_status_equity_curve` (1x) all failed at the SP-6
+  ship baseline too — they're Windows-specific (relative path
+  resolution, wall-clock sensitivity, date grouping under
+  SQLite-aiosqlite). CI is Linux-only so they're invisible there.
+- **Champion-challenger MAE is currently a `1 - win_rate` proxy.**
+  `_evaluate_mae` runs `run_backtest` over the last 30 days and
+  derives a "MAE-like" loss from the win rate — true per-bar
+  prediction-error extraction is tracked as a SP-1.1 follow-up
+  (the right place to wire it is at L7's prediction-vs-realized
+  diff, which doesn't exist yet). For SP-7 ship the proxy is fine —
+  the gate's correctness (5% bar, `?force=true` bypass, no-champion
+  bootstrap) is fully unit-tested with the proxy mocked out.
+
+**Manual checklist (for the human after deploy):**
+- [ ] Apply migration 0012 to production Postgres
+       (`alembic upgrade head` inside the backend container)
+- [ ] Set `BACKUP_ENCRYPTION_KEY` (32 random bytes, base64-encoded)
+       in the Oracle box's secret store; verify `python
+       tools/backup/snapshot.py --dry-run` reports the key resolved
+- [ ] Wire the four backup CLIs into cron — see
+       `tools/backup/README.md` for the exact crontab lines (hourly
+       `pg_dump`, nightly basebackup + B2 upload, weekly recovery
+       rehearsal)
+- [ ] Bring up the monitoring stack: `docker compose up -d
+       prometheus grafana loki promtail`; visit Grafana at
+       `:3000` (admin/admin → reset on first login) and confirm
+       the "Trading Radar — Latency" dashboard renders
+- [ ] First-checkpoint promotion: PATCH
+       `/api/v1/admin/ml-checkpoints/{id}?force=true` with
+       `{"is_active": true}` (no champion yet — gate would otherwise
+       reject)
+- [ ] GET `/api/v1/admin/monitoring/health` returns
+       `last_backup_run` non-null after the first nightly cron tick
+- [ ] Set `GRAFANA_URL` / `PROMETHEUS_URL` env vars to the
+       operator-visible URLs (or accept the
+       `http://localhost:3000` / `:9090` defaults for local-dev)
+- [ ] Trigger the nightly audit verifier manually once
+       (`python -c "import asyncio; from
+       app.ops.verifier_scheduler import _check_all_chains; ..."`)
+       to confirm it logs "audit verifier ok" for every chained
+       table
+
+**Next:** ship G5 (PR `sp-7/main` → `main`) and tag `sp-7`. Then either
+- **SP-1.5** — train L7 XGBoost + wire inference (then wire real MAE
+  into champion-challenger), or
+- **SP-3.5** — wire OI / funding rate / borrow rate adapters into
+  TrapContext + IntermarketAnalysis panel, or
+- **SP-9** — FinBERT sentiment ingest for SentimentFearGreed +
+  NewsMacroImpact panels and L9 layer wiring, or
+- **SP-4** — train L10 RL meta-brain (PPO) + wire BRAIN_ADJUST live.
+
