@@ -26,6 +26,7 @@ from app.data.adapters import aclose_all as _aclose_adapters
 from app.data.universe_sync import start_universe_sync_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
+from app.ops.monitoring import instrument_app
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
 from app.ws.live_prediction import start_background_worker
@@ -131,6 +132,9 @@ def create_app() -> FastAPI:
     app.include_router(me.router)
     app.include_router(scanner.router)  # SP-6
     app.include_router(ws_routes.router)
+    # SP-7 Phase F4: Prometheus instrumentation must happen AFTER every
+    # router is added so every route is observed by the middleware.
+    instrument_app(app)
     return app
 
 

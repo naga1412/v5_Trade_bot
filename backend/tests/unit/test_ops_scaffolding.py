@@ -28,13 +28,20 @@ def test_monitoring_exposes_instrument_app_signature() -> None:
     assert list(sig.parameters) == ["app"]
 
 
-def test_monitoring_instrument_app_is_a_stub() -> None:
+def test_monitoring_instrument_app_is_implemented() -> None:
+    """SP-7 Phase F4 retired the NotImplementedError stub.
+
+    instrument_app is now a working Prometheus wiring helper. Full contract
+    lives in test_ops_monitoring.py (asserts /metrics is added + serves
+    Prometheus text format). Here we only assert the call no longer raises
+    so this scaffolding test stays in sync with the post-F4 contract.
+    """
     from fastapi import FastAPI
 
     from app.ops.monitoring import instrument_app
 
-    with pytest.raises(NotImplementedError, match="Phase F4"):
-        instrument_app(FastAPI())
+    app = FastAPI()
+    assert instrument_app(app) is None
 
 
 def test_alerts_exposes_alert_admin_coroutine_signature() -> None:
