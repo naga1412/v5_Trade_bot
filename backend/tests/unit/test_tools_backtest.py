@@ -89,3 +89,94 @@ def test_run_backtest_params_hash_is_deterministic() -> None:
     )
     assert a.params_hash == b.params_hash
     assert a.params_hash != c.params_hash
+
+
+def test_run_backtest_simulates_trades_on_signaling_data() -> None:
+    """A clearly-trending market produces at least one trade."""
+    bars = _synthetic_bars(300)
+    bars_loader = lambda *_a, **_kw: bars  # noqa: E731
+
+    result = run_backtest(
+        symbol="BTC/USDT", timeframe="1h",
+        start=bars.index[0].to_pydatetime(),
+        end=bars.index[-1].to_pydatetime(),
+        initial_balance_usdt=10000.0,
+        _bars_loader=bars_loader,
+    )
+    assert result.n_trades > 0
+    # Equity curve has at least one entry per closed trade (+ initial point)
+    assert len(result.equity_curve) >= result.n_trades
+    assert -1.0 <= result.win_rate <= 1.0
+    assert result.max_drawdown >= 0.0
+    # Final balance is initial +/- aggregate trade pnl
+    expected_final = (
+        result.initial_balance + sum(t.pnl_usdt for t in result.trade_log)
+    )
+    assert abs(result.final_balance - expected_final) < 1e-6
+
+
+def test_run_backtest_respects_layer_weights() -> None:
+    """Different weights produce different params_hash + potentially different metrics."""
+    bars = _synthetic_bars(300)
+    bars_loader = lambda *_a, **_kw: bars  # noqa: E731
+
+    equal = run_backtest(
+        symbol="BTC/USDT", timeframe="1h",
+        start=bars.index[0].to_pydatetime(),
+        end=bars.index[-1].to_pydatetime(),
+        layer_weights={i: 1 / 9 for i in range(1, 10)},
+        _bars_loader=bars_loader,
+    )
+    l3_heavy = run_backtest(
+        symbol="BTC/USDT", timeframe="1h",
+        start=bars.index[0].to_pydatetime(),
+        end=bars.index[-1].to_pydatetime(),
+        layer_weights={
+            3: 1.0, 1: 0.0, 2: 0.0, 4: 0.0, 5: 0.0,
+            6: 0.0, 7: 0.0, 8: 0.0, 9: 0.0,
+        },
+        _bars_loader=bars_loader,
+    )
+    assert equal.params_hash != l3_heavy.params_hash
+    # At least one of the metrics should differ between the two runs
+    assert (equal.n_trades, equal.sharpe, equal.final_balance) != (
+        l3_heavy.n_trades, l3_heavy.sharpe, l3_heavy.final_balance,
+    )
+
+
+def test_run_backtest_short_trades_close_on_sl_or_tp() -> None:
+    """A descending market should produce exits with SL/TP/TIMEOUT."""
+    n = 300
+    base_ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    idx = pd.DatetimeIndex([base_ts + timedelta(hours=i) for i in range(n)])
+    closes = np.array([100 - i * 0.1 for i in range(n)])  # monotonic down
+    bars = pd.DataFrame({
+        "open": closes - 0.05, "high": closes + 0.3, "low": closes - 0.3,
+        "close": closes, "volume": np.full(n, 1000.0),
+    }, index=idx)
+    bars_loader = lambda *_a, **_kw: bars  # noqa: E731
+
+    result = run_backtest(
+        symbol="BTC/USDT", timeframe="1h",
+        start=bars.index[0].to_pydatetime(),
+        end=bars.index[-1].to_pydatetime(),
+        _bars_loader=bars_loader,
+    )
+    # All exits should be SL/TP/TIMEOUT — never None
+    assert all(t.exit_reason in {"SL", "TP", "TIMEOUT"} for t in result.trade_log)
+
+
+def test_run_backtest_metrics_sane_bounds() -> None:
+    """Sharpe finite, max_drawdown in [0,1], profit_factor >= 0 or +inf."""
+    import math
+
+    bars = _synthetic_bars(300)
+    result = run_backtest(
+        symbol="BTC/USDT", timeframe="1h",
+        start=bars.index[0].to_pydatetime(),
+        end=bars.index[-1].to_pydatetime(),
+        _bars_loader=lambda *_a, **_kw: bars,
+    )
+    assert np.isfinite(result.sharpe)
+    assert 0.0 <= result.max_drawdown <= 1.0
+    assert result.profit_factor >= 0.0 or math.isinf(result.profit_factor)
