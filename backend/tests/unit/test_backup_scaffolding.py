@@ -41,11 +41,11 @@ def test_snapshot_metadata_is_frozen() -> None:
         instance.size_bytes = 5678  # type: ignore[misc]
 
 
-def test_snapshot_take_snapshot_is_a_stub() -> None:
+def test_snapshot_take_snapshot_is_callable() -> None:
+    """Phase E1 replaced the stub with a real subprocess wrapper."""
     from tools.backup.snapshot import take_snapshot
 
-    with pytest.raises(NotImplementedError, match="Phase E1"):
-        take_snapshot(Path("/tmp/out"))
+    assert callable(take_snapshot)
 
 
 def test_upload_b2_exposes_upload_to_b2_callable() -> None:
