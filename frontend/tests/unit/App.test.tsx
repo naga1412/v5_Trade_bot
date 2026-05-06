@@ -36,6 +36,11 @@ vi.mock("@/lib/api", () => ({
     adminImpersonateClear: vi.fn().mockResolvedValue(undefined),
     adminAuditTrail: vi.fn().mockResolvedValue([]),
   },
+  // SP-PAUSE: PausedBanner mounts globally and self-polls; stub returns
+  // running state so the banner stays a no-op in App-level tests.
+  getSystemState: vi.fn().mockResolvedValue({
+    paused: false, since: null, by_email: null, reason: null,
+  }),
 }));
 vi.mock("@/hooks/useShadowUpdates", () => ({
   useShadowUpdates: () => ({

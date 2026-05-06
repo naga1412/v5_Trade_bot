@@ -1,5 +1,6 @@
 import { TabNav } from "@/components/layout/TabNav";
 import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
+import { PausedBanner } from "@/components/layout/PausedBanner";
 import { useHashRoute } from "@/lib/useHashRoute";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { api } from "@/lib/api";
@@ -26,6 +27,7 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-bg-base text-text-primary">
+      <PausedBanner />
       {isImpersonating && user !== null && (
         <ImpersonationBanner
           viewingEmail={user.email}
