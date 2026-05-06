@@ -10,6 +10,7 @@ from app.api.routes import (
     admin_backtest,  # SP-7 Phase B5
     admin_hyperopt,  # SP-7 Phase C4
     admin_ml,
+    admin_monitoring,  # SP-7 Phase G3
     admin_patterns,
     admin_traps,
     bot_status,
@@ -127,6 +128,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_backtest.router)  # SP-7 Phase B5
     app.include_router(admin_hyperopt.router)  # SP-7 Phase C4
     app.include_router(admin_ml.router)
+    app.include_router(admin_monitoring.router)  # SP-7 Phase G3
     app.include_router(admin_patterns.router)
     app.include_router(admin_traps.router)
     app.include_router(me.router)
