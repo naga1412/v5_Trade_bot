@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.news.adapters._base import NewsArticle
-from app.news.persistence import persist_news_items
+from app.news.persistence import cleanup_old_news, persist_news_items
 from app.news.sentiment import SentimentResult
 
 
@@ -186,4 +186,40 @@ async def test_persist_news_items_pairs_each_article_with_its_sentiment(
     assert rows[0].sentiment_score == 0.7
     assert rows[1].sentiment_score is None
 
+
+# -- B6 cleanup tests ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_news_deletes_rows_older_than_cutoff(
+    session: AsyncSession,
+) -> None:
+    from freezegun import freeze_time
+    # Insert one stale (25d) and one fresh (5d) article.
+    await session.execute(sa.text("""
+        INSERT INTO news_items (source, url, title, published_at, impact_score)
+        VALUES ('x','u_old','old','2026-04-10T00:00:00Z',0.5),
+               ('x','u_new','new','2026-05-01T00:00:00Z',0.5)
+    """))
+    await session.commit()
+    with freeze_time("2026-05-06T12:00:00Z"):
+        n = await cleanup_old_news(session, older_than_days=20)
+    assert n == 1
+    rows = (await session.execute(sa.text("SELECT url FROM news_items"))).all()
+    assert {r.url for r in rows} == {"u_new"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_news_returns_zero_when_nothing_to_delete(
+    session: AsyncSession,
+) -> None:
+    from freezegun import freeze_time
+    await session.execute(sa.text("""
+        INSERT INTO news_items (source, url, title, published_at, impact_score)
+        VALUES ('x','u1','a','2026-05-01T00:00:00Z',0.5)
+    """))
+    await session.commit()
+    with freeze_time("2026-05-06T12:00:00Z"):
+        n = await cleanup_old_news(session, older_than_days=20)
+    assert n == 0
 
