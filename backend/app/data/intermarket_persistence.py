@@ -1,24 +1,48 @@
-"""SP-3.5 intermarket persistence layer.
-
-All four functions are scaffolded in Phase A4 and implemented in Phase B5/B6.
-They share the :class:`IntermarketSnapshot` dataclass with the adapter so
-the row → snapshot conversion has one canonical shape.
-"""
+"""SP-3.5 Phase B5/B6: intermarket_snapshots persistence + cleanup."""
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.data.adapters.binance_futures_intermarket import IntermarketSnapshot
+
+
+log = logging.getLogger(__name__)
 
 
 async def persist_intermarket_snapshots(
     session: AsyncSession,
     snapshots: Iterable[IntermarketSnapshot],
 ) -> int:
-    raise NotImplementedError("SP-3.5 Phase B5")
+    """INSERT each snapshot into ``intermarket_snapshots``. Returns # inserted."""
+    snaps = list(snapshots)
+    if not snaps:
+        return 0
+    sql = sa.text("""
+        INSERT INTO intermarket_snapshots
+          (symbol, captured_at, funding_rate, mark_price,
+           open_interest, source)
+        VALUES
+          (:symbol, :captured_at, :funding_rate, :mark_price,
+           :open_interest, :source)
+    """)
+    inserted = 0
+    for s in snaps:
+        await session.execute(sql, {
+            "symbol": s.symbol,
+            "captured_at": s.captured_at,
+            "funding_rate": s.funding_rate,
+            "mark_price": s.mark_price,
+            "open_interest": s.open_interest,
+            "source": s.source,
+        })
+        inserted += 1
+    await session.commit()
+    return inserted
 
 
 async def cleanup_old_intermarket(
