@@ -57,6 +57,28 @@ class GhostOut(BaseModel):
     uncertainty: float = Field(ge=0.0)
 
 
+class SentimentSummary(BaseModel):
+    """SP-9 Phase F1: F&G index + L9 news bias summary for Tab 1.
+
+    Backwards-compatible: surfaced on :class:`LivePredictionOut` only when
+    the predictor is invoked with a session and L9 has data to summarise.
+    """
+
+    fng_value: int = Field(ge=0, le=100)
+    fng_label: Literal[
+        "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed",
+    ]
+    news_bias: Literal["Bullish", "Bearish", "Neutral"]
+
+
+class NewsSummary(BaseModel):
+    """SP-9 Phase F1: top recent-headline + impact aggregation for Tab 1."""
+
+    recent_count: int = Field(ge=0)
+    top_headline: str | None = None
+    impact: Literal["LOW", "MEDIUM", "HIGH"]
+
+
 class LivePredictionOut(BaseModel):
     symbol: str
     timeframe: str
@@ -76,6 +98,10 @@ class LivePredictionOut(BaseModel):
     # off the strict ``layer_scores`` field so the API response shape stays
     # backwards compatible — frontend reads from ``layer_scores`` only.
     prediction_extras: dict[str, Any] | None = None
+    # SP-9 Phase F1: optional summaries populated by predictor when a
+    # session is passed AND the L9 news layer has data / F&G call succeeds.
+    sentiment: SentimentSummary | None = None
+    news: NewsSummary | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---

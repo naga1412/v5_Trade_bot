@@ -1,14 +1,22 @@
 import hashlib
 import logging
 import math
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
-    FinalScoreOut, LayerScoreOut, LivePredictionOut, MomentumPanelOut, TradeSetupOut,
+    FinalScoreOut,
+    LayerScoreOut,
+    LivePredictionOut,
+    MomentumPanelOut,
+    NewsSummary,
+    SentimentSummary,
+    TradeSetupOut,
 )
 from app.core.indicators.macd import macd
 from app.core.indicators.rsi import rsi
@@ -175,6 +183,119 @@ def _build_extras(
     }
 
 
+_NEWS_SUMMARY_LOOKBACK_MIN: int = 60
+_IMPACT_HIGH_THRESHOLD: float = 0.7
+_IMPACT_MEDIUM_THRESHOLD: float = 0.4
+
+
+def _bias_from_layer(layer: LayerScore | None) -> Literal["Bullish", "Bearish", "Neutral"]:
+    """Map an L9 LayerScore.direction to the human bias label."""
+    if layer is None:
+        return "Neutral"
+    if layer.direction is Direction.LONG:
+        return "Bullish"
+    if layer.direction is Direction.SHORT:
+        return "Bearish"
+    return "Neutral"
+
+
+async def _build_news_summary(
+    *,
+    symbol: str,
+    session: AsyncSession,
+    now: datetime | None = None,
+) -> NewsSummary | None:
+    """Aggregate the last-60min news_items for ``symbol`` into a summary.
+
+    Returns ``None`` when there are no rows or any DB error occurs — the
+    Tab 1 panel falls back to its placeholder UI in that case.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(
+        minutes=_NEWS_SUMMARY_LOOKBACK_MIN,
+    )
+    base = symbol.split("/")[0].upper()
+
+    dialect = session.bind.dialect.name if session.bind else "postgresql"
+    is_pg = dialect.startswith("postgres")
+
+    try:
+        if is_pg:
+            sql = sa.text(
+                "SELECT title, impact_score FROM news_items "
+                "WHERE published_at >= :cutoff "
+                "AND :base = ANY(affected_assets)"
+            )
+            params: dict[str, object] = {"cutoff": cutoff, "base": base}
+        else:
+            sql = sa.text(
+                "SELECT title, impact_score FROM news_items "
+                "WHERE published_at >= :cutoff "
+                "AND affected_assets LIKE :pat"
+            )
+            params = {"cutoff": cutoff, "pat": f'%"{base}"%'}
+        rows = (await session.execute(sql, params)).all()
+    except Exception:  # noqa: BLE001 — never let news lookup break scoring
+        log.warning("news summary query failed; skipping", exc_info=True)
+        return None
+
+    if not rows:
+        return None
+
+    impacts = [
+        float(r.impact_score) for r in rows if r.impact_score is not None
+    ]
+    avg_impact = (sum(impacts) / len(impacts)) if impacts else 0.0
+    if avg_impact > _IMPACT_HIGH_THRESHOLD:
+        impact: Literal["LOW", "MEDIUM", "HIGH"] = "HIGH"
+    elif avg_impact > _IMPACT_MEDIUM_THRESHOLD:
+        impact = "MEDIUM"
+    else:
+        impact = "LOW"
+
+    # Top headline = the row with the highest impact_score (None treated as 0).
+    top_row = max(
+        rows, key=lambda r: float(r.impact_score) if r.impact_score is not None else 0.0,
+    )
+    top_headline = str(top_row.title) if top_row.title is not None else None
+
+    return NewsSummary(
+        recent_count=len(rows),
+        top_headline=top_headline,
+        impact=impact,
+    )
+
+
+async def _build_sentiment_summary(
+    *,
+    l9: LayerScore | None,
+) -> SentimentSummary | None:
+    """Fetch the F&G index + map L9 direction to a news_bias label.
+
+    Returns ``None`` when the F&G call fails or the index is unavailable —
+    the Tab 1 panel falls back to its placeholder UI in that case.
+    """
+    # Imported lazily so the schema layer doesn't pull in ``httpx`` at import.
+    from app.news.fear_greed import get_fear_greed_index
+
+    try:
+        fng = await get_fear_greed_index()
+    except Exception:  # noqa: BLE001
+        log.warning("F&G index fetch failed; skipping sentiment summary", exc_info=True)
+        return None
+
+    label = fng.label
+    valid_labels = {"Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed"}
+    if label not in valid_labels:
+        log.warning("F&G returned unknown label %r; skipping summary", label)
+        return None
+
+    return SentimentSummary(
+        fng_value=int(fng.value),
+        fng_label=label,  # type: ignore[arg-type]
+        news_bias=_bias_from_layer(l9),
+    )
+
+
 async def build_prediction(
     *,
     symbol: str,
@@ -292,6 +413,24 @@ async def build_prediction(
         tier=tier,
     )
 
+    # SP-9 Phase F1: build the optional Tab 1 sentiment + news summaries.
+    # Both are best-effort — any failure leaves the field as None so legacy
+    # callers (no session, no news_items table, no F&G upstream) keep
+    # working unchanged.
+    news_summary: NewsSummary | None = None
+    sentiment_summary: SentimentSummary | None = None
+    if session is not None:
+        try:
+            news_summary = await _build_news_summary(symbol=symbol, session=session)
+        except Exception:  # noqa: BLE001
+            log.warning("news summary build failed; skipping", exc_info=True)
+            news_summary = None
+        try:
+            sentiment_summary = await _build_sentiment_summary(l9=layer_results[9])
+        except Exception:  # noqa: BLE001
+            log.warning("sentiment summary build failed; skipping", exc_info=True)
+            sentiment_summary = None
+
     return LivePredictionOut(
         symbol=symbol,
         timeframe=timeframe,
@@ -308,4 +447,6 @@ async def build_prediction(
         cold_start=True,
         inputs_hash=_compute_inputs_hash(symbol, timeframe, bars),
         prediction_extras=extras,
+        sentiment=sentiment_summary,
+        news=news_summary,
     )

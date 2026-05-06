@@ -185,3 +185,94 @@ async def test_build_prediction_layer9_skips_other_assets(
             session=news_session,
         )
     assert pred.layer_scores["9"] is None
+
+
+# --- SP-9 Phase F1: predictor populates `sentiment` + `news` summaries -----
+
+
+@pytest.mark.asyncio
+async def test_build_prediction_populates_news_summary(
+    news_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """News summary surfaces top headline (max impact_score) + count + tier."""
+    # Stub F&G so the sentiment summary doesn't make a network call. We only
+    # assert the news summary in this test, but the predictor will attempt
+    # the F&G call — leave it returning None by raising.
+    async def _fail() -> Any:
+        raise RuntimeError("forced offline")
+
+    monkeypatch.setattr("app.news.fear_greed.get_fear_greed_index", _fail)
+
+    await _seed_news(news_session, n_positive=3, n_negative=2)
+    bars = _make_bars()
+    with freeze_time(_NOW):
+        pred = await build_prediction(
+            symbol="BTC/USDT", timeframe="1h", bars=bars, session=news_session,
+        )
+    assert pred.news is not None
+    assert pred.news.recent_count == 5
+    # Highest impact_score is 0.85 from the bullish rows; top headline is one
+    # of those titles.
+    assert pred.news.top_headline is not None
+    assert "BTC bullish" in pred.news.top_headline
+    # avg(0.85*3 + 0.7*2)/5 = 0.79 → HIGH (>0.7).
+    assert pred.news.impact == "HIGH"
+
+
+@pytest.mark.asyncio
+async def test_build_prediction_news_summary_none_when_no_articles(
+    news_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fail() -> Any:
+        raise RuntimeError("forced offline")
+
+    monkeypatch.setattr("app.news.fear_greed.get_fear_greed_index", _fail)
+    bars = _make_bars()
+    pred = await build_prediction(
+        symbol="BTC/USDT", timeframe="1h", bars=bars, session=news_session,
+    )
+    assert pred.news is None
+    # F&G stubbed to fail → sentiment also None.
+    assert pred.sentiment is None
+
+
+@pytest.mark.asyncio
+async def test_build_prediction_populates_sentiment_summary(
+    news_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F&G stubbed + L9 LONG → sentiment summary with news_bias=Bullish."""
+    from datetime import datetime as _dt
+
+    from app.news.fear_greed import FngResult
+
+    async def _stub() -> FngResult:
+        return FngResult(
+            value=72,
+            label="Greed",
+            timestamp=_dt(2026, 5, 6, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr("app.news.fear_greed.get_fear_greed_index", _stub)
+
+    await _seed_news(news_session, n_positive=3, n_negative=0)
+    bars = _make_bars()
+    with freeze_time(_NOW):
+        pred = await build_prediction(
+            symbol="BTC/USDT", timeframe="1h", bars=bars, session=news_session,
+        )
+    assert pred.sentiment is not None
+    assert pred.sentiment.fng_value == 72
+    assert pred.sentiment.fng_label == "Greed"
+    assert pred.sentiment.news_bias == "Bullish"
+
+
+@pytest.mark.asyncio
+async def test_build_prediction_summaries_none_without_session() -> None:
+    """No session → both summaries default to None."""
+    bars = _make_bars()
+    pred = await build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    assert pred.sentiment is None
+    assert pred.news is None
