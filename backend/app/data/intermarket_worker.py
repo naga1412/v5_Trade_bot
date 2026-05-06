@@ -132,9 +132,30 @@ async def run_intermarket_cleanup_loop(
             log.exception("intermarket cleanup loop iteration failed")
 
 
-def start_intermarket_snapshot_task(session_factory: Any) -> asyncio.Task[None]:
-    raise NotImplementedError("SP-3.5 Phase C3")
+def start_intermarket_snapshot_task(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> asyncio.Task[None]:
+    """Spawn :func:`run_intermarket_snapshot_loop` as a background task."""
+    return asyncio.create_task(run_intermarket_snapshot_loop(session_factory))
 
 
-def start_intermarket_cleanup_task(session_factory: Any) -> asyncio.Task[None]:
-    raise NotImplementedError("SP-3.5 Phase C3")
+def start_intermarket_cleanup_task(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> asyncio.Task[None]:
+    """Spawn :func:`run_intermarket_cleanup_loop` as a background task."""
+    return asyncio.create_task(run_intermarket_cleanup_loop(session_factory))
+
+
+__all__ = [
+    "CLEANUP_HOUR_UTC",
+    "CLEANUP_MINUTE_UTC",
+    "INTERMARKET_INTERVAL_S",
+    "INTERMARKET_RETENTION_DAYS",
+    "UNIVERSE_LIMIT",
+    "_seconds_until_0430_utc",
+    "_snapshot_once",
+    "run_intermarket_cleanup_loop",
+    "run_intermarket_snapshot_loop",
+    "start_intermarket_cleanup_task",
+    "start_intermarket_snapshot_task",
+]
