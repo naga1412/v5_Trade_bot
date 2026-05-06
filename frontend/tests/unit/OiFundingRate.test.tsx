@@ -1,6 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
-import type { ReactElement } from "react";
 import { vi } from "vitest";
 
 import { OiFundingRate } from "@/tabs/Tab1LivePrediction/panels/OiFundingRate";
@@ -20,12 +18,6 @@ const base: LivePrediction = {
 };
 
 
-function wrap(ui: ReactElement) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>;
-}
-
-
 test("renders funding rate, OI and 24h delta when API returns snapshot", async () => {
   vi.spyOn(api, "getIntermarket").mockResolvedValue({
     symbol: "BTC/USDT", funding_rate: -0.0012, mark_price: 70000.0,
@@ -33,7 +25,7 @@ test("renders funding rate, OI and 24h delta when API returns snapshot", async (
     dxy_correlation_30d: null, gold_correlation_30d: null,
     captured_at: "2026-05-06T12:00:00Z",
   });
-  render(wrap(<OiFundingRate data={base} />));
+  render(<OiFundingRate data={base} />);
   await waitFor(() => {
     expect(screen.getByText(/-0\.12%/)).toBeInTheDocument();   // funding 4-decimals as percent
     expect(screen.getByText(/30\.0%/)).toBeInTheDocument();    // delta
@@ -43,14 +35,14 @@ test("renders funding rate, OI and 24h delta when API returns snapshot", async (
 
 test("renders 'no data' placeholder while loading", async () => {
   vi.spyOn(api, "getIntermarket").mockImplementation(() => new Promise(() => {})); // never resolves
-  render(wrap(<OiFundingRate data={base} />));
+  render(<OiFundingRate data={base} />);
   expect(screen.getAllByText("no data").length).toBeGreaterThanOrEqual(2);
 });
 
 
 test("renders 'no data' placeholder on API error", async () => {
   vi.spyOn(api, "getIntermarket").mockRejectedValue(new Error("404"));
-  render(wrap(<OiFundingRate data={base} />));
+  render(<OiFundingRate data={base} />);
   await waitFor(() => {
     expect(screen.getAllByText("no data").length).toBeGreaterThanOrEqual(2);
   });
@@ -64,7 +56,7 @@ test("negative funding rate uses red color class", async () => {
     dxy_correlation_30d: null, gold_correlation_30d: null,
     captured_at: "2026-05-06T12:00:00Z",
   });
-  const { container } = render(wrap(<OiFundingRate data={base} />));
+  const { container } = render(<OiFundingRate data={base} />);
   await waitFor(() => {
     expect(container.querySelector(".text-red-400")).not.toBeNull();
   });

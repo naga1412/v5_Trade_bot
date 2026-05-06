@@ -1,8 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 import { Panel } from "@/components/ui/Panel";
 import { getIntermarket } from "@/lib/api";
-import type { LivePrediction } from "@/lib/api";
+import type { IntermarketSnapshot, LivePrediction } from "@/lib/api";
 
 
 function corrColorClass(c: number | null): string {
@@ -13,16 +13,22 @@ function corrColorClass(c: number | null): string {
 
 export function IntermarketAnalysis({ data }: { data: LivePrediction | null }) {
   const symbol = data?.symbol;
-  const { data: snap, isLoading, isError } = useQuery({
-    queryKey: ["intermarket", symbol],
-    queryFn: () => getIntermarket(symbol ?? ""),
-    enabled: Boolean(symbol),
-    staleTime: 30_000,
-  });
+  const [snap, setSnap] = useState<IntermarketSnapshot | null>(null);
 
-  const ready = !isLoading && !isError && snap !== undefined;
-  const dxy = ready ? snap.dxy_correlation_30d : null;
-  const gold = ready ? snap.gold_correlation_30d : null;
+  useEffect(() => {
+    if (!symbol) {
+      setSnap(null);
+      return;
+    }
+    let cancelled = false;
+    getIntermarket(symbol)
+      .then((s) => { if (!cancelled) setSnap(s); })
+      .catch(() => { if (!cancelled) setSnap(null); });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  const dxy = snap?.dxy_correlation_30d ?? null;
+  const gold = snap?.gold_correlation_30d ?? null;
 
   return (
     <Panel title="Intermarket">
