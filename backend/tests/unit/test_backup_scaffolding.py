@@ -83,8 +83,8 @@ def test_recovery_rehearsal_exposes_run_recovery_rehearsal_callable() -> None:
     assert callable(run_recovery_rehearsal)
 
 
-def test_recovery_rehearsal_is_a_stub() -> None:
+def test_recovery_rehearsal_is_callable() -> None:
+    """Phase E4 replaced the stub with the real B2 + restore orchestrator."""
     from tools.backup.recovery_rehearsal import run_recovery_rehearsal
 
-    with pytest.raises(NotImplementedError, match="Phase E4"):
-        run_recovery_rehearsal(Path("/tmp/snap.tar.zst"))
+    assert callable(run_recovery_rehearsal)
