@@ -44,6 +44,12 @@ dependencies = [
     # revisited once pandas-ta ships a 3.11 wheel or we move to py3.12.
     "optuna==4.0.0",
     "prometheus-fastapi-instrumentator==7.0.0",
+    # SP-9 Phase A3: news + sentiment runtime deps.
+    # - transformers: HuggingFace inference for ProsusAI/finbert (CPU only).
+    # - feedparser: RSS 2.0 / Atom 1.0 parsing for Yahoo RSS macro feeds.
+    # First run downloads FinBERT (~440MB) to ~/.cache/huggingface; cached after.
+    "transformers==4.46.0",
+    "feedparser==6.0.11",
 ]
 
 [build-system]
