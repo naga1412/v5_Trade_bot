@@ -549,3 +549,24 @@ export const api = {
       { method: "POST", body: enable ? {} : { reason: reason ?? "" } },
     ),
 };
+
+// SP-3.5 Phase E3: intermarket snapshot
+export interface IntermarketSnapshot {
+  symbol: string;
+  funding_rate: number | null;
+  mark_price: number | null;
+  open_interest: number | null;
+  open_interest_delta_24h_pct: number | null;
+  dxy_correlation_30d: number | null;
+  gold_correlation_30d: number | null;
+  captured_at: string; // ISO 8601 UTC
+}
+
+export async function getIntermarket(symbol: string): Promise<IntermarketSnapshot> {
+  const url = `/api/v1/intermarket/${encodeURIComponent(symbol)}`;
+  const r = await fetch(url, { credentials: "include" });
+  if (!r.ok) {
+    throw new Error(`getIntermarket(${symbol}) failed: ${r.status}`);
+  }
+  return r.json() as Promise<IntermarketSnapshot>;
+}
