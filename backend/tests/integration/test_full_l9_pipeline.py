@@ -33,6 +33,19 @@ from app.core.scoring.types import Direction
 
 _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
 
+# freezegun introspects every loaded module's attributes via getattr(),
+# which forces transformers' lazy loader to import every model class.
+# Several vision models (mllama, detr, etc.) have import chains that depend
+# on optional vision deps (Pillow, torchvision, ...) which we don't ship.
+# Tell freezegun to skip transformers entirely — we never freeze its
+# internal time anyway. Same goes for torch/torchvision/PIL, which load
+# under transformers introspection.
+_FREEZE_IGNORE = ("transformers", "torch", "torchvision", "PIL")
+
+
+def _freeze(ts: datetime) -> Any:
+    return freeze_time(ts, ignore=list(_FREEZE_IGNORE))
+
 
 def _make_bars(n: int = 250) -> pd.DataFrame:
     """Synthetic uptrend bars (>=200 needed for L1 EMA200)."""
@@ -147,7 +160,7 @@ async def test_build_prediction_populates_layer9_when_session_provided(
     # Freeze the L9 clock so the seeded ``published_at`` values are inside
     # the layer's default 60-min lookback window regardless of when the
     # test runs.
-    with freeze_time(_NOW):
+    with _freeze(_NOW):
         pred = await build_prediction(
             symbol="BTC/USDT",
             timeframe="1h",
@@ -206,7 +219,7 @@ async def test_build_prediction_layer9_skips_other_assets(
     await _seed_news(news_session, n_positive=3, n_negative=0, base="ETH")
     bars = _make_bars()
 
-    with freeze_time(_NOW):
+    with _freeze(_NOW):
         pred = await build_prediction(
             symbol="BTC/USDT",
             timeframe="1h",
@@ -235,7 +248,7 @@ async def test_build_prediction_populates_news_summary(
 
     await _seed_news(news_session, n_positive=3, n_negative=2)
     bars = _make_bars()
-    with freeze_time(_NOW):
+    with _freeze(_NOW):
         pred = await build_prediction(
             symbol="BTC/USDT", timeframe="1h", bars=bars, session=news_session,
         )
@@ -288,7 +301,7 @@ async def test_build_prediction_populates_sentiment_summary(
 
     await _seed_news(news_session, n_positive=3, n_negative=0)
     bars = _make_bars()
-    with freeze_time(_NOW):
+    with _freeze(_NOW):
         pred = await build_prediction(
             symbol="BTC/USDT", timeframe="1h", bars=bars, session=news_session,
         )
