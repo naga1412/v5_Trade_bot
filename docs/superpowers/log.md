@@ -755,3 +755,101 @@ promoting a worse ML checkpoint over the live one.
   NewsMacroImpact panels and L9 layer wiring, or
 - **SP-4** — train L10 RL meta-brain (PPO) + wire BRAIN_ADJUST live.
 
+## 2026-05-06 — SP-9 News + Sentiment: SHIPPED
+
+**Scope:** the news + sentiment slice — replace the L9 placeholder
+with a real news-driven LayerScore, wire FinBERT for ProsusAI/finbert
+sentiment classification, ingest CryptoPanic (5-minute crypto poll) +
+Yahoo Finance RSS (30-minute macro poll), cache the alternative.me
+Fear & Greed index, populate the Tab 1 SentimentFearGreed +
+NewsMacroImpact panels with live data, and expose admin REST for
+listing + manual refresh of the news_items store.
+
+**Delivered (~26 commits on branch `sp-9/main`):**
+
+| Phase | Sub-system                                                                                                                                             | Commits |
+|-------|--------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| A     | Migration 0013 (`news_items` + GIN index on `affected_assets`) + `transformers==4.46.0` / `feedparser==6.0.11` deps + `app.news.*` scaffolds + `NewsAdapter` Protocol + `NewsArticle` dataclass | 4 |
+| B     | CryptoPanic adapter (DailyCounterBucket 500/day) + Yahoo RSS adapter (asyncio.to_thread) + symbol/category/impact heuristics + `persist_news_items` (ON CONFLICT (url) DO NOTHING) + nightly cleanup | 7 |
+| C     | FinBERT lazy-loaded `classify_batch` returning `SentimentResult` + mocked unit tests + opt-in slow smoke + opt-in batch-16 latency budget | 3 |
+| D     | `fear_greed.get_fear_greed_index` (alternative.me, 1h cache) + ingest worker (5-min crypto / 30-min macro cursors) + nightly cleanup loop (04:00 UTC, 20-day retention) + lifespan wiring | 4 |
+| E     | L9 news layer aggregator (sentiment-weighted by impact, tanh-squashed, abstains on no rows) + predictor calls L9 when session provided + full-pipeline E2E integration tests | 3 |
+| F     | `SentimentSummary` + `NewsSummary` Pydantic schemas + `LivePredictionOut` +2 optional fields + predictor populates them best-effort + frontend types/panels wired + admin news REST + log + tag | 5 |
+
+**Test counts at ship:**
+- Backend: **1353 unit + 225 integration passing** (was ~1346 unit /
+  ~210 integration at the SP-9 Phase E baseline; +7 unit
+  schema tests + +15 integration tests across L9 pipeline E2E and
+  admin_news REST).
+- Frontend: **337 Vitest passing** (was 329 at SP-9 Phase E
+  baseline; +4 SentimentFearGreed + +4 NewsMacroImpact wire-up
+  cases).
+- 4 pre-existing Windows-only test failures unchanged from SP-7
+  ship: `test_ml_checkpoints` (2 — relative-path resolution),
+  `test_ratelimit_client` (1 — wall-clock sensitive), and
+  `test_api_bot_status_equity_curve` (1 — date-grouping). Documented
+  in CI as "expected on Windows; track via #TBD".
+
+**Surprises / decisions worth flagging:**
+
+- **FinBERT lazy-loaded on first inference; image growth ~1.5GB.**
+  The HuggingFace `ProsusAI/finbert` checkpoint is ~440MB on disk; we
+  defer the `transformers` + torch graph load to the first
+  `classify_batch(...)` call inside the ingest worker so the FastAPI
+  startup path (and the unit-test process) doesn't pay the cost.
+  Total Docker image growth from the transformers + torch stack is
+  ~1.5GB. Operators on a metered link should `docker pull` once,
+  off-peak, before the next ingest tick.
+- **L9 returns `None` gracefully when no news rows match.** The
+  aggregator in `app.core.scoring.aggregator` already handles a
+  `None` per-layer slot by redistributing weight to the remaining
+  layers (no special-case needed). Same path covers the F&G upstream
+  being down — the SentimentSummary stays `None` and the Tab 1 panel
+  falls back to its placeholder UI.
+- **`build_prediction` became async with an optional `session`
+  kwarg; backward-compatible for legacy callers.** SP-5 left
+  `build_prediction` synchronous + session-less. SP-9 needed an
+  async DB query for the L9 news lookup, so the function is now
+  `async def build_prediction(..., session: AsyncSession | None =
+  None)` — calling without a session keeps the SP-5 abstain-on-L9
+  behaviour (and the predictor returns `sentiment=None` /
+  `news=None`). Every call site was updated to `await`.
+- **Backtester bridges async → sync via `asyncio.run`; L9 abstains
+  in backtest mode.** The SP-7 native backtester runs entirely
+  synchronously in Python threads; rather than refactor it to async
+  end-to-end, the per-bar `build_prediction` is wrapped in
+  `asyncio.run(...)` with `session=None`. L9 always abstains in
+  backtest mode (we don't replay historical news_items per-bar — the
+  bar-level news lookup would explode hyperopt runtime). Fine for
+  the proxy-MAE objective; revisit when the project ingests
+  point-in-time news for forensic backtests.
+- **SQLite `news_items` mirror uses JSON-encoded `affected_assets`
+  (LIKE matching) instead of Postgres `TEXT[] + GIN`.** Migration
+  0013 ships both branches. Postgres uses `affected_assets TEXT[]`
+  with a GIN index for `:base = ANY(affected_assets)` lookups; the
+  SQLite test mirror stores the array as a JSON string and matches
+  via `LIKE :pat` with a quoted token (e.g. `'%"BTC"%'`) so `BTC`
+  doesn't accidentally match `BTCBULL`. The L9 layer + the admin
+  list endpoint detect dialect at query time and pick the right
+  shape — no per-test fixture mocking needed.
+
+**Manual checklist (for the human after deploy):**
+- [ ] Apply migration 0013 to production Postgres
+       (`alembic upgrade head` inside the backend container)
+- [ ] Set `CRYPTOPANIC_API_KEY` env var (free tier; sign up at
+       cryptopanic.com → Account → API → copy the auth_token)
+- [ ] First `docker compose up backend` will lazy-load FinBERT on
+       the first ingest tick (~440MB download, one-time)
+- [ ] POST `/api/v1/admin/news/refresh` once to confirm the ingest
+       round completes; expect a small positive `new_rows` count
+- [ ] Verify Tab 1's "Sentiment / F&G" + "News & Macro" panels
+       populate within ~5 minutes (one ingest tick + the F&G hourly
+       cache fetch)
+
+**Next:** ship F6 (PR `sp-9/main` → `main`) and tag `sp-9`. Then either
+- **SP-1.5** — train L7 XGBoost + wire inference (then wire real MAE
+  into champion-challenger), or
+- **SP-3.5** — wire OI / funding rate / borrow rate adapters into
+  TrapContext + IntermarketAnalysis panel, or
+- **SP-4** — train L10 RL meta-brain (PPO) + wire BRAIN_ADJUST live.
+
