@@ -115,11 +115,24 @@ async def test_layer9_score_reads_seeded_news(news_session: AsyncSession) -> Non
     assert result.confidence == 1.0
 
 
+async def _offline_fng() -> Any:
+    """Force F&G to abstain so the predictor's sentiment summary stays None.
+
+    Any test that passes ``session=`` to build_prediction goes through
+    ``_build_sentiment_summary`` which calls ``get_fear_greed_index``.
+    Unmocked, that hits ``api.alternative.me`` — which hangs in CI where
+    outbound HTTPS to non-Microsoft hosts is intermittently blocked.
+    """
+    raise RuntimeError("forced offline")
+
+
 @pytest.mark.asyncio
 async def test_build_prediction_populates_layer9_when_session_provided(
     news_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """E2E: seed news_items → build_prediction(session=) → layer_scores['9'] set."""
+    monkeypatch.setattr("app.news.fear_greed.get_fear_greed_index", _offline_fng)
     await _seed_news(news_session, n_positive=3, n_negative=2)
     bars = _make_bars()
 
@@ -157,8 +170,10 @@ async def test_build_prediction_layer9_none_without_session() -> None:
 @pytest.mark.asyncio
 async def test_build_prediction_layer9_none_with_session_but_no_news(
     news_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Empty news_items table + session → L9 still abstains."""
+    monkeypatch.setattr("app.news.fear_greed.get_fear_greed_index", _offline_fng)
     bars = _make_bars()
     pred = await build_prediction(
         symbol="BTC/USDT",
@@ -172,8 +187,10 @@ async def test_build_prediction_layer9_none_with_session_but_no_news(
 @pytest.mark.asyncio
 async def test_build_prediction_layer9_skips_other_assets(
     news_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ETH-only news in the table → BTC prediction's L9 abstains."""
+    monkeypatch.setattr("app.news.fear_greed.get_fear_greed_index", _offline_fng)
     await _seed_news(news_session, n_positive=3, n_negative=0, base="ETH")
     bars = _make_bars()
 

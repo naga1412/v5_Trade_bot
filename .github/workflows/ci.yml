@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
 
+# Auto-cancel an in-progress run when a newer commit lands on the same ref.
+# Without this, a pytest-hung run can sit for the full 6h job timeout while
+# the fix commit's run queues behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
