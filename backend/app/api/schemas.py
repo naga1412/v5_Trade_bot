@@ -57,6 +57,32 @@ class GhostOut(BaseModel):
     uncertainty: float = Field(ge=0.0)
 
 
+# --- SP-9 Phase F5: admin news REST schemas -------------------------------
+
+
+class NewsArticleOut(BaseModel):
+    """One ``news_items`` row exposed by ``GET /api/v1/admin/news``."""
+
+    id: int
+    source: str
+    url: str
+    title: str
+    published_at: datetime
+    fetched_at: datetime
+    sentiment_score: float | None = None
+    sentiment_label: Literal["positive", "negative", "neutral"] | None = None
+    impact_score: float | None = None
+    category: str | None = None
+    affected_assets: list[str] = []
+
+
+class NewsRefreshOut(BaseModel):
+    """Result of ``POST /api/v1/admin/news/refresh`` — manual ingest trigger."""
+
+    new_rows: int
+    sources_polled: list[str]
+
+
 class SentimentSummary(BaseModel):
     """SP-9 Phase F1: F&G index + L9 news bias summary for Tab 1.
 
