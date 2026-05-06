@@ -20,7 +20,9 @@ const mockedPause = vi.mocked(pauseSystem);
 const mockedResume = vi.mocked(resumeSystem);
 
 beforeEach(() => {
-  vi.useFakeTimers();
+  // Real timers for the render-and-assert tests; the polling-cadence
+  // test below opts into fake timers locally with `shouldAdvanceTime`
+  // so testing-library's waitFor still works.
   mockedGet.mockReset();
   mockedPause.mockReset();
   mockedResume.mockReset();
@@ -108,11 +110,12 @@ describe("SystemPauseControl", () => {
     mockedGet.mockResolvedValue({
       paused: false, since: null, by_email: null, reason: null,
     });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<SystemPauseControl />);
-    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(1));
-    vi.advanceTimersByTime(5_000);
-    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
-    vi.advanceTimersByTime(5_000);
-    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(3));
   });
 });

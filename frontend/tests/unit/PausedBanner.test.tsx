@@ -11,7 +11,6 @@ import { PausedBanner } from "@/components/layout/PausedBanner";
 const mockedGet = vi.mocked(getSystemState);
 
 beforeEach(() => {
-  vi.useFakeTimers();
   mockedGet.mockReset();
 });
 afterEach(() => {
@@ -21,7 +20,7 @@ afterEach(() => {
 
 describe("PausedBanner", () => {
   test("renders nothing when not paused", async () => {
-    mockedGet.mockResolvedValueOnce({
+    mockedGet.mockResolvedValue({
       paused: false, since: null, by_email: null, reason: null,
     });
     const { container } = render(<PausedBanner />);
@@ -30,7 +29,7 @@ describe("PausedBanner", () => {
   });
 
   test("renders banner with message when paused", async () => {
-    mockedGet.mockResolvedValueOnce({
+    mockedGet.mockResolvedValue({
       paused: true, since: "2026-05-06T12:00:00+00:00",
       by_email: "admin@x.com", reason: "travel",
     });
@@ -45,14 +44,15 @@ describe("PausedBanner", () => {
     mockedGet.mockResolvedValue({
       paused: false, since: null, by_email: null, reason: null,
     });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<PausedBanner />);
-    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(1));
-    vi.advanceTimersByTime(5_000);
-    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
   });
 
   test("uses yellow background for warning visibility", async () => {
-    mockedGet.mockResolvedValueOnce({
+    mockedGet.mockResolvedValue({
       paused: true, since: null, by_email: null, reason: null,
     });
     render(<PausedBanner />);
