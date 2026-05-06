@@ -191,6 +191,26 @@ async def _create_shadow_tables(engine: Any) -> None:
             "  CHECK (status IN ('running','completed','failed')), "
             "error_message TEXT)"
         ))
+        # SP-9 Phase E3: news_items SQLite mirror so integration tests that
+        # exercise build_prediction(..., session=...) can seed news rows the
+        # L9 layer reads. Mirror of migration 0013's SQLite branch:
+        # affected_assets is a JSON-encoded TEXT column (no PG array).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS news_items ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "source TEXT NOT NULL, "
+            "url TEXT UNIQUE NOT NULL, "
+            "title TEXT NOT NULL, "
+            "body TEXT, "
+            "published_at TIMESTAMP NOT NULL, "
+            "fetched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "sentiment_score REAL, "
+            "sentiment_label TEXT, "
+            "sentiment_confidence REAL, "
+            "impact_score REAL, "
+            "category TEXT, "
+            "affected_assets TEXT)"
+        ))
 
 
 @pytest_asyncio.fixture
