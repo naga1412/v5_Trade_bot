@@ -147,6 +147,10 @@ class ShadowWorker:
         return buf
 
     async def _handle_candle(self, candle: MultiStreamCandle) -> None:
+        from app.ops import pause_state
+        if await pause_state.is_paused():
+            log.debug("shadow_worker: paused, skipping candle %s", candle.symbol)
+            return
         buf = self._append_bar(candle)
 
         if candle.symbol in self.open_positions:

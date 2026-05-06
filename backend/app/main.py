@@ -13,6 +13,7 @@ from app.api.routes import (
     admin_monitoring,  # SP-7 Phase G3
     admin_news,  # SP-9 Phase F5
     admin_patterns,
+    admin_system,  # SP-PAUSE master pause/resume
     admin_traps,
     bot_status,
     health,
@@ -22,6 +23,7 @@ from app.api.routes import (
     tab1,
 )
 from app.api.routes import ws as ws_routes
+from app.api.pause_middleware import register_pause_middleware
 from app.auth.query_guard import attach_query_guard
 from app.config import get_settings
 from app.data.adapter_health import start_health_pinger_task
@@ -151,6 +153,9 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+    # SP-PAUSE: 423 gate for non-allow-listed requests when paused. Must
+    # sit before instrument_app so Prometheus observes the 423 path.
+    register_pause_middleware(app)
     app.include_router(health.router)
     app.include_router(tab1.router)
     app.include_router(bot_status.router)
@@ -162,6 +167,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_monitoring.router)  # SP-7 Phase G3
     app.include_router(admin_news.router)  # SP-9 Phase F5
     app.include_router(admin_patterns.router)
+    app.include_router(admin_system.router)  # SP-PAUSE
     app.include_router(admin_traps.router)
     app.include_router(me.router)
     app.include_router(scanner.router)  # SP-6

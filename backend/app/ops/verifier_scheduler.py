@@ -215,6 +215,10 @@ async def run_audit_verifier_loop(
     while True:
         wait_s = seconds_until_next_utc_hour(wake_at_utc_hour, now_fn())
         await _sleep(float(wait_s))
+        from app.ops import pause_state
+        if await pause_state.is_paused():
+            log.debug("audit_verifier: paused, skipping nightly chain check")
+            continue
         await _check_all_chains(session_factory)
 
 
