@@ -19,7 +19,6 @@ from app.core.scoring.layer5_volume import score as score_l5
 from app.core.scoring.layer6_micro import score as score_l6
 from app.core.scoring.layer7_xgboost import score as score_l7
 from app.core.scoring.layer8_convlstm import GhostInput, score as score_l8
-from app.core.scoring.layer9_news import score as score_l9
 from app.core.scoring.layer10_brain import score as score_l10
 from app.core.scoring.run_traps import check_all_traps
 from app.core.scoring.tiers import classify_tier
@@ -208,7 +207,10 @@ def build_prediction(
     layer_results[6] = score_l6(bars)
     layer_results[7] = score_l7(bars)
     layer_results[8] = score_l8(bars, ghost=ghost)
-    layer_results[9] = score_l9(bars)
+    # L9 (news + sentiment, SP-9 Phase E1) is async and needs a DB session;
+    # the wiring lands in Phase E2. Until then, L9 stays None (placeholder
+    # behaviour preserved — aggregator redistributes weight per SP-5 §3.4).
+    layer_results[9] = None
     layer_results[10] = score_l10(bars)
 
     # First aggregator pass — no traps — to derive the proposed direction the
