@@ -75,18 +75,68 @@ def _reset_for_tests() -> None:
     _CACHE = None
 
 
-async def is_paused() -> bool:  # noqa: D401
-    raise NotImplementedError("SP-PAUSE Phase A2")
+async def is_paused() -> bool:
+    """Cached pause-flag getter. Returns the in-process cached value when
+    less than ``CACHE_TTL_S`` seconds old; otherwise refreshes from Redis."""
+    global _CACHE
+    now = time.monotonic()
+    if _CACHE is not None and now - _CACHE[1] < CACHE_TTL_S:
+        return _CACHE[0]
+    try:
+        raw = await _get_redis().get(REDIS_KEY)
+    except Exception:  # noqa: BLE001
+        # If Redis is unreachable, fail OPEN (not paused) - avoids a
+        # Redis outage cascading into a full system lockout.
+        log.warning("pause_state: Redis read failed; assuming not-paused")
+        _CACHE = (False, now)
+        return False
+    value = raw == "true"
+    _CACHE = (value, now)
+    return value
 
 
 async def set_paused(  # type: ignore[no-untyped-def]
-    paused: bool, *, by_email: str, reason: str | None, session, request_path: str | None = None,
+    paused: bool, *, by_email: str, reason: str | None,
+    session, request_path: str | None = None,
 ) -> None:
-    raise NotImplementedError("SP-PAUSE Phase A2")
+    """Flip the pause flag. Phase B layers an audit-row insert in here."""
+    global _CACHE
+    from datetime import timezone
+
+    r = _get_redis()
+    if paused:
+        ts = datetime.now(timezone.utc).isoformat()
+        await r.set(REDIS_KEY, "true")
+        await r.set(SINCE_KEY, ts)
+        await r.set(BY_KEY, by_email)
+        await r.set(REASON_KEY, reason or "")
+    else:
+        await r.delete(REDIS_KEY, SINCE_KEY, BY_KEY, REASON_KEY)
+    _CACHE = None
 
 
 async def get_state() -> SystemPauseState:
-    raise NotImplementedError("SP-PAUSE Phase A2")
+    r = _get_redis()
+    paused_raw, since_raw, by_raw, reason_raw = await r.mget(
+        REDIS_KEY, SINCE_KEY, BY_KEY, REASON_KEY,
+    )
+    paused = paused_raw == "true"
+    if not paused:
+        return SystemPauseState(
+            paused=False, since=None, by_email=None, reason=None,
+        )
+    since: datetime | None = None
+    if since_raw:
+        try:
+            since = datetime.fromisoformat(since_raw)
+        except ValueError:
+            since = None
+    return SystemPauseState(
+        paused=True,
+        since=since,
+        by_email=by_raw or None,
+        reason=(reason_raw or None) or None,
+    )
 
 
 async def pause_event_log(  # type: ignore[no-untyped-def]
