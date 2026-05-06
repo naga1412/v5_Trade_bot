@@ -99,8 +99,16 @@ async def set_paused(  # type: ignore[no-untyped-def]
     paused: bool, *, by_email: str, reason: str | None,
     session, request_path: str | None = None,
 ) -> None:
-    """Flip the pause flag. Phase B layers an audit-row insert in here."""
+    """Flip the pause flag in Redis AND record an audit row.
+
+    The audit row uses ``auth_violations`` (the SP-0.7 table). Reason
+    field encodes the kind so :func:`pause_event_log` can recover it::
+
+        pause:    reason = "system_paused: <free text or empty>"
+        resume:   reason = "system_resumed"
+    """
     global _CACHE
+    import sqlalchemy as sa  # local import - keeps redis-only callers light
     from datetime import timezone
 
     r = _get_redis()
@@ -110,8 +118,20 @@ async def set_paused(  # type: ignore[no-untyped-def]
         await r.set(SINCE_KEY, ts)
         await r.set(BY_KEY, by_email)
         await r.set(REASON_KEY, reason or "")
+        audit_reason = f"system_paused: {reason or ''}"
     else:
         await r.delete(REDIS_KEY, SINCE_KEY, BY_KEY, REASON_KEY)
+        audit_reason = "system_resumed"
+
+    await session.execute(
+        sa.text(
+            "INSERT INTO auth_violations "
+            "(attempted_email, reason, request_path) "
+            "VALUES (:e, :r, :p)"
+        ),
+        {"e": by_email, "r": audit_reason, "p": request_path},
+    )
+    await session.commit()
     _CACHE = None
 
 
