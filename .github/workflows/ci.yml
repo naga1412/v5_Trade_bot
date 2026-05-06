@@ -45,6 +45,12 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:testpw@localhost:5432/trading_radar
           REDIS_URL: redis://localhost:6379/0
           ENV: development
+          # SP-9: lifespan starts background workers when env != test/ci. The
+          # news ingest worker fires immediately and tries to reach CryptoPanic +
+          # Yahoo RSS + alternative.me — outbound HTTPS hangs in CI. Keep
+          # ENV=development for the cf-access dev bypass + DB pool config, but
+          # disable workers so tests don't pile up on outbound network calls.
+          WORKER_ENABLED: "false"
         run: pytest -v
 
   frontend:
