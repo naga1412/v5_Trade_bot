@@ -101,7 +101,7 @@ async def test_l2_layer_lands_in_prediction_and_persists() -> None:
     lookup = PatternStatsLookup(
         by_pattern={"hammer": 0.6, "doji": 0.55, "dragonfly_doji": 0.7},
     )
-    pred = build_prediction(
+    pred = await build_prediction(
         symbol="BTC/USDT",
         timeframe="1h",
         bars=bars,
@@ -154,7 +154,7 @@ async def test_l2_pipeline_e2e_persists_and_audit_chain_includes_l2() -> None:
         lookup = PatternStatsLookup(
             by_pattern={"hammer": 0.6, "doji": 0.55, "dragonfly_doji": 0.7},
         )
-        pred = build_prediction(
+        pred = await build_prediction(
             symbol="BTC/USDT",
             timeframe="1h",
             bars=bars,

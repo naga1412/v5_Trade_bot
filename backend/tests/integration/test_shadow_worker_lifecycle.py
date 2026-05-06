@@ -151,9 +151,10 @@ def _scripted_predictor(triggers: set[tuple[str, datetime]]) -> Any:
     long_pred = _StubPred(final=_StubFinal(score=0.85, confidence=0.80, direction="LONG"))
     neutral_pred = _StubPred(final=_StubFinal(score=0.05, confidence=0.80, direction="NEUTRAL"))
 
-    def fake(  # noqa: ARG001
+    async def fake(  # noqa: ARG001
         *, symbol: str, timeframe: str, bars: pd.DataFrame, **_: Any,
     ) -> Any:
+        # SP-9 Phase E2: build_prediction is async; fake must match.
         last_ts = bars.index[-1].to_pydatetime()
         if last_ts.tzinfo is None:
             last_ts = last_ts.replace(tzinfo=UTC)

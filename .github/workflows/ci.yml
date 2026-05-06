@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
 
+# Auto-cancel an in-progress run when a newer commit lands on the same ref.
+# Without this, a pytest-hung run can sit for the full 6h job timeout while
+# the fix commit's run queues behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -45,7 +52,17 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:testpw@localhost:5432/trading_radar
           REDIS_URL: redis://localhost:6379/0
           ENV: development
-        run: pytest -v
+          # SP-9: lifespan starts background workers when env != test/ci. The
+          # news ingest worker fires immediately and tries to reach CryptoPanic +
+          # Yahoo RSS + alternative.me — outbound HTTPS hangs in CI. Keep
+          # ENV=development for the cf-access dev bypass + DB pool config, but
+          # disable workers so tests don't pile up on outbound network calls.
+          WORKER_ENABLED: "false"
+        # 120s per-test timeout: most tests run in <1s, the slowest legitimate
+        # ones (rate-limit timing tests, freezegun-backed integration flows)
+        # take a few seconds. 120s catches genuine hangs while leaving headroom
+        # for CI runners under load.
+        run: pytest -v --timeout=120 --timeout-method=thread
 
   frontend:
     runs-on: ubuntu-latest

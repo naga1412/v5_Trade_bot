@@ -15,6 +15,7 @@ endpoint.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -332,12 +333,19 @@ def _scan_for_trades(
     i = _WARMUP_BARS
     while i < n - 1:
         window = bars.iloc[: i + 1]
+        # SP-9 Phase E2: build_prediction is async. The backtester runs
+        # synchronously inside ``asyncio.to_thread`` in the admin endpoint
+        # and as a plain CLI elsewhere; we don't pass a session (so L9
+        # abstains, preserving SP-5/SP-7 backtest behaviour) and bridge
+        # async->sync via ``asyncio.run`` per bar.
         try:
-            pred = build_prediction(
-                symbol=symbol,
-                timeframe=timeframe,
-                bars=window,
-                enabled_traps=enabled_traps,
+            pred = asyncio.run(
+                build_prediction(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    bars=window,
+                    enabled_traps=enabled_traps,
+                )
             )
         except Exception as exc:  # noqa: BLE001 — backtest must keep going
             log.debug("build_prediction failed at bar %d: %s", i, exc)
