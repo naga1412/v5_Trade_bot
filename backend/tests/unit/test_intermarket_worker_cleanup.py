@@ -40,7 +40,9 @@ async def test_cleanup_loop_invokes_cleanup_then_cancels() -> None:
     sleep_log: list[float] = []
     async def fake_sleep(s: float) -> None:
         sleep_log.append(s)
-        if len(sleep_log) >= 1:
+        # Loop runs as: sleep → cleanup → sleep → cleanup ...
+        # Cancel on the SECOND sleep so cleanup runs exactly once first.
+        if len(sleep_log) >= 2:
             raise asyncio.CancelledError
 
     def fixed_now() -> datetime:
@@ -57,8 +59,12 @@ async def test_cleanup_loop_invokes_cleanup_then_cancels() -> None:
 
 @pytest.mark.asyncio
 async def test_cleanup_loop_swallows_errors() -> None:
+    sleep_count = {"n": 0}
     async def fake_sleep(s: float) -> None:
-        raise asyncio.CancelledError
+        sleep_count["n"] += 1
+        # Cancel on the second sleep so cleanup runs once and raises first.
+        if sleep_count["n"] >= 2:
+            raise asyncio.CancelledError
 
     def fixed_now() -> datetime:
         return datetime(2026, 5, 6, 12, tzinfo=timezone.utc)

@@ -49,15 +49,18 @@ async def test_get_intermarket_route_returns_latest(  # type: ignore[no-untyped-
     admin_client, auth_factory,
 ) -> None:
     now = datetime.now(timezone.utc)
+    # Pass datetime objects (not isoformat strings) so SQLAlchemy binds them
+    # the same way the persistence layer's WHERE clause will format the
+    # comparison value — string lexicographic compare otherwise mismatches.
     await _seed_snapshots(auth_factory, symbol="BTC/USDT", rows=[
         {
-            "captured_at": (now - timedelta(hours=24)).isoformat(),
+            "captured_at": (now - timedelta(hours=24)).replace(microsecond=0),
             "funding_rate": 0.0,
             "mark_price": 68000.0,
             "open_interest": 1.0e9,
         },
         {
-            "captured_at": now.isoformat(),
+            "captured_at": now.replace(microsecond=0),
             "funding_rate": -0.0012,
             "mark_price": 70000.0,
             "open_interest": 1.30e9,

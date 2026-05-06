@@ -3,7 +3,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.data import intermarket_correlations as ic
 from app.data.intermarket_correlations import compute_30d_correlations
+
+
+@pytest.fixture(autouse=True)
+def _clear_correlation_cache() -> None:
+    """The 1h dict cache is module-level; reset between tests."""
+    ic._cache.clear()
 
 
 def _candles(closes: list[float]) -> list:

@@ -41,9 +41,9 @@ async def test_funding_rate_decay_fires_when_session_supplies_negative_funding(
             symbol="BTC/USDT", timeframe="1h", bars=bars, session=session,
         )
 
-    fires = [f for f in out.prediction_extras["fires"]
+    fires = [f for f in out.prediction_extras["traps_fired"]
              if f["trap_id"] == "funding_rate_decay"]
-    assert len(fires) == 1, f"funding_rate_decay didn't fire; fires={out.prediction_extras['fires']}"
+    assert len(fires) == 1, f"funding_rate_decay didn't fire; traps_fired={out.prediction_extras['traps_fired']}"
     assert fires[0]["severity"] == "high"
     assert fires[0]["evidence"]["funding_rate"] == pytest.approx(-0.005)
 
@@ -88,7 +88,7 @@ async def test_short_squeeze_cascade_fires_on_oi_delta_25pct(
             symbol="BTC/USDT", timeframe="1h", bars=bars, session=session,
         )
 
-    fires = [f for f in out.prediction_extras["fires"]
+    fires = [f for f in out.prediction_extras["traps_fired"]
              if f["trap_id"] == "short_squeeze_cascade"]
     # Trap only fires if proposed_direction is SHORT (pre-trap aggregator).
     # If the bullish-tail bars flip aggregator to LONG, the trap is bypassed by design.
