@@ -23,6 +23,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import redis.asyncio as aioredis
 
@@ -49,10 +50,13 @@ class SystemPauseState:
     reason: str | None
 
 
+PauseEventKind = Literal["system_paused", "system_resumed"]
+
+
 @dataclass(frozen=True)
 class PauseEvent:
     id: int
-    kind: str          # "system_paused" | "system_resumed"
+    kind: PauseEventKind
     by_email: str
     at: datetime
     reason: str | None
@@ -171,6 +175,7 @@ async def pause_event_log(  # type: ignore[no-untyped-def]
     """), {"limit": limit})).all()
     out: list[PauseEvent] = []
     for r in rows:
+        kind: PauseEventKind
         if r.reason == "system_resumed":
             kind = "system_resumed"
             msg: str | None = None
