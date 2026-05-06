@@ -55,6 +55,25 @@ export interface GhostCandle {
   uncertainty: number; // [0, ∞), lower = more confident
 }
 
+// SP-9 Phase F2: F&G index + L9 news bias summary surfaced on Tab 1.
+export interface SentimentSummary {
+  fng_value: number;
+  fng_label:
+    | "Extreme Fear"
+    | "Fear"
+    | "Neutral"
+    | "Greed"
+    | "Extreme Greed";
+  news_bias: "Bullish" | "Bearish" | "Neutral";
+}
+
+// SP-9 Phase F2: top recent-headline + impact aggregation surfaced on Tab 1.
+export interface NewsSummary {
+  recent_count: number;
+  top_headline: string | null;
+  impact: "LOW" | "MEDIUM" | "HIGH";
+}
+
 export interface LivePrediction {
   symbol: string;
   timeframe: string;
@@ -84,6 +103,8 @@ export interface LivePrediction {
   inputs_hash: string;
   signal_markers?: SignalMarkers | null;
   ghost?: GhostCandle | null; // SP-1: null when no active ML checkpoint loaded.
+  sentiment?: SentimentSummary | null; // SP-9
+  news?: NewsSummary | null;            // SP-9
 }
 
 // --- Bot Status types ---
