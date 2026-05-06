@@ -70,11 +70,11 @@ def test_rsync_laptop_exposes_rsync_to_laptop_callable() -> None:
     assert callable(rsync_to_laptop)
 
 
-def test_rsync_laptop_is_a_stub() -> None:
+def test_rsync_laptop_is_callable() -> None:
+    """Phase E3 replaced the stub with a real subprocess wrapper."""
     from tools.backup.rsync_laptop import rsync_to_laptop
 
-    with pytest.raises(NotImplementedError, match="Phase E3"):
-        rsync_to_laptop(Path("/tmp/snap.tar.zst"))
+    assert callable(rsync_to_laptop)
 
 
 def test_recovery_rehearsal_exposes_run_recovery_rehearsal_callable() -> None:
