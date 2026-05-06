@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # value; the test conftest sets this explicitly so encryption helpers work.
     master_passphrase: str = "test-passphrase-only-for-tests-do-not-use-in-prod"
 
+    # SP-9 Phase B1: CryptoPanic free-tier API key.
+    # Empty string in dev/test causes the adapter to raise ValueError, so the
+    # ingest worker is gated separately on settings.env in app.main:lifespan.
+    cryptopanic_api_key: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
