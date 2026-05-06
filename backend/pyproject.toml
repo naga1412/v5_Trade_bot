@@ -47,9 +47,15 @@ dependencies = [
     # SP-9 Phase A3: news + sentiment runtime deps.
     # - transformers: HuggingFace inference for ProsusAI/finbert (CPU only).
     # - feedparser: RSS 2.0 / Atom 1.0 parsing for Yahoo RSS macro feeds.
+    # - Pillow: required by transformers' image_utils for PILImageResampling.
+    #   Without it, transformers.models.mllama (a vision model we don't use)
+    #   fails to import the moment freezegun introspects the transformers
+    #   namespace inside `with freeze_time(...):`, breaking any test that
+    #   freezes time after transformers has been imported.
     # First run downloads FinBERT (~440MB) to ~/.cache/huggingface; cached after.
     "transformers==4.46.0",
     "feedparser==6.0.11",
+    "Pillow==10.4.0",
 ]
 
 [build-system]
