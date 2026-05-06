@@ -1,9 +1,11 @@
 import hashlib
+import logging
 import math
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     FinalScoreOut, LayerScoreOut, LivePredictionOut, MomentumPanelOut, TradeSetupOut,
@@ -19,11 +21,14 @@ from app.core.scoring.layer5_volume import score as score_l5
 from app.core.scoring.layer6_micro import score as score_l6
 from app.core.scoring.layer7_xgboost import score as score_l7
 from app.core.scoring.layer8_convlstm import GhostInput, score as score_l8
+from app.core.scoring.layer9_news import score as score_l9
 from app.core.scoring.layer10_brain import score as score_l10
 from app.core.scoring.run_traps import check_all_traps
 from app.core.scoring.tiers import classify_tier
 from app.core.scoring.traps.base import TrapContext
 from app.core.scoring.types import Direction, LayerScore
+
+log = logging.getLogger(__name__)
 
 _TRAP_PENALTY: float = 0.15
 _TRAP_CAP: int = 4
@@ -170,7 +175,7 @@ def _build_extras(
     }
 
 
-def build_prediction(
+async def build_prediction(
     *,
     symbol: str,
     timeframe: str,
@@ -179,6 +184,7 @@ def build_prediction(
     enabled_patterns: set[str] | None = None,
     enabled_traps: set[str] | None = None,
     ghost: GhostInput | None = None,
+    session: AsyncSession | None = None,
 ) -> LivePredictionOut:
     """Score all 10 layers, run the 17-trap stack, and tag the resulting tier.
 
@@ -207,10 +213,17 @@ def build_prediction(
     layer_results[6] = score_l6(bars)
     layer_results[7] = score_l7(bars)
     layer_results[8] = score_l8(bars, ghost=ghost)
-    # L9 (news + sentiment, SP-9 Phase E1) is async and needs a DB session;
-    # the wiring lands in Phase E2. Until then, L9 stays None (placeholder
-    # behaviour preserved — aggregator redistributes weight per SP-5 §3.4).
-    layer_results[9] = None
+    # L9 (news + sentiment, SP-9 Phase E2): async + needs a DB session.
+    # When ``session`` is None, L9 abstains (None) so legacy callers that
+    # don't pass a session keep the SP-5 placeholder behaviour.
+    if session is not None:
+        try:
+            layer_results[9] = await score_l9(symbol=symbol, session=session)
+        except Exception:  # noqa: BLE001 — never let news lookup break scoring
+            log.warning("L9 news layer query failed; abstaining", exc_info=True)
+            layer_results[9] = None
+    else:
+        layer_results[9] = None
     layer_results[10] = score_l10(bars)
 
     # First aggregator pass — no traps — to derive the proposed direction the

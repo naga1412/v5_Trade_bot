@@ -1,8 +1,21 @@
+import asyncio
+
 import numpy as np
 import pandas as pd
 
 from app.core.predictor import build_prediction
 from app.core.scoring.layer2_patterns import PatternStatsLookup
+
+
+def _run(coro):
+    """Sync bridge for the SP-9 async build_prediction.
+
+    All existing test cases (1300+) call build_prediction synchronously;
+    SP-9 Phase E2 made it async without passing a session (L9 still
+    abstains). Wrap the coroutine in asyncio.run so test bodies can stay
+    plain ``def`` until SP-9 Phase F migrates them.
+    """
+    return asyncio.run(coro)
 
 
 def make_bars(n: int = 250) -> pd.DataFrame:
@@ -17,7 +30,7 @@ def make_bars(n: int = 250) -> pd.DataFrame:
 
 def test_build_prediction_returns_required_keys() -> None:
     bars = make_bars()
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     assert pred.symbol == "BTC/USDT"
     assert pred.timeframe == "1h"
     assert pred.final.direction in {"LONG", "SHORT", "NEUTRAL"}
@@ -28,21 +41,21 @@ def test_build_prediction_returns_required_keys() -> None:
 
 def test_uptrend_yields_long_direction() -> None:
     bars = make_bars(250)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     assert pred.final.direction == "LONG"
 
 
 def test_inputs_hash_is_deterministic_for_same_input() -> None:
     bars = make_bars()
-    a = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
-    b = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    a = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
+    b = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     assert a.inputs_hash == b.inputs_hash
 
 
 def test_layer2_score_is_none_when_no_lookup_passed() -> None:
     """Backward-compat: callers that don't pass pattern_stats_lookup keep L2 unset."""
     bars = make_bars()
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     assert pred.layer_scores["2"] is None
 
 
@@ -50,10 +63,10 @@ def test_layer2_score_runs_when_lookup_passed() -> None:
     """SP-2 Phase E E3: passing a PatternStatsLookup runs L2 and lands a score."""
     bars = make_bars()
     lookup = PatternStatsLookup(by_pattern={})
-    pred = build_prediction(
+    pred = _run(build_prediction(
         symbol="BTC/USDT", timeframe="1h", bars=bars,
         pattern_stats_lookup=lookup,
-    )
+    ))
     layer2 = pred.layer_scores["2"]
     assert layer2 is not None
     assert layer2.direction in {"LONG", "SHORT", "NEUTRAL"}
@@ -65,11 +78,11 @@ def test_layer2_score_respects_disabled_patterns() -> None:
     """Empty `enabled_patterns` set ⇒ no patterns can fire ⇒ NEUTRAL with strength 0."""
     bars = make_bars()
     lookup = PatternStatsLookup(by_pattern={})
-    pred = build_prediction(
+    pred = _run(build_prediction(
         symbol="BTC/USDT", timeframe="1h", bars=bars,
         pattern_stats_lookup=lookup,
         enabled_patterns=set(),
-    )
+    ))
     layer2 = pred.layer_scores["2"]
     assert layer2 is not None
     assert layer2.direction == "NEUTRAL"
@@ -82,7 +95,7 @@ def test_layer2_score_respects_disabled_patterns() -> None:
 def test_build_prediction_includes_all_ten_layer_slots() -> None:
     """All 10 layer slots are present (some may be None — placeholders)."""
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     for i in range(1, 11):
         assert str(i) in pred.layer_scores
 
@@ -92,7 +105,7 @@ def test_build_prediction_exposes_extras_payload_for_persistence() -> None:
     for the JSONB persistence site to merge into ``predictions.layer_scores``.
     """
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     extras = pred.prediction_extras
     assert extras is not None
     # Required fields per Phase F1 spec.
@@ -110,7 +123,7 @@ def test_build_prediction_exposes_extras_payload_for_persistence() -> None:
 
 def test_build_prediction_layer4_smc_runs_when_enough_bars() -> None:
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     # L4 needs >= 60 bars; with 300 bars on a clean uptrend, it should produce
     # a non-None LayerScore (direction may vary).
     assert pred.layer_scores["4"] is not None
@@ -118,15 +131,15 @@ def test_build_prediction_layer4_smc_runs_when_enough_bars() -> None:
 
 def test_build_prediction_layer6_micro_runs() -> None:
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     # L6 always returns a score for non-empty bars.
     assert pred.layer_scores["6"] is not None
 
 
 def test_build_prediction_placeholder_layers_are_none() -> None:
-    """L7 (XGBoost), L9 (news), L10 (brain) are all placeholders — return None."""
+    """L7 (XGBoost), L9 (news, no session), L10 (brain) abstain → None."""
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     assert pred.layer_scores["7"] is None
     assert pred.layer_scores["9"] is None
     assert pred.layer_scores["10"] is None
@@ -134,7 +147,7 @@ def test_build_prediction_placeholder_layers_are_none() -> None:
 
 def test_build_prediction_layer8_is_none_without_ghost() -> None:
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     assert pred.layer_scores["8"] is None
 
 
@@ -145,9 +158,9 @@ def test_build_prediction_layer8_runs_with_ghost_input() -> None:
     bars = make_bars(300)
     last = float(bars["close"].iloc[-1])
     ghost = GhostInput(ghost_close=last * 1.02, ghost_uncertainty=0.2)
-    pred = build_prediction(
+    pred = _run(build_prediction(
         symbol="BTC/USDT", timeframe="1h", bars=bars, ghost=ghost,
-    )
+    ))
     assert pred.layer_scores["8"] is not None
 
 
@@ -158,7 +171,7 @@ def test_build_prediction_extras_tier_matches_final_score() -> None:
     from app.core.scoring.types import Direction, FinalScore
 
     bars = make_bars(300)
-    pred = build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars)
+    pred = _run(build_prediction(symbol="BTC/USDT", timeframe="1h", bars=bars))
     extras = pred.prediction_extras
     assert extras is not None
 

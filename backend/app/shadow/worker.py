@@ -242,11 +242,17 @@ class ShadowWorker:
             )
             stats_lookup = None
 
+        # SP-9 Phase E2: build_prediction is async + may consult news_items
+        # via the session. Open a short-lived L9 session per candle.
         try:
-            pred = build_prediction(
-                symbol=candle.symbol, timeframe=SHADOW_TIMEFRAME, bars=buf,
-                pattern_stats_lookup=stats_lookup,
-            )
+            async with self.session_factory() as l9_session:
+                pred = await build_prediction(
+                    symbol=candle.symbol,
+                    timeframe=SHADOW_TIMEFRAME,
+                    bars=buf,
+                    pattern_stats_lookup=stats_lookup,
+                    session=l9_session,
+                )
         except Exception as e:
             log.warning("build_prediction failed for %s: %s", candle.symbol, e)
             return

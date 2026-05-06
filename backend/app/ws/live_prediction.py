@@ -60,11 +60,16 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
             log.warning("pattern_stats lookup failed; running without L2: %s", e)
             stats_lookup = None
 
+        # SP-9 Phase E2: build_prediction is async + may consult news_items
+        # via the session. We open a short-lived session per candle so the
+        # L9 layer can query without holding a session across the WS loop.
         try:
-            pred = build_prediction(
-                symbol=symbol_pair, timeframe=timeframe, bars=bars,
-                pattern_stats_lookup=stats_lookup,
-            )
+            async with session_factory() as l9_session:
+                pred = await build_prediction(
+                    symbol=symbol_pair, timeframe=timeframe, bars=bars,
+                    pattern_stats_lookup=stats_lookup,
+                    session=l9_session,
+                )
         except Exception as e:  # noqa: BLE001
             log.warning("build_prediction failed: %s", e)
             continue

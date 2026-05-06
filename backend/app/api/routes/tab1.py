@@ -151,7 +151,9 @@ async def predict(
     if len(candles) < 200:
         raise HTTPException(503, "Insufficient candles to compute prediction")
     bars = _candles_to_df(candles)
-    pred = build_prediction(symbol=pair, timeframe=timeframe, bars=bars)
+    pred = await build_prediction(
+        symbol=pair, timeframe=timeframe, bars=bars, session=session,
+    )
     if markers is not None:
         pred = pred.model_copy(update={"signal_markers": markers})
     return pred
