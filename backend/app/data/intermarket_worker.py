@@ -18,7 +18,6 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,7 +31,6 @@ from app.data.intermarket_persistence import (
     persist_intermarket_snapshots,
 )
 from app.shadow.universe import load_current_universe
-from app.shadow.universe_refresh import seconds_until_next_utc
 
 
 log = logging.getLogger(__name__)

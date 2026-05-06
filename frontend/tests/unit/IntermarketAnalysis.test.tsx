@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { vi } from "vitest";
 
 import { IntermarketAnalysis } from "@/tabs/Tab1LivePrediction/panels/IntermarketAnalysis";
@@ -19,7 +20,7 @@ const base: LivePrediction = {
 };
 
 
-function wrap(ui: React.ReactElement) {
+function wrap(ui: ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>;
 }

@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-import pandas as pd
 import pytest
 
 from app.data.intermarket_correlations import compute_30d_correlations

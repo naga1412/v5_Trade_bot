@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -64,7 +64,8 @@ async def test_short_squeeze_cascade_fires_on_oi_delta_25pct(
               ('BTC/USDT', :ts_old, 0.0, 68000.0, 1.0e9, 'binance_futures'),
               ('BTC/USDT', :ts_now, 0.0, 70000.0, 1.25e9, 'binance_futures')
         """), {
-            "ts_old": now.replace(microsecond=0).isoformat().replace("+00:00", "Z").replace("Z", "+00:00"),
+            # 24h ago — required for snapshot_at_or_before(latest - 24h).
+            "ts_old": (now - timedelta(hours=24)).replace(microsecond=0),
             "ts_now": now,
         })
         await session.commit()

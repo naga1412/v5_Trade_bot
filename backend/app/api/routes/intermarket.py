@@ -1,19 +1,20 @@
 """SP-3.5 Phase E2: GET /api/v1/intermarket/{symbol}."""
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.schemas import IntermarketSnapshotOut
 from app.auth.deps import current_user_or_impersonated
 from app.auth.models import User
-from app.data.adapters import get_adapter, get_intermarket_adapter  # noqa: F401
+from app.data.adapters import get_adapter
 from app.data.intermarket_correlations import compute_30d_correlations
 from app.data.intermarket_persistence import (
     latest_snapshot_for,
     snapshot_at_or_before,
 )
 from app.db.session import get_session
-from datetime import timedelta
 
 
 router = APIRouter(prefix="/api/v1", tags=["intermarket"])
