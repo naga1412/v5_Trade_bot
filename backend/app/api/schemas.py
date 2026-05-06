@@ -527,3 +527,23 @@ class ScannerRadarOut(BaseModel):
     supervisor_progress: SupervisorProgress = Field(default_factory=SupervisorProgress)
     bullish: list[SignalCardOut] = Field(default_factory=list)
     bearish: list[SignalCardOut] = Field(default_factory=list)
+
+
+# --- SP-3.5: Intermarket snapshot ----------------------------------------
+
+class IntermarketSnapshotOut(BaseModel):
+    """Latest funding/OI snapshot for a symbol + DXY/gold correlations.
+
+    All numeric fields except ``symbol`` and ``captured_at`` are nullable —
+    worker may have only seeded a partial snapshot, or yfinance may be
+    unavailable for the macro correlations.
+    """
+
+    symbol: str
+    funding_rate: float | None = None
+    mark_price: float | None = None
+    open_interest: float | None = None
+    open_interest_delta_24h_pct: float | None = None
+    dxy_correlation_30d: float | None = Field(default=None, ge=-1.0, le=1.0)
+    gold_correlation_30d: float | None = Field(default=None, ge=-1.0, le=1.0)
+    captured_at: datetime

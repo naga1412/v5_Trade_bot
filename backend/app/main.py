@@ -16,6 +16,7 @@ from app.api.routes import (
     admin_traps,
     bot_status,
     health,
+    intermarket,  # SP-3.5 Phase E2
     me,
     scanner,  # SP-6 Phase A4
     tab1,
@@ -25,6 +26,10 @@ from app.auth.query_guard import attach_query_guard
 from app.config import get_settings
 from app.data.adapter_health import start_health_pinger_task
 from app.data.adapters import aclose_all as _aclose_adapters
+from app.data.intermarket_worker import (
+    start_intermarket_cleanup_task,
+    start_intermarket_snapshot_task,
+)
 from app.data.universe_sync import start_universe_sync_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
@@ -64,6 +69,8 @@ async def lifespan(_app: FastAPI):
     audit_verifier_task = None
     news_ingest_task = None
     news_cleanup_task = None
+    intermarket_snapshot_task = None
+    intermarket_cleanup_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -94,6 +101,10 @@ async def lifespan(_app: FastAPI):
         # check so test/ci never hits CryptoPanic or downloads FinBERT.
         news_ingest_task = start_news_ingest_task(get_session_factory())
         news_cleanup_task = start_news_cleanup_task(get_session_factory())
+        # SP-3.5: 5min funding/OI snapshot worker + nightly 04:30 UTC cleanup.
+        # Skipped in test/ci (no FAPI calls, no DB churn during pytest).
+        intermarket_snapshot_task = start_intermarket_snapshot_task(get_session_factory())
+        intermarket_cleanup_task = start_intermarket_cleanup_task(get_session_factory())
     try:
         yield
     finally:
@@ -111,6 +122,10 @@ async def lifespan(_app: FastAPI):
             news_ingest_task.cancel()
         if news_cleanup_task is not None:
             news_cleanup_task.cancel()
+        if intermarket_snapshot_task is not None:
+            intermarket_snapshot_task.cancel()
+        if intermarket_cleanup_task is not None:
+            intermarket_cleanup_task.cancel()
         await _aclose_adapters()
 
 
@@ -150,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_traps.router)
     app.include_router(me.router)
     app.include_router(scanner.router)  # SP-6
+    app.include_router(intermarket.router)  # SP-3.5
     app.include_router(ws_routes.router)
     # SP-7 Phase F4: Prometheus instrumentation must happen AFTER every
     # router is added so every route is observed by the middleware.

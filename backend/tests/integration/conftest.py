@@ -211,6 +211,20 @@ async def _create_shadow_tables(engine: Any) -> None:
             "category TEXT, "
             "affected_assets TEXT)"
         ))
+        # SP-3.5: intermarket_snapshots SQLite mirror so integration tests
+        # that exercise the predictor's _build_trap_context(..., session=...)
+        # path can seed funding + OI rows. Mirror of migration 0014.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS intermarket_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "captured_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "funding_rate REAL, "
+            "mark_price REAL, "
+            "open_interest REAL, "
+            "source TEXT NOT NULL "
+            "  CHECK (source IN ('binance_futures', 'bybit')))"
+        ))
 
 
 @pytest_asyncio.fixture
@@ -429,6 +443,19 @@ async def _create_auth_tables(engine: Any) -> None:
             "impact_score REAL, "
             "category TEXT, "
             "affected_assets TEXT)"
+        ))
+        # SP-3.5 Phase E2: intermarket_snapshots SQLite mirror for the
+        # GET /api/v1/intermarket/{symbol} REST tests via admin_client.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS intermarket_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "captured_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "funding_rate REAL, "
+            "mark_price REAL, "
+            "open_interest REAL, "
+            "source TEXT NOT NULL "
+            "  CHECK (source IN ('binance_futures', 'bybit')))"
         ))
         # Seed via raw SQL so created_at ordering is deterministic.
         await conn.execute(sa.text(

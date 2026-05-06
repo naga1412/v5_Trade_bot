@@ -353,19 +353,8 @@ async def build_prediction(
     static_score = proposed.score
     proposed_direction = proposed.direction
 
-    # TrapContext: live data sources (funding, OI delta, borrow rate, news
-    # event time) are still TODO (SP-3.5 / SP-9). Compute the cheap bar-derived
-    # fields locally so the per-context traps that need them stop being blind.
-    context = TrapContext(
-        next_news_event_minutes_until=None,
-        is_friday_close=_is_friday_close(bars),
-        weekly_bias=_weekly_bias(bars),
-        btc_atr_pct=_btc_atr_pct(bars),
-        funding_rate=None,
-        open_interest_delta_24h=None,
-        borrow_rate_pct=None,
-        symbol=symbol,
-        timeframe=timeframe,
+    context = await _build_trap_context(
+        symbol=symbol, timeframe=timeframe, bars=bars, session=session,
     )
 
     fires = check_all_traps(
@@ -449,4 +438,73 @@ async def build_prediction(
         prediction_extras=extras,
         sentiment=sentiment_summary,
         news=news_summary,
+    )
+
+
+async def _intermarket_snapshot_for(
+    symbol: str, session: AsyncSession,
+) -> tuple[float | None, float | None]:
+    """Return ``(funding_rate, oi_delta_24h_pct)`` from intermarket_snapshots.
+
+    Looks up:
+      * the latest row for ``symbol`` → funding_rate,
+      * the latest row at-or-before ``latest.captured_at - 24h`` → baseline OI,
+      * delta = (latest.OI - baseline.OI) / baseline.OI.
+
+    Any failure path (no rows, no baseline, baseline OI <= 0, DB error)
+    returns ``(funding, None)`` or ``(None, None)`` — never raises.
+    """
+    from app.data.intermarket_persistence import (
+        latest_snapshot_for, snapshot_at_or_before,
+    )
+    try:
+        latest = await latest_snapshot_for(session, symbol)
+        if latest is None:
+            return (None, None)
+        funding = latest.funding_rate
+        if latest.open_interest is None:
+            return (funding, None)
+        baseline = await snapshot_at_or_before(
+            session, symbol,
+            ts=latest.captured_at - timedelta(hours=24),
+        )
+        if baseline is None or baseline.open_interest is None or baseline.open_interest <= 0:
+            return (funding, None)
+        oi_delta = (latest.open_interest - baseline.open_interest) / baseline.open_interest
+        return (funding, oi_delta)
+    except Exception:  # noqa: BLE001
+        log.warning("_intermarket_snapshot_for(%s) failed", symbol, exc_info=True)
+        return (None, None)
+
+
+async def _build_trap_context(
+    *,
+    symbol: str,
+    timeframe: str,
+    bars: pd.DataFrame,
+    session: AsyncSession | None,
+) -> TrapContext:
+    """Compose the SP-5 TrapContext, wiring SP-3.5 funding + OI when available.
+
+    When ``session is None`` (legacy callers with no DB), funding +
+    open_interest_delta_24h are left None; the trap stack abstains those
+    two short traps for that bar — same behavior as before SP-3.5.
+
+    ``borrow_rate_pct`` is permanently None (spec §6 row 2).
+    ``next_news_event_minutes_until`` is None until the news-calendar
+    follow-up wires it (SP-9.5).
+    """
+    funding, oi_delta = (None, None)
+    if session is not None:
+        funding, oi_delta = await _intermarket_snapshot_for(symbol, session)
+    return TrapContext(
+        next_news_event_minutes_until=None,
+        is_friday_close=_is_friday_close(bars),
+        weekly_bias=_weekly_bias(bars),
+        btc_atr_pct=_btc_atr_pct(bars),
+        funding_rate=funding,
+        open_interest_delta_24h=oi_delta,
+        borrow_rate_pct=None,
+        symbol=symbol,
+        timeframe=timeframe,
     )

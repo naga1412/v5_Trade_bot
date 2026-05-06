@@ -959,3 +959,23 @@ listing + manual refresh of the news_items store.
   TrapContext + IntermarketAnalysis panel, or
 - **SP-4** — train L10 RL meta-brain (PPO) + wire BRAIN_ADJUST live.
 
+## 2026-05-06 — SP-3.5 Intermarket Data (OI / Funding Rate) shipped
+
+- New `intermarket_snapshots` table (migration 0014) stores funding rate +
+  mark price + open interest, written every 5min by `intermarket_worker`
+  for the top-30 universe via Binance Futures `/fapi/v1/premiumIndex` +
+  `/fapi/v1/openInterestHist`. Cleanup nightly at 04:30 UTC, 14d retention.
+- `predictor._build_trap_context` reads the latest + 24h-ago snapshot to
+  populate `TrapContext.funding_rate` and `open_interest_delta_24h`. The
+  short-only traps `funding_rate_decay` (severity high) and
+  `short_squeeze_cascade` (severity high) now fire on real data instead of
+  always abstaining.
+- New `GET /api/v1/intermarket/{symbol}` returns the snapshot plus 30d
+  Pearson correlations against DXY (`^DXY`) and gold (`GC=F`) via the
+  existing yfinance adapter, 1h dict-cached. Two existing Tab 1 panels
+  (`OiFundingRate`, `IntermarketAnalysis`) now show live values with
+  green/red color tiers; `|corr| > 0.5` flags as red.
+- Borrow rate stays None permanently in v1 (spec §6 row 2). Bybit
+  cross-check + SPX correlation are documented follow-ups.
+- ~+25 backend tests, +7 frontend tests; full backend suite green; full
+  frontend suite green; Playwright smoke green.
