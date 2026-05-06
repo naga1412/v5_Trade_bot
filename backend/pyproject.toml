@@ -84,6 +84,8 @@ dev = [
     # SP-9 ops: fail-fast any test that hangs > 60s so CI surfaces the
     # culprit's traceback instead of consuming the full job timeout.
     "pytest-timeout==2.3.1",
+    # SP-PAUSE: in-memory Redis for pause_state unit tests.
+    "fakeredis>=2.20.1",
 ]
 
 [tool.pytest.ini_options]
