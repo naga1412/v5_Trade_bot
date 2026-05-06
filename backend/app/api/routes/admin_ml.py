@@ -13,8 +13,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import logging
+
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
@@ -24,6 +26,9 @@ from app.api.schemas import (
 )
 from app.auth.deps import require_admin
 from app.db.session import get_session
+from app.ml.champion_challenger import evaluate_challenger
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/v1/admin/ml-checkpoints",
@@ -122,6 +127,15 @@ async def list_checkpoints(
 async def patch_checkpoint(
     checkpoint_id: int,
     body: MlCheckpointPatchIn,
+    force: bool = Query(
+        False,
+        description=(
+            "Bypass the SP-7 champion-challenger gate. Used for the "
+            "SP-1.1 first-checkpoint case (no champion to beat) and for "
+            "emergency rollbacks. Logged at WARNING level for the audit "
+            "trail."
+        ),
+    ),
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> MlCheckpointOut:
     """Activate / deactivate a checkpoint and/or update its operator notes.
@@ -129,6 +143,12 @@ async def patch_checkpoint(
     Activating row N atomically deactivates any currently-active row for the
     same ``model_name`` (single transaction — partial-index quirks aside,
     only one active row per model is ever visible).
+
+    SP-7 Phase G2: when ``is_active=true`` is requested without
+    ``?force=true``, ``evaluate_challenger`` runs first. If the challenger
+    fails the 5% improvement bar the request is rejected with HTTP 422
+    and the row stays inactive. Use ``?force=true`` to bypass — the
+    bypass is logged at WARNING level for the audit trail.
     """
     existing = (await session.execute(
         sa.text("SELECT id, model_name FROM ml_checkpoints WHERE id = :i"),
@@ -139,6 +159,27 @@ async def patch_checkpoint(
 
     now = datetime.now(timezone.utc)
     if body.is_active is True:
+        # SP-7 Phase G2 — champion-challenger gate.
+        if force:
+            log.warning(
+                "champion-challenger bypass: admin force-activated "
+                "checkpoint id=%s (model=%s)",
+                checkpoint_id, existing.model_name,
+            )
+        else:
+            cc = await evaluate_challenger(
+                session, challenger_checkpoint_id=checkpoint_id,
+            )
+            if not cc.challenger_wins:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "challenger did not beat champion: "
+                        f"champion_mae={cc.champion_mae} "
+                        f"challenger_mae={cc.challenger_mae} "
+                        "(needs 5% improvement; pass ?force=true to bypass)"
+                    ),
+                )
         await session.execute(sa.text(
             "UPDATE ml_checkpoints SET is_active = 0, deactivated_at = :n "
             "WHERE model_name = :m AND is_active = 1 AND id != :i"

@@ -1,0 +1,23 @@
+# SP-7 Phase F2: Prometheus alert rules.
+#
+# Spec §5.18: backend p99 latency must stay under 500ms over 5min windows.
+# When violated for 5 consecutive minutes, fire HighLatency at warning so
+# the operator sees it in Grafana and the on-call channel.
+
+groups:
+  - name: trading-radar-slo
+    interval: 30s
+    rules:
+      - alert: HighLatency
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: "Backend p99 latency above 500ms for 5min"
+          description: |
+            The 99th-percentile HTTP request latency on the trading-radar
+            backend has been above 500ms for the last 5 minutes (SP-7 §5.18
+            SLO violation). Check /admin/monitoring/health and the latency
+            panel of the trading_radar_overview Grafana dashboard.

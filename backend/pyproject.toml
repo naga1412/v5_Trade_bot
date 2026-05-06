@@ -28,6 +28,22 @@ dependencies = [
     "ta-lib==0.6.5",
     "scipy==1.13.1",
     "yfinance==0.2.40",
+    # SP-7 Phase A3: ops hardening runtime deps.
+    # - optuna: Bayesian search runner for the SP-7 hyperopt loop (§6.10).
+    # - prometheus-fastapi-instrumentator: thin wrapper around prometheus-client
+    #   wired into app.main in Phase F4.
+    # NOTE on freqtrade==2024.10: deferred. The pinned release transitively
+    # requires `pandas-ta`, which has no PyPI wheel for the project's python
+    # range (>=3.11,<3.12) — pandas-ta only publishes >=3.12 prereleases.
+    # Pinning freqtrade==2024.10 makes `pip install -e .` fail with
+    # `ERROR: No matching distribution found for pandas-ta`. Per the SP-7
+    # plan's documented fallback path, Phase B will implement the backtest
+    # runner natively against the existing OHLCV → build_prediction → SL/TP
+    # simulator pipeline (which we already need anyway — freqtrade's data
+    # ingestion model assumes its own SQLite DB), and freqtrade can be
+    # revisited once pandas-ta ships a 3.11 wheel or we move to py3.12.
+    "optuna==4.0.0",
+    "prometheus-fastapi-instrumentator==7.0.0",
 ]
 
 [build-system]

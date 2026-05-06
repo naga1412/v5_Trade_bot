@@ -71,9 +71,65 @@ services:
       VITE_API_URL: /api/v1
       VITE_WS_URL: /ws/v1
 
+  # SP-7 Phase F: monitoring stack (Prometheus + Grafana + Loki + Promtail).
+  # Operator brings these up on demand: `docker compose up -d prometheus grafana loki promtail`.
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: tr-prometheus
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: tr-grafana
+    restart: unless-stopped
+    depends_on: [prometheus, loki]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: tr-loki
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./infra/loki/loki.yml:/etc/loki/loki.yml:ro
+    command: -config.file=/etc/loki/loki.yml
+
+  promtail:
+    image: grafana/promtail:3.2.0
+    container_name: tr-promtail
+    restart: unless-stopped
+    depends_on: [loki]
+    volumes:
+      - /var/log:/var/log:ro
+      - ./infra/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+    command: -config.file=/etc/promtail/promtail.yml
+
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   default:

@@ -1,0 +1,19 @@
+# SP-7 Phase F3: Grafana dashboard provider.
+#
+# Loads every JSON dashboard from /var/lib/grafana/dashboards (mounted from
+# infra/grafana/dashboards in docker-compose.yml). Operator never has to
+# import dashboards manually after boot.
+
+apiVersion: 1
+
+providers:
+  - name: trading-radar
+    orgId: 1
+    folder: trading-radar
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -43,8 +43,13 @@ def _trade(
 async def test_equity_curve_groups_by_day_and_accumulates(
     bot_status_client: Any, bot_status_factory: Any,
 ) -> None:
-    # Anchor on a fixed UTC midnight 30d ago to make day-bucketing deterministic.
-    base = datetime(2026, 4, 5, 0, 0, tzinfo=UTC)  # within 30d of 2026-05-03
+    # Anchor relative to "now" so the test stays within the 30-day window
+    # at any wall-clock time CI runs. We pick a midnight ~10 days ago so
+    # day-bucketing is deterministic but always inside ?days=30.
+    today_midnight = datetime.now(UTC).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    base = today_midnight - timedelta(days=10)
     rows = [
         # Day 1 — one win
         _trade(direction="LONG", entry=100.0, exit_price=110.0,
