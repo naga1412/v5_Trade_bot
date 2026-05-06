@@ -135,8 +135,14 @@ async def run_news_ingest_loop(
     crypto_adapter, yahoo_adapter = _build_adapters(rate_limited_client_factory)
     last_macro_run = datetime.now(timezone.utc) - timedelta(hours=BACKFILL_HOURS)
 
+    from app.ops import pause_state  # local import — avoids circular at module load
+
     while True:
         try:
+            if await pause_state.is_paused():
+                log.debug("news_ingest: paused, skipping tick")
+                await sleep(float(CRYPTO_INTERVAL_S))
+                continue
             await _run_one_iteration(
                 session_factory, crypto_adapter, yahoo_adapter, last_macro_run,
             )
@@ -200,6 +206,10 @@ async def run_news_cleanup_loop(
     sleep = sleep_fn or asyncio.sleep
     while True:
         await sleep(_seconds_until_next_utc_hour(CLEANUP_HOUR_UTC))
+        from app.ops import pause_state
+        if await pause_state.is_paused():
+            log.debug("news_cleanup: paused, skipping nightly run")
+            continue
         # Imported lazily so the heavy classifier import path stays out
         # of cleanup-only code paths.
         from app.news.persistence import cleanup_old_news
