@@ -5,8 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.data.intermarket_worker import (
-    CLEANUP_HOUR_UTC,
-    CLEANUP_MINUTE_UTC,
     _seconds_until_0430_utc,
     run_intermarket_cleanup_loop,
 )
@@ -45,7 +43,8 @@ async def test_cleanup_loop_invokes_cleanup_then_cancels() -> None:
         if len(sleep_log) >= 1:
             raise asyncio.CancelledError
 
-    fixed_now = lambda: datetime(2026, 5, 6, 4, 0, tzinfo=timezone.utc)
+    def fixed_now() -> datetime:
+        return datetime(2026, 5, 6, 4, 0, tzinfo=timezone.utc)
     with patch("app.data.intermarket_worker.cleanup_old_intermarket",
                new=AsyncMock(return_value=42)) as cleanup:
         with pytest.raises(asyncio.CancelledError):
@@ -60,7 +59,9 @@ async def test_cleanup_loop_invokes_cleanup_then_cancels() -> None:
 async def test_cleanup_loop_swallows_errors() -> None:
     async def fake_sleep(s: float) -> None:
         raise asyncio.CancelledError
-    fixed_now = lambda: datetime(2026, 5, 6, 12, tzinfo=timezone.utc)
+
+    def fixed_now() -> datetime:
+        return datetime(2026, 5, 6, 12, tzinfo=timezone.utc)
     with patch("app.data.intermarket_worker.cleanup_old_intermarket",
                new=AsyncMock(side_effect=RuntimeError("boom"))):
         with pytest.raises(asyncio.CancelledError):

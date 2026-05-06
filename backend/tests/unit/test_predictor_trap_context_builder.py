@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest

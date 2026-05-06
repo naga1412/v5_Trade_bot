@@ -24,7 +24,7 @@ export function OiFundingRate({ data }: { data: LivePrediction | null }) {
   const symbol = data?.symbol;
   const { data: snap, isLoading, isError } = useQuery({
     queryKey: ["intermarket", symbol],
-    queryFn: () => getIntermarket(symbol!),
+    queryFn: () => getIntermarket(symbol ?? ""),
     enabled: Boolean(symbol),
     staleTime: 30_000,
   });

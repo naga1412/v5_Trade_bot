@@ -97,8 +97,10 @@ async def aclose_all() -> None:
 
 
 # --- SP-3.5: intermarket adapter registry --------------------------------
+# Late import is intentional: the adapter module needs the package's
+# rate-limit infrastructure already wired above. E402 suppressed.
 
-from app.data.adapters.binance_futures_intermarket import (
+from app.data.adapters.binance_futures_intermarket import (  # noqa: E402
     BinanceFuturesIntermarketAdapter,
 )
 
