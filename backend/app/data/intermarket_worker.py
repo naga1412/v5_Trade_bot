@@ -91,8 +91,45 @@ async def run_intermarket_snapshot_loop(
         await _sleep(float(INTERMARKET_INTERVAL_S))
 
 
-async def run_intermarket_cleanup_loop(session_factory: Any) -> None:
-    raise NotImplementedError("SP-3.5 Phase C2")
+def _seconds_until_0430_utc(*, now: datetime | None = None) -> int:
+    """Seconds until the next 04:30 UTC. If exactly at 04:30, returns 24h."""
+    n = now if now is not None else datetime.now(UTC)
+    if n.tzinfo is None:
+        n = n.replace(tzinfo=UTC)
+    else:
+        n = n.astimezone(UTC)
+    target = n.replace(
+        hour=CLEANUP_HOUR_UTC, minute=CLEANUP_MINUTE_UTC,
+        second=0, microsecond=0,
+    )
+    if target <= n:
+        target = target + timedelta(days=1)
+    return int((target - n).total_seconds())
+
+
+async def run_intermarket_cleanup_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    older_than_days: int = INTERMARKET_RETENTION_DAYS,
+    _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    _now: Callable[[], datetime] | None = None,
+) -> None:
+    """Nightly 04:30 UTC cleanup of intermarket_snapshots > 14d old."""
+    now_fn = _now if _now is not None else lambda: datetime.now(UTC)
+    while True:
+        wait_s = _seconds_until_0430_utc(now=now_fn())
+        await _sleep(float(wait_s))
+        try:
+            async with session_factory() as session:
+                deleted = await cleanup_old_intermarket(
+                    session, older_than_days=older_than_days,
+                )
+            log.info("intermarket cleanup: deleted=%d", deleted)
+        except asyncio.CancelledError:
+            log.info("intermarket cleanup loop cancelled")
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("intermarket cleanup loop iteration failed")
 
 
 def start_intermarket_snapshot_task(session_factory: Any) -> asyncio.Task[None]:
