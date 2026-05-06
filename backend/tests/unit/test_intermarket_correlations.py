@@ -40,8 +40,21 @@ async def test_correlations_positive_when_series_move_together() -> None:
 
 @pytest.mark.asyncio
 async def test_correlations_inverse_returns_negative() -> None:
-    asc = [100 + i for i in range(30)]
-    desc = list(reversed(asc))
+    # Pearson correlation is computed on PCT-CHANGE series, not on the closes
+    # themselves — `[100..129]` and `reversed([100..129])` have the same
+    # divisor pattern and end up positively correlated. Construct asc and
+    # desc so their pct-change series are exact negatives of each other:
+    # apply the same return sequence in opposite signs.
+    rets = [0.01, -0.005, 0.012, -0.008, 0.015, -0.01, 0.007, -0.004,
+            0.02, -0.012, 0.006, 0.018, -0.009, 0.011, -0.006,
+            0.013, -0.007, 0.009, 0.016, -0.011, 0.005, 0.014,
+            -0.003, 0.017, -0.013, 0.008, 0.019, -0.015, 0.022]  # 29 returns
+    asc = [100.0]
+    desc = [100.0]
+    for r in rets:
+        asc.append(asc[-1] * (1 + r))
+        desc.append(desc[-1] * (1 - r))
+
     binance = MagicMock()
     binance.fetch_klines = AsyncMock(return_value=_candles(asc))
     yahoo = MagicMock()
