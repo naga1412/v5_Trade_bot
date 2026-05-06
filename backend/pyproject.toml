@@ -82,6 +82,12 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Pin fixture loop scope to silence pytest-asyncio 0.25's deprecation warning
+# AND prevent loop-policy leaks between tests (sync tests calling
+# `asyncio.run()` while subsequent async tests rely on pytest-asyncio's
+# function-scoped loop manifested as a deterministic hang in test_ratelimit
+# during SP-9 CI; explicit function scope makes the contract clear).
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 # --cov-fail-under is intentionally NOT in default addopts: it should only run
 # as an aggregate CI check at PR time (via `pytest --cov-fail-under=85`),
