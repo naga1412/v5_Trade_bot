@@ -31,8 +31,18 @@ def _spy_workers(monkeypatch: pytest.MonkeyPatch) -> Any:
         calls.append("shadow")
         return _NoopTask()
 
+    def fake_news_ingest(_factory: Any) -> Any:
+        calls.append("news_ingest")
+        return _NoopTask()
+
+    def fake_news_cleanup(_factory: Any) -> Any:
+        calls.append("news_cleanup")
+        return _NoopTask()
+
     monkeypatch.setattr(app_main, "start_background_worker", fake_live)
     monkeypatch.setattr(app_main, "start_shadow_worker", fake_shadow)
+    monkeypatch.setattr(app_main, "start_news_ingest_task", fake_news_ingest)
+    monkeypatch.setattr(app_main, "start_news_cleanup_task", fake_news_cleanup)
     yield calls
 
 
@@ -92,13 +102,84 @@ async def test_lifespan_skips_workers_when_worker_disabled(
 async def test_lifespan_starts_both_workers_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When env is prod-like AND worker_enabled, both workers must spawn."""
+    """When env is prod-like AND worker_enabled, every background worker spawns."""
+    # SP-3 Phase F adds universe_sync + health_pinger background tasks; SP-7
+    # Phase D3 adds the audit verifier; SP-9 Phase D4 adds news ingest +
+    # cleanup. Stub them all so the lifespan doesn't try to open real DB
+    # connections during this isolated startup test.
+    class _NoopTask:
+        def cancel(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        app_main, "start_universe_sync_task", lambda *_a, **_k: _NoopTask(),
+    )
+    monkeypatch.setattr(
+        app_main, "start_health_pinger_task", lambda *_a, **_k: _NoopTask(),
+    )
+    monkeypatch.setattr(
+        app_main, "start_audit_verifier_task", lambda *_a, **_k: _NoopTask(),
+    )
+    monkeypatch.setattr(
+        app_main, "load_active_checkpoint", _async_noop,
+    )
+    monkeypatch.setattr(
+        app_main, "get_session_factory", lambda: _NoopFactory(),
+    )
+    monkeypatch.setattr(
+        app_main, "get_engine", lambda: type("E", (), {"sync_engine": None})(),
+    )
+    monkeypatch.setattr(app_main, "attach_query_guard", lambda *_a, **_k: None)
+
     monkeypatch.setattr(
         app_main, "get_settings",
-        lambda: type("S", (), {"env": "production", "worker_enabled": True})(),
+        lambda: type("S", (), {
+            "env": "production",
+            "worker_enabled": True,
+        })(),
     )
     with _spy_workers(monkeypatch) as calls:
         app = app_main.create_app()
         await _drive_lifespan(app)
 
-    assert sorted(calls) == ["live", "shadow"]
+    assert "live" in calls
+    assert "shadow" in calls
+    assert "news_ingest" in calls
+    assert "news_cleanup" in calls
+
+
+async def _async_noop(*_a: Any, **_k: Any) -> None:
+    return None
+
+
+class _NoopFactory:
+    """Async-context-manager-shaped session factory used by the spy test."""
+
+    def __call__(self) -> "_NoopFactory":
+        return self
+
+    async def __aenter__(self) -> Any:
+        class _S:
+            async def commit(self) -> None:
+                return None
+        return _S()
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_skips_news_workers_in_test_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """News ingest + cleanup must stay off in test/CI exactly like the others."""
+    monkeypatch.setattr(
+        app_main, "get_settings",
+        lambda: type("S", (), {"env": "test", "worker_enabled": True})(),
+    )
+    with _spy_workers(monkeypatch) as calls:
+        app = app_main.create_app()
+        await _drive_lifespan(app)
+
+    assert "news_ingest" not in calls
+    assert "news_cleanup" not in calls

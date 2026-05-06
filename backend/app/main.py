@@ -27,6 +27,10 @@ from app.data.adapters import aclose_all as _aclose_adapters
 from app.data.universe_sync import start_universe_sync_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
+from app.news.ingest_worker import (
+    start_news_cleanup_task,
+    start_news_ingest_task,
+)
 from app.ops.monitoring import instrument_app
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
@@ -57,6 +61,8 @@ async def lifespan(_app: FastAPI):
     universe_sync_task = None
     health_pinger_task = None
     audit_verifier_task = None
+    news_ingest_task = None
+    news_cleanup_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -82,6 +88,11 @@ async def lifespan(_app: FastAPI):
         # attempted_email='system'. Skipped in test/ci so the suite doesn't
         # carry the nightly background overhead.
         audit_verifier_task = start_audit_verifier_task(get_session_factory())
+        # SP-9 Phase D4: news ingest (5min crypto / 30min macro) + nightly
+        # 04:00 UTC retention cleanup. Both are gated on the same env/worker
+        # check so test/ci never hits CryptoPanic or downloads FinBERT.
+        news_ingest_task = start_news_ingest_task(get_session_factory())
+        news_cleanup_task = start_news_cleanup_task(get_session_factory())
     try:
         yield
     finally:
@@ -95,6 +106,10 @@ async def lifespan(_app: FastAPI):
             health_pinger_task.cancel()
         if audit_verifier_task is not None:
             audit_verifier_task.cancel()
+        if news_ingest_task is not None:
+            news_ingest_task.cancel()
+        if news_cleanup_task is not None:
+            news_cleanup_task.cancel()
         await _aclose_adapters()
 
 
