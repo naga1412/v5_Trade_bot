@@ -570,3 +570,49 @@ export async function getIntermarket(symbol: string): Promise<IntermarketSnapsho
   }
   return r.json() as Promise<IntermarketSnapshot>;
 }
+
+// SP-PAUSE: master pause/resume
+export interface SystemPauseState {
+  paused: boolean;
+  since: string | null;       // ISO 8601 UTC
+  by_email: string | null;
+  reason: string | null;
+}
+
+export interface SystemPauseEvent {
+  id: number;
+  kind: "system_paused" | "system_resumed";
+  by_email: string;
+  at: string;                  // ISO 8601 UTC
+  reason: string | null;
+}
+
+export interface SystemPauseEventList {
+  events: SystemPauseEvent[];
+}
+
+export async function getSystemState(): Promise<SystemPauseState> {
+  return fetchJson<SystemPauseState>("/admin/system/state");
+}
+
+export async function getSystemLog(
+  limit: number = 50,
+): Promise<SystemPauseEventList> {
+  return fetchJson<SystemPauseEventList>(
+    `/admin/system/log?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export async function pauseSystem(reason: string): Promise<SystemPauseState> {
+  return fetchJson<SystemPauseState>("/admin/system/pause", {
+    method: "POST",
+    body: { reason },
+  });
+}
+
+export async function resumeSystem(): Promise<SystemPauseState> {
+  return fetchJson<SystemPauseState>("/admin/system/resume", {
+    method: "POST",
+    body: {},
+  });
+}
