@@ -90,3 +90,31 @@ def classify_category(title: str) -> str | None:
             if kw in lower:
                 return cat
     return None
+
+
+# B4: heuristic 0..1 impact score by (category, source).
+# Per spec §4 design intent: regulatory > exchange > macro > whale > project > social.
+_BASE_IMPACT: dict[str | None, float] = {
+    "regulatory": 1.0,
+    "exchange": 0.8,
+    "macro": 0.7,
+    "whale": 0.6,
+    "project": 0.5,
+    "social": 0.3,
+    None: 0.5,
+}
+
+_SOURCE_MODIFIER: dict[str, float] = {
+    "cryptopanic": 1.0,    # 'hot' filter already curated.
+    "yahoo_rss": 0.85,     # unfiltered firehose → mild discount.
+}
+
+
+def impact_score_for(category: str | None, source: str) -> float:
+    """Return a heuristic [0, 1] impact score by (category, source).
+
+    Used by L9 to weight multi-article aggregations toward higher-impact items.
+    """
+    base = _BASE_IMPACT.get(category, 0.5)
+    mod = _SOURCE_MODIFIER.get(source, 1.0)
+    return min(1.0, max(0.0, base * mod))
