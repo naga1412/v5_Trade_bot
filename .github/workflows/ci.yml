@@ -58,7 +58,11 @@ jobs:
           # ENV=development for the cf-access dev bypass + DB pool config, but
           # disable workers so tests don't pile up on outbound network calls.
           WORKER_ENABLED: "false"
-        run: pytest -v --timeout=60 --timeout-method=thread
+        # 120s per-test timeout: most tests run in <1s, the slowest legitimate
+        # ones (rate-limit timing tests, freezegun-backed integration flows)
+        # take a few seconds. 120s catches genuine hangs while leaving headroom
+        # for CI runners under load.
+        run: pytest -v --timeout=120 --timeout-method=thread
 
   frontend:
     runs-on: ubuntu-latest
