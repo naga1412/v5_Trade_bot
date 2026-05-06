@@ -79,6 +79,11 @@ async def run_intermarket_snapshot_loop(
     adapter = _adapter or get_intermarket_adapter()
     loader = _universe_loader or _default_universe_loader
     while True:
+        from app.ops import pause_state
+        if await pause_state.is_paused():
+            log.debug("intermarket_snapshot: paused, skipping tick")
+            await _sleep(float(INTERMARKET_INTERVAL_S))
+            continue
         try:
             await _snapshot_once(session_factory, adapter, loader)
         except asyncio.CancelledError:
@@ -117,6 +122,10 @@ async def run_intermarket_cleanup_loop(
     while True:
         wait_s = _seconds_until_0430_utc(now=now_fn())
         await _sleep(float(wait_s))
+        from app.ops import pause_state
+        if await pause_state.is_paused():
+            log.debug("intermarket_cleanup: paused, skipping nightly run")
+            continue
         try:
             async with session_factory() as session:
                 deleted = await cleanup_old_intermarket(
