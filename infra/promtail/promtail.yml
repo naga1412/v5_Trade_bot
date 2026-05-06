@@ -1,0 +1,24 @@
+# SP-7 Phase F5: minimal Promtail config — tails /var/log/*.log on the
+# host (mounted read-only into the container per docker-compose.yml) and
+# pushes to the Loki sidecar. Adapted from the Loki "quick start"
+# reference at https://grafana.com/docs/loki/latest/get-started/quick-start/.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: varlogs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          host: trading-radar
+          __path__: /var/log/*.log
