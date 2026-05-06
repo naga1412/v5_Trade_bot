@@ -45,19 +45,69 @@ async def persist_intermarket_snapshots(
     return inserted
 
 
-async def cleanup_old_intermarket(
-    session: AsyncSession, *, older_than_days: int = 14,
-) -> int:
-    raise NotImplementedError("SP-3.5 Phase B6")
-
-
 async def latest_snapshot_for(
     session: AsyncSession, symbol: str,
 ) -> IntermarketSnapshot | None:
-    raise NotImplementedError("SP-3.5 Phase B6")
+    sql = sa.text("""
+        SELECT symbol, captured_at, funding_rate, mark_price,
+               open_interest, source
+        FROM intermarket_snapshots
+        WHERE symbol = :symbol
+        ORDER BY captured_at DESC
+        LIMIT 1
+    """)
+    row = (await session.execute(sql, {"symbol": symbol})).first()
+    if row is None:
+        return None
+    return _row_to_snapshot(row)
 
 
 async def snapshot_at_or_before(
     session: AsyncSession, symbol: str, *, ts: datetime,
 ) -> IntermarketSnapshot | None:
-    raise NotImplementedError("SP-3.5 Phase B6")
+    sql = sa.text("""
+        SELECT symbol, captured_at, funding_rate, mark_price,
+               open_interest, source
+        FROM intermarket_snapshots
+        WHERE symbol = :symbol AND captured_at <= :ts
+        ORDER BY captured_at DESC
+        LIMIT 1
+    """)
+    row = (await session.execute(sql, {"symbol": symbol, "ts": ts})).first()
+    if row is None:
+        return None
+    return _row_to_snapshot(row)
+
+
+async def cleanup_old_intermarket(
+    session: AsyncSession, *, older_than_days: int = 14,
+) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    result = await session.execute(
+        sa.text("DELETE FROM intermarket_snapshots WHERE captured_at < :cutoff"),
+        {"cutoff": cutoff},
+    )
+    await session.commit()
+    deleted = int(getattr(result, "rowcount", 0) or 0)
+    log.info(
+        "cleanup_old_intermarket: deleted %d rows older than %dd",
+        deleted, older_than_days,
+    )
+    return deleted
+
+
+def _row_to_snapshot(row) -> IntermarketSnapshot:  # type: ignore[no-untyped-def]
+    captured_at = row.captured_at
+    if isinstance(captured_at, str):
+        # SQLite returns TEXT — parse to UTC datetime.
+        captured_at = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+    return IntermarketSnapshot(
+        symbol=row.symbol,
+        captured_at=captured_at,
+        funding_rate=row.funding_rate,
+        mark_price=row.mark_price,
+        open_interest=row.open_interest,
+        source=row.source,
+    )
