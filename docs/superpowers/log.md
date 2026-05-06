@@ -979,3 +979,69 @@ listing + manual refresh of the news_items store.
   cross-check + SPX correlation are documented follow-ups.
 - ~+25 backend tests, +7 frontend tests; full backend suite green; full
   frontend suite green; Playwright smoke green.
+
+## 2026-05-06 — SP-PAUSE Master Pause/Resume shipped
+
+- Single-flag whole-system pause via `system:paused` Redis key, gated on
+  every long-running worker tick + every non-allow-listed HTTP request.
+  Operator toggles via Settings → System sub-tab; global yellow banner
+  mounted in `App.tsx` polls `/api/v1/admin/system/state` every 5s.
+- New `app/ops/pause_state.py` module — `is_paused()`, `set_paused()`,
+  `get_state()`, `pause_event_log()` with a 1-second in-process cache so
+  hot worker loops don't hammer Redis. `redis==5.2.1` (already in
+  `pyproject.toml`) is lazy-instantiated; tests use `fakeredis>=2.20.1`.
+- Audit-trail integration: every pause AND resume inserts an
+  `auth_violations` row (`reason` populated, `request_path` set to
+  `/system/pause` or `/system/resume`). No hash-chain — the existing
+  `auth_violations` table from migration 0002 has no `prev_hash`/
+  `row_hash` columns and SP-7's verifier doesn't expect them; flagged in
+  the plan as a possible future migration if the operator wants chain
+  coverage on toggle events.
+- Pause guards added in 6 worker locations: news ingest, news cleanup,
+  intermarket snapshot, intermarket cleanup, shadow worker
+  `_handle_candle` (early `return` — natural pacing from candle stream),
+  audit verifier (`is_paused → log → sleep → continue` for the 5 tick-
+  driven loops).
+- New `pause_middleware.py` returns HTTP 423 with body
+  `{"detail":"system_paused", ...}` on every non-allow-listed request.
+  Allow-list covers: all `/api/v1/admin/*` (admins still toggle), GET
+  `/api/v1/me`, `/api/v1/health`, `/metrics`, `/api/v1/bot-status/*`,
+  `/api/v1/ws/*` (WS connections kept alive), GET on
+  `/api/v1/predictions` + `/api/v1/shadow_trades` list endpoints, and
+  frontend static assets. POST `/api/v1/predict` correctly 423s.
+- Admin REST surface: `POST /api/v1/admin/system/pause` (body:
+  `{reason}`), `POST .../resume`, `GET .../state`, `GET .../log?limit=N`
+  (defaults 50, capped 500). All four require `require_admin`.
+- Frontend: `frontend/src/tabs/Settings/SystemPauseControl.tsx` (new
+  "System" sub-tab — 4th, after Profile/Trading/Secrets) with red Pause
+  button + reason textarea (non-empty required) when running, green
+  Resume button + paused-since text when paused. Self-polls
+  `/admin/system/state` every 5s; uses plain `useEffect` + `useState`
+  (TanStack Query was rejected during SP-3.5 cleanup, so the same pattern
+  applies here). `frontend/src/components/layout/PausedBanner.tsx`
+  mirrors `ImpersonationBanner`'s structure — yellow `bg-yellow/20`
+  banner mounted globally in `App.tsx` above any tab, renders `null`
+  when not paused for zero DOM cost in the normal case, polls every 5s,
+  click-through link to `#/settings`.
+- Acceptance criteria (spec §7, all green):
+  - POST `/admin/system/pause` flips Redis flag + returns 200 with
+    `paused: true`
+  - After pause, POST `/api/v1/predict` → 423 `system_paused`
+  - After pause, GET `/api/v1/bot-status/overview` → 200
+  - News + intermarket + shadow + verifier workers idle within one tick
+  - Existing WS connections unaffected (middleware skips `/api/v1/ws/`)
+  - `auth_violations` row appended on pause AND resume
+  - Banner visible on every page when paused
+  - Resume restores normal operation on next worker tick
+- Test count delta: backend baseline + ~22 (3 audit + 4 cache/roundtrip
+  + 3 event-log + 7 worker-guard + middleware param-cases + 11
+  integration); frontend baseline + 10 (6 SystemPauseControl + 4
+  PausedBanner). `App.test.tsx` updated to mock `getSystemState`
+  returning `paused:false` so the now-mounted banner stays a no-op.
+- Known follow-ups (out of scope for v1): per-component pause (e.g.
+  "pause news but keep trading"), auto-pause on broker outage, full
+  pause-history UI (`/admin/system/log` covers immediate need),
+  hash-chain on `auth_violations` (would be a separate migration),
+  mobile push notification on state change (Telegram via
+  `app.ops.alerts` covers v1).
+- Tag: `sp-pause` (set after final regression).
