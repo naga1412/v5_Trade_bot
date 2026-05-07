@@ -35,7 +35,7 @@
 | Q3 | Brain controls SL/TP? | **No — entry/exit/size only; L5 ATR-based SL/TP stays** | Adds 2 action dimensions and 3-5 weeks of training time without clear research evidence the brain learns better SL/TP than ATR-based exits at the 1h horizon. v2 explores brain-controlled exits. |
 | Q4 | Promotion mode | **Telegram-mode for first 90 days post-launch, auto-mode after** | RL agents fail in surprising ways. SP-7's existing `evaluate_challenger` returns the 5% Sharpe improvement bar; for SP-4 the operator gets a Telegram with the eval result and a "approve/reject" inline button before the swap goes live. After 90 days of clean swaps with no surprises, flip to SP-7 auto-mode. |
 | Q5 | Cold-start adapter for new asset | **Blend `median(known_embeddings)` → asset's learned embedding linearly over first 100 trades** (`α = min(1.0, n_trades/100)`) | New asset gets the "average" brain immediately; learned per-asset specialization phases in as evidence accumulates. Matches the meta-plan §2.5 cold-start spec. |
-| D1 | Observation space | **57 floats:** asset_embedding(32) + L1..L9(9) + market_state(9: ATR%, funding, OI_Δ24h, DXY_corr, gold_corr, regime_one_hot[5]) + position_state(3: cur_pos∈{-1,0,+1}, unrealized_pnl_R, bars_in_pos) + macro_calendar(4: hours_to_next_HI, FOMC_window, weekend, asia_open) | Matches what L1–L9 + SP-3.5 + SP-7 already produce. No new feature engineering. |
+| D1 | Observation space | **58 floats:** asset_embedding(32) + L1..L9(9) + market_state(10: ATR%, funding, OI_Δ24h, DXY_corr, gold_corr, regime_one_hot[5]) + position_state(3: cur_pos∈{-1,0,+1}, unrealized_pnl_R, bars_in_pos) + macro_calendar(4: hours_to_next_HI, FOMC_window, weekend, asia_open) | Matches what L1–L9 + SP-3.5 + SP-7 already produce. No new feature engineering. |
 | D2 | Per-asset adapter | **Learned 32-dim embedding per asset, fed into 1st MLP layer** (NOT strict LoRA) | True LoRA on a small MLP saves only 5-10x params per asset; simple embedding saves 100x at much lower complexity. 60 assets × 32 floats × 4 bytes = 7.5 KB total. |
 | D3 | Action space | **5 discrete actions:** `LONG_FULL, LONG_HALF, FLAT, SHORT_HALF, SHORT_FULL` | PPO converges much faster discrete vs continuous; broker has discrete tick sizes anyway; SP-7's Kelly cap handles fractional sizing within "_FULL". |
 | D4 | Reward | **Per-trade risk-adjusted: `(realized_R − 0.5 × σ_20_R)`**, normalized to ~[-3, +3] | Trains on what the exit criterion measures (Sharpe-like). Per-trade (not per-bar) makes credit assignment clean; R-multiples normalize across assets. |
@@ -53,10 +53,10 @@
 ```
 backend/app/rl/
 ├── __init__.py
-├── obs.py              # build_observation(asset, layer_scores, market, position, macro) -> np.ndarray(57,)
+├── obs.py              # build_observation(asset, layer_scores, market, position, macro) -> np.ndarray(58,)
 ├── reward.py           # compute_reward(trade) -> float; uses trailing 20-trade vol per asset
 ├── replay_buffer.py    # ReplayBuffer: load_from_shadow_trades(window=365d) -> list[Transition]
-├── policy.py           # PolicyNetwork: nn.Module mapping obs(57,) -> action logits(5,) + value
+├── policy.py           # PolicyNetwork: nn.Module mapping obs(58,) -> action logits(5,) + value
 ├── adapter.py          # AssetEmbedding: nn.Embedding(N_assets, 32); cold-start blend logic
 ├── ppo.py              # PPO trainer: rollout → advantages → policy loss + value loss + entropy
 ├── inference.py        # decide_action(obs, smoothing_state) -> Action; loaded checkpoint state
@@ -107,7 +107,7 @@ CREATE TABLE brain_decisions (
   ts            TIMESTAMPTZ NOT NULL,
   symbol        TEXT NOT NULL,
   checkpoint_id INTEGER NOT NULL REFERENCES rl_checkpoints(id),
-  observation   JSONB NOT NULL,         -- the 57-float vector serialized as named keys
+  observation   JSONB NOT NULL,         -- the 58-float vector serialized as named keys
   action        TEXT NOT NULL,          -- 'LONG_FULL'|'LONG_HALF'|'FLAT'|'SHORT_HALF'|'SHORT_FULL'
   action_logits JSONB NOT NULL,         -- raw logits for replay
   value_estimate DOUBLE PRECISION,      -- critic's V(s) prediction
@@ -124,7 +124,7 @@ CREATE INDEX brain_decisions_symbol_ts ON brain_decisions (symbol, ts DESC);
 
 ```python
 class PolicyNetwork(nn.Module):
-    def __init__(self, n_assets: int, obs_dim: int = 57, n_actions: int = 5):
+    def __init__(self, n_assets: int, obs_dim: int = 58, n_actions: int = 5):
         super().__init__()
         self.asset_emb = nn.Embedding(n_assets, 32)         # learned per-asset
         self.shared = nn.Sequential(
@@ -137,7 +137,7 @@ class PolicyNetwork(nn.Module):
 
     def forward(self, asset_id: torch.Tensor, market_obs: torch.Tensor):
         emb = self.asset_emb(asset_id)                       # (B, 32)
-        x = torch.cat([emb, market_obs], dim=-1)             # (B, 57)
+        x = torch.cat([emb, market_obs], dim=-1)             # (B, 58)
         h = self.shared(x)
         return self.policy_head(h), self.value_head(h).squeeze(-1)
 ```
@@ -349,7 +349,7 @@ Per meta-plan §5 / §6:
 
 - [ ] All migrations apply cleanly forward + reverse on dev DB
 - [ ] `app.rl.replay_buffer.load_from_shadow_trades(window=365d)` returns ≥1 transition per existing closed shadow trade in the dev DB; raises if `shadow_trades` table is empty
-- [ ] `app.rl.obs.build_observation` produces a 57-float vector with stable shape + dtype across 100+ random fixtures
+- [ ] `app.rl.obs.build_observation` produces a 58-float vector with stable shape + dtype across 100+ random fixtures
 - [ ] `app.rl.reward.compute_reward` matches by-hand calc on 20 fixtures (positive R, negative R, zero-trades-history asset cold-start, post-20-trade variance regime)
 - [ ] `tools/ml/train_brain.py` completes a 1-epoch run on synthetic data without crashing (smoke test in tools/ml/tests/)
 - [ ] First Colab training run produces a checkpoint with `vs_baseline_sharpe_pct >= 10` on the 6-month BTC/USDT 2024 backtest
