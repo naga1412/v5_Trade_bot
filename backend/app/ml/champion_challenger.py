@@ -10,12 +10,20 @@ The "MAE" metric is computed by ``_evaluate_mae`` from a deterministic
 backtest over the held-out window (currently a thin wrapper around
 ``tools.backtest.run_backtest`` — see TODO inline). Tests monkeypatch
 ``_evaluate_mae`` so they never hit real OHLCV / Postgres.
+
+SP-4 Phase D extension — same gate also evaluates RL brain checkpoints
+in the ``rl_checkpoints`` table by passing ``table="rl_checkpoints"``
+and ``metric="sharpe"`` to :func:`evaluate_challenger`. The sharpe
+direction inverts: challenger wins iff
+``challenger_sharpe > champion_sharpe * (1 + (1-IMPROVEMENT_BAR))``,
+i.e. a strict 5% IMPROVEMENT (higher Sharpe is better, opposite of
+MAE which is lower-is-better).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import sqlalchemy as sa
 
@@ -24,81 +32,121 @@ if TYPE_CHECKING:
 
 # A challenger must improve on the champion's MAE by at least 5% to win.
 IMPROVEMENT_BAR: float = 0.95
+# Sharpe equivalent: challenger > champion * SHARPE_IMPROVEMENT_BAR (1.05)
+SHARPE_IMPROVEMENT_BAR: float = 1.0 + (1.0 - IMPROVEMENT_BAR)  # 1.05
 # Held-out window length used by ``_evaluate_mae``. Currently 30 days
 # preceding "now"; in production we should pull this from a configurable
 # knob so we can replay the same window across multiple promotions.
 HELD_OUT_DAYS: int = 30
+
+Metric = Literal["mae", "sharpe"]
+Table = Literal["ml_checkpoints", "rl_checkpoints"]
 
 
 @dataclass(frozen=True)
 class ChampionChallengerResult:
     """Outcome of a single champion-vs-challenger comparison.
 
-    ``champion_mae`` is ``None`` iff there is no currently-active
+    ``champion_metric`` is ``None`` iff there is no currently-active
     checkpoint for the same ``model_name`` — in which case
     ``challenger_wins`` is unconditionally ``True`` (any model beats no
     model).
+
+    Backward compat: the historical fields ``champion_mae`` /
+    ``challenger_mae`` are exposed as @property aliases of
+    ``champion_metric`` / ``challenger_metric`` so SP-7's existing
+    consumers (admin_ml.py error message, integration tests) keep
+    working without rename.
     """
 
-    champion_mae: float | None
-    challenger_mae: float
+    champion_metric: float | None
+    challenger_metric: float
     challenger_wins: bool
+    metric: Metric = "mae"
+
+    @property
+    def champion_mae(self) -> float | None:
+        return self.champion_metric
+
+    @property
+    def challenger_mae(self) -> float:
+        return self.challenger_metric
 
 
 async def evaluate_challenger(
     session: "AsyncSession",
     *,
     challenger_checkpoint_id: int,
+    table: Table = "ml_checkpoints",
+    metric: Metric = "mae",
 ) -> ChampionChallengerResult:
     """Compare a challenger checkpoint against the active champion.
 
-    Looks up the challenger's ``model_name``, finds the currently-active
-    row for the same model (the "champion"), runs ``_evaluate_mae`` for
-    each over the same held-out window, and returns the head-to-head
-    result. The challenger wins iff
-    ``challenger_mae < champion_mae * IMPROVEMENT_BAR`` — i.e. a strict
-    5% improvement. If there is no active champion, the challenger
-    automatically wins (this is the SP-1.1 first-checkpoint case).
+    Looks up the challenger's ``model_name`` in ``table``, finds the
+    currently-active row for the same model (the "champion"), runs the
+    appropriate ``_evaluate_*`` for each over the same held-out window,
+    and returns the head-to-head result.
 
-    Raises ``LookupError`` when ``challenger_checkpoint_id`` does not
-    exist; the admin route translates that to a 404.
+    For ``metric="mae"`` (default — SP-1 ConvLSTM checkpoints):
+        challenger wins iff ``challenger < champion * IMPROVEMENT_BAR``
+        (strict 5% improvement; LOWER is better).
+
+    For ``metric="sharpe"`` (SP-4 RL brain checkpoints):
+        challenger wins iff ``challenger > champion * SHARPE_IMPROVEMENT_BAR``
+        (strict 5% improvement; HIGHER is better).
+
+    The first-checkpoint case (no active champion) auto-passes for
+    both metrics — the bootstrap path stays the same.
+
+    Raises ``LookupError`` when the challenger row is missing; the
+    admin route translates that to a 404.
     """
     challenger_row = (await session.execute(
         sa.text(
-            "SELECT id, model_name FROM ml_checkpoints WHERE id = :i"
+            f"SELECT id, model_name FROM {table} WHERE id = :i"
         ),
         {"i": challenger_checkpoint_id},
     )).first()
     if challenger_row is None:
         raise LookupError(
-            f"challenger checkpoint id={challenger_checkpoint_id} not found"
+            f"challenger checkpoint id={challenger_checkpoint_id} "
+            f"not found in {table}"
         )
 
     champion_row = (await session.execute(
         sa.text(
-            "SELECT id FROM ml_checkpoints "
+            f"SELECT id FROM {table} "
             "WHERE model_name = :m AND is_active = 1 AND id != :i "
             "LIMIT 1"
         ),
         {"m": challenger_row.model_name, "i": challenger_checkpoint_id},
     )).first()
 
-    challenger_mae = await _evaluate_mae(session, challenger_checkpoint_id)
+    if metric == "sharpe":
+        challenger_metric = await _evaluate_sharpe(session, challenger_checkpoint_id)
+    else:
+        challenger_metric = await _evaluate_mae(session, challenger_checkpoint_id)
 
     if champion_row is None:
         # Bootstrap: no incumbent — any model beats no model.
         return ChampionChallengerResult(
-            champion_mae=None,
-            challenger_mae=challenger_mae,
+            champion_metric=None,
+            challenger_metric=challenger_metric,
             challenger_wins=True,
+            metric=metric,
         )
 
-    champion_mae = await _evaluate_mae(session, int(champion_row.id))
-    challenger_wins = challenger_mae < champion_mae * IMPROVEMENT_BAR
+    if metric == "sharpe":
+        champion_metric = await _evaluate_sharpe(session, int(champion_row.id))
+        challenger_wins = challenger_metric > champion_metric * SHARPE_IMPROVEMENT_BAR
+    else:
+        champion_metric = await _evaluate_mae(session, int(champion_row.id))
+        challenger_wins = challenger_metric < champion_metric * IMPROVEMENT_BAR
     return ChampionChallengerResult(
-        champion_mae=champion_mae,
-        challenger_mae=challenger_mae,
+        champion_metric=champion_metric,
+        challenger_metric=challenger_metric,
         challenger_wins=challenger_wins,
+        metric=metric,
     )
 
 
@@ -125,3 +173,28 @@ async def _evaluate_mae(  # pragma: no cover — TDD seam, mocked in tests
     result = run_backtest(symbol="BTC/USDT", timeframe="1h", start=start, end=end)
     # Higher win_rate -> lower "MAE". Bound to [0, 1].
     return max(0.0, min(1.0, 1.0 - result.win_rate))
+
+
+async def _evaluate_sharpe(  # pragma: no cover — TDD seam, mocked in tests
+    session: "AsyncSession",
+    checkpoint_id: int,
+) -> float:
+    """Backtest the given RL checkpoint and return its Sharpe ratio.
+
+    SP-4 Phase D — for L10 brain checkpoints, the metric is the
+    portfolio-level Sharpe ratio over the held-out window. Like
+    :func:`_evaluate_mae`, this delegates to the existing backtest
+    runner — for v1 we read ``result.sharpe`` directly. Tests
+    monkeypatch this seam so they never hit real OHLCV / brain
+    inference.
+
+    Returns the raw Sharpe (typically ~0..3 for crypto strategies).
+    Bootstrap callers (no champion yet) accept any value via the
+    `is None` branch upstream.
+    """
+    from tools.backtest import run_backtest
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=HELD_OUT_DAYS)
+    result = run_backtest(symbol="BTC/USDT", timeframe="1h", start=start, end=end)
+    return float(getattr(result, "sharpe", 0.0))

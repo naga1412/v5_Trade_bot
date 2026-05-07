@@ -324,6 +324,21 @@ async def _create_auth_tables(engine: Any) -> None:
             "activated_at TEXT, deactivated_at TEXT, notes TEXT, "
             "UNIQUE (model_name, version))"
         ))
+        # SP-4 §6.4: rl_checkpoints registry. SQLite-friendly mirror of
+        # migration 0015 (no partial unique index on the SQLite branch).
+        # Used by the admin_rl REST tests in test_api_admin_rl_checkpoints.py.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS rl_checkpoints ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "model_name TEXT NOT NULL, version TEXT NOT NULL, "
+            "checkpoint_uri TEXT NOT NULL, sha256 TEXT NOT NULL, "
+            "trained_at TEXT NOT NULL, "
+            "train_data_window TEXT NOT NULL, "
+            "eval_results TEXT NOT NULL, "
+            "is_active INTEGER NOT NULL DEFAULT 0, "
+            "activated_at TEXT, deactivated_at TEXT, notes TEXT, "
+            "UNIQUE (model_name, version))"
+        ))
         # SP-2 Phase E E5: pattern_enabled. SQLite-friendly mirror of
         # migration 0009 (BIGSERIAL → INTEGER AUTOINCREMENT, BOOLEAN → INTEGER).
         await conn.execute(sa.text(
