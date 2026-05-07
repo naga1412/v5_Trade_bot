@@ -92,18 +92,35 @@ if [ ! -f "$EVAL_FILE" ]; then
 fi
 log "eval file: ${EVAL_FILE}"
 
-# Phase B6 stops here. Phase B7 (registrar) + Phase D (admin endpoints)
-# + Phase E (Telegram approval inline button) wire the rest:
-#   - register_brain.py POSTs to /api/v1/admin/rl-checkpoints
-#   - evaluate_challenger compares against active champion
-#   - if challenger wins by ≥5% Sharpe, Telegram inline button posts
-#   - operator taps Approve → backend swaps + restarts
-#
-# For now the cron lays the rails: training runs nightly, output is
-# saved + logged, operator can manually inspect eval JSON until the
-# rest of the pipeline lands.
-log "▶ candidate ready for review: ${VERSION}"
-notify "🧠" "candidate ${VERSION} trained. Inspect ${EVAL_FILE}."
+# Phase D: register the candidate via the admin_rl REST endpoint. The
+# row lands inactive — promotion to active requires the operator's
+# Telegram approval below. The container path /app/data/rl-cache/ is
+# bind-mounted from $RL_CACHE_DIR (host) via the docker-compose volume
+# from PR #41, so the .pt the trainer just wrote is visible inside.
+log "▶ Phase D — registering candidate in rl_checkpoints"
+REGISTER_CMD="python /app/tools/ml/register_brain.py \
+  --checkpoint /app/data/rl-cache/ppo_policy_${VERSION}.pt \
+  --eval /app/data/rl-cache/eval_brain_${VERSION}.json \
+  --base-url http://localhost:8000"
+
+REGISTER_OUT=$(cd "$INSTALL_DIR" && docker compose exec -T backend bash -c "$REGISTER_CMD" 2>&1 || true)
+echo "$REGISTER_OUT" >> "$LOG_FILE"
+CKPT_ID=$(echo "$REGISTER_OUT" | grep -oE 'id=[0-9]+' | head -n1 | cut -d'=' -f2)
+if [ -z "$CKPT_ID" ]; then
+  log "✗ register_brain.py did not return a checkpoint id; manual promotion required"
+  notify "⚠️" "candidate ${VERSION} trained but registration failed; check ${LOG_FILE}"
+  exit 1
+fi
+log "✓ registered as rl_checkpoints.id=${CKPT_ID}"
+
+# Phase E: send the Telegram inline-button approval message via the
+# new /api/v1/admin/rl-checkpoints/{id}/request-approval helper (added
+# in Phase E.next once the polling worker lands). For Phase E v1 we
+# fall back to the simple notify() sendMessage above — the operator
+# will start seeing inline-button messages once the backend boots
+# the polling task in app/main:lifespan.
+log "▶ Phase E — Telegram approval pending"
+notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) ready for review. Approve via Telegram inline button or curl PATCH."
 
 log "▶ done"
 exit 0
