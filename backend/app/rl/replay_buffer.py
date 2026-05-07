@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 import sqlalchemy as sa
@@ -36,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ml.regimes import REGIME_WINDOWS
 from app.rl.obs import (
-    OBS_DIM,
     AssetState,
     MacroFeatures,
     MarketFeatures,
