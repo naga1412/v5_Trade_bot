@@ -54,7 +54,7 @@ async def save_universe_snapshot(
                 "VALUES (:s, :v, :r, :ts)"
             ),
             {"s": entry.symbol, "v": entry.quote_volume_usd_24h,
-             "r": entry.rank, "ts": now.isoformat()},
+             "r": entry.rank, "ts": now},
         )
     return now
 

@@ -14,8 +14,10 @@ async def persist_trade(session: AsyncSession, trade: Trade) -> str:
         "stop_loss": trade.stop_loss,
         "take_profit": trade.take_profit,
         "position_size": trade.position_size,
-        "opened_at": trade.opened_at.isoformat(),
-        "closed_at": trade.closed_at.isoformat(),
+        # Datetimes pass through raw — asyncpg/Postgres TIMESTAMPTZ
+        # rejects ISO strings; SQLite tests still get TEXT auto-binding.
+        "opened_at": trade.opened_at,
+        "closed_at": trade.closed_at,
         "pnl_pct": trade.pnl_pct,
         "max_drawdown_during": None,
         "bars_held": trade.bars_held,

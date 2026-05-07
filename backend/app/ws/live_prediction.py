@@ -126,7 +126,10 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                     "user_id": BOOTSTRAP_ADMIN_USER_ID,
                     "symbol": pred.symbol,
                     "timeframe": pred.timeframe,
-                    "ts": pred.ts.isoformat(),
+                    # ts is a datetime, NOT isoformat() string. asyncpg's
+                    # PostgreSQL TIMESTAMPTZ binding rejects strings; SQLite
+                    # tests bind datetime->TEXT automatically. SP-1.1 hotfix.
+                    "ts": pred.ts,
                     "layer_scores": json.dumps(_layer_payload),
                     "final_score": pred.final.score,
                     "direction": pred.final.direction,

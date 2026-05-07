@@ -289,11 +289,18 @@ async def test_take_profit_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert t.pnl_usdt > 0
     assert t.signal_id == "seedsig0"
     assert t.bars_held == 1
-    # Cooldown set to candle.ts + 30min.
+    # Cooldown set to candle.ts + 30min. SP-1.1 hotfix: SQL persistence
+    # now passes raw datetime (Postgres TIMESTAMPTZ requires it). SQLite
+    # serializes via str(dt) which uses a SPACE not 'T'. Compare by
+    # parsing both sides to normalize.
+    from datetime import datetime as _dt
     assert len(cools) == 1
     assert cools[0].symbol == SYMBOL
-    expected_cd = (candle.ts + timedelta(minutes=COOLDOWN_MINUTES)).isoformat()
-    assert cools[0].cooldown_until == expected_cd
+    expected_cd = candle.ts + timedelta(minutes=COOLDOWN_MINUTES)
+    actual_raw = cools[0].cooldown_until
+    if isinstance(actual_raw, str):
+        actual_raw = _dt.fromisoformat(actual_raw.replace(" ", "T"))
+    assert actual_raw == expected_cd
 
 
 @pytest.mark.asyncio

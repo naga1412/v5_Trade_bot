@@ -68,7 +68,9 @@ async def record_brain_decision(
         ts: timestamp the candle closed at; defaults to now-UTC if absent.
     """
     payload = {
-        "ts": (ts or datetime.now(timezone.utc)).isoformat(),
+        # Datetime passes through raw — Postgres TIMESTAMPTZ rejects ISO
+        # strings via asyncpg; SQLite tests still bind datetime->TEXT.
+        "ts": ts or datetime.now(timezone.utc),
         "symbol": symbol,
         "checkpoint_id": decision.checkpoint_id,
         "observation": _to_jsonable(observation),
