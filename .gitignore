@@ -159,3 +159,20 @@ test-results/
 # --- Profiling ---
 *.prof
 .profile/
+
+# --- Operational scripts with baked-in secrets ---
+# Generated locally for one-off Hetzner deploys; contain TUNNEL_TOKEN,
+# TELEGRAM_BOT_TOKEN, CF_ACCESS_AUD. NEVER commit these to GitHub.
+hetzner_deploy*.sh
+hetzner_fix_*.sh
+
+# --- Transient ---
+files.zip
+.claude/
+tools/oci/poll_ampere.pid
+tools/oci/poll_ampere.*.log
+
+# --- ML training artifacts ---
+# Local training runs / parquet downloads. Checkpoints are uploaded to
+# the production server filesystem, not git.
+data/ml/
