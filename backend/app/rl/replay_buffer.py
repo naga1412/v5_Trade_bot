@@ -89,6 +89,20 @@ class _TradeRow:
     position_size_usdt: float
 
 
+@dataclass(frozen=True)
+class _RewardShim:
+    """Adapter conforming to ``app.rl.reward._TradeLike`` protocol.
+
+    `compute_reward` only needs ``pnl_quote`` + ``initial_risk_quote``;
+    we compute those from the shadow_trades row + a derived risk amount
+    and bundle them in this tiny frozen dataclass so mypy can see the
+    protocol fit (vs anonymous classes defined inside loops).
+    """
+
+    pnl_quote: float
+    initial_risk_quote: float
+
+
 async def _fetch_closed_trades(
     session: AsyncSession, *, window_days: int,
 ) -> list[_TradeRow]:
@@ -275,23 +289,24 @@ async def load_from_shadow_trades(
             )
             continue
 
-        class _RewardTrade:
-            pnl_quote = tr.pnl_usdt or 0.0
-            initial_risk_quote = risk_quote
+        reward_trade = _RewardShim(
+            pnl_quote=tr.pnl_usdt or 0.0,
+            initial_risk_quote=risk_quote,
+        )
 
-        recent_for_sigma: list[object] = []
+        recent_for_sigma: list[_RewardShim] = []
         for past in history_by_symbol.get(tr.symbol, []):
             past_risk = abs(past.entry_price - past.stop_loss) * (
                 past.position_size_usdt / past.entry_price
             )
             if past_risk <= 0:
                 continue
-            class _R:
-                pnl_quote = past.pnl_usdt or 0.0
-                initial_risk_quote = past_risk
-            recent_for_sigma.append(_R())
+            recent_for_sigma.append(_RewardShim(
+                pnl_quote=past.pnl_usdt or 0.0,
+                initial_risk_quote=past_risk,
+            ))
 
-        reward = compute_reward(_RewardTrade(), recent=recent_for_sigma)
+        reward = compute_reward(reward_trade, recent=recent_for_sigma)
 
         # Build observation
         asset_id = sym_to_id.get(tr.symbol, 0)
