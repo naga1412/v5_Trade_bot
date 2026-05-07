@@ -129,7 +129,7 @@ async def monitoring_health(
     try:
         cp_row = (await session.execute(sa.text(
             "SELECT id, model_name, version, sha256 "
-            "FROM ml_checkpoints WHERE is_active = 1 LIMIT 1"
+            "FROM ml_checkpoints WHERE is_active = TRUE LIMIT 1"
         ))).first()
         if cp_row is not None:
             active_checkpoint = ActiveCheckpointSummary(

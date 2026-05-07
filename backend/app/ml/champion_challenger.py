@@ -124,7 +124,7 @@ async def evaluate_challenger(
     champion_row = (await session.execute(
         sa.text(
             f"SELECT id FROM {table} "
-            "WHERE model_name = :m AND is_active = 1 AND id != :i "
+            "WHERE model_name = :m AND is_active = TRUE AND id != :i "
             "LIMIT 1"
         ),
         {"m": challenger_row.model_name, "i": challenger_checkpoint_id},
