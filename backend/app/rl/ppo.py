@@ -156,7 +156,7 @@ def train_ppo(
     # Standard PPO normalisation across the buffer to stabilise gradient scale.
     adv_mean = advantages.mean()
     adv_std = advantages.std()
-    if float(adv_std) > cfg.eps_safe():
+    if float(adv_std) > DEFAULT_ADVANTAGE_NORM_EPS:
         advantages = (advantages - adv_mean) / (adv_std + DEFAULT_ADVANTAGE_NORM_EPS)
     returns = rewards  # episodic reward = return for single-step episodes
 
@@ -240,14 +240,6 @@ def train_ppo(
             k: v.detach().cpu().clone() for k, v in policy.state_dict().items()
         },
     )
-
-
-# Tiny helper kept on the dataclass to side-step Python's "method on frozen
-# dataclass" idiom complaints in older versions.
-def _eps_safe(self: TrainConfig) -> float:
-    return DEFAULT_ADVANTAGE_NORM_EPS
-
-TrainConfig.eps_safe = _eps_safe  # type: ignore[attr-defined]
 
 
 __all__ = [

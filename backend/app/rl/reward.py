@@ -39,9 +39,18 @@ MIN_TRADES_FOR_SIGMA: int = 5
 
 
 class _TradeLike(Protocol):
-    """Anything with ``pnl_quote`` (signed) + ``initial_risk_quote`` (>0)."""
-    pnl_quote: float
-    initial_risk_quote: float
+    """Anything with ``pnl_quote`` (signed) + ``initial_risk_quote`` (>0).
+
+    Properties (not class attributes) so frozen dataclasses + NamedTuples
+    + plain classes all conform without mypy complaining about
+    "settable variable vs read-only attribute".
+    """
+
+    @property
+    def pnl_quote(self) -> float: ...
+
+    @property
+    def initial_risk_quote(self) -> float: ...
 
 
 def compute_reward(trade: _TradeLike, *, recent: Sequence[_TradeLike]) -> float:
