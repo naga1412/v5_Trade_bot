@@ -6,7 +6,7 @@
 # tee'd to a log file the operator can grep when something looks off.
 #
 # Each run:
-#   1. docker compose exec backend python /app/tools/ml/train_brain.py ...
+#   1. docker compose exec backend python /app/host-tools/ml/train_brain.py ...
 #   2. compute eval metrics vs current champion via the SP-7 evaluate_challenger
 #   3. if challenger_sharpe > champion_sharpe * 1.05:
 #        send Telegram inline-button message — operator approves to swap
@@ -63,7 +63,7 @@ fi
 # Run the training. docker compose exec is the same pattern the SP-1.1
 # README uses for the register step, so the operator's mental model
 # stays consistent.
-TRAIN_CMD="python /app/tools/ml/train_brain.py \
+TRAIN_CMD="python /app/host-tools/ml/train_brain.py \
   --window-days 365 \
   --out-dir /app/data/rl-cache \
   --device cpu \
@@ -98,7 +98,7 @@ log "eval file: ${EVAL_FILE}"
 # bind-mounted from $RL_CACHE_DIR (host) via the docker-compose volume
 # from PR #41, so the .pt the trainer just wrote is visible inside.
 log "▶ Phase D — registering candidate in rl_checkpoints"
-REGISTER_CMD="python /app/tools/ml/register_brain.py \
+REGISTER_CMD="python /app/host-tools/ml/register_brain.py \
   --checkpoint /app/data/rl-cache/ppo_policy_${VERSION}.pt \
   --eval /app/data/rl-cache/eval_brain_${VERSION}.json \
   --base-url http://localhost:8000"

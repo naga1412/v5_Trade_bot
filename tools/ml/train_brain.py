@@ -17,7 +17,7 @@ Pipeline:
 
 Usage on Hetzner (production cron):
     docker compose -f /opt/trading-radar/docker-compose.yml exec -T backend \
-        python /app/tools/ml/train_brain.py \
+        python /app/host-tools/ml/train_brain.py \
             --window-days 365 \
             --out-dir /app/data/rl-cache \
             --device cpu \
