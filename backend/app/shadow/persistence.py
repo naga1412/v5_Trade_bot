@@ -12,6 +12,7 @@ raises in dev.
 
 import json
 from datetime import datetime
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.audit import insert_with_chain
 from app.shadow.engine import Direction, ShadowPosition
 from app.shadow.exit_monitor import ExitReason
+
+
+def _to_dt(value: Any) -> datetime:
+    """Coerce a DB-returned timestamp into a datetime.
+
+    asyncpg/PostgreSQL returns native datetime objects; SQLite returns
+    ISO-8601 strings (since SQLite has no native datetime type).
+    Tests run on SQLite, production on PostgreSQL — this normaliser
+    makes both work.
+    """
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
 async def persist_open_position(
@@ -39,7 +53,9 @@ async def persist_open_position(
             "ps": pos.position_size_usdt, "es": pos.entry_score,
             "ec": pos.entry_confidence, "ea": pos.entry_atr,
             "bh": pos.bars_held,
-            "oa": pos.opened_at.isoformat(), "lc": pos.last_check_at.isoformat(),
+            # Datetimes pass through raw — asyncpg/Postgres rejects ISO
+            # strings on TIMESTAMPTZ; SQLite tests still get TEXT via SQLAlchemy.
+            "oa": pos.opened_at, "lc": pos.last_check_at,
             "sig": pos.signal_id,
         },
     )
@@ -64,8 +80,8 @@ async def list_open_positions(
             entry_score=r.entry_score, entry_confidence=r.entry_confidence,
             entry_atr=r.entry_atr, layer_scores={},
             bars_held=r.bars_held,
-            opened_at=datetime.fromisoformat(r.opened_at),
-            last_check_at=datetime.fromisoformat(r.last_check_at),
+            opened_at=_to_dt(r.opened_at),
+            last_check_at=_to_dt(r.last_check_at),
             signal_id=r.signal_id,
         ))
     return out
@@ -123,8 +139,9 @@ async def persist_closed_trade(
         "pnl_pct": pnl_pct,
         "pnl_usdt": pnl_usdt,
         "bars_held": bars_held,
-        "opened_at": pos.opened_at.isoformat(),
-        "closed_at": closed_at.isoformat(),
+        # Raw datetimes — Postgres TIMESTAMPTZ binding requires this.
+        "opened_at": pos.opened_at,
+        "closed_at": closed_at,
         "inputs_hash": inputs_hash,
         "model_version": "sp-0.5",
         "signal_id": pos.signal_id,
@@ -148,7 +165,7 @@ async def set_cooldown(
             "ON CONFLICT(user_id, symbol) DO UPDATE SET "
             "cooldown_until = excluded.cooldown_until"
         ),
-        {"uid": user_id, "s": symbol, "u": until.isoformat()},
+        {"uid": user_id, "s": symbol, "u": until},
     )
 
 
@@ -162,4 +179,4 @@ async def load_cooldowns(
         ),
         {"uid": user_id},
     )
-    return {r.symbol: datetime.fromisoformat(r.cooldown_until) for r in result}
+    return {r.symbol: _to_dt(r.cooldown_until) for r in result}

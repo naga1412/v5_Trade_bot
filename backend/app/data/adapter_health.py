@@ -75,7 +75,9 @@ async def record_health(
     checked_at: datetime | None = None,
 ) -> None:
     """INSERT a single row into ``adapter_health``."""
-    ts = (checked_at or datetime.now(UTC)).isoformat()
+    # Pass datetime directly; asyncpg/PostgreSQL TIMESTAMPTZ rejects ISO
+    # strings, SQLite tests still get TEXT via SQLAlchemy. SP-1.1 hotfix.
+    ts = checked_at or datetime.now(UTC)
     await session.execute(
         sa.text(
             "INSERT INTO adapter_health "

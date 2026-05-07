@@ -29,7 +29,7 @@ class OHLCVPipeline:
                     ),
                     {
                         "s": candle.symbol, "tf": candle.timeframe,
-                        "cts": candle.ts.isoformat(),
+                        "cts": candle.ts,
                         "ck": failure,
                         "d": json.dumps({"open": candle.open, "high": candle.high,
                                          "low": candle.low, "close": candle.close,
@@ -48,7 +48,7 @@ class OHLCVPipeline:
             ),
             {
                 "s": candle.symbol, "tf": candle.timeframe,
-                "ts": candle.ts.isoformat(),
+                "ts": candle.ts,
                 "o": candle.open, "h": candle.high,
                 "l": candle.low, "c": candle.close, "v": candle.volume,
             },
