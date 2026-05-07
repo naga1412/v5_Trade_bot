@@ -49,7 +49,7 @@ scp -i $HOME\.ssh\oracle_key $LOCAL_EV root@95.216.187.204:/tmp/
 # 2. Inside the backend container, register + activate (force=true bypasses
 #    the SP-7 champion-challenger gate — required for the first checkpoint
 #    because there is no champion to beat yet).
-ssh -i $HOME\.ssh\oracle_key root@95.216.187.204 "docker compose -f /opt/trading-radar/docker-compose.yml exec -T backend python /app/tools/ml/register.py --checkpoint /app/data/ml-cache/conv_lstm_$VERSION.pt --eval /tmp/eval_$VERSION.json --base-url http://localhost:8000 --activate --force"
+ssh -i $HOME\.ssh\oracle_key root@95.216.187.204 "docker compose -f /opt/trading-radar/docker-compose.yml exec -T backend python /app/host-tools/ml/register.py --checkpoint /app/data/ml-cache/conv_lstm_$VERSION.pt --eval /tmp/eval_$VERSION.json --base-url http://localhost:8000 --activate --force"
 
 # 3. Restart backend so the lifespan loader picks up the active row
 ssh -i $HOME\.ssh\oracle_key root@95.216.187.204 "docker compose -f /opt/trading-radar/docker-compose.yml restart backend"

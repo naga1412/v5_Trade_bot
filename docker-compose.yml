@@ -63,11 +63,16 @@ services:
       # register.py records the file:// URI.
       - ./backend/data/ml-cache:/app/data/ml-cache:ro
       - ./backend/data/rl-cache:/app/data/rl-cache:ro
-      # SP-1.1 — bind-mount tools/ so register.py + future operator
-      # scripts are runnable inside the container via
-      # `docker compose exec backend python /app/tools/ml/register.py`
-      # without rebuilding the image. Read-only.
-      - ./tools:/app/tools:ro
+      # SP-1.1 — bind-mount the REPO-ROOT tools/ at /app/host-tools (NOT
+      # /app/tools — that path is owned by the image's COPY of
+      # backend/tools/{backtest,ml,...} which app/api/routes/admin_backtest.py
+      # imports via `from tools.backtest import ...`). Mounting at
+      # /app/tools shadows the package and breaks `from tools.backtest`
+      # at startup (production crash-restart loop). Mounting at
+      # /app/host-tools keeps both available. Operator activation flow:
+      #     docker compose exec backend python \
+      #         /app/host-tools/ml/register.py --checkpoint ... --activate --force
+      - ./tools:/app/host-tools:ro
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:

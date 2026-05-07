@@ -22,7 +22,7 @@ two differences:
   not the ConvLSTM's (per-regime MAE)
 
 Usage (from inside the backend container):
-    docker compose exec -T backend python /app/tools/ml/register_brain.py \\
+    docker compose exec -T backend python /app/host-tools/ml/register_brain.py \\
         --checkpoint /app/data/rl-cache/ppo_policy_v1-20260514-033000.pt \\
         --eval /tmp/eval_brain_v1-20260514-033000.json \\
         --base-url http://localhost:8000 \\
