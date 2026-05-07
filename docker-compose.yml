@@ -52,6 +52,22 @@ services:
       CF_ACCESS_AUD: ${CF_ACCESS_AUD}
       BINANCE_USE_TESTNET: ${BINANCE_USE_TESTNET}
       MASTER_PASSPHRASE: ${MASTER_PASSPHRASE}
+    volumes:
+      # SP-1.1 / SP-4 — bind-mount checkpoint caches so SCP'd .pt files
+      # survive container restarts. The lifespan loader (app/main.py)
+      # calls load_active_checkpoint() at startup, which resolves
+      # file:///app/data/ml-cache/<name>.pt against this mount. Without
+      # the mount the .pt is wiped every restart and the loader fails.
+      # Read-only inside the container — the operator SCPs to the host
+      # path /opt/trading-radar/backend/data/{ml,rl}-cache/ and
+      # register.py records the file:// URI.
+      - ./backend/data/ml-cache:/app/data/ml-cache:ro
+      - ./backend/data/rl-cache:/app/data/rl-cache:ro
+      # SP-1.1 — bind-mount tools/ so register.py + future operator
+      # scripts are runnable inside the container via
+      # `docker compose exec backend python /app/tools/ml/register.py`
+      # without rebuilding the image. Read-only.
+      - ./tools:/app/tools:ro
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
