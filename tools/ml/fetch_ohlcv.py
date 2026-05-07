@@ -235,7 +235,30 @@ def fetch_all_archive(
         )
 
     df = pd.concat(frames, ignore_index=True)
-    df["timestamp"] = pd.to_datetime(df["open_ms"], unit="ms", utc=True)
+
+    # Binance flipped the archive's timestamp unit from milliseconds to
+    # MICROSECONDS at the 2024-12 → 2025-01 boundary. Older months have
+    # 13-digit values (ms), newer have 16-digit (μs). We auto-detect
+    # per-row by magnitude rather than per-month so a mixed-range pull
+    # (the common SP-1.1 case) works without per-file branching.
+    open_ms_int = pd.to_numeric(df["open_ms"], errors="coerce")
+    # Anything > 1e14 is microseconds (year > 5138 in millis = absurd);
+    # anything ≤ 1e14 is milliseconds. The cutoff sits between any
+    # plausible ms timestamp (≤ 9.5e12 in 2270) and any plausible μs
+    # timestamp (≥ 1.5e15 from 2017 onward).
+    is_micro = open_ms_int > 1e14
+    df["open_ms"] = open_ms_int
+
+    # Convert each subset to a datetime Series, then merge by index so
+    # the output column is a single tz-aware datetime64[ns, UTC] dtype
+    # (avoids pandas' object-vs-datetime mixed-dtype FutureWarning).
+    ms_idx = df.index[~is_micro]
+    us_idx = df.index[is_micro]
+    ts_ms = pd.to_datetime(df.loc[ms_idx, "open_ms"], unit="ms", utc=True)
+    ts_us = pd.to_datetime(df.loc[us_idx, "open_ms"], unit="us", utc=True)
+    df["timestamp"] = pd.concat([ts_ms, ts_us]).reindex(df.index)
+    # Drop any rows that didn't parse (malformed or stale header rows).
+    df = df.dropna(subset=["timestamp"])
     df = df.set_index("timestamp")
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     df = df[~df.index.duplicated(keep="first")].sort_index()
