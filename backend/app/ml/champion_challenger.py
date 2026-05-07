@@ -47,30 +47,38 @@ Table = Literal["ml_checkpoints", "rl_checkpoints"]
 class ChampionChallengerResult:
     """Outcome of a single champion-vs-challenger comparison.
 
-    ``champion_metric`` is ``None`` iff there is no currently-active
+    ``champion_mae`` is ``None`` iff there is no currently-active
     checkpoint for the same ``model_name`` — in which case
     ``challenger_wins`` is unconditionally ``True`` (any model beats no
     model).
 
-    Backward compat: the historical fields ``champion_mae`` /
-    ``challenger_mae`` are exposed as @property aliases of
-    ``champion_metric`` / ``challenger_metric`` so SP-7's existing
-    consumers (admin_ml.py error message, integration tests) keep
-    working without rename.
+    The ``metric`` field carries the comparison type:
+      * ``"mae"`` (default, SP-7 ConvLSTM path) — values in
+        ``champion_mae``/``challenger_mae`` are MAEs, lower-is-better.
+      * ``"sharpe"`` (SP-4 RL brain path) — values are Sharpe ratios,
+        higher-is-better. The field NAMES stay ``*_mae`` for
+        backward compatibility with SP-7 consumers (admin_ml.py error
+        messages, the ``test_api_admin_ml_checkpoints_gate.py``
+        integration tests, etc.). Read ``metric`` to know how to
+        interpret the values.
+
+    Generic-name @property aliases ``champion_metric`` /
+    ``challenger_metric`` are provided for SP-4 admin_rl.py callers
+    that prefer metric-agnostic naming.
     """
 
-    champion_metric: float | None
-    challenger_metric: float
+    champion_mae: float | None
+    challenger_mae: float
     challenger_wins: bool
     metric: Metric = "mae"
 
     @property
-    def champion_mae(self) -> float | None:
-        return self.champion_metric
+    def champion_metric(self) -> float | None:
+        return self.champion_mae
 
     @property
-    def challenger_mae(self) -> float:
-        return self.challenger_metric
+    def challenger_metric(self) -> float:
+        return self.challenger_mae
 
 
 async def evaluate_challenger(
@@ -123,28 +131,28 @@ async def evaluate_challenger(
     )).first()
 
     if metric == "sharpe":
-        challenger_metric = await _evaluate_sharpe(session, challenger_checkpoint_id)
+        challenger_value = await _evaluate_sharpe(session, challenger_checkpoint_id)
     else:
-        challenger_metric = await _evaluate_mae(session, challenger_checkpoint_id)
+        challenger_value = await _evaluate_mae(session, challenger_checkpoint_id)
 
     if champion_row is None:
         # Bootstrap: no incumbent — any model beats no model.
         return ChampionChallengerResult(
-            champion_metric=None,
-            challenger_metric=challenger_metric,
+            champion_mae=None,
+            challenger_mae=challenger_value,
             challenger_wins=True,
             metric=metric,
         )
 
     if metric == "sharpe":
-        champion_metric = await _evaluate_sharpe(session, int(champion_row.id))
-        challenger_wins = challenger_metric > champion_metric * SHARPE_IMPROVEMENT_BAR
+        champion_value = await _evaluate_sharpe(session, int(champion_row.id))
+        challenger_wins = challenger_value > champion_value * SHARPE_IMPROVEMENT_BAR
     else:
-        champion_metric = await _evaluate_mae(session, int(champion_row.id))
-        challenger_wins = challenger_metric < champion_metric * IMPROVEMENT_BAR
+        champion_value = await _evaluate_mae(session, int(champion_row.id))
+        challenger_wins = challenger_value < champion_value * IMPROVEMENT_BAR
     return ChampionChallengerResult(
-        champion_metric=champion_metric,
-        challenger_metric=challenger_metric,
+        champion_mae=champion_value,
+        challenger_mae=challenger_value,
         challenger_wins=challenger_wins,
         metric=metric,
     )

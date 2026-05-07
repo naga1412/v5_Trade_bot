@@ -179,8 +179,8 @@ async def patch_rl_checkpoint(
                     status_code=422,
                     detail=(
                         "challenger did not beat champion: "
-                        f"champion_sharpe={cc.champion_metric} "
-                        f"challenger_sharpe={cc.challenger_metric} "
+                        f"champion_sharpe={cc.champion_mae} "
+                        f"challenger_sharpe={cc.challenger_mae} "
                         "(needs 5% improvement; pass ?force=true to bypass)"
                     ),
                 )
