@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 import torch
 
@@ -20,7 +19,6 @@ from app.rl.inference import (
     reset_smoothing_state,
 )
 from app.rl.obs import (
-    AssetState,
     MacroFeatures,
     MarketFeatures,
     PositionState,
