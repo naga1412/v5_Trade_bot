@@ -1045,3 +1045,36 @@ listing + manual refresh of the news_items store.
   mobile push notification on state change (Telegram via
   `app.ops.alerts` covers v1).
 - Tag: `sp-pause` (set after final regression).
+
+## 2026-05-07 — SP-1.1 First-Checkpoint Tooling shipped (training pending)
+
+- New `tools/ml/` package wraps the existing `app.ml.*` infra into a
+  one-command training pipeline:
+  - `fetch_ohlcv.py` pulls BTC/USDT 1h history (2017-08 → today) from
+    the Binance public klines REST endpoint (no auth, ~30s) and writes
+    a Parquet file. Spec sec 5.1 originally called for a B2 export from
+    production Postgres; the Hetzner deploy dropped B2, so we go direct
+    to source. Idempotent, dedups boundary rows.
+  - `train.py` materializes sliding 256-bar windows over the chronological
+    train/val split (train ≤ 2022, val = 2023, test ≥ 2024), trains the
+    `ConvLSTMPredictor` with Adam(3e-4) + early stopping (patience=5),
+    then evaluates on the 5 frozen regime windows from `app.ml.regimes`
+    via the existing `evaluate_on_regime` harness. Saves `.pt` + `eval.json`
+    to a versioned dir; exit code 2 if any regime fails the 1.5% MAE gate.
+  - `register.py` SHA-256 hashes the local `.pt`, builds the
+    `MlCheckpointCreateIn` body (using `file:///app/data/ml-cache/<name>`
+    URI for the Hetzner-local checkpoint location), POSTs to
+    `/api/v1/admin/ml-checkpoints`, and optionally PATCHes `is_active=true`
+    with `?force=true` (the SP-7 first-checkpoint bypass).
+  - `colab/train_conv_lstm.ipynb` — Colab T4 GPU wrapper. Cells 1–6
+    do clone → install → fetch → train → inspect → download. ~30-60 min
+    end-to-end on free Colab.
+- 20 smoke tests (`tools/ml/tests/`) cover pagination/dedup math, dataset
+  shape, training plumbing on synthetic data, sha256 streaming, and the
+  HTTP request shape for register + activate. Full network fetch + full
+  30-epoch training are intentionally manual smokes.
+- Tag `sp-1` (full ship of SP-1 including the activated checkpoint) is
+  blocked on the human running the Colab notebook + the
+  scp/register/restart sequence documented in `tools/ml/README.md`.
+  Until then, ghost candles render as NULL and the chart degrades
+  gracefully (predictor falls back to baseline per spec sec 10).
