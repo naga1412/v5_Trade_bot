@@ -1,0 +1,235 @@
+"""SP-4 Phase C end-to-end integration smoke for the brain glue.
+
+Validates the production path the predictor takes:
+
+1. No active checkpoint → ``compute_brain_adjust_and_persist`` returns
+   ``brain_adjust=1.0`` (no-op) and ``decision=None``. **Critical:** this
+   is the day-1 production behaviour, must be bit-identical to
+   pre-SP-4 equal-weight aggregation.
+
+2. Active checkpoint → returns the multiplier mapped from the brain's
+   action, AND writes a hash-chained ``brain_decisions`` row when a
+   session is supplied.
+
+3. Audit chain integrity preserved across multiple calls.
+"""
+from __future__ import annotations
+
+import pytest
+import pytest_asyncio
+import sqlalchemy as sa
+import torch
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.rl.checkpoints import (
+    ActiveRlCheckpoint,
+    clear_active,
+    set_active,
+)
+from app.rl.inference import reset_smoothing_state
+from app.rl.obs import MacroFeatures, MarketFeatures, PositionState
+from app.rl.policy import PolicyNetwork
+from app.rl.predictor_glue import (
+    compute_brain_adjust_and_persist,
+    reset_glue_state,
+)
+
+
+CREATE_BRAIN_DECISIONS_TABLE = (
+    "CREATE TABLE brain_decisions ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "ts TEXT NOT NULL, symbol TEXT NOT NULL, "
+    "checkpoint_id INTEGER NOT NULL, "
+    "observation TEXT NOT NULL, action TEXT NOT NULL, "
+    "action_logits TEXT NOT NULL, value_estimate REAL, "
+    "smoothed_action TEXT NOT NULL, "
+    "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL)"
+)
+
+
+@pytest_asyncio.fixture
+async def session() -> AsyncSession:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(CREATE_BRAIN_DECISIONS_TABLE))
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    async with sm() as s:
+        yield s
+    await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _reset_state() -> None:
+    clear_active()
+    reset_smoothing_state()
+    reset_glue_state()
+
+
+def _market() -> MarketFeatures:
+    return MarketFeatures(
+        atr_pct=0.02, funding_rate=0.0001, oi_delta_24h=0.05,
+        dxy_corr_30d=-0.3, gold_corr_30d=0.1, regime="bull_breakout",
+    )
+
+
+def _position() -> PositionState:
+    return PositionState(cur_position=0, unrealized_pnl_R=0.0, bars_in_position=0)
+
+
+def _macro() -> MacroFeatures:
+    return MacroFeatures(
+        hours_to_next_high_impact=12.0,
+        fomc_window=False, weekend=False, asia_open=False,
+    )
+
+
+def _layers() -> tuple[float, ...]:
+    return tuple(0.1 * i for i in range(1, 10))
+
+
+def _activate_long_full_policy() -> None:
+    policy = PolicyNetwork()
+    with torch.no_grad():
+        policy.policy_head.weight.zero_()
+        policy.policy_head.bias.zero_()
+        policy.policy_head.bias[0] = 10.0  # ALL_ACTIONS[0] = LONG_FULL
+    set_active(
+        policy,
+        ActiveRlCheckpoint(
+            id=42, model_name="ppo_policy_v1", version="v1-test",
+            sha256="0" * 64, checkpoint_uri="file:///x.pt",
+        ),
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_no_active_checkpoint_returns_no_op_multiplier(
+    session: AsyncSession,
+) -> None:
+    """Day-1 production: no checkpoint loaded, brain_adjust=1.0 + no DB row."""
+    result = await compute_brain_adjust_and_persist(
+        symbol="BTC/USDT",
+        proposed_direction="LONG",
+        layer_scores=_layers(),
+        market=_market(),
+        position=_position(),
+        macro=_macro(),
+        session=session,
+    )
+    assert result.brain_adjust == 1.0
+    assert result.decision is None
+
+    # No brain_decisions row should have been created.
+    rows = (await session.execute(sa.text(
+        "SELECT count(*) AS n FROM brain_decisions"
+    ))).first()
+    assert rows.n == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_active_checkpoint_returns_multiplier_and_writes_row(
+    session: AsyncSession,
+) -> None:
+    _activate_long_full_policy()
+    result = await compute_brain_adjust_and_persist(
+        symbol="BTC/USDT",
+        proposed_direction="LONG",
+        layer_scores=_layers(),
+        market=_market(),
+        position=_position(),
+        macro=_macro(),
+        session=session,
+    )
+    await session.commit()
+
+    # LONG_FULL + proposed=LONG → boost to 1.4
+    assert result.brain_adjust == 1.4
+    assert result.decision is not None
+    assert result.decision.raw_action == "LONG_FULL"
+    assert result.decision.smoothed_action == "LONG_FULL"
+
+    # One audit row written, hash-chained from genesis.
+    rows = (await session.execute(sa.text(
+        "SELECT prev_hash, row_hash, action, smoothed_action, "
+        "checkpoint_id FROM brain_decisions"
+    ))).all()
+    assert len(rows) == 1
+    assert rows[0].prev_hash == "0" * 64
+    assert rows[0].action == "LONG_FULL"
+    assert rows[0].smoothed_action == "LONG_FULL"
+    assert rows[0].checkpoint_id == 42
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_active_checkpoint_brain_disagrees_suppresses(
+    session: AsyncSession,
+) -> None:
+    """Brain says LONG_FULL but L1..L9 proposed SHORT → suppress (0.6)."""
+    _activate_long_full_policy()
+    result = await compute_brain_adjust_and_persist(
+        symbol="BTC/USDT",
+        proposed_direction="SHORT",
+        layer_scores=_layers(),
+        market=_market(),
+        position=_position(),
+        macro=_macro(),
+        session=session,
+    )
+    assert result.brain_adjust == 0.6
+    assert result.decision is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_audit_chain_links_across_multiple_predictions(
+    session: AsyncSession,
+) -> None:
+    """3 sequential predictor ticks → 3 hash-chained brain_decisions rows."""
+    _activate_long_full_policy()
+    for symbol in ("BTC/USDT", "ETH/USDT", "SOL/USDT"):
+        await compute_brain_adjust_and_persist(
+            symbol=symbol,
+            proposed_direction="LONG",
+            layer_scores=_layers(),
+            market=_market(),
+            position=_position(),
+            macro=_macro(),
+            session=session,
+        )
+    await session.commit()
+
+    rows = (await session.execute(sa.text(
+        "SELECT id, prev_hash, row_hash, symbol FROM brain_decisions ORDER BY id"
+    ))).all()
+    assert len(rows) == 3
+    assert rows[0].prev_hash == "0" * 64
+    assert rows[1].prev_hash == rows[0].row_hash
+    assert rows[2].prev_hash == rows[1].row_hash
+    assert [r.symbol for r in rows] == ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_session_none_skips_persistence(session: AsyncSession) -> None:
+    """Legacy callers without a session: still get the multiplier, no DB write."""
+    _activate_long_full_policy()
+    result = await compute_brain_adjust_and_persist(
+        symbol="BTC/USDT",
+        proposed_direction="LONG",
+        layer_scores=_layers(),
+        market=_market(),
+        position=_position(),
+        macro=_macro(),
+        session=None,
+    )
+    assert result.brain_adjust == 1.4
+    assert result.decision is not None
+    # Use the live session as a witness — brain_decisions table should
+    # be empty since we asked the glue to skip persistence.
+    rows = (await session.execute(sa.text(
+        "SELECT count(*) AS n FROM brain_decisions"
+    ))).first()
+    assert rows.n == 0

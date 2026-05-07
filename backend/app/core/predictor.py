@@ -31,6 +31,8 @@ from app.core.scoring.layer7_xgboost import score as score_l7
 from app.core.scoring.layer8_convlstm import GhostInput, score as score_l8
 from app.core.scoring.layer9_news import score as score_l9
 from app.core.scoring.layer10_brain import score as score_l10
+from app.rl.obs import MacroFeatures, MarketFeatures, PositionState
+from app.rl.predictor_glue import compute_brain_adjust_and_persist
 from app.core.scoring.run_traps import check_all_traps
 from app.core.scoring.tiers import classify_tier
 from app.core.scoring.traps.base import TrapContext
@@ -366,11 +368,45 @@ async def build_prediction(
         enabled_set=enabled_traps,
     )
 
-    # Second pass — apply traps (and the neutral brain / news multipliers).
+    # SP-4 Phase C — brain hook. Returns brain_adjust=1.0 (no-op) when no
+    # checkpoint is loaded, so the pre-SP-4 equal-weight behaviour is
+    # bit-identical until the first PPO policy is activated.
+    brain_layers = tuple(
+        (layer_results[i].signed_strength if layer_results[i] is not None else 0.0)
+        for i in range(1, 10)
+    )
+    brain_market = MarketFeatures(
+        atr_pct=context.btc_atr_pct or 0.0,
+        funding_rate=context.funding_rate or 0.0,
+        oi_delta_24h=context.open_interest_delta_24h or 0.0,
+        dxy_corr_30d=0.0,
+        gold_corr_30d=0.0,
+        regime="sideways_grind",  # SP-4 Phase D wires real regime detection
+    )
+    brain_position = PositionState(
+        cur_position=0, unrealized_pnl_R=0.0, bars_in_position=0,
+    )
+    brain_macro = MacroFeatures(
+        hours_to_next_high_impact=float(
+            context.next_news_event_minutes_until or 60 * 24
+        ) / 60.0,
+        fomc_window=False, weekend=False, asia_open=False,
+    )
+    brain_hook = await compute_brain_adjust_and_persist(
+        symbol=symbol,
+        proposed_direction=proposed_direction.value,
+        layer_scores=brain_layers,
+        market=brain_market,
+        position=brain_position,
+        macro=brain_macro,
+        session=session,
+    )
+
+    # Second pass — apply traps + brain multiplier + news multiplier.
     final = aggregate(
         layer_results,
         trap_fires=fires,
-        brain_adjust=1.0,
+        brain_adjust=brain_hook.brain_adjust,
         news_multiplier=1.0,
     )
     tier = classify_tier(final)
