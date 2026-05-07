@@ -241,6 +241,153 @@ def test_fetch_all_archive_concatenates_months() -> None:
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
 
 
+def _kline_row_micros(open_us: int, *, price: float = 100.0,
+                      vol: float = 1000.0) -> list:
+    """Construct a Binance-format kline row using MICROSECOND timestamps
+    (post-2025-01 archive format).
+
+    Same 12 columns; just the timestamp magnitudes differ. Open + close
+    times are 1000x larger than the millisecond variant.
+    """
+    return [
+        open_us, str(price), str(price * 1.001), str(price * 0.999),
+        str(price * 1.0005), str(vol),
+        open_us + 3_599_999_999, str(price * vol), 50,
+        str(vol / 2), str(price * vol / 2), "0",
+    ]
+
+
+def test_fetch_all_archive_handles_millisecond_format_alone() -> None:
+    """Pre-2025 only — all rows are 13-digit millisecond timestamps."""
+    rows = [_kline_row(1706745600000 + i * 3_600_000) for i in range(5)]
+    zip_bytes = _build_fake_archive_zip(rows)
+
+    with patch("requests.Session") as mock_sess_cls:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.status_code = 200
+        resp.content = zip_bytes
+        sess.get.return_value = resp
+        sess.headers = {}
+        mock_sess_cls.return_value = sess
+
+        df = F.fetch_all_archive(
+            symbol="BTCUSDT", interval="1h",
+            start=datetime(2024, 2, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 2, 28, tzinfo=timezone.utc),
+        )
+    assert len(df) == 5
+    # First timestamp from millis → 2024-02-01 00:00 UTC
+    assert df.index[0] == pd.Timestamp("2024-02-01 00:00:00", tz="UTC")
+
+
+def test_fetch_all_archive_handles_microsecond_format_alone() -> None:
+    """Post-2025 only — all rows are 16-digit microsecond timestamps.
+
+    Reproduces the bug that caused the user's Colab run to fail with
+    OutOfBoundsDatetime: my fetcher was hardcoded ``unit='ms'`` so a
+    16-digit μs value parsed as if it were ms → year ~57000.
+    """
+    # 2025-01-01 00:00 UTC in microseconds
+    base_us = 1735689600 * 1_000_000
+    rows = [_kline_row_micros(base_us + i * 3_600_000_000) for i in range(5)]
+    zip_bytes = _build_fake_archive_zip(rows)
+
+    with patch("requests.Session") as mock_sess_cls:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.status_code = 200
+        resp.content = zip_bytes
+        sess.get.return_value = resp
+        sess.headers = {}
+        mock_sess_cls.return_value = sess
+
+        df = F.fetch_all_archive(
+            symbol="BTCUSDT", interval="1h",
+            start=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2025, 1, 31, tzinfo=timezone.utc),
+        )
+    assert len(df) == 5
+    assert df.index[0] == pd.Timestamp("2025-01-01 00:00:00", tz="UTC")
+    # Sanity — should NOT have parsed as a far-future timestamp.
+    assert df.index[0].year == 2025
+
+
+def test_fetch_all_archive_handles_mixed_ms_and_us_format() -> None:
+    """The realistic SP-1.1 case: 2017→2024 months in ms + 2025+ in us.
+
+    A combined fetch must auto-detect per-row by magnitude — the
+    cutoff sits around 1e14, well between any plausible ms (≤ 9e12)
+    and any plausible μs (≥ 1.5e15).
+    """
+    ms_rows = [_kline_row(1733011200000 + i * 3_600_000) for i in range(5)]
+    base_us = 1735689600 * 1_000_000
+    us_rows = [_kline_row_micros(base_us + i * 3_600_000_000) for i in range(5)]
+    dec_zip = _build_fake_archive_zip(ms_rows)
+    jan_zip = _build_fake_archive_zip(us_rows)
+
+    def fake_get(url, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "2024-12" in url:
+            resp.status_code = 200
+            resp.content = dec_zip
+        elif "2025-01" in url:
+            resp.status_code = 200
+            resp.content = jan_zip
+        else:
+            resp.status_code = 404
+        return resp
+
+    with patch("requests.Session") as mock_sess_cls:
+        sess = MagicMock()
+        sess.get.side_effect = fake_get
+        sess.headers = {}
+        mock_sess_cls.return_value = sess
+
+        df = F.fetch_all_archive(
+            symbol="BTCUSDT", interval="1h",
+            start=datetime(2024, 12, 1, tzinfo=timezone.utc),
+            end=datetime(2025, 1, 31, tzinfo=timezone.utc),
+        )
+    assert len(df) == 10
+    assert df.index.is_monotonic_increasing
+    # First (Dec 2024) is from ms, last (Jan 2025) is from us — both
+    # parse into year 2024 / 2025 respectively, NOT year ~57000.
+    assert df.index[0].year == 2024
+    assert df.index[-1].year == 2025
+
+
+def test_fetch_all_archive_drops_unparseable_rows() -> None:
+    """Rows with non-numeric open_ms (e.g., a future "header" row) are
+    dropped via pd.to_numeric(errors='coerce') + dropna."""
+    bad = ["bad_header", "100", "101", "99", "100.5", "1000",
+           "9999", "100000", "5", "500", "50000", "0"]
+    good = _kline_row(1706745600000)
+    rows = [bad, good]
+    zip_bytes = _build_fake_archive_zip(rows)
+
+    with patch("requests.Session") as mock_sess_cls:
+        sess = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.status_code = 200
+        resp.content = zip_bytes
+        sess.get.return_value = resp
+        sess.headers = {}
+        mock_sess_cls.return_value = sess
+
+        df = F.fetch_all_archive(
+            symbol="BTCUSDT", interval="1h",
+            start=datetime(2024, 2, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 2, 28, tzinfo=timezone.utc),
+        )
+    # Only the good row survives.
+    assert len(df) == 1
+
+
 def test_fetch_all_archive_raises_on_no_data() -> None:
     """All months 404 → no frames → RuntimeError."""
     with patch("requests.Session") as mock_sess_cls:
