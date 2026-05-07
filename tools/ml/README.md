@@ -10,7 +10,7 @@ This directory contains the end-to-end pipeline for training the **first** Conv-
 
 | Path | Purpose |
 |---|---|
-| `fetch_ohlcv.py` | Pull BTC/USDT 1h from Binance public klines API → Parquet |
+| `fetch_ohlcv.py` | Pull BTC/USDT 1h from Binance → Parquet. Two sources: `archive` (default — `data.binance.vision` monthly ZIPs, works everywhere including Colab) or `api` (live `api.binance.com` — HTTP 451 from cloud datacenter IPs). |
 | `train.py` | Train the `ConvLSTMPredictor` (defined in `backend/app/ml/model.py`), evaluate on 5 regimes, save `.pt` + `eval.json` |
 | `register.py` | Hash + POST the trained checkpoint to `/api/v1/admin/ml-checkpoints`, optionally activate |
 | `colab/train_conv_lstm.ipynb` | Colab T4 GPU wrapper — does fetch + train + download in one notebook |
