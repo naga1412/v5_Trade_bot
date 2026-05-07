@@ -108,8 +108,12 @@ describe("OpenPositions", () => {
       };
     });
     rerender(<OpenPositions />);
+    // Match the exact formatted price ("108.00") rather than `/108/` —
+    // the latter also matches the "held Xh Ym" duration cell when the
+    // wall-clock makes Xh land in the 108–109 range (real failure observed
+    // 2026-05-07 ~20:44 UTC against opened_at 2026-05-03T08:00:00Z).
     await waitFor(() => {
-      expect(screen.getByText(/108/)).toBeInTheDocument();
+      expect(screen.getByText("108.00")).toBeInTheDocument();
     });
   });
 
