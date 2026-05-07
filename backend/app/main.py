@@ -11,6 +11,7 @@ from app.api.routes import (
     admin_hyperopt,  # SP-7 Phase C4
     admin_ml,
     admin_monitoring,  # SP-7 Phase G3
+    admin_rl,  # SP-4 Phase D — RL brain checkpoint registry
     admin_news,  # SP-9 Phase F5
     admin_patterns,
     admin_system,  # SP-PAUSE master pause/resume
@@ -165,6 +166,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_hyperopt.router)  # SP-7 Phase C4
     app.include_router(admin_ml.router)
     app.include_router(admin_monitoring.router)  # SP-7 Phase G3
+    app.include_router(admin_rl.router)  # SP-4 Phase D
     app.include_router(admin_news.router)  # SP-9 Phase F5
     app.include_router(admin_patterns.router)
     app.include_router(admin_system.router)  # SP-PAUSE

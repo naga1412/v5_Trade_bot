@@ -374,6 +374,43 @@ class MlCheckpointPatchIn(BaseModel):
     notes: str | None = None
 
 
+# --- SP-4 Phase D: RL checkpoint admin schemas (spec §6.4) ------------------
+# Mirror of Ml*; separate types so the FastAPI router validates the right
+# eval_results shape (Sharpe / Sortino / max_dd vs MAE per regime) and so
+# OpenAPI docs distinguish the two registries.
+
+
+class RlCheckpointOut(BaseModel):
+    id: int
+    model_name: str
+    version: str
+    checkpoint_uri: str
+    sha256: str
+    trained_at: datetime
+    train_data_window: str
+    eval_results: dict
+    is_active: bool
+    activated_at: datetime | None = None
+    deactivated_at: datetime | None = None
+    notes: str | None = None
+
+
+class RlCheckpointCreateIn(BaseModel):
+    model_name: str
+    version: str
+    checkpoint_uri: str
+    sha256: str = Field(min_length=64, max_length=64)
+    trained_at: datetime
+    train_data_window: str
+    eval_results: dict
+    notes: str | None = None
+
+
+class RlCheckpointPatchIn(BaseModel):
+    is_active: bool | None = None
+    notes: str | None = None
+
+
 # --- SP-2 Phase E: Pattern admin schemas (spec §3.2/§5) -------------------
 
 
