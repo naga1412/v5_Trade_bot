@@ -371,10 +371,10 @@ async def build_prediction(
     # SP-4 Phase C — brain hook. Returns brain_adjust=1.0 (no-op) when no
     # checkpoint is loaded, so the pre-SP-4 equal-weight behaviour is
     # bit-identical until the first PPO policy is activated.
-    brain_layers = tuple(
-        (layer_results[i].signed_strength if layer_results[i] is not None else 0.0)
-        for i in range(1, 10)
-    )
+    def _layer_signed(i: int) -> float:
+        ls = layer_results[i]
+        return ls.signed_strength if ls is not None else 0.0
+    brain_layers = tuple(_layer_signed(i) for i in range(1, 10))
     brain_market = MarketFeatures(
         atr_pct=context.btc_atr_pct or 0.0,
         funding_rate=context.funding_rate or 0.0,
