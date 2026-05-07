@@ -138,7 +138,7 @@ async def load_active_checkpoint(
         await session.execute(
             sa.text(
                 "SELECT id, model_name, version, checkpoint_uri, sha256 "
-                "FROM rl_checkpoints WHERE model_name = :n AND is_active = 1 "
+                "FROM rl_checkpoints WHERE model_name = :n AND is_active = TRUE "
                 "ORDER BY id DESC LIMIT 1"
             ),
             {"n": model_name},

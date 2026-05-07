@@ -181,16 +181,16 @@ async def patch_checkpoint(
                     ),
                 )
         await session.execute(sa.text(
-            "UPDATE ml_checkpoints SET is_active = 0, deactivated_at = :n "
-            "WHERE model_name = :m AND is_active = 1 AND id != :i"
+            "UPDATE ml_checkpoints SET is_active = FALSE, deactivated_at = :n "
+            "WHERE model_name = :m AND is_active = TRUE AND id != :i"
         ), {"n": now, "m": existing.model_name, "i": checkpoint_id})
         await session.execute(sa.text(
-            "UPDATE ml_checkpoints SET is_active = 1, activated_at = :n, "
+            "UPDATE ml_checkpoints SET is_active = TRUE, activated_at = :n, "
             "deactivated_at = NULL WHERE id = :i"
         ), {"n": now, "i": checkpoint_id})
     elif body.is_active is False:
         await session.execute(sa.text(
-            "UPDATE ml_checkpoints SET is_active = 0, deactivated_at = :n "
+            "UPDATE ml_checkpoints SET is_active = FALSE, deactivated_at = :n "
             "WHERE id = :i"
         ), {"n": now, "i": checkpoint_id})
 
@@ -231,7 +231,7 @@ async def delete_checkpoint(
         raise HTTPException(status_code=404, detail="checkpoint not found")
 
     await session.execute(sa.text(
-        "UPDATE ml_checkpoints SET is_active = 0, deactivated_at = :n "
+        "UPDATE ml_checkpoints SET is_active = FALSE, deactivated_at = :n "
         "WHERE id = :i"
     ), {"n": datetime.now(timezone.utc), "i": checkpoint_id})
     await session.commit()
