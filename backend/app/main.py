@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -44,6 +45,16 @@ from app.ops.monitoring import instrument_app
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
 from app.ws.live_prediction import start_background_worker
+
+# Configure root logger from LOG_LEVEL env var. docker-compose passes
+# LOG_LEVEL=INFO from .env, but Python's default is WARNING for unconfigured
+# loggers, so app.* INFO lines (including "loaded active checkpoint") were
+# silently dropped in production. Uvicorn configures its own loggers
+# separately so this only affects app.* — no conflict.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 log = logging.getLogger(__name__)
 

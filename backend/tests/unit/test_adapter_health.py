@@ -123,6 +123,36 @@ async def test_record_health_inserts_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_health_passes_real_bool_to_sql() -> None:
+    """Regression: prod hit asyncpg DataError because is_healthy was bound
+    as int 1 instead of bool True. SQLite tolerates either, so this test
+    intercepts the bind dict directly and asserts the bool type — independent
+    of DB backend strictness.
+    """
+    captured: dict[str, Any] = {}
+
+    class _Spy:
+        async def execute(self, _stmt: Any, params: dict[str, Any]) -> None:
+            captured.update(params)
+
+    await record_health(
+        _Spy(), exchange="binance",  # type: ignore[arg-type]
+        result=HealthResult(is_healthy=True),
+    )
+    assert "h" in captured
+    assert captured["h"] is True
+    assert type(captured["h"]) is bool
+
+    captured.clear()
+    await record_health(
+        _Spy(), exchange="bybit",  # type: ignore[arg-type]
+        result=HealthResult(is_healthy=False, error_message="down"),
+    )
+    assert captured["h"] is False
+    assert type(captured["h"]) is bool
+
+
+@pytest.mark.asyncio
 async def test_run_health_pinger_loop_one_pass(monkeypatch: Any) -> None:
     """Loop wakes, probes each adapter once, records, then is cancelled."""
     from sqlalchemy.ext.asyncio import async_sessionmaker

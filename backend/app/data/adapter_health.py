@@ -88,7 +88,11 @@ async def record_health(
         {
             "ex": exchange,
             "ts": ts,
-            "h": 1 if result.is_healthy else 0,
+            # Pass bool directly — asyncpg/PostgreSQL rejects int as bool
+            # (PR #45 fixed the same pattern in is_active comparisons; this
+            # site was missed). SQLite tests still work because SQLite
+            # coerces int to bool transparently.
+            "h": result.is_healthy,
             "lat": result.latency_ms,
             "err": result.error_message,
             "q": result.quota_used_pct,
