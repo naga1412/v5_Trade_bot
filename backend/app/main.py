@@ -46,6 +46,10 @@ from app.news.ingest_worker import (
 from app.ops.monitoring import instrument_app
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
+from app.trading.auto_promote import (
+    AutoPromoteConfig,
+    start_auto_promote_task,
+)
 from app.trading.preflight import run_preflight
 from app.ws.live_prediction import start_background_worker
 
@@ -90,6 +94,7 @@ async def lifespan(_app: FastAPI):
     intermarket_cleanup_task = None
     universe_refresh_task = None
     universe_refreshed_event: asyncio.Event | None = None
+    auto_promote_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -171,6 +176,29 @@ async def lifespan(_app: FastAPI):
                 log.error(
                     "autonomous trading pre-flight raised: %s", e,
                 )
+
+            # SP-8 Phase J.2: daily auto-promotion worker. Independent of
+            # pre-flight — auto-promotion only changes mode rows; it does
+            # NOT execute trades on its own. The Telegram-approve / Fully-
+            # auto modes themselves still need the live-trading workers
+            # to actually place orders. Safe to start even when pre-flight
+            # didn't pass: a mode change with no live worker is a no-op.
+            ap_cfg = AutoPromoteConfig(
+                to_telegram_enabled=settings.auto_promote_to_telegram_enabled,
+                to_fullyauto_enabled=settings.auto_promote_to_fullyauto_enabled,
+                consecutive_days=settings.auto_promote_consecutive_days,
+            )
+            if ap_cfg.any_enabled:
+                auto_promote_task = start_auto_promote_task(
+                    get_session_factory(), ap_cfg,
+                )
+                log.warning(
+                    "auto-promote ENABLED: telegram=%s fullyauto=%s "
+                    "consecutive_days=%d. Daily 03:30 UTC tick.",
+                    ap_cfg.to_telegram_enabled,
+                    ap_cfg.to_fullyauto_enabled,
+                    ap_cfg.consecutive_days,
+                )
     try:
         yield
     finally:
@@ -194,6 +222,8 @@ async def lifespan(_app: FastAPI):
             intermarket_snapshot_task.cancel()
         if intermarket_cleanup_task is not None:
             intermarket_cleanup_task.cancel()
+        if auto_promote_task is not None:
+            auto_promote_task.cancel()
         await _aclose_adapters()
 
 

@@ -117,7 +117,38 @@ rolling window.
 
 In short: **the system requires months of paper-trade history before
 any real money flows.** Once gates pass, mode upgrades require hardware-
-confirm (TOTP code).
+confirm (TOTP code) — UNLESS auto-promote is enabled (next section).
+
+### Unattended auto-promotion (optional)
+
+If you can't be available to manually flip modes (Claude subscription
+ended, away from computer for months, etc.), enable the daily 03:30 UTC
+auto-promote worker:
+
+```
+# /opt/trading-radar/.env
+AUTO_PROMOTE_TO_TELEGRAM_ENABLED=true     # Manual → Telegram-approve
+AUTO_PROMOTE_TO_FULLYAUTO_ENABLED=true    # Telegram-approve → Fully-auto
+AUTO_PROMOTE_CONSECUTIVE_DAYS=7           # gates must pass for N days running
+```
+
+Behavior:
+- Worker runs once daily at 03:30 UTC (after the brain-retrain cron)
+- For each user whose mode could be auto-promoted, computes the spec §4
+  gates over the past N days; if **every** day passes, the worker
+  upgrades the mode without hardware-confirm
+- Audit log records `triggered_by='auto-demote'` (closest existing enum)
+  + the gate snapshot that justified the upgrade
+- Hardware-confirm is bypassed; **kill switches still apply**
+  post-promotion (auto-demote on daily loss > 5% etc.)
+
+Disarm at any time:
+- Set the env var to false + `docker compose restart backend`
+- Or send `/freeze` via Telegram (halts all autonomous trading)
+- Or downgrade the mode manually via the UI (downgrades always allowed)
+
+Default is OFF — auto-promotion only fires when the env vars are
+explicitly set.
 
 ### Auto-demotion (spec §4.4)
 
