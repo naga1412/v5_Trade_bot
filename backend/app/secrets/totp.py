@@ -80,8 +80,8 @@ def verify(
     if not code or not code.isdigit() or len(code) != 6:
         return False
     totp = pyotp.TOTP(secret, interval=_TOTP_INTERVAL_SECONDS)
-    target_t = (now or datetime.now(timezone.utc)).timestamp()
-    return totp.verify(code, for_time=target_t, valid_window=_TOTP_GRACE_WINDOW)
+    target = now or datetime.now(timezone.utc)
+    return totp.verify(code, for_time=target, valid_window=_TOTP_GRACE_WINDOW)
 
 
 def verify_backup_code(
