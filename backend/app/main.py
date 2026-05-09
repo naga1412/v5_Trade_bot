@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,9 +47,17 @@ from app.news.ingest_worker import (
 from app.ops.monitoring import instrument_app
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
+from app.exchanges.binance_live import BinanceLiveClient
 from app.trading.auto_promote import (
     AutoPromoteConfig,
     start_auto_promote_task,
+)
+from app.trading.execution.glue import (
+    initialize_vault_cache,
+    vault_keys,
+)
+from app.trading.execution.liquidation_monitor import (
+    start_liquidation_monitor,
 )
 from app.trading.preflight import run_preflight
 from app.ws.live_prediction import start_background_worker
@@ -95,6 +104,7 @@ async def lifespan(_app: FastAPI):
     universe_refresh_task = None
     universe_refreshed_event: asyncio.Event | None = None
     auto_promote_task = None
+    liquidation_monitor_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -154,15 +164,48 @@ async def lifespan(_app: FastAPI):
                     )
                 if pf.all_passed:
                     log.info(
-                        "autonomous trading: pre-flight passed (%s); "
-                        "live workers ready (wiring in next commit)",
+                        "autonomous trading: pre-flight passed (%s)",
                         pf.summary_line(),
                     )
-                    # The actual live execution worker, telegram-approve
-                    # poller extension, and liquidation monitor are wired
-                    # in subsequent Phase J commits — keeping each new
-                    # task in its own commit so a single regression can
-                    # be reverted independently.
+                    # SP-8 Phase J: cache the decrypted Binance keys at
+                    # module level. The live worker calls vault_keys() on
+                    # every tick — a cache miss returns None and the worker
+                    # silently skips dispatch.
+                    secrets_path = Path(
+                        os.environ.get("VAULT_SECRETS_PATH", "/app/secrets.enc"),
+                    )
+                    vault_ok = initialize_vault_cache(
+                        passphrase=settings.master_passphrase,
+                        secrets_path=secrets_path,
+                    )
+                    if vault_ok:
+                        # SP-8 Phase J: liquidation monitor — 30s poll of
+                        # all open live_trades. Auto-closes at <10% buffer
+                        # (more aggressive than spec — operator request to
+                        # avoid Binance forced-liquidation fees).
+                        keys = vault_keys()
+                        assert keys is not None  # vault_ok=True guarantees this
+
+                        def _binance_factory() -> BinanceLiveClient:
+                            return BinanceLiveClient(
+                                api_key=keys.binance_api_key,
+                                api_secret=keys.binance_api_secret,
+                                use_testnet=settings.binance_use_testnet,
+                            )
+
+                        liquidation_monitor_task = start_liquidation_monitor(
+                            session_factory, _binance_factory,
+                        )
+                        log.warning(
+                            "autonomous trading: vault cached + liquidation "
+                            "monitor running (testnet=%s)",
+                            settings.binance_use_testnet,
+                        )
+                    else:
+                        log.error(
+                            "autonomous trading: vault decrypt failed at "
+                            "startup; live workers will skip dispatch",
+                        )
                 else:
                     failures = "; ".join(
                         f"{c.name}={c.detail}" for c in pf.failures()
@@ -224,6 +267,8 @@ async def lifespan(_app: FastAPI):
             intermarket_cleanup_task.cancel()
         if auto_promote_task is not None:
             auto_promote_task.cancel()
+        if liquidation_monitor_task is not None:
+            liquidation_monitor_task.cancel()
         await _aclose_adapters()
 
 
