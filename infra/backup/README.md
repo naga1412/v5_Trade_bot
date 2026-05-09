@@ -1,25 +1,68 @@
-# Backup & Recovery (SP-0)
+# Backup & Recovery
 
-## Schedule
-- Hourly: `tr_pg_dump_hourly.sh` — data-only dump → /var/backups/trading-radar/hourly_*.sql.gz (72h retention)
-- Nightly 02:30 UTC: `tr_pg_basebackup_nightly.sh` — full base + B2 + laptop rsync (7-day retention)
+## Current setup (Hetzner)
 
-## RPO / RTO
-- RPO: 1 hour (worst case = data lost since last hourly dump)
-- RTO: 4 hours (full restore + redeploy stack)
+| What | Where | When |
+|---|---|---|
+| Daily encrypted dump | `/var/backups/trading-radar/backup_YYYY-MM-DD.sql.gz.enc` on Hetzner | 03:15 UTC daily |
+| Optional offsite copy | `b2:${BACKUP_B2_BUCKET}/` via rclone | same run, after local dump |
 
-## Cloud → laptop sync
-Set `LAPTOP_RSYNC_TARGET=user@laptop.lan:/mnt/external_ssd/trading-radar-backups/` in `/home/ubuntu/trading-radar/.env`.
-Laptop must have SSH server running with key-based auth from Oracle.
+**RPO**: 24h (worst case = data lost since last 03:15 UTC dump)
+**RTO**: ~1 hour (decrypt → docker exec psql restore)
 
-## Recovery rehearsal (quarterly)
-Run on laptop:
+## Files
+
+- [`scripts/backup.sh`](../../scripts/backup.sh) — daily cron. `pg_dump` whole DB → gzip → AES-256-CBC encrypt → write to `/var/backups/trading-radar/`. Optional B2 upload. Telegram alerts on success/failure. 14-day local retention.
+- [`scripts/restore_backup.sh`](../../scripts/restore_backup.sh) — restore an encrypted dump into a side-channel DB (defaults to `trading_radar_restore`). Refuses to overwrite the live DB unless `TARGET_IS_LIVE=1` is set.
+- [`scripts/install_backup_cron.sh`](../../scripts/install_backup_cron.sh) — one-time installer: copies the scripts, installs the cron entry, runs one validation backup.
+
+## Setup on a fresh Hetzner host
+
 ```bash
-infra/backup/recovery_rehearsal.sh
+# After git clone /opt/trading-radar and docker compose up
+cd /opt/trading-radar
+sudo ./scripts/install_backup_cron.sh
 ```
-Then manually compare reported row counts to Oracle production using the printed command. Archive the output in `docs/superpowers/log.md`.
+
+## Enabling offsite (Backblaze B2)
+
+The default setup keeps backups on Hetzner only — if the box dies, backups die with it. Add an offsite copy in 5 minutes:
+
+1. Sign up at <https://backblaze.com/b2> (free tier — 10 GB storage, 1 GB/day egress)
+2. Create a bucket (e.g. `trading-radar-backups`); set lifecycle to keep 30 versions
+3. Create an application key with **write** scope to that bucket
+4. On Hetzner: `curl -fsSL https://rclone.org/install.sh | sudo bash`
+5. `rclone config` → choose `n` (new) → name `b2` → choose Backblaze B2 → paste your key/secret
+6. Edit `/opt/trading-radar/.env`:
+   ```
+   BACKUP_B2_BUCKET=trading-radar-backups
+   ```
+7. Re-run `sudo ./scripts/install_backup_cron.sh` to validate the next backup uploads.
+
+## Restore — quarterly rehearsal
+
+On any host with docker compose + the encryption key:
+
+```bash
+# Pull the latest encrypted backup (from Hetzner or B2)
+scp -i ~/.ssh/oracle_key root@95.216.187.204:/var/backups/trading-radar/backup_$(date +%F).sql.gz.enc .
+
+# Restore into a SIDE-CHANNEL DB (safe — won't touch live)
+INSTALL_DIR=/opt/trading-radar BACKUP_ENCRYPTION_KEY=... \
+  ./scripts/restore_backup.sh ./backup_$(date +%F).sql.gz.enc
+
+# Compare row counts vs live (printed by restore_backup.sh)
+# Then drop the restore DB:
+docker compose exec postgres dropdb -U postgres trading_radar_restore
+```
 
 ## Failure-mode plan
-- **Oracle suspended:** restore from latest B2 to laptop dev stack → flip Cloudflare Tunnel target → run from laptop until new Oracle account.
-- **B2 unavailable:** laptop SSD copy is the failover.
-- **Both unavailable + Oracle running:** Oracle host is the source of truth; rebuild backups going forward.
+
+- **Hetzner box dies + offsite enabled** → fresh server, `git clone`, `docker compose up`, `restore_backup.sh` from B2 → flip Cloudflare Tunnel to new box. RTO ~2 hours.
+- **Hetzner dies + offsite disabled** → all data lost since deploy. **Set up B2 if you care.**
+- **B2 unavailable** → local copy on Hetzner is the failover (14-day window).
+- **`.env` lost (encryption key gone)** → backups become unrestorable. Keep `.env` in two places off-server (your laptop + a secure cloud note manager).
+
+## Old (deprecated)
+
+`pg_dump_hourly.sh`, `pg_basebackup_nightly.sh`, `b2_upload.sh`, `recovery_rehearsal.sh` reference `/home/ubuntu/trading-radar` — that path was the spec's target but never matched the actual deployment at `/opt/trading-radar` on Hetzner. They have been removed; the schedule now lives in `scripts/backup.sh`.
