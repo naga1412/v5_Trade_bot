@@ -31,8 +31,20 @@ fi
 
 echo "▶ installing backup scripts to $SCRIPT_DEST/"
 mkdir -p "$SCRIPT_DEST"
-install -m 755 scripts/backup.sh         "$SCRIPT_DEST/backup.sh"
-install -m 755 scripts/restore_backup.sh "$SCRIPT_DEST/restore_backup.sh"
+# When running from inside INSTALL_DIR (the normal Hetzner case), src and
+# dest resolve to the same path — `install` errors with "are the same file".
+# Detect that and just chmod in place; the git-pull already updated the
+# file content.
+copy_or_chmod() {
+    local src="$1" dest="$2"
+    if [ "$(realpath "$src")" = "$(realpath "$dest" 2>/dev/null || echo /nonexistent)" ]; then
+        chmod 755 "$dest"
+    else
+        install -m 755 "$src" "$dest"
+    fi
+}
+copy_or_chmod scripts/backup.sh         "$SCRIPT_DEST/backup.sh"
+copy_or_chmod scripts/restore_backup.sh "$SCRIPT_DEST/restore_backup.sh"
 
 # Ensure log file is writable.
 touch /var/log/trading-radar-backup.log
