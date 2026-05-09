@@ -68,17 +68,16 @@ def test_migration_drops_all_tables_on_downgrade() -> None:
         assert f"DROP TABLE IF EXISTS {table}" in src
 
 
-def test_users_table_extended_with_three_columns() -> None:
-    """Spec §14 — users gets trading_mode + totp_secret_encrypted + telegram_chat_id."""
+def test_users_columns_owned_by_migration_0004_not_re_added() -> None:
+    """Migration 0004 already added trading_mode, totp_secret_encrypted, and
+    telegram_chat_id to users. Spec §14's ALTER TABLE on users is therefore
+    dead text — re-running it errors with DuplicateColumnError. This test
+    asserts the migration does NOT contain ADD COLUMN for any of those.
+    """
     src = _migration_source()
-    for col in ("trading_mode", "totp_secret_encrypted", "telegram_chat_id"):
-        assert f"ADD COLUMN {col}" in src
-
-
-def test_trading_mode_check_enumerates_all_three_modes() -> None:
-    src = _migration_source()
-    for mode in ("manual", "telegram-approve", "fully-auto"):
-        assert f"'{mode}'" in src, f"trading_mode CHECK missing `{mode}`"
+    assert "ADD COLUMN trading_mode" not in src
+    assert "ADD COLUMN totp_secret_encrypted" not in src
+    assert "ADD COLUMN telegram_chat_id" not in src
 
 
 def test_hash_chained_tables_carry_audit_columns() -> None:

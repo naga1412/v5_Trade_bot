@@ -12,10 +12,13 @@ hardware_confirms) get the same prev_hash/row_hash columns as
 predictions/paper_trades/brain_decisions so SP-7's verify_chain
 worker picks them up automatically.
 
-Adds three columns to users:
-  - trading_mode (default 'manual')
-  - totp_secret_encrypted (NULL until user runs setup)
-  - telegram_chat_id (NULL until user runs setup)
+NOTE on users columns: SP-8 spec §14 calls for trading_mode,
+totp_secret_encrypted, and telegram_chat_id on users. Migration 0004
+already added all three (plus several more SP-8-shaped columns:
+position_sizing_mode, fixed_size_min/max_usdt, max_concurrent_positions,
+max_leverage_cap, binance_api_key/secret_encrypted,
+telegram_bot_token_encrypted, totp_backup_codes_encrypted, quiet_hours_*).
+This migration only adds the new TABLES; the users columns belong to 0004.
 
 Cross-cutting compliance: same dialect-aware DDL pattern as 0015.
 SQLite path is intentionally minimal — full schema is Postgres-only;
@@ -38,18 +41,11 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect == "postgresql":
-        # ----- 1. Extend users -----
-        op.execute(
-            """
-            ALTER TABLE users
-                ADD COLUMN trading_mode TEXT NOT NULL DEFAULT 'manual'
-                    CHECK (trading_mode IN ('manual', 'telegram-approve', 'fully-auto')),
-                ADD COLUMN totp_secret_encrypted TEXT,
-                ADD COLUMN telegram_chat_id TEXT;
-            """
-        )
+        # users columns (trading_mode, totp_secret_encrypted, telegram_chat_id)
+        # are owned by migration 0004 — skipping the ALTER TABLE here so
+        # this migration is idempotent against the existing prod schema.
 
-        # ----- 2. mode_change_log (hash-chained audit) -----
+        # ----- mode_change_log (hash-chained audit) -----
         op.execute(
             """
             CREATE TABLE mode_change_log (
@@ -226,17 +222,8 @@ def upgrade() -> None:
     else:
         # SQLite path — minimal schema for tests that exercise these tables.
         # Production never runs on SQLite; tests that need richer constraints
-        # construct their own tables in-place.
-        op.execute(
-            "ALTER TABLE users ADD COLUMN trading_mode TEXT NOT NULL "
-            "DEFAULT 'manual';"
-        )
-        op.execute(
-            "ALTER TABLE users ADD COLUMN totp_secret_encrypted TEXT;"
-        )
-        op.execute(
-            "ALTER TABLE users ADD COLUMN telegram_chat_id TEXT;"
-        )
+        # construct their own tables in-place. The users column ALTERs that
+        # spec §14 calls for are skipped: migration 0004 already added them.
 
         for ddl in (
             (
@@ -328,9 +315,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-
     # Explicit drops (not a loop) so the source-scan test in
     # test_migration_0016_sp8_trading.py can verify each table by name.
     op.execute("DROP TABLE IF EXISTS fx_rates")
@@ -340,12 +324,4 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS telegram_signals")
     op.execute("DROP TABLE IF EXISTS live_trades")
     op.execute("DROP TABLE IF EXISTS mode_change_log")
-
-    if dialect == "postgresql":
-        op.execute(
-            "ALTER TABLE users "
-            "DROP COLUMN IF EXISTS trading_mode, "
-            "DROP COLUMN IF EXISTS totp_secret_encrypted, "
-            "DROP COLUMN IF EXISTS telegram_chat_id;"
-        )
-    # SQLite ALTER TABLE DROP COLUMN is awkward; tests don't downgrade.
+    # No ALTER TABLE on users — those columns are owned by migration 0004.
