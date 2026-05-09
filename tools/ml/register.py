@@ -112,6 +112,86 @@ def activate(
     return resp.json()
 
 
+def _direct_db_register_and_activate(
+    *, payload: dict, eval_doc: dict, activate_flag: bool, force: bool,
+) -> dict:
+    """Write the row directly via SQLAlchemy, bypassing the HTTP API.
+
+    Used when the script runs INSIDE the backend container with
+    ``--direct``. Skips Cloudflare Access auth entirely (the HTTP path
+    requires a valid CF JWT in production, which scripts inside the
+    container can't easily obtain). Mirrors the SQL the admin_ml route
+    would run.
+
+    Returns ``{"id": <new_id>, "version": <ver>, "is_active": <bool>}``
+    so the rest of main() can use the same shape as the HTTP path.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+    from sqlalchemy import text
+
+    # Late import — only needed for direct mode and only resolves when
+    # PYTHONPATH includes /app (i.e. inside the backend container).
+    from app.db.session import get_session_factory  # type: ignore[import-not-found]
+
+    async def _go() -> dict:
+        sf = get_session_factory()
+        async with sf() as s:
+            if activate_flag and force:
+                # Mirror the champion deactivation the HTTP PATCH does
+                # under the hood when activating with force=true.
+                await s.execute(
+                    text(
+                        "UPDATE ml_checkpoints SET is_active=FALSE, "
+                        "deactivated_at=NOW() "
+                        "WHERE model_name=:m AND is_active=TRUE"
+                    ),
+                    {"m": payload["model_name"]},
+                )
+
+            # Parse trained_at ISO into a real datetime — asyncpg/Postgres
+            # rejects ISO strings for TIMESTAMPTZ binds (PR #46 fixed this
+            # for predictions; same constraint here).
+            trained_at_raw = payload.get("trained_at")
+            if isinstance(trained_at_raw, str):
+                trained_at = datetime.fromisoformat(trained_at_raw)
+            else:
+                trained_at = trained_at_raw or datetime.now(timezone.utc)
+
+            r = await s.execute(
+                text(
+                    "INSERT INTO ml_checkpoints "
+                    "(model_name, version, checkpoint_uri, sha256, "
+                    " trained_at, train_data_window, eval_results, "
+                    " is_active, activated_at, notes) "
+                    "VALUES (:m, :v, :u, :h, :t, :w, CAST(:e AS JSONB), "
+                    "        :a, CASE WHEN :a THEN NOW() ELSE NULL END, :n) "
+                    "RETURNING id, is_active"
+                ),
+                {
+                    "m": payload["model_name"],
+                    "v": payload["version"],
+                    "u": payload["checkpoint_uri"],
+                    "h": payload["sha256"],
+                    "t": trained_at,
+                    "w": payload["train_data_window"],
+                    "e": json.dumps(payload.get("eval_results", {})),
+                    "a": activate_flag,
+                    "n": payload.get("notes")
+                    or "registered via tools.ml.register --direct",
+                },
+            )
+            row = r.first()
+            await s.commit()
+            return {
+                "id": row.id,
+                "version": payload["version"],
+                "is_active": row.is_active,
+            }
+
+    return asyncio.run(_go())
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="tools.ml.register")
     p.add_argument(
@@ -138,11 +218,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--bearer", default=None,
-        help="optional admin bearer token (skip if using --internal)",
+        help="optional admin bearer token for the HTTP path",
+    )
+    p.add_argument(
+        "--direct", action="store_true",
+        help=(
+            "bypass HTTP and write directly to ml_checkpoints via "
+            "SQLAlchemy. Run inside the backend container with "
+            "PYTHONPATH=/app so app.db.session imports resolve. "
+            "Avoids the Cloudflare Access JWT requirement that the "
+            "HTTP route enforces in production."
+        ),
     )
     p.add_argument(
         "--activate", action="store_true",
-        help="immediately PATCH is_active=true after register",
+        help="immediately mark is_active=true after register",
     )
     p.add_argument(
         "--force", action="store_true",
@@ -180,6 +270,22 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_path=ckpt_path, eval_doc=eval_doc,
         checkpoint_uri=ckpt_uri, sha256=sha, notes=args.notes,
     )
+
+    if args.direct:
+        result = _direct_db_register_and_activate(
+            payload=payload, eval_doc=eval_doc,
+            activate_flag=args.activate, force=args.force,
+        )
+        log.info(
+            "[direct] registered+activated id=%s version=%s is_active=%s",
+            result["id"], result["version"], result["is_active"],
+        )
+        log.info(
+            "Restart backend container so the new checkpoint loads:\n"
+            "    docker compose -f /opt/trading-radar/docker-compose.yml "
+            "restart backend"
+        )
+        return 0
 
     sess = requests.Session()
     created = register(

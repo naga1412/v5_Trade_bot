@@ -191,3 +191,40 @@ def test_activate_url_targets_rl_endpoint() -> None:
     )
     url, = sess.patch.call_args[0]
     assert url.endswith("/api/v1/admin/rl-checkpoints/7")
+
+
+def test_main_with_direct_skips_http_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--direct must NOT touch requests.Session for the brain registrar."""
+    pt = tmp_path / "fake.pt"
+    pt.write_bytes(b"fake-brain-bytes")
+    eval_path = tmp_path / "eval.json"
+    _write_eval_json(eval_path)
+
+    direct_calls: list[dict] = []
+
+    def fake_direct(*, payload, activate_flag, force):
+        direct_calls.append({
+            "version": payload["version"],
+            "activate_flag": activate_flag,
+            "force": force,
+        })
+        return {"id": 7, "version": payload["version"], "is_active": True}
+
+    monkeypatch.setattr(R, "_direct_db_register_and_activate", fake_direct)
+
+    def boom(*a, **kw):
+        raise AssertionError("HTTP path must not run when --direct is set")
+    monkeypatch.setattr(R.requests, "Session", boom)
+
+    rc = R.main([
+        "--checkpoint", str(pt),
+        "--eval", str(eval_path),
+        "--direct", "--activate", "--force",
+    ])
+    assert rc == 0
+    assert len(direct_calls) == 1
+    assert direct_calls[0]["activate_flag"] is True
+    assert direct_calls[0]["force"] is True
+    assert direct_calls[0]["version"] == "v1-test"

@@ -144,3 +144,47 @@ def test_activate_omits_force_when_false() -> None:
 
     params = sess.patch.call_args[1]["params"]
     assert params == {}
+
+
+def test_main_with_direct_skips_http_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--direct must NOT touch requests.Session — it writes to the DB instead.
+
+    Regression: production registration via HTTP fails with 401 (CF Access).
+    --direct skips the HTTP layer and writes via SQLAlchemy. We mock the DB
+    helper so the test doesn't need a live Postgres.
+    """
+    pt = tmp_path / "fake.pt"
+    pt.write_bytes(b"fake-checkpoint-bytes")
+    eval_path = tmp_path / "eval.json"
+    _write_eval_json(eval_path)
+
+    direct_calls: list[dict] = []
+
+    def fake_direct(*, payload, eval_doc, activate_flag, force):
+        direct_calls.append({
+            "version": payload["version"],
+            "activate_flag": activate_flag,
+            "force": force,
+        })
+        return {"id": 99, "version": payload["version"], "is_active": True}
+
+    monkeypatch.setattr(R, "_direct_db_register_and_activate", fake_direct)
+
+    # Make requests.Session blow up if anyone tries to use the HTTP path —
+    # tightest possible regression test that --direct really skips HTTP.
+    def boom(*a, **kw):
+        raise AssertionError("HTTP path must not run when --direct is set")
+    monkeypatch.setattr(R.requests, "Session", boom)
+
+    rc = R.main([
+        "--checkpoint", str(pt),
+        "--eval", str(eval_path),
+        "--direct", "--activate", "--force",
+    ])
+    assert rc == 0
+    assert len(direct_calls) == 1
+    assert direct_calls[0]["activate_flag"] is True
+    assert direct_calls[0]["force"] is True
+    assert direct_calls[0]["version"] == "v1-test"
