@@ -7,34 +7,35 @@ beforeEach(() => {
 });
 
 describe("TabNav", () => {
-  test("renders 4 tabs by default (admin hidden), Scanner + Settings visible", () => {
+  test("renders 5 tabs by default (admin hidden) — SP-8 added Autonomous", () => {
     const onChange = vi.fn();
     render(<TabNav active="live-prediction" onChange={onChange} />);
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(4);
+    expect(buttons).toHaveLength(5);
     expect(buttons[0]).toHaveTextContent(/live prediction/i);
     expect(buttons[1]).toHaveTextContent(/bot status/i);
     expect(buttons[2]).toHaveTextContent(/scanner/i);
-    expect(buttons[3]).toHaveTextContent(/settings/i);
+    expect(buttons[3]).toHaveTextContent(/autonomous/i);
+    expect(buttons[4]).toHaveTextContent(/settings/i);
     expect(screen.queryByRole("tab", { name: /admin/i })).toBeNull();
   });
 
-  test("renders 5 tabs when adminVisible=true with Admin last", () => {
+  test("renders 6 tabs when adminVisible=true with Admin last", () => {
     const onChange = vi.fn();
     render(
       <TabNav active="live-prediction" onChange={onChange} adminVisible />,
     );
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(5);
-    expect(buttons[4]).toHaveTextContent(/admin/i);
+    expect(buttons).toHaveLength(6);
+    expect(buttons[5]).toHaveTextContent(/admin/i);
   });
 
-  test("renders Scanner tab between Bot Status and Settings", () => {
+  test("renders Autonomous between Scanner and Settings", () => {
     const onChange = vi.fn();
     render(<TabNav active="live-prediction" onChange={onChange} adminVisible={false} />);
     const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
     expect(tabs).toEqual([
-      "Live Prediction", "Bot Status", "Scanner", "Settings",
+      "Live Prediction", "Bot Status", "Scanner", "Autonomous", "Settings",
     ]);
   });
 
