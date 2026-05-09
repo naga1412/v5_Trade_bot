@@ -79,10 +79,29 @@ operation. **Default is testnet.**)
 ```bash
 # Copy secrets.enc into place
 scp secrets.enc root@95.216.187.204:/opt/trading-radar/backend/secrets.enc
-ssh root@95.216.187.204 "cd /opt/trading-radar && docker compose up -d --build backend"
 ```
 
-### 5. Verify pre-flight
+### 5. One-shot bootstrap (preferred path)
+
+After steps 1-4 are done, the entire enable-autonomous-trading sequence
+collapses to one SSH command:
+
+```bash
+ssh root@95.216.187.204 "cd /opt/trading-radar && sudo ./scripts/bootstrap_autonomous.sh"
+```
+
+What it does (idempotent):
+1. Validates `.env` has `MASTER_PASSPHRASE` + `AUTONOMOUS_TRADING_ENABLED=true`
+2. Validates `backend/secrets.enc` is present + non-empty
+3. Installs the daily 03:15 UTC backup cron + 15-min watchdog cron
+4. `docker compose up -d --build backend` (so the new env takes effect)
+5. Waits 30s + greps the backend log for `preflight: 5/5 checks passed`
+
+A failed pre-flight halts the bootstrap with a loud message — the rest
+of the platform (paper trading, ghost candles, dashboard) keeps
+running, but the autonomous workers don't start.
+
+### 6. Manual verify (if you skipped the bootstrap)
 
 ```bash
 ssh root@95.216.187.204 \
