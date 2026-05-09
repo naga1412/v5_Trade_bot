@@ -394,21 +394,30 @@ async def _create_auth_tables(engine: Any) -> None:
         # PATCH /me/trading-mode tests (compute_gates_from_db reads
         # shadow_trades, set_mode appends to mode_change_log via the
         # audit hash chain).
+        # DEFAULT-fill the NOT NULL columns so existing tests that
+        # INSERT with only a subset of columns (test_api_admin_audit_trail
+        # in particular) keep working unchanged.
         await conn.execute(sa.text(
             "CREATE TABLE IF NOT EXISTS shadow_trades ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "user_id INTEGER NOT NULL DEFAULT 1, "
             "symbol TEXT NOT NULL, "
             "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
-            "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
-            "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
-            "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
-            "layer_scores TEXT NOT NULL, entry_atr REAL NOT NULL, "
+            "entry_price REAL NOT NULL DEFAULT 0, "
+            "stop_loss REAL NOT NULL DEFAULT 0, "
+            "take_profit REAL NOT NULL DEFAULT 0, "
+            "position_size_usdt REAL NOT NULL DEFAULT 0, "
+            "entry_score REAL NOT NULL DEFAULT 0, "
+            "entry_confidence REAL NOT NULL DEFAULT 0, "
+            "layer_scores TEXT NOT NULL DEFAULT '{}', "
+            "entry_atr REAL NOT NULL DEFAULT 0, "
             "exit_price REAL, exit_reason TEXT, pnl_pct REAL, pnl_usdt REAL, "
             "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
-            "inputs_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
+            "inputs_hash TEXT NOT NULL DEFAULT '', "
+            "model_version TEXT NOT NULL DEFAULT 'sp-0', "
             "signal_id TEXT NOT NULL UNIQUE, "
-            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+            "prev_hash TEXT NOT NULL DEFAULT '', "
+            "row_hash TEXT NOT NULL UNIQUE)"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE IF NOT EXISTS mode_change_log ("

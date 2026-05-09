@@ -143,7 +143,9 @@ describe("KillSwitches", () => {
   test("Enable on disabled switch PATCHes immediately without TOTP", async () => {
     mockUser({ totp_configured: true });
     const list = defaultSwitchList();
-    list.switches[0]!.enabled = false;
+    const first = list.switches[0];
+    if (!first) throw new Error("seed list missing first switch");
+    first.enabled = false;
     vi.spyOn(apiMod.api, "meKillSwitches").mockResolvedValue(list);
     const patch = vi
       .spyOn(apiMod.api, "meKillSwitchPatch")

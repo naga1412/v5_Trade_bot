@@ -70,8 +70,8 @@ describe("TaxExport", () => {
     const otherOption = Array.from(select.options).find(
       (o) => o.value !== select.value,
     );
-    expect(otherOption).toBeTruthy();
-    fireEvent.change(select, { target: { value: otherOption!.value } });
+    if (!otherOption) throw new Error("expected at least one alt FY option");
+    fireEvent.change(select, { target: { value: otherOption.value } });
     await waitFor(() => {
       expect(spy).toHaveBeenCalledTimes(2);
     });
