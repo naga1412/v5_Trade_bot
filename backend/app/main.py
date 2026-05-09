@@ -45,6 +45,10 @@ from app.news.ingest_worker import (
     start_news_ingest_task,
 )
 from app.ops.monitoring import instrument_app
+from app.ops.telegram_polling import (
+    PollerConfig,
+    start_telegram_poller,
+)
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
 from app.exchanges.binance_live import BinanceLiveClient
@@ -105,6 +109,7 @@ async def lifespan(_app: FastAPI):
     universe_refreshed_event: asyncio.Event | None = None
     auto_promote_task = None
     liquidation_monitor_task = None
+    telegram_poller_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -201,6 +206,40 @@ async def lifespan(_app: FastAPI):
                             "monitor running (testnet=%s)",
                             settings.binance_use_testnet,
                         )
+
+                        # SP-8 Phase J: Telegram polling worker. Routes
+                        # both sig:* (trade approvals) and rl_* (brain
+                        # checkpoint approvals) callbacks. Without bot
+                        # creds set, log + skip — the rest of the
+                        # autonomous-trading subsystem still works in
+                        # fully-auto / manual modes.
+                        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+                        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+                        if bot_token and chat_id:
+                            poller_cfg = PollerConfig(
+                                bot_token=bot_token, chat_id=chat_id,
+                                backend_internal_url=os.environ.get(
+                                    "BACKEND_INTERNAL_URL",
+                                    "http://localhost:8000",
+                                ),
+                            )
+                            telegram_poller_task = start_telegram_poller(
+                                session_factory,
+                                config=poller_cfg,
+                                binance_factory=_binance_factory,
+                                use_testnet=settings.binance_use_testnet,
+                                user_id=1,  # bootstrap admin
+                            )
+                            log.warning(
+                                "telegram poller running (chat_id=%s)",
+                                chat_id,
+                            )
+                        else:
+                            log.info(
+                                "telegram poller skipped: "
+                                "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID "
+                                "not set",
+                            )
                     else:
                         log.error(
                             "autonomous trading: vault decrypt failed at "
@@ -269,6 +308,8 @@ async def lifespan(_app: FastAPI):
             auto_promote_task.cancel()
         if liquidation_monitor_task is not None:
             liquidation_monitor_task.cancel()
+        if telegram_poller_task is not None:
+            telegram_poller_task.cancel()
         await _aclose_adapters()
 
 
