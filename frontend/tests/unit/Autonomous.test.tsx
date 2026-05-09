@@ -1,7 +1,67 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { Autonomous } from "@/tabs/Autonomous";
+import * as currentUserHook from "@/hooks/useCurrentUser";
+import * as apiMod from "@/lib/api";
+
+const baseUser = {
+  id: 1,
+  email: "u@x.com",
+  display_name: "u",
+  is_admin: false,
+  is_impersonating: false,
+  trading_mode: "manual" as const,
+  position_sizing_mode: "fixed" as const,
+  fixed_size_min_usdt: 30,
+  fixed_size_max_usdt: 30,
+  max_concurrent_positions: 5,
+  max_leverage_cap: 10,
+  quiet_hours_enabled: false,
+  quiet_hours_start: null,
+  quiet_hours_end: null,
+  binance_keys_configured: false,
+  telegram_configured: false,
+  totp_configured: false,
+};
+
+beforeEach(() => {
+  // Pin /me so ModeSwitcher renders the active "Manual" button without
+  // hitting the network (no MSW in this suite).
+  vi.spyOn(currentUserHook, "useCurrentUser").mockReturnValue({
+    user: baseUser,
+    isAdmin: false,
+    isImpersonating: false,
+    isLoading: false,
+    error: null,
+    reload: vi.fn().mockResolvedValue(undefined),
+  });
+  // KillSwitches calls /me/kill-switches on mount.
+  vi.spyOn(apiMod.api, "meKillSwitches").mockResolvedValue({
+    switches: (
+      [
+        "daily_loss", "consecutive_losses", "network_outage",
+        "slippage", "liquidation_near", "funding_rate_guard",
+      ] as const
+    ).map((n) => ({
+      name: n, enabled: true, threshold_value: null,
+      is_tripped: false, tripped_at: null, tripped_reason: null,
+      default_threshold: 0.02,
+    })),
+  });
+  // TaxExport calls /me/tax/summary on mount.
+  vi.spyOn(apiMod.api, "meTaxSummary").mockResolvedValue({
+    fy_year: "FY2026-27",
+    total_trades: 0,
+    total_realized_pnl_inr: 0,
+    total_tds_inr: 0,
+    total_fees_inr: 0,
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("Autonomous tab", () => {
   test("renders all 7 panels", () => {
@@ -23,16 +83,22 @@ describe("Autonomous tab", () => {
     }
   });
 
-  test("ModeSwitcher renders three mode buttons with locks on the upgrade modes", () => {
+  test("ModeSwitcher renders three clickable mode buttons", () => {
     render(<Autonomous />);
-    expect(screen.getByText("Manual")).toBeInTheDocument();
-    // Locked modes are prefixed with 🔒
-    expect(screen.getByText(/🔒.*Telegram approve/i)).toBeInTheDocument();
-    expect(screen.getByText(/🔒.*Fully auto/i)).toBeInTheDocument();
+    // Phase J: locks removed; clicking an upgrade button now opens a
+    // TOTP confirm form instead. See ModeSwitcher.test.tsx for the
+    // interactive coverage.
+    for (const label of [/^manual$/i, /telegram approve/i, /fully auto/i]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    expect(
+      screen.getByRole("button", { name: /^manual$/i }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
-  test("KillSwitches lists all 6 switches from spec §11.1", () => {
+  test("KillSwitches lists all 6 switches from spec §11.1", async () => {
     render(<Autonomous />);
+    // KillSwitches loads its rows from the mocked /me/kill-switches.
     for (const switchName of [
       "Daily loss",
       "Consecutive losses",
@@ -41,7 +107,7 @@ describe("Autonomous tab", () => {
       "Liquidation near",
       "Funding rate guard",
     ]) {
-      expect(screen.getByText(switchName)).toBeInTheDocument();
+      expect(await screen.findByText(switchName)).toBeInTheDocument();
     }
   });
 
@@ -64,8 +130,14 @@ describe("Autonomous tab", () => {
     expect(screen.getAllByText("Closed trades")).toHaveLength(2);
   });
 
-  test("TaxExport shows the financial year", () => {
+  test("TaxExport offers an FY selector + a download link", async () => {
     render(<Autonomous />);
-    expect(screen.getByText("FY2026-27")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/^fy$/i),
+    ).toBeInTheDocument();
+    const link = await screen.findByRole("link", {
+      name: /download schedule-vda csv/i,
+    });
+    expect(link).toBeInTheDocument();
   });
 });

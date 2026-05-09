@@ -259,6 +259,68 @@ export interface TotpVerifyOut {
   ok: boolean;
 }
 
+// --- SP-8 Phase J: tax export ---
+
+export interface TaxSummary {
+  fy_year: string;
+  total_trades: number;
+  total_realized_pnl_inr: number;
+  total_tds_inr: number;
+  total_fees_inr: number;
+}
+
+// --- SP-8 Phase J: kill switches ---
+
+export type KillSwitchName =
+  | "daily_loss"
+  | "consecutive_losses"
+  | "network_outage"
+  | "slippage"
+  | "liquidation_near"
+  | "funding_rate_guard";
+
+export interface KillSwitch {
+  name: KillSwitchName;
+  enabled: boolean;
+  threshold_value: number | null;
+  is_tripped: boolean;
+  tripped_at: string | null;
+  tripped_reason: string | null;
+  default_threshold: number;
+}
+
+export interface KillSwitchListOut {
+  switches: KillSwitch[];
+}
+
+export interface KillSwitchPatchIn {
+  enabled?: boolean;
+  threshold_value?: number | null;
+  totp_code?: string;
+}
+
+// --- SP-8 Phase J: trading-mode change ---
+
+export interface TradingModeChangeIn {
+  new_mode: TradingMode;
+  totp_code?: string;
+  reason?: string;
+}
+
+export interface TradingModeChangeOut {
+  new_mode: TradingMode;
+  old_mode: TradingMode;
+  audit_row_hash: string;
+  is_upgrade: boolean;
+}
+
+export interface TradingModeChangeError {
+  error: "gate_failed";
+  current_mode: TradingMode;
+  requested_mode: TradingMode;
+  failures: string[];
+}
+
 // --- SP-0.7 Phase G: Admin types (mirrors backend Pydantic schemas) ---
 
 export interface AdminUser {
@@ -480,6 +542,24 @@ export const api = {
       method: "POST",
       body: { code },
     }),
+  meChangeTradingMode: (body: TradingModeChangeIn) =>
+    fetchJson<TradingModeChangeOut>("/me/trading-mode", {
+      method: "PATCH",
+      body,
+    }),
+  meKillSwitches: () =>
+    fetchJson<KillSwitchListOut>("/me/kill-switches"),
+  meKillSwitchPatch: (name: KillSwitchName, body: KillSwitchPatchIn) =>
+    fetchJson<KillSwitch>(`/me/kill-switches/${name}`, {
+      method: "PATCH",
+      body,
+    }),
+  meTaxSummary: (fy_year: string) =>
+    fetchJson<TaxSummary>(
+      `/me/tax/summary?fy_year=${encodeURIComponent(fy_year)}`,
+    ),
+  meTaxExportUrl: (fy_year: string) =>
+    `/api/v1/me/tax/export?fy_year=${encodeURIComponent(fy_year)}`,
 
   // --- SP-0.7 Phase G: admin endpoints ---
   adminListUsers: () => fetchJson<AdminUser[]>("/admin/users"),

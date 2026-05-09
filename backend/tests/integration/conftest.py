@@ -390,6 +390,73 @@ async def _create_auth_tables(engine: Any) -> None:
             "latency_ms INTEGER, error_message TEXT, "
             "quota_used_pct REAL)"
         ))
+        # SP-8 Phase J: shadow_trades + mode_change_log. Needed by the
+        # PATCH /me/trading-mode tests (compute_gates_from_db reads
+        # shadow_trades, set_mode appends to mode_change_log via the
+        # audit hash chain).
+        # DEFAULT-fill the NOT NULL columns so existing tests that
+        # INSERT with only a subset of columns (test_api_admin_audit_trail
+        # in particular) keep working unchanged.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS shadow_trades ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
+            "entry_price REAL NOT NULL DEFAULT 0, "
+            "stop_loss REAL NOT NULL DEFAULT 0, "
+            "take_profit REAL NOT NULL DEFAULT 0, "
+            "position_size_usdt REAL NOT NULL DEFAULT 0, "
+            "entry_score REAL NOT NULL DEFAULT 0, "
+            "entry_confidence REAL NOT NULL DEFAULT 0, "
+            "layer_scores TEXT NOT NULL DEFAULT '{}', "
+            "entry_atr REAL NOT NULL DEFAULT 0, "
+            "exit_price REAL, exit_reason TEXT, pnl_pct REAL, pnl_usdt REAL, "
+            "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
+            "inputs_hash TEXT NOT NULL DEFAULT '', "
+            "model_version TEXT NOT NULL DEFAULT 'sp-0', "
+            "signal_id TEXT NOT NULL UNIQUE, "
+            "prev_hash TEXT NOT NULL DEFAULT '', "
+            "row_hash TEXT NOT NULL UNIQUE)"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS mode_change_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "old_mode TEXT NOT NULL, new_mode TEXT NOT NULL, "
+            "triggered_by TEXT NOT NULL, reason TEXT, "
+            "gate_snapshot TEXT, changed_at TEXT NOT NULL, "
+            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS kill_switch_state ("
+            "user_id INTEGER NOT NULL, switch_name TEXT NOT NULL, "
+            "enabled INTEGER NOT NULL DEFAULT 1, "
+            "threshold_value REAL, "
+            "is_tripped INTEGER NOT NULL DEFAULT 0, "
+            "tripped_at TEXT, tripped_reason TEXT, "
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "PRIMARY KEY (user_id, switch_name))"
+        ))
+        # SP-8 §8: tax_events. SQLite-friendly mirror of migration 0016
+        # (BIGSERIAL → INTEGER AUTOINCREMENT, BIGINT → INTEGER,
+        # TIMESTAMPTZ → TEXT, no FK enforcement).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS tax_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "trade_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+            "symbol TEXT NOT NULL, direction TEXT NOT NULL, "
+            "quantity REAL NOT NULL, "
+            "entry_price REAL NOT NULL, exit_price REAL NOT NULL, "
+            "entry_value_inr REAL NOT NULL, exit_value_inr REAL NOT NULL, "
+            "realized_pnl_inr REAL NOT NULL, tds_owed_inr REAL NOT NULL, "
+            "fee_paid_inr REAL NOT NULL DEFAULT 0, "
+            "leverage INTEGER NOT NULL, "
+            "exchange TEXT NOT NULL DEFAULT 'binance', "
+            "fy_year TEXT NOT NULL, "
+            "closed_at TEXT NOT NULL, fifo_match_id INTEGER, "
+            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+        ))
         # SP-7 Phase B4/B5: backtests table. SQLite-friendly mirror of
         # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT,
         # JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the admin REST

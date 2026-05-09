@@ -340,6 +340,68 @@ class TotpVerifyOut(BaseModel):
     ok: bool
 
 
+class TradingModeChangeIn(BaseModel):
+    """SP-8 Phase J — body for PATCH /me/trading-mode.
+
+    `totp_code` is required when the change is an upgrade. Downgrades are
+    always allowed without TOTP. The endpoint computes the gate snapshot
+    server-side from shadow_trades + live_trades to avoid trusting a
+    client-supplied snapshot.
+    """
+
+    new_mode: Literal["manual", "telegram-approve", "fully-auto"]
+    totp_code: str | None = None
+    reason: str | None = None
+
+
+class TradingModeChangeOut(BaseModel):
+    new_mode: Literal["manual", "telegram-approve", "fully-auto"]
+    old_mode: Literal["manual", "telegram-approve", "fully-auto"]
+    audit_row_hash: str
+    is_upgrade: bool
+
+
+# --- SP-8 Phase J: kill switch state -------------------------------------
+
+KillSwitchName = Literal[
+    "daily_loss",
+    "consecutive_losses",
+    "network_outage",
+    "slippage",
+    "liquidation_near",
+    "funding_rate_guard",
+]
+
+
+class KillSwitchOut(BaseModel):
+    name: KillSwitchName
+    enabled: bool
+    threshold_value: float | None
+    is_tripped: bool
+    tripped_at: datetime | None
+    tripped_reason: str | None
+    default_threshold: float
+
+
+class KillSwitchListOut(BaseModel):
+    switches: list[KillSwitchOut]
+
+
+class KillSwitchPatchIn(BaseModel):
+    """Patch one kill switch. Disabling requires totp_code."""
+    enabled: bool | None = None
+    threshold_value: float | None = None
+    totp_code: str | None = None
+
+
+class TaxSummaryOut(BaseModel):
+    fy_year: str
+    total_trades: int
+    total_realized_pnl_inr: float
+    total_tds_inr: float
+    total_fees_inr: float
+
+
 # --- SP-1 Phase F: ML checkpoint admin schemas (spec §6.4) ----------------
 
 
