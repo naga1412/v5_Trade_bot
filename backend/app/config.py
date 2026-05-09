@@ -40,6 +40,19 @@ class Settings(BaseSettings):
     # failed check refuses to start them.
     autonomous_trading_enabled: bool = False
 
+    # SP-8 Phase J.2: unattended mode auto-promotion. When the relevant
+    # flag is true AND the spec sec 4 gates pass for N consecutive days,
+    # the daily 03:30 UTC worker upgrades the user's mode without
+    # hardware-confirm. Designed for the case where the operator can't
+    # be available to manually flip modes (e.g. Claude subscription ended).
+    # Default OFF — opt in per direction:
+    auto_promote_to_telegram_enabled: bool = False
+    auto_promote_to_fullyauto_enabled: bool = False
+    # Number of consecutive days the gates must hold before auto-promote
+    # fires. Default 7 — overrides the spec's "any one snapshot" trigger
+    # to absorb single-day variance.
+    auto_promote_consecutive_days: int = 7
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -79,10 +79,29 @@ operation. **Default is testnet.**)
 ```bash
 # Copy secrets.enc into place
 scp secrets.enc root@95.216.187.204:/opt/trading-radar/backend/secrets.enc
-ssh root@95.216.187.204 "cd /opt/trading-radar && docker compose up -d --build backend"
 ```
 
-### 5. Verify pre-flight
+### 5. One-shot bootstrap (preferred path)
+
+After steps 1-4 are done, the entire enable-autonomous-trading sequence
+collapses to one SSH command:
+
+```bash
+ssh root@95.216.187.204 "cd /opt/trading-radar && sudo ./scripts/bootstrap_autonomous.sh"
+```
+
+What it does (idempotent):
+1. Validates `.env` has `MASTER_PASSPHRASE` + `AUTONOMOUS_TRADING_ENABLED=true`
+2. Validates `backend/secrets.enc` is present + non-empty
+3. Installs the daily 03:15 UTC backup cron + 15-min watchdog cron
+4. `docker compose up -d --build backend` (so the new env takes effect)
+5. Waits 30s + greps the backend log for `preflight: 5/5 checks passed`
+
+A failed pre-flight halts the bootstrap with a loud message — the rest
+of the platform (paper trading, ghost candles, dashboard) keeps
+running, but the autonomous workers don't start.
+
+### 6. Manual verify (if you skipped the bootstrap)
 
 ```bash
 ssh root@95.216.187.204 \
@@ -117,7 +136,104 @@ rolling window.
 
 In short: **the system requires months of paper-trade history before
 any real money flows.** Once gates pass, mode upgrades require hardware-
-confirm (TOTP code).
+confirm (TOTP code) — UNLESS auto-promote is enabled (next section).
+
+### Unattended auto-promotion (optional)
+
+If you can't be available to manually flip modes (Claude subscription
+ended, away from computer for months, etc.), enable the daily 03:30 UTC
+auto-promote worker:
+
+```
+# /opt/trading-radar/.env
+AUTO_PROMOTE_TO_TELEGRAM_ENABLED=true     # Manual → Telegram-approve
+AUTO_PROMOTE_TO_FULLYAUTO_ENABLED=true    # Telegram-approve → Fully-auto
+AUTO_PROMOTE_CONSECUTIVE_DAYS=7           # gates must pass for N days running
+```
+
+Behavior:
+- Worker runs once daily at 03:30 UTC (after the brain-retrain cron)
+- For each user whose mode could be auto-promoted, computes the spec §4
+  gates over the past N days; if **every** day passes, the worker
+  upgrades the mode without hardware-confirm
+- Audit log records `triggered_by='auto-demote'` (closest existing enum)
+  + the gate snapshot that justified the upgrade
+- Hardware-confirm is bypassed; **kill switches still apply**
+  post-promotion (auto-demote on daily loss > 5% etc.)
+
+Disarm at any time:
+- Set the env var to false + `docker compose restart backend`
+- Or send `/freeze` via Telegram (halts all autonomous trading)
+- Or downgrade the mode manually via the UI (downgrades always allowed)
+
+Default is OFF — auto-promotion only fires when the env vars are
+explicitly set.
+
+---
+
+## Self-healing watchdog
+
+Spec: [SP-9 plan](superpowers/plans/2026-05-09-SP-9-self-healing-plan.md).
+
+A cron-driven watchdog (`/opt/trading-radar/scripts/watchdog.sh`) runs
+every 15 minutes and auto-recovers from common failure modes:
+
+| Failure | Auto-action |
+|---|---|
+| Backend container missing | `docker compose up -d backend` |
+| Backend in restart loop | Telegram alert (operator must investigate) |
+| Memory > 90% | Restart backend (resets memory leaks) |
+| Docker disk > 80% | `docker system prune -f`; reduce backup retention to 14 days |
+| Docker disk > 95% | Aggressive prune; reduce retention to 7 days; emergency alert |
+| Postgres not ready | Restart postgres |
+| No predictions in 2h | Restart backend (live worker stuck) |
+| Backup not run in 25h | Run `backup.sh` manually |
+| Binance Futures unreachable | Telegram alert (kill switches in backend handle the freeze) |
+
+Install once:
+
+```bash
+ssh root@95.216.187.204
+cd /opt/trading-radar
+sudo ./scripts/install_watchdog_cron.sh
+```
+
+Verify:
+
+```bash
+crontab -l | grep watchdog
+# */15 * * * * /opt/trading-radar/scripts/watchdog.sh >> /var/log/trading-radar-watchdog.log 2>&1
+```
+
+The watchdog sends a Telegram message ONLY when it detects a problem
+(or takes auto-action). Quiet runs are silent — `tail -f
+/var/log/trading-radar-watchdog.log` shows the heartbeat.
+
+### What the watchdog can NOT fix
+
+New code bugs, strategy underperformance, Binance API schema changes.
+For those: loud Telegram alert (so you know to investigate) but no
+auto-fix. Roll back the bad commit + redeploy:
+
+```bash
+ssh root@95.216.187.204
+cd /opt/trading-radar
+git log --oneline -5         # find the last good commit
+git reset --hard <good-sha>
+docker compose up -d --build backend
+```
+
+### Optional: LLM-assisted log diagnosis
+
+For an opt-in daily AI-generated incident summary, set:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_DIAGNOSIS_ENABLED=true
+```
+
+Cost: ~\$0.01–\$0.05/day depending on log volume. Off by default —
+needs your own Anthropic API key + token spend.
 
 ### Auto-demotion (spec §4.4)
 

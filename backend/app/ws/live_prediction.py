@@ -7,11 +7,13 @@ import httpx
 import pandas as pd
 
 from app.api.routes.ws import manager
+from app.config import get_settings
 from app.core.execution.persistence import persist_prediction
 from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.session import get_session_factory
+from app.trading.execution.glue import dispatch_if_eligible, vault_keys
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +165,62 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
             key={"symbol": symbol_pair, "timeframe": timeframe},
             payload=payload,
         )
+
+        # SP-8 Phase J: dispatch the signal (Telegram message or live
+        # order) when autonomous trading is enabled. _maybe_dispatch
+        # gates on vault_keys() + valid trade_setup; everything else
+        # logs and swallows so a dispatch hiccup never breaks the
+        # candle loop.
+        await _maybe_dispatch(
+            session_factory, pred=pred, layer_payload=_layer_payload,
+        )
+
+
+async def _maybe_dispatch(
+    session_factory: Any, *, pred: Any, layer_payload: dict[str, Any],
+) -> None:
+    """Bridge between the live-prediction loop and the execution glue.
+
+    Skips silently when the vault isn't loaded (autonomous trading off)
+    or the prediction has no usable trade setup (NEUTRAL signal). Any
+    dispatch error is logged + swallowed — the candle loop must keep
+    ticking even when Binance / Telegram are sad.
+
+    Extracted from the worker body so unit tests can drive it directly
+    instead of standing up a full WS stream.
+    """
+    if vault_keys() is None:
+        return
+    ts = pred.trade_setup
+    if ts is None or ts.entry is None or ts.stop_loss is None or ts.take_profit is None:
+        return
+    try:
+        async with session_factory() as dispatch_session:
+            result = await dispatch_if_eligible(
+                dispatch_session,
+                user_id=BOOTSTRAP_ADMIN_USER_ID,
+                use_testnet=get_settings().binance_use_testnet,
+                proposal_kwargs={
+                    "symbol": pred.symbol,
+                    "timeframe": pred.timeframe,
+                    "pred_direction": pred.final.direction,
+                    "pred_confidence": pred.final.confidence,
+                    "layer_summary": layer_payload,
+                    "inputs_hash": pred.inputs_hash,
+                    "entry_price": ts.entry,
+                    "stop_loss_price": ts.stop_loss,
+                    "take_profit_price": ts.take_profit,
+                },
+            )
+            await dispatch_session.commit()
+        if result is not None:
+            log.info(
+                "dispatch %s/%s -> %s: %s",
+                pred.symbol, pred.timeframe,
+                result.outcome, result.detail,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.error("dispatch_if_eligible failed: %s", e)
 
 
 def start_background_worker() -> asyncio.Task:
