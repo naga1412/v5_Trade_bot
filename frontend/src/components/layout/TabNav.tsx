@@ -22,6 +22,7 @@ const ALL_TABS: readonly TabDef[] = [
   { id: "live-prediction", label: "Live Prediction" },
   { id: "bot-status", label: "Bot Status" },
   { id: "scanner", label: "Scanner" },
+  { id: "autonomous", label: "Autonomous" },
   { id: "settings", label: "Settings" },
   { id: "admin", label: "Admin" },
 ];
