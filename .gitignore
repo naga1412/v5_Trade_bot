@@ -176,3 +176,9 @@ tools/oci/poll_ampere.*.log
 # Local training runs / parquet downloads. Checkpoints are uploaded to
 # the production server filesystem, not git.
 data/ml/
+
+# --- One-off ops scripts ---
+# Throwaway helpers written at repo root for diagnosing or patching
+# production. Reference instance-specific data; don't commit.
+/activate_*.py
+/probe_*.py
