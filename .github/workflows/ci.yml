@@ -77,3 +77,78 @@ jobs:
           npm run lint
           npm test
           npm run build
+
+  # docker-compose smoke test — boots the entire stack with the real
+  # docker-compose.yml and verifies the backend reaches a healthy state
+  # without crash-restarting. Catches the class of bugs unit tests miss:
+  #
+  # - Bind mount paths that shadow image-built packages
+  #   (PR #47: ./tools:/app/tools shadowed /app/tools/backtest, kept the
+  #    backend in a ModuleNotFoundError crash-restart loop in production)
+  # - Module imports that break only when actually loaded by uvicorn
+  # - Postgres-strict SQL errors that pass against SQLite (PR #45 bool=int,
+  #   PR #46 datetime-as-string, PR #49 adapter_health bool — all shipped
+  #   broken because the unit tests use SQLite)
+  #
+  # Adds ~3-5 min to CI per push but is worth it given the cost of a prod
+  # crash-loop incident (last one took half a day to chase down).
+  docker-compose-smoke:
+    runs-on: ubuntu-latest
+    needs: [backend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write smoke .env
+        run: |
+          cat > .env <<'EOF'
+          POSTGRES_USER=postgres
+          POSTGRES_PASSWORD=smokepw
+          POSTGRES_DB=trading_radar
+          DATABASE_URL=postgresql+asyncpg://postgres:smokepw@postgres:5432/trading_radar
+          REDIS_URL=redis://redis:6379/0
+          ENV=ci
+          LOG_LEVEL=INFO
+          CF_ACCESS_TEAM_DOMAIN=
+          CF_ACCESS_AUD=
+          BINANCE_USE_TESTNET=true
+          MASTER_PASSPHRASE=smoketest-master-passphrase-do-not-use-in-prod
+          BACKUP_ENCRYPTION_KEY=smoketest-backup-key
+          GRAFANA_ADMIN_PASSWORD=smokeonly
+          EOF
+      - name: Build + start backend, postgres, redis
+        run: |
+          docker compose up -d --build postgres redis backend
+      - name: Wait for backend healthy (max 90s)
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect tr-backend --format '{{.State.Health.Status}}' 2>/dev/null || echo "missing")
+            RESTARTS=$(docker inspect tr-backend --format '{{.RestartCount}}' 2>/dev/null || echo "?")
+            echo "[t+${i}x3s] health=$STATUS restarts=$RESTARTS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "✓ backend healthy after ${i}x3s"
+              exit 0
+            fi
+            if [ "$RESTARTS" -gt 0 ] 2>/dev/null; then
+              echo "✗ backend restarted (RestartCount=$RESTARTS) — likely an import or startup error"
+              docker compose logs --tail=50 backend
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "✗ backend did not reach healthy in 90s"
+          docker compose logs --tail=80 backend
+          exit 1
+      - name: Verify imports the previous regression hit
+        run: |
+          # PR #47 regression guard: /app/tools/backtest.py must import.
+          docker exec tr-backend python -c "import tools.backtest; print('tools.backtest:', tools.backtest.__file__)"
+          # The bind-mounted host-tools must also be visible (not shadowed).
+          docker exec tr-backend test -d /app/host-tools/ml
+      - name: Verify /api/v1/health returns 200
+        run: |
+          docker exec tr-backend curl -fsS http://localhost:8000/api/v1/health
+      - name: Tail logs for any startup warnings
+        if: always()
+        run: docker compose logs --tail=80 backend
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
