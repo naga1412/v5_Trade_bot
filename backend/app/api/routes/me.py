@@ -23,6 +23,7 @@ from app.api.schemas import (
     KillSwitchPatchIn,
     MeOut,
     MePatchIn,
+    TaxSummaryOut,
     TelegramIn,
     TotpSetupOut,
     TotpVerifyIn,
@@ -50,6 +51,7 @@ from app.trading.modes import (
     set_mode,
 )
 from app.trading.promotion import compute_gates_from_db
+from app.trading.tax.itr_export import export_fy
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
 
@@ -348,6 +350,54 @@ async def change_trading_mode(
     return TradingModeChangeOut(
         new_mode=body.new_mode, old_mode=old,
         audit_row_hash=row_hash, is_upgrade=upgrade,
+    )
+
+
+@router.get("/tax/summary", response_model=TaxSummaryOut)
+async def get_me_tax_summary(
+    fy_year: str,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> TaxSummaryOut:
+    """SP-8 Phase J — totals for a financial year (e.g. fy_year=FY2026-27).
+
+    Backed by export_fy which fetches every tax_events row for the
+    user/FY pair. Empty result is a valid response (zeros across the
+    board); no 404 — the operator may legitimately have no closed
+    trades yet in the requested FY.
+    """
+    summary, _ = await export_fy(session, user_id=actual_user.id, fy_year=fy_year)
+    return TaxSummaryOut(
+        fy_year=summary.fy_year,
+        total_trades=summary.total_trades,
+        total_realized_pnl_inr=summary.total_realized_pnl_inr,
+        total_tds_inr=summary.total_tds_inr,
+        total_fees_inr=summary.total_fees_inr,
+    )
+
+
+@router.get("/tax/export")
+async def get_me_tax_export(
+    fy_year: str,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    """SP-8 Phase J — Schedule VDA CSV download for ITR-3 filing.
+
+    Returns a text/csv attachment compatible with ClearTax. Contains
+    one row per closed tax_events row for the user/FY pair.
+    """
+    _summary, csv_text = await export_fy(
+        session, user_id=actual_user.id, fy_year=fy_year,
+    )
+    safe_fy = fy_year.replace("/", "-")
+    filename = f"schedule-vda-{safe_fy}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
     )
 
 

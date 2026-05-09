@@ -49,6 +49,14 @@ beforeEach(() => {
       default_threshold: 0.02,
     })),
   });
+  // TaxExport calls /me/tax/summary on mount.
+  vi.spyOn(apiMod.api, "meTaxSummary").mockResolvedValue({
+    fy_year: "FY2026-27",
+    total_trades: 0,
+    total_realized_pnl_inr: 0,
+    total_tds_inr: 0,
+    total_fees_inr: 0,
+  });
 });
 
 afterEach(() => {
@@ -122,8 +130,14 @@ describe("Autonomous tab", () => {
     expect(screen.getAllByText("Closed trades")).toHaveLength(2);
   });
 
-  test("TaxExport shows the financial year", () => {
+  test("TaxExport offers an FY selector + a download link", async () => {
     render(<Autonomous />);
-    expect(screen.getByText("FY2026-27")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/^fy$/i),
+    ).toBeInTheDocument();
+    const link = await screen.findByRole("link", {
+      name: /download schedule-vda csv/i,
+    });
+    expect(link).toBeInTheDocument();
   });
 });

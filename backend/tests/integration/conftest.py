@@ -429,6 +429,25 @@ async def _create_auth_tables(engine: Any) -> None:
             "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
             "PRIMARY KEY (user_id, switch_name))"
         ))
+        # SP-8 §8: tax_events. SQLite-friendly mirror of migration 0016
+        # (BIGSERIAL → INTEGER AUTOINCREMENT, BIGINT → INTEGER,
+        # TIMESTAMPTZ → TEXT, no FK enforcement).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS tax_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "trade_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+            "symbol TEXT NOT NULL, direction TEXT NOT NULL, "
+            "quantity REAL NOT NULL, "
+            "entry_price REAL NOT NULL, exit_price REAL NOT NULL, "
+            "entry_value_inr REAL NOT NULL, exit_value_inr REAL NOT NULL, "
+            "realized_pnl_inr REAL NOT NULL, tds_owed_inr REAL NOT NULL, "
+            "fee_paid_inr REAL NOT NULL DEFAULT 0, "
+            "leverage INTEGER NOT NULL, "
+            "exchange TEXT NOT NULL DEFAULT 'binance', "
+            "fy_year TEXT NOT NULL, "
+            "closed_at TEXT NOT NULL, fifo_match_id INTEGER, "
+            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+        ))
         # SP-7 Phase B4/B5: backtests table. SQLite-friendly mirror of
         # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT,
         # JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the admin REST

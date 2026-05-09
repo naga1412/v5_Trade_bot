@@ -394,6 +394,14 @@ class KillSwitchPatchIn(BaseModel):
     totp_code: str | None = None
 
 
+class TaxSummaryOut(BaseModel):
+    fy_year: str
+    total_trades: int
+    total_realized_pnl_inr: float
+    total_tds_inr: float
+    total_fees_inr: float
+
+
 # --- SP-1 Phase F: ML checkpoint admin schemas (spec §6.4) ----------------
 
 

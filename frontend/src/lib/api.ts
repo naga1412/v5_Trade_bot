@@ -259,6 +259,16 @@ export interface TotpVerifyOut {
   ok: boolean;
 }
 
+// --- SP-8 Phase J: tax export ---
+
+export interface TaxSummary {
+  fy_year: string;
+  total_trades: number;
+  total_realized_pnl_inr: number;
+  total_tds_inr: number;
+  total_fees_inr: number;
+}
+
 // --- SP-8 Phase J: kill switches ---
 
 export type KillSwitchName =
@@ -544,6 +554,12 @@ export const api = {
       method: "PATCH",
       body,
     }),
+  meTaxSummary: (fy_year: string) =>
+    fetchJson<TaxSummary>(
+      `/me/tax/summary?fy_year=${encodeURIComponent(fy_year)}`,
+    ),
+  meTaxExportUrl: (fy_year: string) =>
+    `/api/v1/me/tax/export?fy_year=${encodeURIComponent(fy_year)}`,
 
   // --- SP-0.7 Phase G: admin endpoints ---
   adminListUsers: () => fetchJson<AdminUser[]>("/admin/users"),
