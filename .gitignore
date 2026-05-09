@@ -10,6 +10,8 @@
 *.key
 *.crt
 secrets/
+!backend/app/secrets/
+!tools/secrets/
 credentials/
 
 # --- Python ---
