@@ -26,6 +26,17 @@ def _config() -> PollerConfig:
     return PollerConfig(bot_token="bot-token", chat_id="123456")
 
 
+def _cb(data: str, *, cb_id: str = "1", chat_id: str = "123456",
+        from_id: str | None = None, message_id: int = 1) -> dict[str, Any]:
+    """Build a callback_query payload that passes the chat-auth gate."""
+    sender = from_id if from_id is not None else chat_id
+    return {
+        "id": cb_id, "data": data,
+        "message": {"message_id": message_id, "chat": {"id": chat_id}},
+        "from": {"id": sender},
+    }
+
+
 # ---- Stub Binance client ------------------------------------------------
 
 
@@ -158,7 +169,7 @@ async def test_route_sig_skip_marks_response(monkeypatch) -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(_http_handler)) as http:
         await _route_callback(
             _factory,  # type: ignore[arg-type]
-            callback_query={"id": "1", "data": "sig:abc123:skip"},
+            callback_query=_cb("sig:abc123:skip"),
             config=_config(), binance_factory=None,
             use_testnet=True, user_id=1, http=http,
         )
@@ -184,7 +195,7 @@ async def test_route_sig_approve_places_order_when_factory_present() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(_http_handler)) as http:
         await _route_callback(
             _factory,  # type: ignore[arg-type]
-            callback_query={"id": "2", "data": "sig:abc123:approve:7"},
+            callback_query=_cb("sig:abc123:approve:7", cb_id="2"),
             config=_config(), binance_factory=lambda: stub,
             use_testnet=True, user_id=1, http=http,
         )
@@ -218,7 +229,7 @@ async def test_route_sig_approve_skips_order_without_factory() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(_http_handler)) as http:
         await _route_callback(
             _factory,  # type: ignore[arg-type]
-            callback_query={"id": "3", "data": "sig:abc123:approve:5"},
+            callback_query=_cb("sig:abc123:approve:5", cb_id="3"),
             config=_config(), binance_factory=None,
             use_testnet=True, user_id=1, http=http,
         )
@@ -254,11 +265,70 @@ async def test_route_rl_callback_forwards_to_brain_handler(monkeypatch) -> None:
     )) as http:
         await _route_callback(
             _factory,  # type: ignore[arg-type]
-            callback_query={"id": "4", "data": "rl_approve:42"},
+            callback_query=_cb("rl_approve:42", cb_id="4"),
             config=_config(), binance_factory=None,
             use_testnet=True, user_id=1, http=http,
         )
     assert seen == [{"data": "rl_approve:42", "client": True}]
+
+
+@pytest.mark.asyncio
+async def test_route_rejects_callback_from_wrong_chat_id(caplog) -> None:
+    """Anyone DMing the bot must NOT be able to fire approvals."""
+    engine = await _mk_engine()
+    await _seed(engine)
+    stub = _StubBinance(order_id="should-not-fire")
+
+    def _factory():
+        return AsyncSession(engine)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"ok": True}),
+    )) as http:
+        await _route_callback(
+            _factory,  # type: ignore[arg-type]
+            callback_query=_cb(
+                "sig:abc123:approve:5", cb_id="x",
+                chat_id="999999",  # not the configured chat
+            ),
+            config=_config(), binance_factory=lambda: stub,
+            use_testnet=True, user_id=1, http=http,
+        )
+    # Order NOT placed; row NOT updated.
+    assert stub.placed == []
+    async with AsyncSession(engine) as s:
+        sig = (await s.execute(sa.text(
+            "SELECT response FROM telegram_signals WHERE id='abc123'"
+        ))).first()
+    assert sig.response is None
+    assert any("REJECT unauthorised callback" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_route_rejects_when_sender_id_mismatches_chat_id() -> None:
+    """Even when chat is right, sender must be the operator (defends
+    against group chats where another member would otherwise be allowed)."""
+    engine = await _mk_engine()
+    await _seed(engine)
+    stub = _StubBinance(order_id="should-not-fire")
+
+    def _factory():
+        return AsyncSession(engine)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"ok": True}),
+    )) as http:
+        await _route_callback(
+            _factory,  # type: ignore[arg-type]
+            callback_query=_cb(
+                "sig:abc123:approve:5", cb_id="y",
+                chat_id="123456",
+                from_id="99999",  # right chat, wrong sender
+            ),
+            config=_config(), binance_factory=lambda: stub,
+            use_testnet=True, user_id=1, http=http,
+        )
+    assert stub.placed == []
 
 
 @pytest.mark.asyncio
@@ -273,7 +343,7 @@ async def test_route_unknown_callback_logged_and_dropped(caplog) -> None:
     )) as http:
         await _route_callback(
             _factory,  # type: ignore[arg-type]
-            callback_query={"id": "5", "data": "garbage"},
+            callback_query=_cb("garbage", cb_id="5"),
             config=_config(), binance_factory=None,
             use_testnet=True, user_id=1, http=http,
         )
@@ -290,10 +360,7 @@ async def test_poll_once_advances_offset_and_dispatches() -> None:
 
     update = {
         "update_id": 42,
-        "callback_query": {
-            "id": "cb-1", "data": "sig:abc123:skip",
-            "message": {"message_id": 1},
-        },
+        "callback_query": _cb("sig:abc123:skip", cb_id="cb-1"),
     }
     sent: list[dict[str, Any]] = []
 

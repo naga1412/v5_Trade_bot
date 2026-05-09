@@ -184,6 +184,28 @@ async def _place_approved_order(
 # ---- Update routing ------------------------------------------------------
 
 
+def _is_authorised_callback(
+    callback_query: dict[str, Any], *, allowed_chat_id: str,
+) -> bool:
+    """Reject callbacks not from the configured chat / sender.
+
+    Telegram bot tokens occasionally leak (in logs, in screenshots, in
+    abandoned repos). Without this check, anyone who DMs the bot can
+    fire ``sig:<id>:approve`` and the polling worker would happily
+    place a real Binance order. We refuse any callback whose
+    ``message.chat.id`` OR ``from.id`` doesn't match the operator's
+    chat_id (which is also their personal user_id since they DM the
+    bot directly).
+    """
+    chat = (callback_query.get("message") or {}).get("chat") or {}
+    sender = callback_query.get("from") or {}
+    chat_id = str(chat.get("id", ""))
+    sender_id = str(sender.get("id", ""))
+    return (
+        chat_id == allowed_chat_id and sender_id == allowed_chat_id
+    )
+
+
 async def _route_callback(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -194,7 +216,24 @@ async def _route_callback(
     user_id: int,
     http: httpx.AsyncClient,
 ) -> None:
-    """Route one callback_query to the right handler by data prefix."""
+    """Route one callback_query to the right handler by data prefix.
+
+    Refuses any callback not from ``config.chat_id`` (both the message
+    chat AND the sender). Logs the rejection at WARNING with the
+    callback_query.id so an operator can spot abuse attempts in the
+    backend log.
+    """
+    if not _is_authorised_callback(
+        callback_query, allowed_chat_id=config.chat_id,
+    ):
+        log.warning(
+            "telegram-poll: REJECT unauthorised callback id=%s chat=%s from=%s",
+            callback_query.get("id"),
+            (callback_query.get("message") or {}).get("chat", {}).get("id"),
+            (callback_query.get("from") or {}).get("id"),
+        )
+        return
+
     data = (callback_query.get("data") or "").strip()
     if not data:
         return

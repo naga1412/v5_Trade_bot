@@ -34,6 +34,7 @@ from app.api.schemas import (
 from app.auth.deps import current_user_or_impersonated, require_user
 from app.auth.impersonation import get_active_target
 from app.auth.models import User
+from app.auth.rate_limit import RateLimitExceeded, check_and_record
 from app.auth.secrets import (
     decrypt_for_user,
     encrypt_for_user,
@@ -534,9 +535,25 @@ async def verify_me_totp(
     actual_user: User = Depends(require_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> TotpVerifyOut:
-    """Verify a TOTP `code` against the user's stored secret."""
+    """Verify a TOTP `code` against the user's stored secret.
+
+    Per-user rate limit: 5 attempts per rolling 60s window. Beyond
+    that we return 429 with a Retry-After header so a brute-force
+    over a compromised CF Access JWT can't outpace TOTP rotation.
+    """
     is_imp = await _is_currently_impersonating(request, actual_user, session)
     _reject_during_impersonation(is_imp)
+
+    try:
+        check_and_record(
+            bucket_key="totp_verify", user_id=actual_user.id,
+        )
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail="too many TOTP attempts; slow down",
+            headers={"Retry-After": str(int(e.retry_after_seconds) + 1)},
+        ) from e
 
     user = (
         await session.execute(
