@@ -1,13 +1,17 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from app.config import get_settings
+from app.deps import CFAccessConfig, CFAccessError, verify_cf_access_jwt
 from app.ws.manager import ConnectionManager, Subscription
 
 router = APIRouter(prefix="/ws/v1", tags=["ws"])
 
+log = logging.getLogger(__name__)
 manager = ConnectionManager()
 HEARTBEAT_SECONDS = 15.0
 
@@ -22,9 +26,48 @@ async def _heartbeat_loop(ws: WebSocket) -> None:
             return
 
 
+async def _authenticate_ws(ws: WebSocket) -> str | None:
+    """Verify the CF Access JWT on the WS upgrade. Returns the user
+    email on success, or None after closing the socket on failure.
+
+    Dev mode (settings.env=='development') skips the check and returns
+    'dev@local' so the LAN dashboard keeps working without CF locally.
+    """
+    settings = get_settings()
+    if settings.env == "development":
+        return "dev@local"
+    # CF Access forwards the JWT in the Cf-Access-Jwt-Assertion header
+    # on the upgrade request — same as REST.
+    jwt = ws.headers.get("cf-access-jwt-assertion", "").strip()
+    if not jwt:
+        log.warning("ws: refusing connection — no CF Access JWT")
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return None
+    if not settings.cf_access_team_domain or not settings.cf_access_aud:
+        log.error("ws: CF Access env vars not configured; refusing")
+        await ws.close(code=status.WS_1011_INTERNAL_ERROR)
+        return None
+    try:
+        user = await verify_cf_access_jwt(
+            jwt,
+            cfg=CFAccessConfig(
+                team_domain=settings.cf_access_team_domain,
+                aud=settings.cf_access_aud,
+            ),
+        )
+    except CFAccessError as e:
+        log.warning("ws: CF Access JWT rejected: %s", e)
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return None
+    return user.email or user.sub or "unknown"
+
+
 @router.websocket("/{client_id}")
 async def ws_endpoint(ws: WebSocket, client_id: str) -> None:
     await ws.accept()
+    user = await _authenticate_ws(ws)
+    if user is None:
+        return  # _authenticate_ws already closed the socket
     hb_task = asyncio.create_task(_heartbeat_loop(ws))
     try:
         while True:
