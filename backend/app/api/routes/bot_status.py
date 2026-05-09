@@ -10,6 +10,7 @@ that complete data isolation; D8 wires the dep only).
 from __future__ import annotations
 
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -29,6 +30,8 @@ from app.api.schemas import (
     PerAssetStatOut,
     PromotionGateOut,
     RecentTradeOut,
+    SymbolSearchHit,
+    SymbolSearchOut,
     WindowStatsOut,
 )
 from app.auth.deps import current_user_or_impersonated
@@ -553,6 +556,103 @@ async def asset_universe(
         for r in rows
     ]
     return AssetUniverseOut(snapshot_at=snapshot_at, entries=entries)
+
+
+# Symbol limit per query: keeps the response cheap to render in the
+# typeahead dropdown + caps any potential SQL-load amplification.
+_SEARCH_HARD_LIMIT = 25
+# Whitelisted character set for the search query. Symbol names are
+# uppercase letters + digits + slash + dash + colon (for some
+# exchanges' suffixes). Anything else is filtered out so the LIKE
+# can't be tricked into pathological patterns.
+_SAFE_QUERY_RE = re.compile(r"[A-Z0-9/_:\-]+")
+
+
+@router.get("/symbol-search", response_model=SymbolSearchOut)
+async def symbol_search(
+    q: str = Query(min_length=1, max_length=32),
+    limit: int = Query(default=10, ge=1, le=_SEARCH_HARD_LIMIT),
+    exchange: str | None = Query(default=None, max_length=32),
+    _user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> SymbolSearchOut:
+    """Typeahead suggestions for the symbol input.
+
+    Matches case-insensitively against ``universe_history.symbol``
+    using a prefix-then-substring ranking — exact prefix matches sort
+    before substring matches so "SHIB" hits SHIB/USDT before
+    SUSHI-perp/USDT. Joined to the latest ``asset_universe`` snapshot
+    so liquid pairs surface 24h volume in the suggestion row.
+
+    Active rows only (``delisted_at IS NULL``). Optional ``exchange``
+    filter restricts to one venue (default: all).
+
+    Caller is any authenticated user — no admin gate. Defended against
+    LIKE-pattern abuse by sanitising the query string to
+    [A-Z0-9/_:-] before binding.
+    """
+    # Sanitise: uppercase + drop anything outside the safe set. This is
+    # belt-and-braces — the LIKE binding already escapes wildcards.
+    cleaned_parts = _SAFE_QUERY_RE.findall(q.upper())
+    cleaned = "".join(cleaned_parts)
+    if not cleaned:
+        return SymbolSearchOut(query=q, hits=[])
+
+    where: list[str] = ["uh.delisted_at IS NULL"]
+    params: dict[str, Any] = {
+        "lim": limit,
+        "prefix": cleaned + "%",
+        "anywhere": "%" + cleaned + "%",
+    }
+    if exchange is not None:
+        where.append("uh.exchange = :ex")
+        params["ex"] = exchange[:32]
+
+    # Two passes via UNION ALL — prefix matches first, then substring
+    # matches that aren't already prefix matches. SQLite + Postgres
+    # both support this; the inner LIMIT prevents runaway scans on
+    # universe_history when q is very short.
+    sql = (
+        "SELECT symbol, exchange, asset_class, "
+        "       (SELECT au.quote_volume_usd_24h FROM asset_universe au "
+        "         WHERE au.symbol = uh.symbol "
+        "         ORDER BY au.snapshot_at DESC LIMIT 1) AS qv "
+        "FROM universe_history uh "
+        "WHERE " + " AND ".join(where) + " "
+        "  AND UPPER(uh.symbol) LIKE :prefix "
+        "ORDER BY uh.symbol ASC LIMIT :lim"
+    )
+    rows = (await session.execute(sa.text(sql), params)).all()
+
+    if len(rows) < limit:
+        # Fill remaining slots with substring matches that aren't
+        # prefix matches (de-duped by symbol).
+        seen = {r.symbol for r in rows}
+        sub_params = dict(params)
+        sub_params["lim"] = limit - len(rows)
+        sub_sql = (
+            "SELECT symbol, exchange, asset_class, "
+            "       (SELECT au.quote_volume_usd_24h FROM asset_universe au "
+            "         WHERE au.symbol = uh.symbol "
+            "         ORDER BY au.snapshot_at DESC LIMIT 1) AS qv "
+            "FROM universe_history uh "
+            "WHERE " + " AND ".join(where) + " "
+            "  AND UPPER(uh.symbol) LIKE :anywhere "
+            "  AND UPPER(uh.symbol) NOT LIKE :prefix "
+            "ORDER BY uh.symbol ASC LIMIT :lim"
+        )
+        extra = (await session.execute(sa.text(sub_sql), sub_params)).all()
+        rows = list(rows) + [r for r in extra if r.symbol not in seen]
+
+    hits = [
+        SymbolSearchHit(
+            symbol=r.symbol, exchange=r.exchange,
+            asset_class=r.asset_class,
+            quote_volume_24h_usdt=float(r.qv) if r.qv is not None else None,
+        )
+        for r in rows[:limit]
+    ]
+    return SymbolSearchOut(query=q, hits=hits)
 
 
 def _build_distance_summary(
