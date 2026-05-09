@@ -171,3 +171,56 @@ async def test_predict_without_signal_omits_markers(
     r = await bot_status_client.get("/api/v1/predict/BTC-USDT/1h")
     assert r.status_code == 200
     assert r.json()["signal_markers"] is None
+
+
+@pytest.mark.asyncio
+async def test_predict_attaches_ghost_when_active_checkpoint_loaded(
+    monkeypatch, bot_status_client,
+) -> None:
+    """SP-1: when an ML checkpoint is loaded, REST initial-fetch must
+    return ghost data (previously only the WS push path included it,
+    leaving the dashboard stuck on "no model" until the next candle close).
+    """
+    from app.ml.inference import GhostCandle
+
+    async def fake_fetch(symbol: str, timeframe: str, *, limit: int = 500):
+        return _fake_candles(min(limit, 260))
+
+    monkeypatch.setattr(tab1, "_fetch_recent_candles", fake_fetch)
+
+    fake_ghost = GhostCandle(
+        open=150.0, high=152.0, low=148.0, close=151.0,
+        p5_low=147.0, p95_high=153.0, uncertainty=1.5,
+    )
+    monkeypatch.setattr(
+        tab1, "get_active_model_and_checkpoint",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        tab1, "predict_ghost_candle",
+        lambda **kwargs: fake_ghost,
+    )
+
+    r = await bot_status_client.get("/api/v1/predict/BTC-USDT/1h")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ghost"] is not None
+    assert body["ghost"]["close"] == 151.0
+    assert body["ghost"]["p5_low"] == 147.0
+    assert body["ghost"]["p95_high"] == 153.0
+
+
+@pytest.mark.asyncio
+async def test_predict_omits_ghost_when_no_active_checkpoint(
+    monkeypatch, bot_status_client,
+) -> None:
+    """When no checkpoint is loaded, ghost stays None (frontend renders "no model")."""
+    async def fake_fetch(symbol: str, timeframe: str, *, limit: int = 500):
+        return _fake_candles(min(limit, 260))
+
+    monkeypatch.setattr(tab1, "_fetch_recent_candles", fake_fetch)
+    monkeypatch.setattr(tab1, "get_active_model_and_checkpoint", lambda: None)
+
+    r = await bot_status_client.get("/api/v1/predict/BTC-USDT/1h")
+    assert r.status_code == 200
+    assert r.json()["ghost"] is None

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 import httpx
@@ -7,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import LivePredictionOut, SignalMarkersOut
+from app.api.schemas import GhostOut, LivePredictionOut, SignalMarkersOut
 from app.auth.deps import current_user_or_impersonated
 from app.auth.models import User
 from app.core.dataquality.validator import Candle
@@ -15,6 +16,10 @@ from app.core.predictor import build_prediction
 from app.data.adapters.binance import BinanceClient
 from app.data.universe import is_tradable
 from app.db.session import get_session
+from app.ml.checkpoints import get_active_model_and_checkpoint
+from app.ml.inference import predict_ghost_candle
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["tab1"])
 
@@ -154,6 +159,29 @@ async def predict(
     pred = await build_prediction(
         symbol=pair, timeframe=timeframe, bars=bars, session=session,
     )
+
+    # SP-1: ghost candle for the REST initial-load case. The WS worker
+    # attaches this on every closed-candle push; the REST endpoint did
+    # not, which left the dashboard stuck on "no model" until the next
+    # WS push arrived (potentially up to one timeframe interval after
+    # page load). Mirror the WS worker's logic so initial paint is correct.
+    active = get_active_model_and_checkpoint()
+    if active is not None and len(bars) >= 256:
+        model, _ck = active
+        try:
+            ghost = predict_ghost_candle(
+                model=model,
+                bars=bars,
+                last_close=float(bars["close"].iloc[-1]),
+            )
+            pred = pred.model_copy(update={"ghost": GhostOut(
+                open=ghost.open, high=ghost.high, low=ghost.low,
+                close=ghost.close, p5_low=ghost.p5_low,
+                p95_high=ghost.p95_high, uncertainty=ghost.uncertainty,
+            )})
+        except Exception as e:  # noqa: BLE001
+            _log.warning("predict_ghost_candle failed in REST predict: %s", e)
+
     if markers is not None:
         pred = pred.model_copy(update={"signal_markers": markers})
     return pred
