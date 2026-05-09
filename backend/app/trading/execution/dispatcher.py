@@ -215,7 +215,7 @@ async def _send_telegram_signal(
         sa.text(
             "INSERT INTO telegram_signals "
             "(id, user_id, symbol, direction, sent_at, payload) "
-            "VALUES (:id, :u, :s, :d, :ts, CAST(:p AS JSONB))"
+            "VALUES (:id, :u, :s, :d, :ts, :p)"
         ),
         {
             "id": sig_id, "u": user.user_id, "s": proposal.symbol,
