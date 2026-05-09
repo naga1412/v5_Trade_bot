@@ -34,9 +34,8 @@ const UNITS: Record<KillSwitchName, string> = {
   funding_rate_guard: "%/day",
 };
 
-function formatThreshold(s: KillSwitch): string {
-  const v = s.threshold_value ?? s.default_threshold;
-  return `${v} ${UNITS[s.name]}`;
+function currentThreshold(s: KillSwitch): number {
+  return s.threshold_value ?? s.default_threshold;
 }
 
 export function KillSwitches() {
@@ -49,6 +48,37 @@ export function KillSwitches() {
   const [pending, setPending] = useState<KillSwitchName | null>(null);
   const [totpInput, setTotpInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Local edit buffer for the threshold inputs. Keyed by switch name.
+  // Empty string means "showing the persisted value"; any other string
+  // is the user's typed-but-not-yet-saved override.
+  const [thresholdEdit, setThresholdEdit] = useState<
+    Record<KillSwitchName, string>
+  >({} as Record<KillSwitchName, string>);
+
+  async function saveThreshold(s: KillSwitch, raw: string) {
+    const next = Number(raw);
+    if (raw === "" || Number.isNaN(next) || next === currentThreshold(s)) {
+      // Reset edit buffer (user blurred without changing).
+      setThresholdEdit((m) => ({ ...m, [s.name]: "" }));
+      return;
+    }
+    if (next <= 0) {
+      setError("threshold must be positive");
+      setThresholdEdit((m) => ({ ...m, [s.name]: "" }));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.meKillSwitchPatch(s.name, { threshold_value: next });
+      await reload();
+      setThresholdEdit((m) => ({ ...m, [s.name]: "" }));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "threshold save failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function reload() {
     setLoading(true);
@@ -121,11 +151,47 @@ export function KillSwitches() {
             </tr>
           </thead>
           <tbody>
-            {switches.map((s) => (
+            {switches.map((s) => {
+              const editValue =
+                thresholdEdit[s.name] ?? "";
+              const displayValue =
+                editValue !== ""
+                  ? editValue
+                  : String(currentThreshold(s));
+              return (
               <tr key={s.name}>
                 <td className="text-text-secondary">{LABELS[s.name]}</td>
-                <td className="text-right text-text-secondary">
-                  {formatThreshold(s)}
+                <td className="text-right">
+                  <span className="inline-flex items-center gap-1 justify-end">
+                    <input
+                      type="number"
+                      min={0}
+                      step={s.name === "consecutive_losses" ? 1 : "any"}
+                      value={displayValue}
+                      onChange={(e) =>
+                        setThresholdEdit((m) => ({
+                          ...m,
+                          [s.name]: e.target.value,
+                        }))
+                      }
+                      onBlur={(e) => {
+                        if (editValue !== "") {
+                          void saveThreshold(s, e.target.value);
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          (e.currentTarget as HTMLInputElement).blur();
+                        }
+                      }}
+                      disabled={busy}
+                      aria-label={`threshold for ${LABELS[s.name]}`}
+                      className="w-12 text-right text-[8.5px] bg-bg-base border border-border rounded px-1"
+                    />
+                    <span className="text-text-tertiary">
+                      {UNITS[s.name]}
+                    </span>
+                  </span>
                 </td>
                 <td className="text-right">
                   {s.is_tripped ? (
@@ -158,7 +224,8 @@ export function KillSwitches() {
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

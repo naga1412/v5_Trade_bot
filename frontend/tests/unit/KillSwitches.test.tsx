@@ -140,6 +140,51 @@ describe("KillSwitches", () => {
     });
   });
 
+  test("editing threshold + blur PATCHes with threshold_value, no TOTP", async () => {
+    mockUser({ totp_configured: true });
+    vi.spyOn(apiMod.api, "meKillSwitches").mockResolvedValue(
+      defaultSwitchList(),
+    );
+    const patch = vi
+      .spyOn(apiMod.api, "meKillSwitchPatch")
+      .mockResolvedValue({
+        name: "slippage", enabled: true, threshold_value: 0.01,
+        is_tripped: false, tripped_at: null, tripped_reason: null,
+        default_threshold: 0.005,
+      });
+
+    render(<KillSwitches />);
+    await screen.findByText("Slippage");
+    const input = screen.getByLabelText(
+      /threshold for slippage/i,
+    ) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "0.01" } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(patch).toHaveBeenCalledWith("slippage", {
+        threshold_value: 0.01,
+      });
+    });
+  });
+
+  test("blur on unchanged threshold does NOT PATCH", async () => {
+    mockUser({ totp_configured: true });
+    vi.spyOn(apiMod.api, "meKillSwitches").mockResolvedValue(
+      defaultSwitchList(),
+    );
+    const patch = vi.spyOn(apiMod.api, "meKillSwitchPatch");
+
+    render(<KillSwitches />);
+    await screen.findByText("Slippage");
+    const input = screen.getByLabelText(
+      /threshold for slippage/i,
+    ) as HTMLInputElement;
+    fireEvent.blur(input);
+
+    expect(patch).not.toHaveBeenCalled();
+  });
+
   test("Enable on disabled switch PATCHes immediately without TOTP", async () => {
     mockUser({ totp_configured: true });
     const list = defaultSwitchList();
