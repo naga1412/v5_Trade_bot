@@ -71,10 +71,11 @@ export function KillSwitches() {
     setBusy(true);
     setError(null);
     try {
-      await api.meKillSwitchPatch(name, {
+      const body: { enabled: boolean; totp_code?: string } = {
         enabled: !currentlyEnabled,
-        totp_code: totp,
-      });
+      };
+      if (totp !== undefined) body.totp_code = totp;
+      await api.meKillSwitchPatch(name, body);
       await reload();
       setPending(null);
       setTotpInput("");

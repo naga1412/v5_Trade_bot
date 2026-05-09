@@ -42,10 +42,11 @@ export function ModeSwitcher() {
     setBusy(true);
     setError(null);
     try {
-      await api.meChangeTradingMode({
+      const body: { new_mode: TradingMode; totp_code?: string } = {
         new_mode: target,
-        totp_code: totpCode,
-      });
+      };
+      if (totpCode !== undefined) body.totp_code = totpCode;
+      await api.meChangeTradingMode(body);
       await reload();
       setPending(null);
       setTotpInput("");

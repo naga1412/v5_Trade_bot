@@ -140,7 +140,7 @@ describe("KillSwitches", () => {
     });
   });
 
-  test("Enable on disabled switch PATCHes immediately, no TOTP", async () => {
+  test("Enable on disabled switch PATCHes immediately without TOTP", async () => {
     mockUser({ totp_configured: true });
     const list = defaultSwitchList();
     list.switches[0]!.enabled = false;
@@ -160,7 +160,7 @@ describe("KillSwitches", () => {
     );
     await waitFor(() => {
       expect(patch).toHaveBeenCalledWith("daily_loss", {
-        enabled: true, totp_code: undefined,
+        enabled: true,
       });
     });
   });

@@ -21,7 +21,7 @@ const baseUser = {
   display_name: "u",
   is_admin: false,
   is_impersonating: false,
-  trading_mode: "manual" as const,
+  trading_mode: "manual" as "manual" | "telegram-approve" | "fully-auto",
   position_sizing_mode: "fixed" as const,
   fixed_size_min_usdt: 30,
   fixed_size_max_usdt: 30,
@@ -70,10 +70,7 @@ describe("ModeSwitcher", () => {
     fireEvent.click(screen.getByRole("button", { name: /^manual$/i }));
 
     await waitFor(() => {
-      expect(spy).toHaveBeenCalledWith({
-        new_mode: "manual",
-        totp_code: undefined,
-      });
+      expect(spy).toHaveBeenCalledWith({ new_mode: "manual" });
     });
     // No TOTP form should appear.
     expect(
