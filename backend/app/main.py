@@ -46,6 +46,7 @@ from app.news.ingest_worker import (
 from app.ops.monitoring import instrument_app
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.shadow.worker import start_shadow_worker
+from app.trading.preflight import run_preflight
 from app.ws.live_prediction import start_background_worker
 
 # Configure root logger from LOG_LEVEL env var. docker-compose passes
@@ -133,6 +134,43 @@ async def lifespan(_app: FastAPI):
         # Skipped in test/ci (no FAPI calls, no DB churn during pytest).
         intermarket_snapshot_task = start_intermarket_snapshot_task(get_session_factory())
         intermarket_cleanup_task = start_intermarket_cleanup_task(get_session_factory())
+
+        # SP-8 Phase J: gate the autonomous-trading subsystem on
+        # AUTONOMOUS_TRADING_ENABLED + a passing pre-flight. Pre-flight
+        # validates passphrase, vault decrypt, Binance permissions
+        # (sec 9.3), migration applied, and audit chain intact. Any
+        # failure means the live workers do NOT start; paper trading
+        # + ghost candles + dashboard keep running normally.
+        if settings.autonomous_trading_enabled:
+            try:
+                async with session_factory() as preflight_session:
+                    pf = await run_preflight(
+                        preflight_session, use_testnet=settings.binance_use_testnet,
+                    )
+                if pf.all_passed:
+                    log.info(
+                        "autonomous trading: pre-flight passed (%s); "
+                        "live workers ready (wiring in next commit)",
+                        pf.summary_line(),
+                    )
+                    # The actual live execution worker, telegram-approve
+                    # poller extension, and liquidation monitor are wired
+                    # in subsequent Phase J commits — keeping each new
+                    # task in its own commit so a single regression can
+                    # be reverted independently.
+                else:
+                    failures = "; ".join(
+                        f"{c.name}={c.detail}" for c in pf.failures()
+                    )
+                    log.error(
+                        "autonomous trading DISABLED: pre-flight failed "
+                        "(%d/%d) — %s",
+                        len(pf.failures()), len(pf.checks), failures,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    "autonomous trading pre-flight raised: %s", e,
+                )
     try:
         yield
     finally:
