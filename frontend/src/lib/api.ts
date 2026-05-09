@@ -259,6 +259,28 @@ export interface TotpVerifyOut {
   ok: boolean;
 }
 
+// --- SP-8 Phase J: trading-mode change ---
+
+export interface TradingModeChangeIn {
+  new_mode: TradingMode;
+  totp_code?: string;
+  reason?: string;
+}
+
+export interface TradingModeChangeOut {
+  new_mode: TradingMode;
+  old_mode: TradingMode;
+  audit_row_hash: string;
+  is_upgrade: boolean;
+}
+
+export interface TradingModeChangeError {
+  error: "gate_failed";
+  current_mode: TradingMode;
+  requested_mode: TradingMode;
+  failures: string[];
+}
+
 // --- SP-0.7 Phase G: Admin types (mirrors backend Pydantic schemas) ---
 
 export interface AdminUser {
@@ -479,6 +501,11 @@ export const api = {
     fetchJson<TotpVerifyOut>("/me/totp/verify", {
       method: "POST",
       body: { code },
+    }),
+  meChangeTradingMode: (body: TradingModeChangeIn) =>
+    fetchJson<TradingModeChangeOut>("/me/trading-mode", {
+      method: "PATCH",
+      body,
     }),
 
   // --- SP-0.7 Phase G: admin endpoints ---

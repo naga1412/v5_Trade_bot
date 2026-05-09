@@ -24,6 +24,8 @@ from app.api.schemas import (
     TotpSetupOut,
     TotpVerifyIn,
     TotpVerifyOut,
+    TradingModeChangeIn,
+    TradingModeChangeOut,
 )
 from app.auth.deps import current_user_or_impersonated, require_user
 from app.auth.impersonation import get_active_target
@@ -37,6 +39,13 @@ from app.auth.secrets import (
 from app.auth.totp import generate_backup_codes, generate_totp_setup, verify_totp
 from app.config import get_settings
 from app.db.session import get_session
+from app.trading.modes import (
+    ModeChangeError,
+    get_mode,
+    is_upgrade,
+    set_mode,
+)
+from app.trading.promotion import compute_gates_from_db
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
 
@@ -255,6 +264,86 @@ async def setup_me_totp(
         provisioning_uri=setup.provisioning_uri,
         secret_for_display=setup.secret,
         backup_codes=backup_codes,
+    )
+
+
+@router.patch("/trading-mode", response_model=TradingModeChangeOut)
+async def change_trading_mode(
+    body: TradingModeChangeIn,
+    request: Request,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> TradingModeChangeOut:
+    """SP-8 Phase J — switch the user's trading_mode.
+
+    Downgrades require nothing. Upgrades require:
+      1. Spec §4 gates pass for the target mode (computed server-side
+         from shadow_trades over the rolling 30-day window).
+      2. A valid TOTP code (so the upgrade ties to physical possession
+         of the operator's authenticator).
+
+    Audit row is hash-chained into mode_change_log; row_hash is
+    returned so the UI can link it.
+    """
+    is_imp = await _is_currently_impersonating(request, actual_user, session)
+    _reject_during_impersonation(is_imp)
+
+    user = (
+        await session.execute(
+            sa.select(User).where(User.id == actual_user.id)
+        )
+    ).scalar_one()
+
+    old = await get_mode(session, user.id)
+    upgrade = is_upgrade(old, body.new_mode)
+
+    snapshot = None
+    if upgrade:
+        # Hardware-confirm: TOTP required for any promotion.
+        if not body.totp_code or not user.totp_secret_encrypted:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "TOTP code required for upgrades. Configure TOTP at "
+                    "/me/totp/setup and submit the current 6-digit code."
+                ),
+            )
+        secret = decrypt_for_user(
+            user.totp_secret_encrypted,
+            passphrase=get_settings().master_passphrase,
+            user_id=user.id,
+        )
+        if not verify_totp(secret, body.totp_code):
+            raise HTTPException(
+                status_code=400, detail="invalid TOTP code",
+            )
+        # Compute gates from DB so the client can't lie about its history.
+        snapshot = await compute_gates_from_db(session)
+
+    try:
+        row_hash = await set_mode(
+            session,
+            user_id=user.id,
+            new_mode=body.new_mode,
+            triggered_by="user",
+            reason=body.reason,
+            gate_snapshot=snapshot,
+        )
+    except ModeChangeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "gate_failed",
+                "current_mode": e.refusal.current_mode,
+                "requested_mode": e.refusal.requested_mode,
+                "failures": e.refusal.gate_failures,
+            },
+        ) from e
+
+    await session.commit()
+    return TradingModeChangeOut(
+        new_mode=body.new_mode, old_mode=old,
+        audit_row_hash=row_hash, is_upgrade=upgrade,
     )
 
 

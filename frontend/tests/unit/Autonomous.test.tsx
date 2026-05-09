@@ -1,7 +1,45 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { Autonomous } from "@/tabs/Autonomous";
+import * as currentUserHook from "@/hooks/useCurrentUser";
+
+const baseUser = {
+  id: 1,
+  email: "u@x.com",
+  display_name: "u",
+  is_admin: false,
+  is_impersonating: false,
+  trading_mode: "manual" as const,
+  position_sizing_mode: "fixed" as const,
+  fixed_size_min_usdt: 30,
+  fixed_size_max_usdt: 30,
+  max_concurrent_positions: 5,
+  max_leverage_cap: 10,
+  quiet_hours_enabled: false,
+  quiet_hours_start: null,
+  quiet_hours_end: null,
+  binance_keys_configured: false,
+  telegram_configured: false,
+  totp_configured: false,
+};
+
+beforeEach(() => {
+  // Pin /me so ModeSwitcher renders the active "Manual" button without
+  // hitting the network (no MSW in this suite).
+  vi.spyOn(currentUserHook, "useCurrentUser").mockReturnValue({
+    user: baseUser,
+    isAdmin: false,
+    isImpersonating: false,
+    isLoading: false,
+    error: null,
+    reload: vi.fn().mockResolvedValue(undefined),
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("Autonomous tab", () => {
   test("renders all 7 panels", () => {
@@ -23,12 +61,17 @@ describe("Autonomous tab", () => {
     }
   });
 
-  test("ModeSwitcher renders three mode buttons with locks on the upgrade modes", () => {
+  test("ModeSwitcher renders three clickable mode buttons", () => {
     render(<Autonomous />);
-    expect(screen.getByText("Manual")).toBeInTheDocument();
-    // Locked modes are prefixed with 🔒
-    expect(screen.getByText(/🔒.*Telegram approve/i)).toBeInTheDocument();
-    expect(screen.getByText(/🔒.*Fully auto/i)).toBeInTheDocument();
+    // Phase J: locks removed; clicking an upgrade button now opens a
+    // TOTP confirm form instead. See ModeSwitcher.test.tsx for the
+    // interactive coverage.
+    for (const label of [/^manual$/i, /telegram approve/i, /fully auto/i]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    expect(
+      screen.getByRole("button", { name: /^manual$/i }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
   test("KillSwitches lists all 6 switches from spec §11.1", () => {

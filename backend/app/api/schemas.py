@@ -340,6 +340,27 @@ class TotpVerifyOut(BaseModel):
     ok: bool
 
 
+class TradingModeChangeIn(BaseModel):
+    """SP-8 Phase J — body for PATCH /me/trading-mode.
+
+    `totp_code` is required when the change is an upgrade. Downgrades are
+    always allowed without TOTP. The endpoint computes the gate snapshot
+    server-side from shadow_trades + live_trades to avoid trusting a
+    client-supplied snapshot.
+    """
+
+    new_mode: Literal["manual", "telegram-approve", "fully-auto"]
+    totp_code: str | None = None
+    reason: str | None = None
+
+
+class TradingModeChangeOut(BaseModel):
+    new_mode: Literal["manual", "telegram-approve", "fully-auto"]
+    old_mode: Literal["manual", "telegram-approve", "fully-auto"]
+    audit_row_hash: str
+    is_upgrade: bool
+
+
 # --- SP-1 Phase F: ML checkpoint admin schemas (spec §6.4) ----------------
 
 

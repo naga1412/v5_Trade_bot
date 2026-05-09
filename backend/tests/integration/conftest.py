@@ -390,6 +390,35 @@ async def _create_auth_tables(engine: Any) -> None:
             "latency_ms INTEGER, error_message TEXT, "
             "quota_used_pct REAL)"
         ))
+        # SP-8 Phase J: shadow_trades + mode_change_log. Needed by the
+        # PATCH /me/trading-mode tests (compute_gates_from_db reads
+        # shadow_trades, set_mode appends to mode_change_log via the
+        # audit hash chain).
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS shadow_trades ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL, direction TEXT NOT NULL, "
+            "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
+            "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
+            "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
+            "layer_scores TEXT NOT NULL, entry_atr REAL NOT NULL, "
+            "exit_price REAL, exit_reason TEXT, pnl_pct REAL, pnl_usdt REAL, "
+            "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
+            "inputs_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
+            "signal_id TEXT NOT NULL UNIQUE, "
+            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS mode_change_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "old_mode TEXT NOT NULL, new_mode TEXT NOT NULL, "
+            "triggered_by TEXT NOT NULL, reason TEXT, "
+            "gate_snapshot TEXT, changed_at TEXT NOT NULL, "
+            "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+        ))
         # SP-7 Phase B4/B5: backtests table. SQLite-friendly mirror of
         # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT,
         # JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the admin REST
