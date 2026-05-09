@@ -230,6 +230,19 @@ class AssetUniverseOut(BaseModel):
     entries: list[AssetUniverseEntryOut]
 
 
+class SymbolSearchHit(BaseModel):
+    """One row in the typeahead suggestion list."""
+    symbol: str            # e.g. "SHIB/USDT"
+    exchange: str          # e.g. "binance"
+    asset_class: str       # "crypto"
+    quote_volume_24h_usdt: float | None = None  # if known from asset_universe
+
+
+class SymbolSearchOut(BaseModel):
+    query: str
+    hits: list[SymbolSearchHit]
+
+
 # --- SP-0.7 Phase G: Admin schemas ----------------------------------------
 
 

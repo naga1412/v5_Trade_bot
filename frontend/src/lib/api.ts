@@ -259,6 +259,20 @@ export interface TotpVerifyOut {
   ok: boolean;
 }
 
+// --- SP-9 Phase A: symbol search (typeahead) ---
+
+export interface SymbolSearchHit {
+  symbol: string;
+  exchange: string;
+  asset_class: string;
+  quote_volume_24h_usdt: number | null;
+}
+
+export interface SymbolSearchOut {
+  query: string;
+  hits: SymbolSearchHit[];
+}
+
 // --- SP-8 Phase J: tax export ---
 
 export interface TaxSummary {
@@ -560,6 +574,14 @@ export const api = {
     ),
   meTaxExportUrl: (fy_year: string) =>
     `/api/v1/me/tax/export?fy_year=${encodeURIComponent(fy_year)}`,
+  symbolSearch: (q: string, opts: { limit?: number; exchange?: string } = {}) => {
+    const params = new URLSearchParams({ q });
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.exchange !== undefined) params.set("exchange", opts.exchange);
+    return fetchJson<SymbolSearchOut>(
+      `/bot-status/symbol-search?${params.toString()}`,
+    );
+  },
 
   // --- SP-0.7 Phase G: admin endpoints ---
   adminListUsers: () => fetchJson<AdminUser[]>("/admin/users"),
