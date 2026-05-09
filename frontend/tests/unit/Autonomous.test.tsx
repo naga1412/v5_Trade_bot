@@ -64,7 +64,7 @@ afterEach(() => {
 });
 
 describe("Autonomous tab", () => {
-  test("renders all 7 panels", () => {
+  test("renders all 8 panels", () => {
     render(<Autonomous />);
     // Each panel has a unique <h3> title. Use heading role rather than
     // free text so the assertion doesn't collide with body copy that
@@ -78,6 +78,7 @@ describe("Autonomous tab", () => {
       /Recent Activity/i,
       /Tax Export/i,
       /^Settings$/i,
+      /TOTP \(Two-Factor\)/i,
     ]) {
       expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
     }

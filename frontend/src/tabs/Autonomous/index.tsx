@@ -24,6 +24,7 @@ import { KillSwitches } from "./panels/KillSwitches";
 import { RecentActivity } from "./panels/RecentActivity";
 import { TaxExport } from "./panels/TaxExport";
 import { AutonomousSettings } from "./panels/AutonomousSettings";
+import { TotpSetupWizard } from "./panels/TotpSetupWizard";
 
 export function Autonomous() {
   return (
@@ -37,6 +38,7 @@ export function Autonomous() {
           <RecentActivity />
           <TaxExport />
           <AutonomousSettings />
+          <TotpSetupWizard />
         </div>
       </div>
     </div>
