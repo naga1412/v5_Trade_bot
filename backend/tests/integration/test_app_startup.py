@@ -136,6 +136,12 @@ async def test_lifespan_starts_both_workers_when_enabled(
         lambda: type("S", (), {
             "env": "production",
             "worker_enabled": True,
+            # SP-8 Phase J: leave the autonomous-trading subsystem off
+            # in this startup test so the pre-flight branch doesn't
+            # need a vault / Binance key / migration in the SQLite
+            # mock environment.
+            "autonomous_trading_enabled": False,
+            "binance_use_testnet": True,
         })(),
     )
     with _spy_workers(monkeypatch) as calls:

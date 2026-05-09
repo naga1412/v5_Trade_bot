@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     # ingest worker is gated separately on settings.env in app.main:lifespan.
     cryptopanic_api_key: str = ""
 
+    # SP-8 Phase J: master switch for the autonomous-trading subsystem.
+    # When false (default), the lifespan does NOT run pre-flight or start
+    # any of the live-trading workers. Operator opts in by setting this
+    # to true in /opt/trading-radar/.env AFTER:
+    #   1. tools/secrets/encrypt.py has produced secrets.enc
+    #   2. MASTER_PASSPHRASE is set to the matching value
+    #   3. The Binance API key has Reading + Futures only (sec 9.3)
+    # Pre-flight gates the actual workers — even with this true, any
+    # failed check refuses to start them.
+    autonomous_trading_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
