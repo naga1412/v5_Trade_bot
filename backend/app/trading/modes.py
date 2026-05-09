@@ -16,13 +16,13 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, cast
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.audit import insert_with_chain
-from app.trading.promotion import GateSnapshot
+from app.trading.promotion import GateSnapshot, TargetMode
 
 log = logging.getLogger(__name__)
 
@@ -122,8 +122,11 @@ async def set_mode(
                 requested_mode=new_mode, current_mode=old,
                 gate_failures=["no gate snapshot provided"],
             ))
-        # Check gates apply to the requested target.
-        failures = gate_snapshot.failures_for(new_mode)
+        # An upgrade target is always 'telegram-approve' or 'fully-auto'
+        # (you can't 'upgrade' to 'manual'), so narrow the type for the
+        # gate-check call.
+        target = cast(TargetMode, new_mode)
+        failures = gate_snapshot.failures_for(target)
         if failures:
             raise ModeChangeError(ModeChangeRefused(
                 requested_mode=new_mode, current_mode=old,
