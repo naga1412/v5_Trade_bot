@@ -259,6 +259,36 @@ export interface TotpVerifyOut {
   ok: boolean;
 }
 
+// --- SP-8 Phase J: kill switches ---
+
+export type KillSwitchName =
+  | "daily_loss"
+  | "consecutive_losses"
+  | "network_outage"
+  | "slippage"
+  | "liquidation_near"
+  | "funding_rate_guard";
+
+export interface KillSwitch {
+  name: KillSwitchName;
+  enabled: boolean;
+  threshold_value: number | null;
+  is_tripped: boolean;
+  tripped_at: string | null;
+  tripped_reason: string | null;
+  default_threshold: number;
+}
+
+export interface KillSwitchListOut {
+  switches: KillSwitch[];
+}
+
+export interface KillSwitchPatchIn {
+  enabled?: boolean;
+  threshold_value?: number | null;
+  totp_code?: string;
+}
+
 // --- SP-8 Phase J: trading-mode change ---
 
 export interface TradingModeChangeIn {
@@ -504,6 +534,13 @@ export const api = {
     }),
   meChangeTradingMode: (body: TradingModeChangeIn) =>
     fetchJson<TradingModeChangeOut>("/me/trading-mode", {
+      method: "PATCH",
+      body,
+    }),
+  meKillSwitches: () =>
+    fetchJson<KillSwitchListOut>("/me/kill-switches"),
+  meKillSwitchPatch: (name: KillSwitchName, body: KillSwitchPatchIn) =>
+    fetchJson<KillSwitch>(`/me/kill-switches/${name}`, {
       method: "PATCH",
       body,
     }),

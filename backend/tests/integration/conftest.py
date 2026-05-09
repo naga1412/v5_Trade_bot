@@ -419,6 +419,16 @@ async def _create_auth_tables(engine: Any) -> None:
             "gate_snapshot TEXT, changed_at TEXT NOT NULL, "
             "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
         ))
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS kill_switch_state ("
+            "user_id INTEGER NOT NULL, switch_name TEXT NOT NULL, "
+            "enabled INTEGER NOT NULL DEFAULT 1, "
+            "threshold_value REAL, "
+            "is_tripped INTEGER NOT NULL DEFAULT 0, "
+            "tripped_at TEXT, tripped_reason TEXT, "
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "PRIMARY KEY (user_id, switch_name))"
+        ))
         # SP-7 Phase B4/B5: backtests table. SQLite-friendly mirror of
         # migration 0012 (BIGSERIAL -> INTEGER AUTOINCREMENT,
         # JSONB -> TEXT, TIMESTAMPTZ -> TEXT). Used by the admin REST

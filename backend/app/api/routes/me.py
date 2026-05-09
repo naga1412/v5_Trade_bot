@@ -18,6 +18,9 @@ import json
 
 from app.api.schemas import (
     BinanceKeysIn,
+    KillSwitchListOut,
+    KillSwitchOut,
+    KillSwitchPatchIn,
     MeOut,
     MePatchIn,
     TelegramIn,
@@ -39,6 +42,7 @@ from app.auth.secrets import (
 from app.auth.totp import generate_backup_codes, generate_totp_setup, verify_totp
 from app.config import get_settings
 from app.db.session import get_session
+from app.trading.kill_switches import DEFAULTS as KILL_DEFAULTS
 from app.trading.modes import (
     ModeChangeError,
     get_mode,
@@ -344,6 +348,132 @@ async def change_trading_mode(
     return TradingModeChangeOut(
         new_mode=body.new_mode, old_mode=old,
         audit_row_hash=row_hash, is_upgrade=upgrade,
+    )
+
+
+@router.get("/kill-switches", response_model=KillSwitchListOut)
+async def list_me_kill_switches(
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> KillSwitchListOut:
+    """SP-8 Phase J — list all 6 kill switches with current state.
+
+    Falls back to spec §11.1 defaults for switches without a row yet.
+    """
+    rows = (await session.execute(
+        sa.text(
+            "SELECT switch_name, enabled, threshold_value, is_tripped, "
+            "       tripped_at, tripped_reason "
+            "FROM kill_switch_state WHERE user_id = :u"
+        ),
+        {"u": actual_user.id},
+    )).all()
+    by_name = {r.switch_name: r for r in rows}
+
+    switches = []
+    for name, default in KILL_DEFAULTS.items():
+        r = by_name.get(name)
+        if r is None:
+            switches.append(KillSwitchOut(
+                name=name,  # type: ignore[arg-type]
+                enabled=True, threshold_value=None,
+                is_tripped=False, tripped_at=None, tripped_reason=None,
+                default_threshold=default,
+            ))
+        else:
+            switches.append(KillSwitchOut(
+                name=name,  # type: ignore[arg-type]
+                enabled=bool(r.enabled),
+                threshold_value=r.threshold_value,
+                is_tripped=bool(r.is_tripped),
+                tripped_at=r.tripped_at,
+                tripped_reason=r.tripped_reason,
+                default_threshold=default,
+            ))
+    return KillSwitchListOut(switches=switches)
+
+
+@router.patch("/kill-switches/{name}", response_model=KillSwitchOut)
+async def patch_me_kill_switch(
+    name: str,
+    body: KillSwitchPatchIn,
+    request: Request,
+    actual_user: User = Depends(require_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> KillSwitchOut:
+    """SP-8 Phase J — toggle a kill switch or update its threshold.
+
+    Disabling a switch is a safety-critical change — it requires a
+    valid TOTP code. Enabling, or threshold-only edits, do not.
+    """
+    is_imp = await _is_currently_impersonating(request, actual_user, session)
+    _reject_during_impersonation(is_imp)
+
+    if name not in KILL_DEFAULTS:
+        raise HTTPException(status_code=404, detail=f"unknown switch: {name}")
+
+    user = (
+        await session.execute(
+            sa.select(User).where(User.id == actual_user.id)
+        )
+    ).scalar_one()
+
+    # TOTP required when disabling.
+    if body.enabled is False:
+        if not body.totp_code or not user.totp_secret_encrypted:
+            raise HTTPException(
+                status_code=400,
+                detail="TOTP required to disable a kill switch",
+            )
+        secret = decrypt_for_user(
+            user.totp_secret_encrypted,
+            passphrase=get_settings().master_passphrase,
+            user_id=user.id,
+        )
+        if not verify_totp(secret, body.totp_code):
+            raise HTTPException(status_code=400, detail="invalid TOTP code")
+
+    # Upsert the row. Read existing first so we keep the unchanged fields.
+    row = (await session.execute(
+        sa.text(
+            "SELECT enabled, threshold_value FROM kill_switch_state "
+            "WHERE user_id = :u AND switch_name = :n"
+        ),
+        {"u": user.id, "n": name},
+    )).first()
+    new_enabled = body.enabled if body.enabled is not None else (
+        bool(row.enabled) if row is not None else True
+    )
+    new_threshold = (
+        body.threshold_value if body.threshold_value is not None else (
+            row.threshold_value if row is not None else None
+        )
+    )
+    if row is None:
+        await session.execute(
+            sa.text(
+                "INSERT INTO kill_switch_state "
+                "(user_id, switch_name, enabled, threshold_value) "
+                "VALUES (:u, :n, :e, :t)"
+            ),
+            {"u": user.id, "n": name, "e": new_enabled, "t": new_threshold},
+        )
+    else:
+        await session.execute(
+            sa.text(
+                "UPDATE kill_switch_state "
+                "SET enabled = :e, threshold_value = :t, "
+                "    updated_at = CURRENT_TIMESTAMP "
+                "WHERE user_id = :u AND switch_name = :n"
+            ),
+            {"u": user.id, "n": name, "e": new_enabled, "t": new_threshold},
+        )
+    await session.commit()
+    return KillSwitchOut(
+        name=name,  # type: ignore[arg-type]
+        enabled=new_enabled, threshold_value=new_threshold,
+        is_tripped=False, tripped_at=None, tripped_reason=None,
+        default_threshold=KILL_DEFAULTS[name],  # type: ignore[index]
     )
 
 

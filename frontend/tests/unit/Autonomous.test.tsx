@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { Autonomous } from "@/tabs/Autonomous";
 import * as currentUserHook from "@/hooks/useCurrentUser";
+import * as apiMod from "@/lib/api";
 
 const baseUser = {
   id: 1,
@@ -34,6 +35,19 @@ beforeEach(() => {
     isLoading: false,
     error: null,
     reload: vi.fn().mockResolvedValue(undefined),
+  });
+  // KillSwitches calls /me/kill-switches on mount.
+  vi.spyOn(apiMod.api, "meKillSwitches").mockResolvedValue({
+    switches: (
+      [
+        "daily_loss", "consecutive_losses", "network_outage",
+        "slippage", "liquidation_near", "funding_rate_guard",
+      ] as const
+    ).map((n) => ({
+      name: n, enabled: true, threshold_value: null,
+      is_tripped: false, tripped_at: null, tripped_reason: null,
+      default_threshold: 0.02,
+    })),
   });
 });
 
@@ -74,8 +88,9 @@ describe("Autonomous tab", () => {
     ).toHaveAttribute("aria-pressed", "true");
   });
 
-  test("KillSwitches lists all 6 switches from spec §11.1", () => {
+  test("KillSwitches lists all 6 switches from spec §11.1", async () => {
     render(<Autonomous />);
+    // KillSwitches loads its rows from the mocked /me/kill-switches.
     for (const switchName of [
       "Daily loss",
       "Consecutive losses",
@@ -84,7 +99,7 @@ describe("Autonomous tab", () => {
       "Liquidation near",
       "Funding rate guard",
     ]) {
-      expect(screen.getByText(switchName)).toBeInTheDocument();
+      expect(await screen.findByText(switchName)).toBeInTheDocument();
     }
   });
 
