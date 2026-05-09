@@ -150,6 +150,72 @@ Disarm at any time:
 Default is OFF — auto-promotion only fires when the env vars are
 explicitly set.
 
+---
+
+## Self-healing watchdog
+
+Spec: [SP-9 plan](superpowers/plans/2026-05-09-SP-9-self-healing-plan.md).
+
+A cron-driven watchdog (`/opt/trading-radar/scripts/watchdog.sh`) runs
+every 15 minutes and auto-recovers from common failure modes:
+
+| Failure | Auto-action |
+|---|---|
+| Backend container missing | `docker compose up -d backend` |
+| Backend in restart loop | Telegram alert (operator must investigate) |
+| Memory > 90% | Restart backend (resets memory leaks) |
+| Docker disk > 80% | `docker system prune -f`; reduce backup retention to 14 days |
+| Docker disk > 95% | Aggressive prune; reduce retention to 7 days; emergency alert |
+| Postgres not ready | Restart postgres |
+| No predictions in 2h | Restart backend (live worker stuck) |
+| Backup not run in 25h | Run `backup.sh` manually |
+| Binance Futures unreachable | Telegram alert (kill switches in backend handle the freeze) |
+
+Install once:
+
+```bash
+ssh root@95.216.187.204
+cd /opt/trading-radar
+sudo ./scripts/install_watchdog_cron.sh
+```
+
+Verify:
+
+```bash
+crontab -l | grep watchdog
+# */15 * * * * /opt/trading-radar/scripts/watchdog.sh >> /var/log/trading-radar-watchdog.log 2>&1
+```
+
+The watchdog sends a Telegram message ONLY when it detects a problem
+(or takes auto-action). Quiet runs are silent — `tail -f
+/var/log/trading-radar-watchdog.log` shows the heartbeat.
+
+### What the watchdog can NOT fix
+
+New code bugs, strategy underperformance, Binance API schema changes.
+For those: loud Telegram alert (so you know to investigate) but no
+auto-fix. Roll back the bad commit + redeploy:
+
+```bash
+ssh root@95.216.187.204
+cd /opt/trading-radar
+git log --oneline -5         # find the last good commit
+git reset --hard <good-sha>
+docker compose up -d --build backend
+```
+
+### Optional: LLM-assisted log diagnosis
+
+For an opt-in daily AI-generated incident summary, set:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_DIAGNOSIS_ENABLED=true
+```
+
+Cost: ~\$0.01–\$0.05/day depending on log volume. Off by default —
+needs your own Anthropic API key + token spend.
+
 ### Auto-demotion (spec §4.4)
 
 The system automatically downgrades modes if:
