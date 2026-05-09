@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -35,6 +36,7 @@ from app.data.intermarket_worker import (
     start_intermarket_snapshot_task,
 )
 from app.data.universe_sync import start_universe_sync_task
+from app.shadow.universe_refresh import start_universe_refresh_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
 from app.news.ingest_worker import (
@@ -85,6 +87,8 @@ async def lifespan(_app: FastAPI):
     news_cleanup_task = None
     intermarket_snapshot_task = None
     intermarket_cleanup_task = None
+    universe_refresh_task = None
+    universe_refreshed_event: asyncio.Event | None = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -97,6 +101,16 @@ async def lifespan(_app: FastAPI):
             log.warning("load_active_checkpoint failed at startup: %s", e)
         live_worker = start_background_worker()
         shadow_worker = start_shadow_worker()
+        # SP-3.5 / shadow: daily 00:00 UTC asset_universe refresh — top-30
+        # USDT-quoted Binance Futures perpetuals by 24h volume. The shadow
+        # worker reads this table at startup; without this task the table
+        # stays empty in production, the worker falls back to BTCUSDT-only,
+        # and SP-8's promotion gates (which need 100+ trades on top-30) can
+        # never accumulate. The orphaned task was caught while planning SP-8.
+        universe_refreshed_event = asyncio.Event()
+        universe_refresh_task = start_universe_refresh_task(
+            get_session_factory(), universe_refreshed_event,
+        )
         # SP-3 Phase F: daily 02:00 UTC universe sync across all registered
         # adapters. Skipped in test/ci so the test event loop isn't racing
         # background tasks.
@@ -128,6 +142,8 @@ async def lifespan(_app: FastAPI):
             shadow_worker.cancel()
         if universe_sync_task is not None:
             universe_sync_task.cancel()
+        if universe_refresh_task is not None:
+            universe_refresh_task.cancel()
         if health_pinger_task is not None:
             health_pinger_task.cancel()
         if audit_verifier_task is not None:
