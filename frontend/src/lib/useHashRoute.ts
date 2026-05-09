@@ -9,6 +9,7 @@ export type TabId =
   | "live-prediction"
   | "bot-status"
   | "scanner"
+  | "autonomous"
   | "settings"
   | "admin";
 
@@ -16,6 +17,7 @@ const VALID: ReadonlySet<TabId> = new Set<TabId>([
   "live-prediction",
   "bot-status",
   "scanner",
+  "autonomous",
   "settings",
   "admin",
 ]);
