@@ -107,7 +107,22 @@ class ShadowWorker:
                     history = await client.fetch_klines(
                         sym, SHADOW_TIMEFRAME, limit=HISTORY_BARS,
                     )
-                except Exception as e:
+                except httpx.HTTPStatusError as e:
+                    # Expected: futures-only tokens (COLLECTUSDT, SIRENUSDT,
+                    # etc.) return 400 from the SPOT klines endpoint because
+                    # the symbol doesn't exist there. The asset_universe
+                    # comes from FUTURES via /fapi/v1/ticker/24hr. Log at
+                    # DEBUG so the warning channel stays clean — the worker
+                    # gracefully continues with the symbols that did seed.
+                    if e.response.status_code in (400, 404):
+                        log.debug(
+                            "seed skip %s (not on Binance Spot): %s",
+                            sym, e.response.status_code,
+                        )
+                    else:
+                        log.warning("seed history failed for %s: %s", sym, e)
+                    continue
+                except Exception as e:  # noqa: BLE001
                     log.warning("seed history failed for %s: %s", sym, e)
                     continue
                 if not history:

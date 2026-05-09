@@ -110,6 +110,21 @@ class BinanceFuturesIntermarketAdapter:
             oi_rows = resp_oi.json()
             if oi_rows:
                 oi_value = float(oi_rows[0]["sumOpenInterest"])
+        except httpx.HTTPStatusError as e:
+            # Many futures symbols don't have OI history (newer / thin-
+            # volume listings). The endpoint returns 404 with
+            # {"code": -1121, "msg": "Invalid symbol."} for those. Drop
+            # to DEBUG so the warning channel stays signal-only — the
+            # snapshot is still useful for the funding-decay trap with
+            # open_interest=None.
+            if e.response.status_code in (400, 404):
+                log.debug(
+                    "binance_futures openInterestHist 4xx for %s "
+                    "(no OI history available)",
+                    native,
+                )
+            else:
+                log.warning("binance_futures openInterestHist error: %s", e)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPError,
                 KeyError, TypeError, ValueError, IndexError) as e:
             log.warning("binance_futures openInterestHist error: %s", e)
