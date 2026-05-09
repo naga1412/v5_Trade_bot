@@ -6,7 +6,10 @@ import { Autonomous } from "@/tabs/Autonomous";
 describe("Autonomous tab", () => {
   test("renders all 7 panels", () => {
     render(<Autonomous />);
-    // Each panel has a unique title.
+    // Each panel has a unique <h3> title. Use heading role rather than
+    // free text so the assertion doesn't collide with body copy that
+    // happens to mention the same words (e.g. "Live positions will
+    // appear here..." in the empty-state paragraph).
     for (const title of [
       /Trading Mode/i,
       /Promotion Gates/i,
@@ -16,7 +19,7 @@ describe("Autonomous tab", () => {
       /Tax Export/i,
       /^Settings$/i,
     ]) {
-      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
     }
   });
 
@@ -44,9 +47,11 @@ describe("Autonomous tab", () => {
 
   test("GateStatus shows all 6 gate metrics from spec §4.1/4.2", () => {
     render(<Autonomous />);
+    // Note: "Closed trades" also appears in TaxExport, so assert it via
+    // its row-context (use getAllByText and assert the count instead of
+    // getByText which would trip the multi-match guard).
     for (const metric of [
       "Days continuous",
-      "Closed trades",
       "Sharpe (annualised)",
       "Max drawdown",
       "Win rate",
@@ -54,6 +59,9 @@ describe("Autonomous tab", () => {
     ]) {
       expect(screen.getByText(metric)).toBeInTheDocument();
     }
+    // "Closed trades" intentionally appears in both GateStatus and
+    // TaxExport (same metric, different aggregation window).
+    expect(screen.getAllByText("Closed trades")).toHaveLength(2);
   });
 
   test("TaxExport shows the financial year", () => {
