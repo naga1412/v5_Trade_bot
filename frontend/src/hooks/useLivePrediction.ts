@@ -16,7 +16,11 @@ export function useLivePrediction(symbol: string, timeframe: string, signalId?: 
       (e: Error) => { if (!cancelled) setErr(e.message); },
     );
 
-    const sock = new TradingRadarSocket(`tab1-${symbol}-${timeframe}`);
+    // WS path must use the URL-safe symbolPath (BTC-USDT), not raw symbol
+    // (BTC/USDT). The backend route /ws/v1/{client_id} treats the slash as
+    // a path separator, which made the connection 404/403 on every request
+    // and caused the dashboard to lose all real-time updates.
+    const sock = new TradingRadarSocket(`tab1-${symbolPath}-${timeframe}`);
     sockRef.current = sock;
     sock.connect();
     sock.subscribe("live_prediction", { symbol, timeframe });
