@@ -142,17 +142,26 @@ async def radar(
     # Latest prediction per symbol for this user, joined to universe_history
     # for full_name. Sparkline is left NULL here (SP-7 will swap in real OHLC
     # last-20).
+    #
+    # CTE pattern (latest_ts → join back) instead of MAX(layer_scores). Both
+    # layer_scores and universe_history.metadata are JSONB in Postgres prod,
+    # and Postgres has no default MAX(jsonb) operator → would 500 every call
+    # (SQLite happily compared the TEXT but production didn't). The CTE is
+    # portable and has the same row count.
     rows = (await session.execute(sa.text(
-        "SELECT p.symbol AS symbol, MAX(p.ts) AS ts, "
-        "       MAX(p.layer_scores) AS layer_scores, "
-        "       COALESCE(MAX(u.metadata), '') AS full_name, "
+        "WITH latest AS ( "
+        "  SELECT symbol, MAX(ts) AS max_ts FROM predictions "
+        "  WHERE user_id = :u AND timeframe = :tf "
+        "  GROUP BY symbol "
+        ") "
+        "SELECT p.symbol AS symbol, p.ts AS ts, p.layer_scores AS layer_scores, "
+        "       COALESCE(u.metadata, '') AS full_name, "
         "       NULL AS sparkline "
         "FROM predictions p "
-        "LEFT JOIN universe_history u "
-        "  ON u.symbol = p.symbol "
+        "JOIN latest l ON l.symbol = p.symbol AND l.max_ts = p.ts "
+        "LEFT JOIN universe_history u ON u.symbol = p.symbol "
         "WHERE p.user_id = :u AND p.timeframe = :tf "
-        "GROUP BY p.symbol "
-        "ORDER BY MAX(p.ts) DESC "
+        "ORDER BY p.ts DESC "
         "LIMIT :lim"
     ), {"u": current_user.id, "tf": tf, "lim": limit})).all()
 
