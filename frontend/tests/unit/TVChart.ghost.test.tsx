@@ -145,7 +145,7 @@ test("renders ghost candle one timeframe ahead of liveTs", () => {
   expect(args[0]?.time).toBe(expectedTs);
 });
 
-test("creates two price lines (P5 + P95) on ghost series", () => {
+test("creates three price lines (Ghost close + P5 + P95) on ghost series", () => {
   render(
     <TVChart
       symbol="BTC/USDT"
@@ -155,14 +155,18 @@ test("creates two price lines (P5 + P95) on ghost series", () => {
       ghost={SAMPLE_GHOST}
     />,
   );
-  expect(mocks.ghostSeries.createPriceLine).toHaveBeenCalledTimes(2);
+  // SP-9 polish: added a SOLID 'Ghost' close line for at-a-glance
+  // visibility on top of the dashed P5/P95 band, so the operator can
+  // spot the prediction during manual trading. Tests the 3-line set.
+  expect(mocks.ghostSeries.createPriceLine).toHaveBeenCalledTimes(3);
   const calls = mocks.ghostSeries.createPriceLine.mock.calls.map(
     (c) => c[0] as unknown as PriceLineOpts,
   );
   const titles = calls.map((c) => c.title).sort();
-  expect(titles).toEqual(["P5", "P95"]);
-  expect(calls.find((c) => c.title === "P5")?.price).toBe(79500);
-  expect(calls.find((c) => c.title === "P95")?.price).toBe(80800);
+  expect(titles).toEqual(["Ghost", "Ghost P5", "Ghost P95"]);
+  expect(calls.find((c) => c.title === "Ghost")?.price).toBe(80200);
+  expect(calls.find((c) => c.title === "Ghost P5")?.price).toBe(79500);
+  expect(calls.find((c) => c.title === "Ghost P95")?.price).toBe(80800);
 });
 
 test("does not add a ghost series when liveTs is missing (cannot anchor)", () => {
