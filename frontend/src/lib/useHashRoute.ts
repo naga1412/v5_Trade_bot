@@ -75,9 +75,14 @@ export function useHashRoute(defaultTab: TabId = "live-prediction"): HashRouteSt
     // listener will fire too (as a no-op resync) — this avoids relying on
     // JSDOM's async hashchange dispatch in tests, and feels snappier in real
     // browsers where the listener would otherwise lag a frame behind.
-    setState((prev) => ({ tab: id, query: prev.query }));
-    if (window.location.hash !== "#/" + id) {
-      window.location.hash = "#/" + id;
+    //
+    // CLEAR query on tab change: a stale ?signal=... from Tab 1 surviving
+    // the navigation made other tabs (and any later return to Tab 1)
+    // re-fire signal-marker fetches with the wrong context.
+    setState({ tab: id, query: {} });
+    const target = "#/" + id;
+    if (window.location.hash !== target) {
+      window.location.hash = target;
     }
   }, []);
 
