@@ -41,17 +41,24 @@ def _force_prod(env_value: str = "production"):
     ]
 
 
-def test_ws_rejects_connection_without_jwt_in_prod() -> None:
+def test_ws_accepts_connection_without_jwt_when_cf_access_gates_at_tunnel() -> None:
+    """Browsers can't set Cf-Access-Jwt-Assertion on WS upgrade. CF Access
+    gates the connection at the tunnel layer; the backend must accept
+    JWT-less connections in prod (with a sentinel principal name) so the
+    dashboard's live-prediction stream isn't broken behind CF Access."""
+    import json
     patches = _force_prod()
     for p in patches:
         p.start()
     try:
         client = TestClient(app)
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/ws/v1/c1") as ws:
-                # Server should close immediately after .accept(); reading
-                # any message raises WebSocketDisconnect.
-                ws.receive_json()
+        with client.websocket_connect("/ws/v1/c1") as ws:
+            ws.send_text(json.dumps({
+                "action": "subscribe", "channel": "live_prediction",
+                "params": {"symbol": "BTC/USDT", "timeframe": "1h"},
+            }))
+            msg = ws.receive_json()
+            assert msg["type"] == "subscribed"
     finally:
         for p in patches:
             p.stop()
