@@ -66,7 +66,16 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
         horzLines: { color: "#1f2530" },
       },
       rightPriceScale: { borderColor: "#1f2530" },
-      timeScale: { borderColor: "#1f2530", timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: "#1f2530", timeVisible: true, secondsVisible: false,
+        // Reserve 5 bars of space to the right of the latest live bar so
+        // the SP-1 ghost candle (one timeframe in the future) actually
+        // renders inside the visible viewport. Without this the ghost
+        // is drawn but clipped — only the right-axis price-line labels
+        // appear, which is what the user kept reporting as "ghost not
+        // drawing".
+        rightOffset: 5,
+      },
       autoSize: true,
     });
     const series = chart.addCandlestickSeries({

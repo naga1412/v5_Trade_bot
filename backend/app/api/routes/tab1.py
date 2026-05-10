@@ -13,7 +13,7 @@ from app.auth.deps import current_user_or_impersonated
 from app.auth.models import User
 from app.core.dataquality.validator import Candle
 from app.core.predictor import build_prediction
-from app.data.adapters.binance import BinanceClient
+from app.data.adapters.binance import BinanceClient, BinanceFuturesAdapter
 from app.data.universe import is_tradable
 from app.db.session import get_session
 from app.ml.checkpoints import get_active_model_and_checkpoint
@@ -46,16 +46,46 @@ def _to_binance_symbol(pair: str) -> str:
 async def _fetch_recent_candles(
     symbol: str, timeframe: str, *, limit: int = 500,
 ) -> list[Candle]:
-    """Fetch klines via the canonical Binance adapter, then re-wrap as the
-    validator-flavoured ``Candle`` (which carries the extra ``symbol`` /
-    ``timeframe`` metadata downstream consumers — predictor, charting layer —
-    expect).
+    """Fetch klines, trying Binance Spot first then Futures fallback.
+
+    Many Binance Futures perpetuals don't exist on Spot — most notably
+    the ``1000XXX`` family (1000SHIB, 1000PEPE, 1000FLOKI, etc.) which
+    Binance created so the price stays > 1 satoshi for low-priced
+    coins. The user reported HTTP 500 on /predict/1000SHIB-USDT/1h
+    — root cause was Spot returning 400, the unhandled HTTPStatusError
+    surfaced as 500. We now silently fall back to Futures klines.
     """
+    native = _to_binance_symbol(symbol)
     async with httpx.AsyncClient() as http:
-        client = BinanceClient(http=http)
-        bars = await client.fetch_klines(
-            _to_binance_symbol(symbol), timeframe, limit=limit,
-        )
+        # 1. Try Spot.
+        try:
+            client = BinanceClient(http=http)
+            bars = await client.fetch_klines(native, timeframe, limit=limit)
+            if bars:
+                return [
+                    Candle(
+                        symbol=symbol, timeframe=timeframe,
+                        ts=b.ts, open=b.open, high=b.high,
+                        low=b.low, close=b.close, volume=b.volume,
+                    )
+                    for b in bars
+                ]
+        except (httpx.HTTPStatusError, httpx.HTTPError) as e:
+            _log.info(
+                "spot fetch_klines failed for %s (%s); trying futures",
+                native, e,
+            )
+
+        # 2. Fall back to Futures perpetual.
+        try:
+            futures = BinanceFuturesAdapter(http=http)
+            bars = await futures.fetch_klines(native, timeframe, limit=limit)
+        except (httpx.HTTPStatusError, httpx.HTTPError) as e:
+            _log.warning(
+                "futures fetch_klines also failed for %s: %s", native, e,
+            )
+            bars = []
+
     return [
         Candle(
             symbol=symbol, timeframe=timeframe,
