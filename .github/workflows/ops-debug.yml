@@ -1,0 +1,71 @@
+name: ops-debug
+
+# Manual one-off SSH probes for forensic / triage. workflow_dispatch
+# only — never runs automatically. Each probe outputs to the run log.
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: which probe to run
+        required: true
+        default: errors
+        type: choice
+        options:
+          - errors      # last 200 backend log lines filtered to errors
+          - logs        # last 200 backend log lines unfiltered
+          - tables      # row counts on universe_history + asset_universe + predictions
+          - scanner     # show scanner endpoint internals (live SQL EXPLAIN + count)
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+      HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+      HETZNER_USER: ${{ secrets.HETZNER_USER }}
+      HETZNER_INSTALL_DIR: ${{ secrets.HETZNER_INSTALL_DIR }}
+    steps:
+      - name: Set up SSH
+        if: env.HETZNER_HOST != ''
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$HETZNER_SSH_KEY" > ~/.ssh/hetzner_key
+          chmod 600 ~/.ssh/hetzner_key
+          ssh-keyscan -H "$HETZNER_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run probe
+        if: env.HETZNER_HOST != ''
+        env:
+          PROBE: ${{ inputs.probe }}
+        run: |
+          USER_DEFAULTED="${HETZNER_USER:-root}"
+          DIR_DEFAULTED="${HETZNER_INSTALL_DIR:-/opt/trading-radar}"
+          case "$PROBE" in
+            errors)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose logs --tail=300 backend | \
+                 grep -iE 'error|exception|traceback|500 internal|sqlalche\\.me' | \
+                 tail -80"
+              ;;
+            logs)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose logs --tail=200 backend"
+              ;;
+            tables)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT 'universe_history' AS t, count(*) FROM universe_history \
+                   UNION ALL SELECT 'asset_universe', count(*) FROM asset_universe \
+                   UNION ALL SELECT 'predictions', count(*) FROM predictions \
+                   UNION ALL SELECT 'shadow_trades', count(*) FROM shadow_trades \
+                   UNION ALL SELECT 'live_trades', count(*) FROM live_trades;\""
+              ;;
+            scanner)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT user_id, timeframe, count(*), max(ts) \
+                   FROM predictions GROUP BY user_id, timeframe ORDER BY 1, 2;\""
+              ;;
+          esac

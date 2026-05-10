@@ -9,9 +9,13 @@ from app.data.adapters import (
 )
 
 
-def test_list_registered_returns_four_known_exchanges() -> None:
+def test_list_registered_returns_known_exchanges() -> None:
     names = set(list_registered())
-    assert names == {"binance", "bybit", "yahoo", "twelvedata"}
+    # binance-futures added in SP-9 alongside the spot binance adapter so
+    # the symbol-search dropdown surfaces USDT-margined perpetuals too.
+    assert names == {
+        "binance", "binance-futures", "bybit", "yahoo", "twelvedata",
+    }
 
 
 @pytest.mark.asyncio

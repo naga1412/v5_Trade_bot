@@ -166,6 +166,117 @@ class BinanceAdapter:
 BinanceClient = BinanceAdapter
 
 
+@dataclass
+class BinanceFuturesAdapter:
+    """SP-9 — Binance USDⓈ-M Futures (perpetuals) symbol source.
+
+    The spot adapter at `BinanceAdapter` lists ~1.4k SPOT pairs but
+    misses every USDT-margined PERPETUAL (which is what the
+    autonomous-trading subsystem actually places orders on). This
+    adapter calls fapi.binance.com/fapi/v1/exchangeInfo and exposes
+    every active perpetual contract so the symbol-search dropdown
+    surfaces them too.
+
+    `name = 'binance-futures'` so universe_history rows from this
+    source coexist with the spot adapter's `binance` rows without
+    PK conflict (PK is exchange + symbol).
+    """
+
+    http: httpx.AsyncClient
+    base_url: str = "https://fapi.binance.com"
+    rate_client: RateLimitedClient | None = None
+    name: str = field(default="binance-futures", init=False)
+
+    def __post_init__(self) -> None:
+        if self.rate_client is None:
+            self.rate_client = _default_rate_client(self.http)
+
+    async def fetch_klines(
+        self,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        *,
+        limit: int = 500,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[Candle]:
+        """Fetch perpetual-futures klines via /fapi/v1/klines.
+
+        Schema is identical to spot — same 12-element rows. Symbol
+        format is the native form (e.g. BTCUSDT) since Futures has
+        no separator concept.
+        """
+        if symbol is None or timeframe is None:
+            raise TypeError("symbol and timeframe are required")
+        assert self.rate_client is not None
+        binance_tf = _TF_TO_BINANCE[timeframe]
+        canonical = _coerce_canonical(symbol)
+        native = to_native("binance", canonical)
+        params: dict[str, str | int] = {
+            "symbol": native, "interval": binance_tf, "limit": limit,
+        }
+        if start is not None:
+            params["startTime"] = int(start.timestamp() * 1000)
+        if end is not None:
+            params["endTime"] = int(end.timestamp() * 1000)
+        url = f"{self.base_url}/fapi/v1/klines"
+        try:
+            response = await self.rate_client.request(
+                "GET", url, endpoint_key="klines", params=params, timeout=10.0,
+            )
+            response.raise_for_status()
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            log.warning("binance-futures fetch_klines network error: %s", e)
+            return []
+        result: list[Candle] = []
+        for row in response.json():
+            result.append(Candle(
+                ts=datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc),
+                open=float(row[1]), high=float(row[2]),
+                low=float(row[3]),  close=float(row[4]),
+                volume=float(row[5]),
+            ))
+        return result
+
+    async def list_symbols(self) -> list[SymbolInfo]:
+        """Return every TRADING perpetual contract from
+        /fapi/v1/exchangeInfo. Skips non-perpetuals + delisted."""
+        assert self.rate_client is not None
+        url = f"{self.base_url}/fapi/v1/exchangeInfo"
+        try:
+            response = await self.rate_client.request(
+                "GET", url, endpoint_key="exchangeInfo", timeout=15.0,
+            )
+            response.raise_for_status()
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            log.warning("binance-futures list_symbols network error: %s", e)
+            return []
+
+        out: list[SymbolInfo] = []
+        for sym in response.json().get("symbols", []):
+            if sym.get("status") != "TRADING":
+                continue
+            # contractType: PERPETUAL / CURRENT_QUARTER / NEXT_QUARTER /
+            # PERPETUAL_DELIVERING. We only want perpetuals.
+            if sym.get("contractType") != "PERPETUAL":
+                continue
+            native = sym["symbol"]
+            try:
+                canonical = from_native("binance", native)
+            except Exception:  # noqa: BLE001
+                continue
+            out.append(SymbolInfo(
+                canonical=canonical,
+                native=native,
+                base=sym.get("baseAsset", ""),
+                quote=sym.get("quoteAsset", ""),
+                listed_at=None,
+                delisted_at=None,
+                asset_class="crypto",
+            ))
+        return out
+
+
 # --- WebSocket stream (unchanged from SP-0.5) ---
 
 
