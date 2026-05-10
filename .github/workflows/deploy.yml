@@ -56,6 +56,6 @@ jobs:
                   http://localhost:8000/api/v1/health && \
              echo '--- populating universe_history (idempotent) ---' && \
              docker compose exec -T backend \
-                 python /app/tools/populate_universe_history.py || true && \
+                 python /app/host-tools/populate_universe_history.py || true && \
              echo '--- recent backend logs (last 30 lines) ---' && \
              docker compose logs --tail=30 backend"
