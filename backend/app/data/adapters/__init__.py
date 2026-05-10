@@ -43,6 +43,11 @@ def _make_binance() -> ExchangeAdapter:
     return BinanceAdapter(http=_shared_http())
 
 
+def _make_binance_futures() -> ExchangeAdapter:
+    from app.data.adapters.binance import BinanceFuturesAdapter
+    return BinanceFuturesAdapter(http=_shared_http())
+
+
 def _make_bybit() -> ExchangeAdapter:
     from app.data.adapters.bybit import BybitAdapter
     return BybitAdapter(http=_shared_http())
@@ -62,6 +67,7 @@ def _make_twelvedata() -> ExchangeAdapter:
 
 _FACTORIES: dict[str, Callable[[], ExchangeAdapter]] = {
     "binance": _make_binance,
+    "binance-futures": _make_binance_futures,
     "bybit": _make_bybit,
     "yahoo": _make_yahoo,
     "twelvedata": _make_twelvedata,
