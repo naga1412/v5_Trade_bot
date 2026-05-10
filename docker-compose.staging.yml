@@ -1,0 +1,119 @@
+# Staging stack — runs SAME images as prod with isolated container
+# names, ports, volumes, and Postgres database. Brought up via:
+#
+#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d --build
+#
+# Designed to run side-by-side with the prod stack on the same Hetzner
+# box. Contention vectors:
+#   - CPU + RAM (CX22 has 8GB; staging usually idle so OK)
+#   - Disk space (postgres_data_staging volume separate)
+#   - No port overlap: prod 5173/8000/5432/6379, staging 5174/8001/5433/6380
+#
+# Cloudflare Tunnel hostnames:
+#   prod:    aji12.nagayuaj.com         -> localhost:5173
+#   staging: staging.aji12.nagayuaj.com -> localhost:5174
+#
+# Database isolation: trading_radar_staging vs trading_radar.
+# secrets.enc isolation: backend/secrets.enc.staging (kept distinct so
+# real-money keys never appear in staging by accident).
+
+services:
+  postgres-staging:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: tr-staging-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data_staging:/var/lib/postgresql/data
+    # Lighter resource profile — staging idles most of the time.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "work_mem=16MB"
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-staging:
+    image: redis:7-alpine
+    container_name: tr-staging-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data_staging:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend-staging:
+    build: ./backend
+    container_name: tr-staging-backend
+    restart: unless-stopped
+    depends_on:
+      postgres-staging: { condition: service_healthy }
+      redis-staging:    { condition: service_healthy }
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      ENV: staging
+      LOG_LEVEL: ${LOG_LEVEL}
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD}
+      BINANCE_USE_TESTNET: "true"
+      MASTER_PASSPHRASE: ${MASTER_PASSPHRASE}
+      # Autonomous trading hard-OFF in staging. Even if a developer
+      # later flips it true in .env.staging, the backend keeps it
+      # disabled because pre-flight requires a real secrets.enc file
+      # that staging deliberately doesn't ship.
+      AUTONOMOUS_TRADING_ENABLED: "false"
+      AUTO_PROMOTE_TO_TELEGRAM_ENABLED: "false"
+      AUTO_PROMOTE_TO_FULLYAUTO_ENABLED: "false"
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_CHAT_ID: ""
+      BACKEND_INTERNAL_URL: http://localhost:8001
+    volumes:
+      # Separate ml-cache + rl-cache directories so staging can have
+      # different (or no) checkpoints from prod.
+      - ./backend/data/ml-cache-staging:/app/data/ml-cache:ro
+      - ./backend/data/rl-cache-staging:/app/data/rl-cache:ro
+      - ./tools:/app/host-tools:ro
+    ports:
+      - "127.0.0.1:8001:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend-staging:
+    build: ./frontend
+    container_name: tr-staging-frontend
+    restart: unless-stopped
+    depends_on: [backend-staging]
+    ports:
+      - "127.0.0.1:5174:5173"
+    environment:
+      VITE_API_URL: /api/v1
+      VITE_WS_URL: /ws/v1
+
+volumes:
+  postgres_data_staging:
+  redis_data_staging:
+
+networks:
+  default:
+    name: trading-radar-staging
