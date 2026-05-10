@@ -8,8 +8,8 @@ const fmt = (v: number | null, dp = 2) => (v == null ? "—" : v.toFixed(dp));
 // always renders an em-dash for SP-6.
 export function FinalValue({ data }: { data: LivePrediction | null }) {
   if (!data) return <Panel title="Final Value">—</Panel>;
-  const rr = data.trade_setup.risk_reward;
-  const match = data.final.confidence * 100;
+  const rr = data.trade_setup?.risk_reward ?? null;
+  const match = (data.final?.confidence ?? 0) * 100;
   return (
     <Panel title="Final Value">
       <div className="grid grid-cols-2 gap-x-2 gap-y-1">

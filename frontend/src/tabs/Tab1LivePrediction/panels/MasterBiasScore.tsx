@@ -12,8 +12,8 @@ const labelFor = (score: number): "BULL" | "BEAR" | "NEUTRAL" => {
 };
 
 export function MasterBiasScore({ data }: Props) {
-  if (!data) return <Panel title="Master Bias Score">—</Panel>;
-  const score = data.final.score;
+  if (!data || !data.final) return <Panel title="Master Bias Score">—</Panel>;
+  const score = data.final.score ?? 0;
   const pct = ((score + 1) / 2) * 100;
   const label = labelFor(score);
   const trackColor =

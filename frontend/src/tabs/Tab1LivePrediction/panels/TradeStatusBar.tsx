@@ -12,8 +12,8 @@ const COLOR = {
 } as const;
 
 export function TradeStatusBar({ data }: Props) {
-  if (!data) return <Panel title="Trade Status">—</Panel>;
-  const dir = data.final.direction;
+  if (!data || !data.final) return <Panel title="Trade Status">—</Panel>;
+  const dir = data.final.direction ?? "NEUTRAL";
   return (
     <Panel title="Trade Status" intensity={dir !== "NEUTRAL" ? "alert" : "default"}>
       <div className="flex justify-between">
