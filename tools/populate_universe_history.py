@@ -24,10 +24,20 @@ import logging
 import sys
 from pathlib import Path
 
-# Path setup so this script can be run from the repo root without
-# installing the backend package.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "backend"))
+# Path setup. Two layouts must work:
+#   1. Repo: tools/ + backend/ are siblings; need to add ./backend to
+#      sys.path so `from app.x import y` resolves.
+#   2. Container: this file is bind-mounted at /app/host-tools/, while
+#      the actual `app/` package lives at /app/app/. /app is already
+#      on sys.path inside uvicorn but NOT for ad-hoc `python` calls,
+#      so we add it explicitly.
+for _candidate in (
+    Path(__file__).resolve().parent.parent / "backend",  # repo layout
+    Path("/app"),                                         # container layout
+):
+    if (_candidate / "app").is_dir():
+        sys.path.insert(0, str(_candidate))
+        break
 
 from app.data.adapters import get_adapter, list_registered  # noqa: E402
 from app.data.universe_sync import sync_universe  # noqa: E402
