@@ -152,3 +152,14 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # NOTE: Playwright e2e is run AFTER the staging deploy succeeds, NOT
+  # in PR CI. The existing tests/e2e/*.spec.ts files all require a live
+  # backend (probe role-based selectors that only render when /me returns
+  # real data, predictions exist, etc.). Running them against a static
+  # Vite preview times out on every spec.
+  #
+  # The right place is the deploy-staging step in deploy.yml — after
+  # the dev branch lands on staging.aji12.nagayuaj.com, fire Playwright
+  # against the live staging URL with a CF Access service token bypass.
+  # See PR #94 + STAGING.md.
