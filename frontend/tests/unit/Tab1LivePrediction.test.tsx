@@ -33,7 +33,15 @@ test("forwards query.signal to useLivePrediction", () => {
     query: { signal: "sig-xyz" },
     setTab: vi.fn(),
   });
-  render(<Tab1LivePrediction />);
+  render(
+  <Tab1LivePrediction
+    symbol="BTC/USDT"
+    timeframe="1h"
+    onTimeframeChange={vi.fn()}
+    drawerOpen={false}
+    onDrawerClose={vi.fn()}
+  />,
+);
   expect(useLivePredictionMock).toHaveBeenCalledWith("BTC/USDT", "1h", "sig-xyz");
 });
 
@@ -43,7 +51,15 @@ test("passes undefined when no signal in query", () => {
     query: {},
     setTab: vi.fn(),
   });
-  render(<Tab1LivePrediction />);
+  render(
+  <Tab1LivePrediction
+    symbol="BTC/USDT"
+    timeframe="1h"
+    onTimeframeChange={vi.fn()}
+    drawerOpen={false}
+    onDrawerClose={vi.fn()}
+  />,
+);
   expect(useLivePredictionMock).toHaveBeenCalledWith("BTC/USDT", "1h", undefined);
 });
 
@@ -69,7 +85,15 @@ const samplePrediction: LivePrediction = {
 
 test("renders all permanent panel titles (16 always-on panels) when data present", () => {
   useLivePredictionMock.mockReturnValue({ data: samplePrediction });
-  render(<Tab1LivePrediction />);
+  render(
+  <Tab1LivePrediction
+    symbol="BTC/USDT"
+    timeframe="1h"
+    onTimeframeChange={vi.fn()}
+    drawerOpen={false}
+    onDrawerClose={vi.fn()}
+  />,
+);
   // Titles unique to each panel — verify the sidebar wires them all up.
   const titles = [
     /Final Value/i,
@@ -94,13 +118,29 @@ test("renders all permanent panel titles (16 always-on panels) when data present
 
 test("renders DeepLearningSupervisor only when L8 layer is present", () => {
   useLivePredictionMock.mockReturnValue({ data: samplePrediction });
-  render(<Tab1LivePrediction />);
+  render(
+  <Tab1LivePrediction
+    symbol="BTC/USDT"
+    timeframe="1h"
+    onTimeframeChange={vi.fn()}
+    drawerOpen={false}
+    onDrawerClose={vi.fn()}
+  />,
+);
   expect(screen.getByText(/Deep Learning Supervisor/i)).toBeInTheDocument();
 });
 
 test("hides DeepLearningSupervisor when L8 layer is absent", () => {
   const noL8 = { ...samplePrediction, layer_scores: { "1": samplePrediction.layer_scores["1"] } };
   useLivePredictionMock.mockReturnValue({ data: noL8 });
-  render(<Tab1LivePrediction />);
+  render(
+  <Tab1LivePrediction
+    symbol="BTC/USDT"
+    timeframe="1h"
+    onTimeframeChange={vi.fn()}
+    drawerOpen={false}
+    onDrawerClose={vi.fn()}
+  />,
+);
   expect(screen.queryByText(/Deep Learning Supervisor/i)).not.toBeInTheDocument();
 });
