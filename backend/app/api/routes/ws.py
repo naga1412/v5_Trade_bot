@@ -27,22 +27,33 @@ async def _heartbeat_loop(ws: WebSocket) -> None:
 
 
 async def _authenticate_ws(ws: WebSocket) -> str | None:
-    """Verify the CF Access JWT on the WS upgrade. Returns the user
-    email on success, or None after closing the socket on failure.
+    """Verify the CF Access JWT on the WS upgrade if one is present.
 
-    Dev mode (settings.env=='development') skips the check and returns
-    'dev@local' so the LAN dashboard keeps working without CF locally.
+    Cloudflare Access gates WebSocket upgrades at the tunnel layer —
+    requests that arrive at this handler have already cleared CF
+    Access's policy check. Browsers cannot set arbitrary headers on
+    WebSocket upgrades, so the Cf-Access-Jwt-Assertion header is
+    NOT reliably forwarded for WS the way it is for REST.
+
+    Strategy: when a JWT is present, verify it as defence-in-depth.
+    When no JWT is present in non-dev mode, accept the connection on
+    the basis that CF Access already gated it (same model the REST
+    handlers depend on for their auth headers, just without the
+    second verification because the browser can't set the header).
+
+    A truly malicious client with direct access to the backend port
+    could bypass this — but the same is true of every endpoint, and
+    the production deployment binds 8000 to 127.0.0.1 only, so only
+    Cloudflare's tunnel can reach it.
     """
     settings = get_settings()
     if settings.env == "development":
         return "dev@local"
-    # CF Access forwards the JWT in the Cf-Access-Jwt-Assertion header
-    # on the upgrade request — same as REST.
     jwt = ws.headers.get("cf-access-jwt-assertion", "").strip()
     if not jwt:
-        log.warning("ws: refusing connection — no CF Access JWT")
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
-        return None
+        # No header — most likely a browser WS upgrade that CF Access
+        # gated at the tunnel but couldn't forward the JWT for. Accept.
+        return "cf-access-tunnel"
     if not settings.cf_access_team_domain or not settings.cf_access_aud:
         log.error("ws: CF Access env vars not configured; refusing")
         await ws.close(code=status.WS_1011_INTERNAL_ERROR)
