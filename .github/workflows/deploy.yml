@@ -50,4 +50,12 @@ jobs:
              git checkout main && git pull && \
              docker compose up -d --build && \
              docker compose exec -T backend alembic upgrade head && \
-             curl -fsS http://localhost:8000/api/v1/health"
+             echo 'waiting 15s for backend to bind port 8000…' && \
+             sleep 15 && \
+             curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
+                  http://localhost:8000/api/v1/health && \
+             echo '--- populating universe_history (idempotent) ---' && \
+             docker compose exec -T backend \
+                 python /app/tools/populate_universe_history.py || true && \
+             echo '--- recent backend logs (last 30 lines) ---' && \
+             docker compose logs --tail=30 backend"
