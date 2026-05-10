@@ -249,6 +249,14 @@ async def run_preflight(
     Binance check requires the API keys from inside the vault."""
     results: list[CheckResult] = []
 
+    # Default the vault path so callers (lifespan) don't have to know it.
+    # check_vault_decrypt already does the same defaulting; we mirror it
+    # here so the secrets-extraction step below ALSO finds the file.
+    # Without this, lifespan's run_preflight(...) call (which doesn't
+    # pass secrets_path) loaded an empty secrets dict and the Binance
+    # permissions check skipped with "no API keys in vault".
+    effective_secrets_path = secrets_path or Path("/app/secrets.enc")
+
     # 1. Passphrase — cheap; check first.
     pp_check = check_master_passphrase()
     results.append(pp_check)
@@ -257,14 +265,14 @@ async def run_preflight(
     secrets: dict[str, str] = {}
     if pp_check.passed:
         vault_check = check_vault_decrypt(
-            secrets_path=secrets_path,
+            secrets_path=effective_secrets_path,
             passphrase=os.environ.get("MASTER_PASSPHRASE"),
         )
         results.append(vault_check)
-        if vault_check.passed and secrets_path is not None:
+        if vault_check.passed:
             try:
                 secrets = decrypt_secrets(
-                    secrets_path.read_bytes(),
+                    effective_secrets_path.read_bytes(),
                     passphrase=os.environ["MASTER_PASSPHRASE"],
                 )
             except Exception:  # noqa: BLE001
