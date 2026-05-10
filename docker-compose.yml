@@ -52,6 +52,18 @@ services:
       CF_ACCESS_AUD: ${CF_ACCESS_AUD}
       BINANCE_USE_TESTNET: ${BINANCE_USE_TESTNET}
       MASTER_PASSPHRASE: ${MASTER_PASSPHRASE}
+      # SP-8 Phase J: autonomous trading. Without these the lifespan
+      # never reaches the pre-flight branch and the live workers
+      # never start (container env doesn't see vars unless listed
+      # here, even when set in .env).
+      AUTONOMOUS_TRADING_ENABLED: ${AUTONOMOUS_TRADING_ENABLED:-false}
+      AUTO_PROMOTE_TO_TELEGRAM_ENABLED: ${AUTO_PROMOTE_TO_TELEGRAM_ENABLED:-false}
+      AUTO_PROMOTE_TO_FULLYAUTO_ENABLED: ${AUTO_PROMOTE_TO_FULLYAUTO_ENABLED:-false}
+      AUTO_PROMOTE_CONSECUTIVE_DAYS: ${AUTO_PROMOTE_CONSECUTIVE_DAYS:-7}
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://localhost:8000}
     volumes:
       # SP-1.1 / SP-4 — bind-mount checkpoint caches so SCP'd .pt files
       # survive container restarts. The lifespan loader (app/main.py)
