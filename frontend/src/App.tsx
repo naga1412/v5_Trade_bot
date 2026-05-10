@@ -3,6 +3,7 @@ import { TabNav } from "@/components/layout/TabNav";
 import { TopNav } from "@/components/layout/TopNav";
 import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
 import { PausedBanner } from "@/components/layout/PausedBanner";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useHashRoute } from "@/lib/useHashRoute";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { api } from "@/lib/api";
@@ -78,20 +79,26 @@ export default function App() {
       />
       <TabNav active={tab} onChange={setTab} adminVisible={isAdmin} />
       <div className="flex-1 min-h-0">
-        {tab === "live-prediction" ? (
-          <Tab1LivePrediction
-            symbol={symbol}
-            timeframe={timeframe}
-            onTimeframeChange={setTimeframe}
-            drawerOpen={drawerOpen}
-            onDrawerClose={() => setDrawerOpen(false)}
-          />
-        ) :
-         tab === "bot-status" ? <BotStatus /> :
-         tab === "scanner" ? <Tab3Scanner /> :
-         tab === "autonomous" ? <Autonomous /> :
-         tab === "settings" ? <Settings /> :
-         tab === "admin" && isAdmin ? <Admin /> : null}
+        {/* Each tab in its own ErrorBoundary so a panel crash in
+            one tab does not blank the whole dashboard. The boundary
+            is keyed on `tab` so navigating to a fresh tab always
+            resets the error state. */}
+        <ErrorBoundary key={tab} label={tab.replace("-", " ")}>
+          {tab === "live-prediction" ? (
+            <Tab1LivePrediction
+              symbol={symbol}
+              timeframe={timeframe}
+              onTimeframeChange={setTimeframe}
+              drawerOpen={drawerOpen}
+              onDrawerClose={() => setDrawerOpen(false)}
+            />
+          ) :
+           tab === "bot-status" ? <BotStatus /> :
+           tab === "scanner" ? <Tab3Scanner /> :
+           tab === "autonomous" ? <Autonomous /> :
+           tab === "settings" ? <Settings /> :
+           tab === "admin" && isAdmin ? <Admin /> : null}
+        </ErrorBoundary>
       </div>
     </div>
   );
