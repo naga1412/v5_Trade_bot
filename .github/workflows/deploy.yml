@@ -3,24 +3,51 @@ name: deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Hetzner deploy. Required repo secrets:
+    #   HETZNER_HOST           — IP or hostname (e.g. 95.216.187.204)
+    #   HETZNER_SSH_KEY        — private key (PEM) for the deploy user
+    #   HETZNER_USER           — optional, defaults to "root"
+    #   HETZNER_INSTALL_DIR    — optional, defaults to "/opt/trading-radar"
+    # Without HETZNER_HOST the job exits early with a clear message
+    # rather than failing in ssh-keyscan with an empty arg.
+    env:
+      HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+      HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+      HETZNER_USER: ${{ secrets.HETZNER_USER }}
+      HETZNER_INSTALL_DIR: ${{ secrets.HETZNER_INSTALL_DIR }}
     steps:
+      - name: Guard — required secrets present
+        run: |
+          if [ -z "$HETZNER_HOST" ]; then
+            echo "::warning::HETZNER_HOST secret not set; skipping deploy."
+            echo "Add repo secrets HETZNER_HOST + HETZNER_SSH_KEY to enable auto-deploy."
+            exit 0
+          fi
+          echo "host_ok=true" >> $GITHUB_OUTPUT
+        id: guard
+
       - name: Set up SSH
+        if: env.HETZNER_HOST != ''
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.ORACLE_SSH_KEY }}" > ~/.ssh/oracle_key
-          chmod 600 ~/.ssh/oracle_key
-          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts
+          printf '%s\n' "$HETZNER_SSH_KEY" > ~/.ssh/hetzner_key
+          chmod 600 ~/.ssh/hetzner_key
+          ssh-keyscan -H "$HETZNER_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy on Oracle
+      - name: Deploy on Hetzner
+        if: env.HETZNER_HOST != ''
         run: |
-          ssh -i ~/.ssh/oracle_key ubuntu@${{ secrets.ORACLE_HOST }} \
-            'cd ~/trading-radar && \
+          USER_DEFAULTED="${HETZNER_USER:-root}"
+          DIR_DEFAULTED="${HETZNER_INSTALL_DIR:-/opt/trading-radar}"
+          ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+            "cd $DIR_DEFAULTED && \
              git fetch --all && \
              git checkout main && git pull && \
              docker compose up -d --build && \
              docker compose exec -T backend alembic upgrade head && \
-             curl -fsS http://localhost:8000/api/v1/health'
+             curl -fsS http://localhost:8000/api/v1/health"
