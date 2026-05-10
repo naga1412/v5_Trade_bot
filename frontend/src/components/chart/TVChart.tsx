@@ -109,11 +109,24 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
     if (!series) return;
 
     const clearOverlay = (): void => {
+      // lightweight-charts throws "Value is undefined" if the parent
+      // chart has already been disposed (e.g. unmount-cleanup ordering
+      // means the chart-creation effect's `chart.remove()` ran first).
+      // Each removal needs its own try so one disposed line doesn't
+      // skip the rest. Same caveat applies to setMarkers.
       for (const line of priceLinesRef.current) {
-        series.removePriceLine(line);
+        try {
+          series.removePriceLine(line);
+        } catch {
+          // chart already disposed — nothing to clean up
+        }
       }
       priceLinesRef.current = [];
-      series.setMarkers([]);
+      try {
+        series.setMarkers([]);
+      } catch {
+        // chart already disposed
+      }
     };
 
     if (!signalMarkers) {
@@ -200,11 +213,24 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
     const clearGhost = (): void => {
       const series = ghostSeriesRef.current;
       if (series) {
+        // Same disposal-race story as the signal-marker overlay above:
+        // when the user navigates away from Live Prediction, React runs
+        // the chart-creation effect's cleanup first (chart.remove()),
+        // then THIS cleanup runs against an already-disposed chart.
+        // Each call wrapped so one throw doesn't skip the next.
         for (const line of ghostPriceLinesRef.current) {
-          series.removePriceLine(line);
+          try {
+            series.removePriceLine(line);
+          } catch {
+            // chart already disposed
+          }
         }
         ghostPriceLinesRef.current = [];
-        chart.removeSeries(series);
+        try {
+          chart.removeSeries(series);
+        } catch {
+          // chart already disposed
+        }
         ghostSeriesRef.current = null;
       }
     };
