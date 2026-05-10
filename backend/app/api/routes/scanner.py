@@ -155,7 +155,11 @@ async def radar(
         "  GROUP BY symbol "
         ") "
         "SELECT p.symbol AS symbol, p.ts AS ts, p.layer_scores AS layer_scores, "
-        "       COALESCE(u.metadata, '') AS full_name, "
+        # Cast JSONB metadata to text so COALESCE-with-text works in
+        # Postgres (without the cast, '' is parsed as JSON and fails:
+        # 'invalid input syntax for type json'). CAST(.. AS TEXT) is
+        # portable; ::text is Postgres-only and breaks SQLite tests.
+        "       COALESCE(CAST(u.metadata AS TEXT), '') AS full_name, "
         "       NULL AS sparkline "
         "FROM predictions p "
         "JOIN latest l ON l.symbol = p.symbol AND l.max_ts = p.ts "
