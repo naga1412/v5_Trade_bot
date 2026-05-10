@@ -25,9 +25,13 @@ const TR_GREEN = "#00d68f";
 const TR_RED = "#ff3d71";
 const TR_NEUTRAL = "#c4c8d0";
 const TR_TIMEOUT = "#ffaa00";
-// SP-1 ghost colors — same hue as TR_GREEN/TR_RED, 50% alpha (8-digit hex).
-const TR_GREEN_GHOST = "#00d68f80";
-const TR_RED_GHOST = "#ff3d7180";
+// SP-1 ghost colors — same hue as TR_GREEN/TR_RED. Bumped from 50% alpha
+// (`80`) to 90% (`E6`) per operator feedback: at 50% the ghost candle was
+// invisible against the dark chart background, especially on tight-spread
+// bars (BTC at $80k with $1 between open/close). 90% makes the prediction
+// clearly visible while still distinguishable from the live (100%) bars.
+const TR_GREEN_GHOST = "#00d68fE6";
+const TR_RED_GHOST = "#ff3d71E6";
 
 function isoToUnix(iso: string): number {
   return Math.floor(new Date(iso).getTime() / 1000);
@@ -265,14 +269,27 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
       },
     ]);
 
+    // Add a SOLID line at the predicted close so the operator can spot
+    // the ghost prediction at a glance — useful for manual trading. The
+    // P5/P95 dashed lines stay as the uncertainty band.
+    ghostPriceLinesRef.current.push(
+      series.createPriceLine({
+        price: ghost.close,
+        color: ghost.close >= ghost.open ? TR_GREEN_GHOST : TR_RED_GHOST,
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: "Ghost",
+      }),
+    );
     ghostPriceLinesRef.current.push(
       series.createPriceLine({
         price: ghost.p5_low,
         color: TR_RED_GHOST,
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
-        axisLabelVisible: false,
-        title: "P5",
+        axisLabelVisible: true,
+        title: "Ghost P5",
       }),
     );
     ghostPriceLinesRef.current.push(
@@ -281,8 +298,8 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
         color: TR_GREEN_GHOST,
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
-        axisLabelVisible: false,
-        title: "P95",
+        axisLabelVisible: true,
+        title: "Ghost P95",
       }),
     );
 
