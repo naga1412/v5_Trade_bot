@@ -47,13 +47,18 @@ export function SymbolAutocomplete({
   const [active, setActive] = useState(0);
   const [loading, setLoading] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const reqIdRef = useRef(0);
+  // Last value committed via onSelect — used to suppress wasteful
+  // re-fetches when the input re-focuses after a selection.
+  const lastCommittedRef = useRef(initialValue);
   const listboxId = useId();
 
   // Re-sync draft when parent forces a different symbol from outside
-  // (e.g. clicking a row in another panel).
+  // (e.g. clicking a row in another panel, or selecting from another tab).
   useEffect(() => {
     setDraft(initialValue);
+    lastCommittedRef.current = initialValue;
   }, [initialValue]);
 
   // Click-outside closes the dropdown.
@@ -74,6 +79,12 @@ export function SymbolAutocomplete({
   useEffect(() => {
     if (!open || draft.length < 1) {
       setHits([]);
+      return;
+    }
+    // Skip refetching when the draft equals the last committed value.
+    // Without this, re-focusing the input after a selection re-fired
+    // a search of the just-confirmed symbol on every focus.
+    if (draft === lastCommittedRef.current) {
       return;
     }
     const myReqId = ++reqIdRef.current;
@@ -99,7 +110,11 @@ export function SymbolAutocomplete({
   const commit = useCallback(
     (sym: string) => {
       setDraft(sym);
+      lastCommittedRef.current = sym;
       setOpen(false);
+      // Drop focus so the next click on the input is a fresh interaction
+      // (and doesn't immediately re-open + re-search).
+      inputRef.current?.blur();
       onSelect(sym);
     },
     [onSelect],
@@ -109,17 +124,29 @@ export function SymbolAutocomplete({
     if (e.key === "ArrowDown") {
       e.preventDefault();
       if (!open) setOpen(true);
-      setActive((i) => Math.min(i + 1, Math.max(hits.length - 1, 0)));
+      if (hits.length > 0) {
+        setActive((i) => Math.min(i + 1, hits.length - 1));
+      }
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((i) => Math.max(i - 1, 0));
+      if (hits.length > 0) {
+        setActive((i) => Math.max(i - 1, 0));
+      }
     } else if (e.key === "Enter") {
       e.preventDefault();
       const pick = hits[active];
       if (pick) {
         commit(pick.symbol);
+      } else if (loading) {
+        // Don't commit while debounce / fetch is still resolving — the
+        // user might be expecting suggestions. Wait one tick and let
+        // the next render either show hits OR fall through to the
+        // "no matches" branch below.
+        return;
       } else if (draft.trim()) {
-        // No suggestions — submit the literal value (legacy behaviour).
+        // No suggestions arrived. Hand the parent the typed value;
+        // App.handleSymbolChange normalises slashless input
+        // (SHIB -> SHIB/USDT) before passing to the chart.
         commit(draft.trim().toUpperCase());
       }
     } else if (e.key === "Escape") {
@@ -137,6 +164,7 @@ export function SymbolAutocomplete({
   return (
     <div ref={wrapRef} className="relative">
       <input
+        ref={inputRef}
         type="text"
         value={draft}
         onChange={(e) => {
@@ -174,6 +202,10 @@ export function SymbolAutocomplete({
               role="option"
               aria-selected={i === active}
               onMouseDown={(e) => {
+                e.preventDefault();
+                commit(h.symbol);
+              }}
+              onTouchStart={(e) => {
                 e.preventDefault();
                 commit(h.symbol);
               }}
