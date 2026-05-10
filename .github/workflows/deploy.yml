@@ -2,19 +2,19 @@ name: deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
+# Two parallel deploy paths:
+#   main branch -> production (aji12.nagayuaj.com, port 5173/8000)
+#   dev  branch -> staging    (staging.aji12.nagayuaj.com, port 5174/8001)
+#
+# Same Hetzner box, separate docker-compose stacks, separate volumes,
+# separate Postgres database. Staging hard-OFF for autonomous trading
+# regardless of .env contents (compose env override).
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Hetzner deploy. Required repo secrets:
-    #   HETZNER_HOST           — IP or hostname (e.g. 95.216.187.204)
-    #   HETZNER_SSH_KEY        — private key (PEM) for the deploy user
-    #   HETZNER_USER           — optional, defaults to "root"
-    #   HETZNER_INSTALL_DIR    — optional, defaults to "/opt/trading-radar"
-    # Without HETZNER_HOST the job exits early with a clear message
-    # rather than failing in ssh-keyscan with an empty arg.
     env:
       HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
       HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
@@ -28,7 +28,6 @@ jobs:
             echo "Add repo secrets HETZNER_HOST + HETZNER_SSH_KEY to enable auto-deploy."
             exit 0
           fi
-          echo "host_ok=true" >> $GITHUB_OUTPUT
         id: guard
 
       - name: Set up SSH
@@ -39,8 +38,8 @@ jobs:
           chmod 600 ~/.ssh/hetzner_key
           ssh-keyscan -H "$HETZNER_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy on Hetzner
-        if: env.HETZNER_HOST != ''
+      - name: Deploy production (main branch)
+        if: github.ref == 'refs/heads/main' && env.HETZNER_HOST != ''
         run: |
           USER_DEFAULTED="${HETZNER_USER:-root}"
           DIR_DEFAULTED="${HETZNER_INSTALL_DIR:-/opt/trading-radar}"
@@ -59,3 +58,39 @@ jobs:
                  python /app/host-tools/populate_universe_history.py || true && \
              echo '--- recent backend logs (last 30 lines) ---' && \
              docker compose logs --tail=30 backend"
+
+      - name: Deploy staging (dev branch)
+        if: github.ref == 'refs/heads/dev' && env.HETZNER_HOST != ''
+        run: |
+          USER_DEFAULTED="${HETZNER_USER:-root}"
+          # Staging deploys to /opt/trading-radar-staging (separate
+          # checkout so a corrupted dev branch can never overwrite the
+          # prod git tree).
+          DIR_DEFAULTED="${HETZNER_INSTALL_DIR:-/opt/trading-radar}-staging"
+          # First-deploy bootstrap: clone if absent.
+          ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+            "if [ ! -d $DIR_DEFAULTED/.git ]; then \
+               git clone https://github.com/naga1412/v5_Trade_bot.git $DIR_DEFAULTED && \
+               cd $DIR_DEFAULTED && \
+               cp .env.staging.example .env.staging && \
+               echo '⚠ Edit $DIR_DEFAULTED/.env.staging with real values then re-deploy'; \
+             fi"
+          ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+            "cd $DIR_DEFAULTED && \
+             git fetch --all && \
+             git checkout dev && git pull origin dev && \
+             docker compose -f docker-compose.staging.yml --env-file .env.staging \
+                 up -d --build && \
+             docker compose -f docker-compose.staging.yml --env-file .env.staging \
+                 exec -T backend-staging alembic upgrade head && \
+             echo 'waiting 15s for staging backend to bind port 8001…' && \
+             sleep 15 && \
+             curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
+                  http://localhost:8001/api/v1/health && \
+             echo '--- staging populate ---' && \
+             docker compose -f docker-compose.staging.yml --env-file .env.staging \
+                 exec -T backend-staging \
+                 python /app/host-tools/populate_universe_history.py || true && \
+             echo '--- staging backend logs ---' && \
+             docker compose -f docker-compose.staging.yml --env-file .env.staging \
+                 logs --tail=30 backend-staging"
