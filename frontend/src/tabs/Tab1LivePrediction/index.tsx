@@ -42,10 +42,18 @@ export function Tab1LivePrediction({
 }: Props) {
   const { query } = useHashRoute();
   const signalId = query.signal;
-  const { data } = useLivePrediction(symbol, timeframe, signalId);
+  const { data, err } = useLivePrediction(symbol, timeframe, signalId);
 
   return (
     <div className="h-full flex flex-col min-h-0">
+      {err !== null ? (
+        <div
+          role="alert"
+          className="bg-red/20 border-b border-red text-text-primary text-[10px] px-2 py-1 font-mono"
+        >
+          ⚠ {err}
+        </div>
+      ) : null}
       <TimeframeRow active={timeframe} onChange={onTimeframeChange} />
       <main className="flex-1 flex min-h-0">
         <div className="flex-1 min-w-0">
