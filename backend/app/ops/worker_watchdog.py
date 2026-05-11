@@ -36,15 +36,24 @@ WATCHDOG_INTERVAL_SECONDS: int = 5 * 60
 
 
 async def _staleness_seconds(
-    session: AsyncSession, spec: WorkerSpec,
+    session_factory: async_sessionmaker[AsyncSession], spec: WorkerSpec,
 ) -> float | None:
-    """Returns seconds since the worker's last heartbeat, or None on error."""
+    """Returns seconds since the worker's last heartbeat, or None on error.
+
+    Uses a fresh session per call: asyncpg + Postgres aborts the entire
+    transaction on the first SQL error, after which every subsequent
+    query on the same session fails with InFailedSQLTransactionError.
+    The first prod watchdog pass (PR #97) hit a wrong column name on
+    intermarket_snapshots and the cascade poisoned 4 other workers'
+    queries. Per-call sessions isolate failures to the offending worker.
+    """
     if spec.liveness_query is None:
         return None
     try:
-        params = {"n": spec.name} if ":n" in spec.liveness_query else {}
-        result = await session.execute(sa.text(spec.liveness_query), params)
-        row = result.first()
+        async with session_factory() as session:
+            params = {"n": spec.name} if ":n" in spec.liveness_query else {}
+            result = await session.execute(sa.text(spec.liveness_query), params)
+            row = result.first()
     except Exception as e:  # noqa: BLE001
         log.warning("watchdog: liveness query failed for %s: %s", spec.name, e)
         return None
@@ -74,32 +83,31 @@ async def check_all_workers(
 ) -> list[dict[str, object]]:
     """Run one watchdog pass. Returns a status dict per worker."""
     statuses: list[dict[str, object]] = []
-    async with session_factory() as session:
-        for spec in WORKER_REGISTRY:
-            if not _env_gates_met(spec):
-                statuses.append({
-                    "name": spec.name,
-                    "state": "expected_absent",
-                    "reason": f"required_env not set: {spec.required_env}",
-                })
-                continue
-            stale = await _staleness_seconds(session, spec)
-            entry: dict[str, object] = {
+    for spec in WORKER_REGISTRY:
+        if not _env_gates_met(spec):
+            statuses.append({
                 "name": spec.name,
-                "description": spec.description,
-                "stateful": spec.stateful,
-                "max_staleness_seconds": spec.max_staleness_seconds,
-                "staleness_seconds": stale,
-            }
-            if stale is None:
-                entry["state"] = "no_signal"
-            elif stale == float("inf"):
-                entry["state"] = "never_heartbeated"
-            elif stale > spec.max_staleness_seconds:
-                entry["state"] = "stale"
-            else:
-                entry["state"] = "ok"
-            statuses.append(entry)
+                "state": "expected_absent",
+                "reason": f"required_env not set: {spec.required_env}",
+            })
+            continue
+        stale = await _staleness_seconds(session_factory, spec)
+        entry: dict[str, object] = {
+            "name": spec.name,
+            "description": spec.description,
+            "stateful": spec.stateful,
+            "max_staleness_seconds": spec.max_staleness_seconds,
+            "staleness_seconds": stale,
+        }
+        if stale is None:
+            entry["state"] = "no_signal"
+        elif stale == float("inf"):
+            entry["state"] = "never_heartbeated"
+        elif stale > spec.max_staleness_seconds:
+            entry["state"] = "stale"
+        else:
+            entry["state"] = "ok"
+        statuses.append(entry)
     return statuses
 
 
