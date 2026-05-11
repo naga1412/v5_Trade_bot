@@ -219,6 +219,29 @@ export interface FastScanRadar {
   by_tier: Record<string, number>;
 }
 
+// Feature 2 — prediction accuracy telemetry.
+export interface DirectionAccuracy {
+  n: number;
+  correct: number;
+  accuracy_pct: number;
+}
+
+export interface PredictionAccuracy {
+  symbol: string;
+  timeframe: string;
+  validated_count: number;
+  correct_count: number;
+  accuracy_pct: number;
+  pending_count: number;
+  by_direction: {
+    LONG: DirectionAccuracy;
+    SHORT: DirectionAccuracy;
+    NEUTRAL: DirectionAccuracy;
+  };
+  avg_pnl_pct: number | null;
+  last_validated_at: string | null;
+}
+
 export interface EquityCurvePoint {
   date: string;                 // ISO datetime
   cumulative_pnl_usdt: number;
@@ -547,6 +570,10 @@ export const api = {
     const qs = signal ? `?signal=${encodeURIComponent(signal)}` : "";
     return fetchJson<LivePrediction>(`/predict/${symbolPath}/${tf}${qs}`);
   },
+  predictionAccuracy: (symbolPath: string, tf: string, window = 100) =>
+    fetchJson<PredictionAccuracy>(
+      `/predictions/accuracy/${symbolPath}/${tf}?window=${window}`,
+    ),
   botOverview: () => fetchJson<BotOverview>("/bot-status/overview"),
   promotionGate: () => fetchJson<PromotionGate>("/bot-status/promotion-gate"),
   openPositions: () => fetchJson<OpenPosition[]>("/bot-status/open-positions"),
