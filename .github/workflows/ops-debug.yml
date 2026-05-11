@@ -16,6 +16,8 @@ on:
           - tables      # row counts on universe_history + asset_universe + predictions
           - scanner     # show scanner endpoint internals (live SQL EXPLAIN + count)
           - checkpoints # ml_checkpoints + rl_checkpoints rows (is anything active?)
+          - stats       # paper-trade win rate, P&L, open positions, prediction direction split
+          - shadow-debug # why are zero shadow_trades being created? checks worker, thresholds, universe, errors
 
 jobs:
   probe:
@@ -80,5 +82,78 @@ jobs:
                     activated_at, deactivated_at \
                     FROM rl_checkpoints ORDER BY id DESC LIMIT 10;\" && \
                  docker compose exec -T backend ls -la /app/data/ml-cache/ 2>/dev/null || true"
+              ;;
+            stats)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT 'paper trades closed' AS kind, count(*) AS n FROM shadow_trades WHERE closed_at IS NOT NULL \
+                   UNION ALL SELECT 'paper trades open', count(*) FROM shadow_trades WHERE closed_at IS NULL \
+                   UNION ALL SELECT 'live trades open', count(*) FROM live_trades WHERE closed_at IS NULL \
+                   UNION ALL SELECT 'live trades closed', count(*) FROM live_trades WHERE closed_at IS NOT NULL;\" -c \
+                 \"SELECT direction, count(*) AS trades, \
+                    round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
+                    round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
+                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
+                    FROM shadow_trades WHERE closed_at IS NOT NULL GROUP BY direction \
+                    UNION ALL SELECT 'TOTAL', count(*), \
+                      round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1), \
+                      round(sum(pnl_usdt)::numeric, 2), \
+                      round(avg(pnl_pct)::numeric * 100, 2) \
+                    FROM shadow_trades WHERE closed_at IS NOT NULL;\" -c \
+                 \"SELECT direction, count(*) AS predictions, \
+                    round(avg(final_score)::numeric, 3) AS avg_score, \
+                    round(avg(confidence)::numeric, 3) AS avg_conf, \
+                    max(ts) AS last_seen \
+                    FROM predictions WHERE ts > now() - interval '24 hours' \
+                    GROUP BY direction ORDER BY direction;\" -c \
+                 \"SELECT date_trunc('hour', ts) AS hour, count(*) AS predictions \
+                    FROM predictions WHERE ts > now() - interval '6 hours' \
+                    GROUP BY 1 ORDER BY 1 DESC LIMIT 6;\""
+              ;;
+            shadow-debug)
+              # Why are zero shadow_trades being created? Checks the four
+              # things that can prevent the shadow worker from opening
+              # positions: (1) the worker isn't running / has crashed,
+              # (2) asset_universe is empty so it falls back to BTCUSDT only,
+              # (3) prediction scores never clear the 0.30 LONG threshold,
+              # (4) the worker is opening positions but persist is failing.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== row counts (REAL open count from shadow_open_positions) ===' && \
+                 docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT 'shadow_open_positions' AS t, count(*) FROM shadow_open_positions \
+                   UNION ALL SELECT 'shadow_trades (closed)', count(*) FROM shadow_trades \
+                   UNION ALL SELECT 'shadow_cooldowns', count(*) FROM shadow_cooldowns \
+                   UNION ALL SELECT 'asset_universe (total rows)', count(*) FROM asset_universe \
+                   UNION ALL SELECT 'asset_universe (latest snapshot symbols)', \
+                     count(*) FROM asset_universe \
+                     WHERE snapshot_at = (SELECT max(snapshot_at) FROM asset_universe);\" && \
+                 echo '=== prediction score distribution (24h) — entry needs score > 0.30 LONG or < -0.50 SHORT, conf >= 0.50 ===' && \
+                 docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT count(*) AS total_24h, \
+                    round(min(final_score)::numeric, 3) AS min_score, \
+                    round(max(final_score)::numeric, 3) AS max_score, \
+                    round((percentile_cont(0.95) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p95_score, \
+                    round(min(confidence)::numeric, 3) AS min_conf, \
+                    round(max(confidence)::numeric, 3) AS max_conf \
+                    FROM predictions WHERE ts > now() - interval '24 hours';\" -c \
+                 \"SELECT 'long-eligible (score>0.30 AND conf>=0.50)' AS gate, count(*) FROM predictions \
+                    WHERE ts > now() - interval '24 hours' AND final_score > 0.30 AND confidence >= 0.50 \
+                    UNION ALL SELECT 'short-eligible (score<-0.50 AND conf>=0.50)', count(*) FROM predictions \
+                    WHERE ts > now() - interval '24 hours' AND final_score < -0.50 AND confidence >= 0.50 \
+                    UNION ALL SELECT 'conf-blocked (score passes, conf<0.50)', count(*) FROM predictions \
+                    WHERE ts > now() - interval '24 hours' AND (final_score > 0.30 OR final_score < -0.50) AND confidence < 0.50;\" && \
+                 echo '=== shadow worker activity over the entire log buffer ===' && \
+                 docker compose logs --tail=20000 backend 2>&1 | \
+                   grep -iE 'shadow|MultiStreamReader|start_shadow|worker:' | tail -80 && \
+                 echo '=== startup banner (first 80 lines of log buffer) ===' && \
+                 docker compose logs --tail=20000 backend 2>&1 | head -80 && \
+                 echo '=== ENV + WORKER_ENABLED that lifespan checks ===' && \
+                 docker compose exec -T backend env | grep -iE '^(ENV|WORKER_ENABLED|AUTONOMOUS_TRADING_ENABLED|BINANCE)=' | sort && \
+                 echo '=== container restart counts (anything > 0 = crash loop) ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} health={{.State.Health.Status}}'"
               ;;
           esac
