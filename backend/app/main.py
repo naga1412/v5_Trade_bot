@@ -23,6 +23,7 @@ from app.api.routes import (
     health,
     intermarket,  # SP-3.5 Phase E2
     me,
+    predictions,  # Feature 2 — prediction accuracy telemetry
     scanner,  # SP-6 Phase A4
     scanner_fast,  # Feature 4 — multi-asset fast scanner
     tab1,
@@ -50,6 +51,7 @@ from app.ops.telegram_polling import (
     PollerConfig,
     start_telegram_poller,
 )
+from app.ml.validator import start_prediction_validator_task
 from app.ops.verifier_scheduler import start_audit_verifier_task
 from app.ops.worker_watchdog import start_worker_watchdog
 from app.scanner.batch import start_scanner_batch_task
@@ -115,6 +117,7 @@ async def lifespan(_app: FastAPI):
     telegram_poller_task = None
     worker_watchdog_task = None
     scanner_batch_task = None
+    prediction_validator_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -171,6 +174,13 @@ async def lifespan(_app: FastAPI):
         # module-level dict; the /api/v1/scanner/fast endpoint reads
         # from that cache so requests are O(1).
         scanner_batch_task = start_scanner_batch_task(get_session_factory())
+        # Feature 2: 60s prediction validator. Picks up rows from
+        # prediction_validations where target_ts has passed and the
+        # actual close is available; computes was_correct + pnl_pct
+        # so the chart UI can surface live accuracy telemetry.
+        prediction_validator_task = start_prediction_validator_task(
+            get_session_factory(),
+        )
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
         # AUTONOMOUS_TRADING_ENABLED + a passing pre-flight. Pre-flight
@@ -331,6 +341,8 @@ async def lifespan(_app: FastAPI):
             worker_watchdog_task.cancel()
         if scanner_batch_task is not None:
             scanner_batch_task.cancel()
+        if prediction_validator_task is not None:
+            prediction_validator_task.cancel()
         await _aclose_adapters()
 
 
@@ -374,6 +386,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_system.router)  # SP-PAUSE
     app.include_router(admin_traps.router)
     app.include_router(me.router)
+    app.include_router(predictions.router)  # Feature 2 — accuracy telemetry
     app.include_router(scanner.router)  # SP-6
     app.include_router(scanner_fast.router)  # Feature 4 — fast scanner
     app.include_router(intermarket.router)  # SP-3.5

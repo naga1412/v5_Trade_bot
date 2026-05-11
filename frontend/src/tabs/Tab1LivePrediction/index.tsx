@@ -1,6 +1,7 @@
 import { TimeframeRow } from "@/components/layout/TimeframeRow";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TVChart } from "@/components/chart/TVChart";
+import { PredictionAccuracyBadge } from "@/components/PredictionAccuracyBadge";
 import { useLivePrediction } from "@/hooks/useLivePrediction";
 import { useHashRoute } from "@/lib/useHashRoute";
 
@@ -60,15 +61,23 @@ export function Tab1LivePrediction({
       ) : null}
       <TimeframeRow active={timeframe} onChange={onTimeframeChange} />
       <main className="flex-1 flex min-h-0">
-        <div className="flex-1 min-w-0">
-          <TVChart
-            symbol={symbol}
-            timeframe={timeframe}
-            {...(data?.price != null ? { livePrice: data.price } : {})}
-            {...(data?.ts != null ? { liveTs: data.ts } : {})}
-            signalMarkers={data?.signal_markers ?? null}
-            ghost={data?.ghost ?? null}
-          />
+        <div className="flex-1 min-w-0 flex flex-col">
+          <div className="px-2 py-1 border-b border-border bg-bg-panel/50">
+            <PredictionAccuracyBadge
+              symbolPath={symbol.replace("/", "-")}
+              timeframe={timeframe}
+            />
+          </div>
+          <div className="flex-1 min-h-0">
+            <TVChart
+              symbol={symbol}
+              timeframe={timeframe}
+              {...(data?.price != null ? { livePrice: data.price } : {})}
+              {...(data?.ts != null ? { liveTs: data.ts } : {})}
+              signalMarkers={data?.signal_markers ?? null}
+              ghost={data?.ghost ?? null}
+            />
+          </div>
         </div>
         {/* MASTER_PLAN §9 panels in order. DeepLearningSupervisor (#5)
             renders null when no L8 alert; all other slots are permanent. */}

@@ -184,6 +184,14 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=10 * 60,  # 60s cadence + 9min slack
         stateful=False,
     ),
+    # 15. Feature 2 — 60s prediction accuracy validator.
+    WorkerSpec(
+        name="prediction_validator_task",
+        description="60s loop validating predictions against next-bar actual close",
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=10 * 60,
+        stateful=False,
+    ),
 )
 
 
