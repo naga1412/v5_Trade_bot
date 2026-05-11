@@ -211,7 +211,7 @@ jobs:
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && \
                  echo '=== container ===' && \
-                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} health={{.State.Health.Status}} started={{.State.StartedAt}}' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
                  echo '=== backend /api/v1/health ===' && \
                  docker compose exec -T backend curl -s -o /dev/null -m 5 -w 'http_code=%{http_code} time=%{time_total}s\n' http://localhost:8000/api/v1/health && \
                  echo '=== workers (via watchdog check_all_workers) ===' && \
