@@ -5,6 +5,10 @@ import { useLivePrediction } from "@/hooks/useLivePrediction";
 import { useHashRoute } from "@/lib/useHashRoute";
 
 // Tab 1 sidebar panels — order follows MASTER_PLAN §9 lines 280-298.
+// TradeSignalCard is a new top-of-sidebar summary that consolidates the
+// most important fields into one SMC-Pro-style card. The 17 detail
+// panels below remain unchanged.
+import { TradeSignalCard } from "./panels/TradeSignalCard";
 import { TradeStatusBar } from "./panels/TradeStatusBar";
 import { MasterBiasScore } from "./panels/MasterBiasScore";
 import { FinalValue } from "./panels/FinalValue";
@@ -69,6 +73,7 @@ export function Tab1LivePrediction({
         {/* MASTER_PLAN §9 panels in order. DeepLearningSupervisor (#5)
             renders null when no L8 alert; all other slots are permanent. */}
         <Sidebar open={drawerOpen} onClose={onDrawerClose}>
+          <TradeSignalCard data={data} />
           <TradeStatusBar data={data} />
           <MasterBiasScore data={data} />
           <FinalValue data={data} />
