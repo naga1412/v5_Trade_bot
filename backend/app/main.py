@@ -50,6 +50,7 @@ from app.ops.telegram_polling import (
     start_telegram_poller,
 )
 from app.ops.verifier_scheduler import start_audit_verifier_task
+from app.ops.worker_watchdog import start_worker_watchdog
 from app.shadow.worker import start_shadow_worker
 from app.exchanges.binance_live import BinanceLiveClient
 from app.trading.auto_promote import (
@@ -110,6 +111,7 @@ async def lifespan(_app: FastAPI):
     auto_promote_task = None
     liquidation_monitor_task = None
     telegram_poller_task = None
+    worker_watchdog_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -154,6 +156,12 @@ async def lifespan(_app: FastAPI):
         # Skipped in test/ci (no FAPI calls, no DB churn during pytest).
         intermarket_snapshot_task = start_intermarket_snapshot_task(get_session_factory())
         intermarket_cleanup_task = start_intermarket_cleanup_task(get_session_factory())
+        # PR #97: 5-min watchdog that reads each worker's liveness signal
+        # (DB MAX(timestamp) for workers with natural signals; heartbeats
+        # for the rest) and alerts via SMTP on staleness. Stateful workers
+        # are alert-only — auto-restart is unsafe for them. See
+        # app/ops/worker_registry.py for the full list.
+        worker_watchdog_task = start_worker_watchdog(get_session_factory())
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
         # AUTONOMOUS_TRADING_ENABLED + a passing pre-flight. Pre-flight
@@ -310,6 +318,8 @@ async def lifespan(_app: FastAPI):
             liquidation_monitor_task.cancel()
         if telegram_poller_task is not None:
             telegram_poller_task.cancel()
+        if worker_watchdog_task is not None:
+            worker_watchdog_task.cancel()
         await _aclose_adapters()
 
 
