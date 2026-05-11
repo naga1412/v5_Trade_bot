@@ -36,6 +36,15 @@ class WorkerSpec:
     max_staleness_seconds: int
     stateful: bool
     required_env: tuple[str, ...] = ()
+    # PR #97 declared 8 workers using the HEARTBEAT liveness query, but the
+    # follow-up PR that adds record_heartbeat() calls inside each worker's
+    # main loop hasn't shipped yet. Until it does, those workers' MAX(beat_at)
+    # legitimately returns NULL — but reporting that as 'never_heartbeated'
+    # creates ~8 false alarms on every watchdog tick and hides any real
+    # never_heartbeated condition we care about. Workers flagged here are
+    # reported in a separate 'pending_heartbeat' bucket and don't trigger
+    # alerts. Flag is removed when the heartbeat call lands in that worker.
+    pending_heartbeat: bool = False
 
 
 # Canonical liveness signal for workers that have one in a natural table.
@@ -54,6 +63,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=15 * 60,
         stateful=True,
+        pending_heartbeat=True,
     ),
     # 2. Multi-symbol 1h shadow trading worker.
     WorkerSpec(
@@ -62,6 +72,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=2 * 60 * 60,  # 2x its 1h cadence
         stateful=True,  # holds open positions in memory
+        pending_heartbeat=True,
     ),
     # 3. Daily 00:00 UTC asset_universe refresh.
     WorkerSpec(
@@ -94,6 +105,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
+        pending_heartbeat=True,
     ),
     # 7. 5-min crypto / 30-min macro news ingest.
     WorkerSpec(
@@ -110,6 +122,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
+        pending_heartbeat=True,
     ),
     # 9. 5-min funding/OI snapshot.
     WorkerSpec(
@@ -129,6 +142,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
+        pending_heartbeat=True,
     ),
     # 11. 30s liquidation monitor — autonomous-trading-only.
     WorkerSpec(
@@ -138,6 +152,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=5 * 60,  # 30s cadence — be strict
         stateful=True,  # touches exchange — never auto-restart
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
+        pending_heartbeat=True,
     ),
     # 12. Telegram poller — autonomous-trading-only + creds required.
     WorkerSpec(
@@ -149,6 +164,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         required_env=(
             "AUTONOMOUS_TRADING_ENABLED", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
         ),
+        pending_heartbeat=True,
     ),
     # 13. Daily 03:30 UTC mode auto-promote — autonomous-trading-only.
     WorkerSpec(
@@ -158,6 +174,7 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
+        pending_heartbeat=True,
     ),
 )
 
