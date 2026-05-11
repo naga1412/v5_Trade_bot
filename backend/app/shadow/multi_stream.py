@@ -18,10 +18,26 @@ def build_combined_stream_url(
     symbols: list[str],
     *,
     timeframe: str = "1h",
-    base: str = "wss://fstream.binance.com",
+    base: str = "wss://stream.binance.com:9443",
     max_streams: int = 200,
 ) -> str:
-    """Build a Binance combined-stream URL (multiple klines on one connection)."""
+    """Build a Binance combined-stream URL (multiple klines on one connection).
+
+    Default base is the SPOT endpoint (stream.binance.com:9443), NOT the
+    Futures endpoint (fstream.binance.com). Reason: Binance silently
+    geoblocks Futures market-data WS streams from EEA jurisdictions —
+    handshake completes but zero frames are ever delivered. Confirmed
+    from the production Hetzner Helsinki box on 2026-05-11 via
+    ops-debug ws-probe (SPOT WS returned aggTrade frames immediately;
+    Futures WS timed out at 10s with no message). REST endpoints
+    (fapi.binance.com) are unaffected — only the live-stream path.
+
+    The shadow worker uses the kline price action to evaluate paper
+    trade entries; SPOT and Futures prices for liquid pairs are
+    arbitrage-locked within basis points, so SPOT is fine for this use.
+    Funding rate / open interest still come from REST polls in the
+    intermarket_snapshot_task.
+    """
     if not symbols:
         raise ValueError("symbols must be non-empty")
     truncated = symbols[:max_streams]
@@ -52,7 +68,7 @@ class MultiStreamReader:
         symbols: list[str],
         *,
         timeframe: str = "1h",
-        base_url: str = "wss://fstream.binance.com",
+        base_url: str = "wss://stream.binance.com:9443",
         _connect: Callable[[str], AsyncIterator[str]] | None = None,
     ) -> None:
         self.symbols = symbols
