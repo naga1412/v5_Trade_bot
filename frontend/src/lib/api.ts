@@ -185,6 +185,40 @@ export interface LongShortBreakdown {
   short: WindowStats;
 }
 
+// Feature 4 — multi-asset fast-scanner types.
+export interface FastScanModule {
+  name: string;
+  score: number;
+  weight: number;
+  notes: string;
+}
+
+export type FastScanTier = "confirmed" | "probable" | "weak" | "diverging" | "neutral";
+export type FastScanPhase = "markup" | "markdown" | "accumulation" | "distribution" | "neutral";
+
+export interface FastScanCard {
+  symbol: string;
+  timeframe: string;
+  final_score: number;
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  confidence: number;
+  tier: FastScanTier;
+  phase: FastScanPhase;
+  modules: FastScanModule[];
+  last_close: number;
+  expected_move_pct: number | null;
+  rr_estimate: number | null;
+  scanned_at: string;
+}
+
+export interface FastScanRadar {
+  timeframe: string;
+  cache_size: number;
+  bullish: FastScanCard[];
+  bearish: FastScanCard[];
+  by_tier: Record<string, number>;
+}
+
 export interface EquityCurvePoint {
   date: string;                 // ISO datetime
   cumulative_pnl_usdt: number;
@@ -629,6 +663,14 @@ export const api = {
     return fetchJson<ScannerRadar>(
       `/scanner/radar?market=${market}&tf=${tf}&limit=${limit}`,
     );
+  },
+  // --- Feature 4 — fast indicator-only scanner ---
+  scannerFast: (opts: { timeframe?: string; tier?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    qs.set("timeframe", opts.timeframe ?? "1h");
+    if (opts.tier) qs.set("tier", opts.tier);
+    qs.set("limit", String(opts.limit ?? 200));
+    return fetchJson<FastScanRadar>(`/scanner/fast?${qs.toString()}`);
   },
 
   // --- SP-6 Phase A5: admin sub-pages ---

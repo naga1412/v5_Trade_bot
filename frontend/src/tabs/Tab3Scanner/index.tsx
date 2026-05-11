@@ -19,6 +19,7 @@ import { ScannerToolbar, type Market, type Timeframe, type SortKey } from "./Sca
 import { HybridSupervisorBar } from "./HybridSupervisorBar";
 import { BullishColumn } from "./BullishColumn";
 import { BearishColumn } from "./BearishColumn";
+import { FastScanRadar } from "./FastScanRadar";
 import { useScannerRadar } from "./hooks/useScannerRadar";
 import type { ScannerFilter } from "./FilterPills";
 
@@ -77,7 +78,12 @@ export function Tab3Scanner() {
           {error.message}
         </div>
       )}
-      <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-2 gap-2 p-2 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto p-2">
+        {/* Feature 4 — fast indicator-only scan over the asset universe.
+            Sits above the legacy ML-driven radar; the two are
+            complementary (breadth scan vs the per-symbol ML view). */}
+        <FastScanRadar timeframe={tf} />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         <BullishColumn
           cards={data?.bullish ?? []}
           search={search}
@@ -90,6 +96,7 @@ export function Tab3Scanner() {
           filter={filter}
           tf={tf}
         />
+      </div>
       </div>
       <footer className="text-[8px] text-text-tertiary border-t border-border px-2 py-1 flex justify-between">
         <span>
