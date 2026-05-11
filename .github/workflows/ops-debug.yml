@@ -20,6 +20,7 @@ on:
           - shadow-debug # why are zero shadow_trades being created? checks worker, thresholds, universe, errors
           - ws-probe    # one-shot direct WS test against fstream.binance.com — diagnoses silent multi-stream
           - net-probe   # DNS + TCP + HTTPS reachability test from backend container to fstream.binance.com
+          - health-summary # one-page production health: container, workers, errors, recent shadow + prediction activity
 
 jobs:
   probe:
@@ -198,5 +199,43 @@ jobs:
                  docker compose exec -T backend bash -c 'timeout 5 bash -c \"</dev/tcp/fapi.binance.com/443\" && echo TCP_OK_fapi || echo TCP_FAIL_fapi' && \
                  echo '=== HTTPS GET https://fstream.binance.com/ (10s timeout) ===' && \
                  docker compose exec -T backend bash -c 'curl -s -o /dev/null -m 10 -w \"http_code=%{http_code} time=%{time_total}s\\n\" https://fstream.binance.com/'"
+              ;;
+            health-summary)
+              # One-page production health check: container status,
+              # backend health endpoint, the 13-worker watchdog state,
+              # recent error count, shadow trade activity, prediction
+              # cadence. Designed to be safe to run hourly as a polling
+              # monitor — every section bounded so the whole thing
+              # finishes in under 30s.
+              WORKER_SCRIPT='aW1wb3J0IGFzeW5jaW8KZnJvbSBhcHAuZGIuc2Vzc2lvbiBpbXBvcnQgZ2V0X3Nlc3Npb25fZmFjdG9yeQpmcm9tIGFwcC5vcHMud29ya2VyX3dhdGNoZG9nIGltcG9ydCBjaGVja19hbGxfd29ya2Vycwphc3luYyBkZWYgbWFpbigpOgogICAgc2YgPSBnZXRfc2Vzc2lvbl9mYWN0b3J5KCkKICAgIHN0YXR1c2VzID0gYXdhaXQgY2hlY2tfYWxsX3dvcmtlcnMoc2YpCiAgICBva19uID0gc3VtKDEgZm9yIHMgaW4gc3RhdHVzZXMgaWYgc1snc3RhdGUnXSA9PSAnb2snKQogICAgc3RhbGVfbiA9IHN1bSgxIGZvciBzIGluIHN0YXR1c2VzIGlmIHNbJ3N0YXRlJ10gPT0gJ3N0YWxlJykKICAgIG5ldmVyX24gPSBzdW0oMSBmb3IgcyBpbiBzdGF0dXNlcyBpZiBzWydzdGF0ZSddID09ICduZXZlcl9oZWFydGJlYXRlZCcpCiAgICBhYnNlbnRfbiA9IHN1bSgxIGZvciBzIGluIHN0YXR1c2VzIGlmIHNbJ3N0YXRlJ10gPT0gJ2V4cGVjdGVkX2Fic2VudCcpCiAgICBub3NpZ19uID0gc3VtKDEgZm9yIHMgaW4gc3RhdHVzZXMgaWYgc1snc3RhdGUnXSA9PSAnbm9fc2lnbmFsJykKICAgIHByaW50KGYnd29ya2Vyczogb2s9e29rX259IHN0YWxlPXtzdGFsZV9ufSBuZXZlcl9oYj17bmV2ZXJfbn0gZXhwZWN0ZWRfYWJzZW50PXthYnNlbnRfbn0gbm9fc2lnbmFsPXtub3NpZ19ufScpCiAgICBmb3IgcyBpbiBzdGF0dXNlczoKICAgICAgICBpZiBzWydzdGF0ZSddIGluICgnc3RhbGUnLCAnbmV2ZXJfaGVhcnRiZWF0ZWQnLCAnbm9fc2lnbmFsJyk6CiAgICAgICAgICAgIHN0YWxlX3MgPSBzLmdldCgnc3RhbGVuZXNzX3NlY29uZHMnKQogICAgICAgICAgICBpZiBzdGFsZV9zID09IGZsb2F0KCdpbmYnKToKICAgICAgICAgICAgICAgIHN0YWxlX3N0ciA9ICduZXZlcicKICAgICAgICAgICAgZWxpZiBpc2luc3RhbmNlKHN0YWxlX3MsIChpbnQsIGZsb2F0KSk6CiAgICAgICAgICAgICAgICBzdGFsZV9zdHIgPSBmJ3tpbnQoc3RhbGVfcyl9cycKICAgICAgICAgICAgZWxzZToKICAgICAgICAgICAgICAgIHN0YWxlX3N0ciA9ICc/JwogICAgICAgICAgICBwcmludChmIiAge3NbJ25hbWUnXX06IHtzWydzdGF0ZSddfSAoc3RhbGU9e3N0YWxlX3N0cn0pIikKYXN5bmNpby5ydW4obWFpbigpKQo='
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== container ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} health={{.State.Health.Status}} started={{.State.StartedAt}}' && \
+                 echo '=== backend /api/v1/health ===' && \
+                 docker compose exec -T backend curl -s -o /dev/null -m 5 -w 'http_code=%{http_code} time=%{time_total}s\n' http://localhost:8000/api/v1/health && \
+                 echo '=== workers (via watchdog check_all_workers) ===' && \
+                 timeout 30 docker compose exec -T backend python -c 'import base64; exec(base64.b64decode(\"$WORKER_SCRIPT\").decode())' && \
+                 echo '=== errors in last hour ===' && \
+                 ERRC=\$(docker compose logs --since=1h backend 2>&1 | grep -ciE 'error|exception|traceback|500 internal' || true) && \
+                 echo \"error-like log lines (last 1h): \$ERRC\" && \
+                 echo '=== shadow trade activity (last 1h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'open positions' AS k, count(*) FROM shadow_open_positions \
+                     UNION ALL SELECT 'closed trades total', count(*) FROM shadow_trades \
+                     UNION ALL SELECT 'closed trades last 1h', count(*) FROM shadow_trades WHERE closed_at > now() - interval '1 hour' \
+                     UNION ALL SELECT 'opened last 1h (open + closed)', \
+                       (SELECT count(*) FROM shadow_open_positions WHERE opened_at > now() - interval '1 hour') + \
+                       (SELECT count(*) FROM shadow_trades WHERE opened_at > now() - interval '1 hour');\" && \
+                 echo '=== predictions cadence (last 6h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT date_trunc('hour', ts) AS hour, count(*) AS predictions, \
+                       round(max(final_score)::numeric, 3) AS max_score, \
+                       round(min(final_score)::numeric, 3) AS min_score \
+                     FROM predictions WHERE ts > now() - interval '6 hours' \
+                     GROUP BY 1 ORDER BY 1 DESC LIMIT 6;\" && \
+                 echo '=== shadow signals fired in last 1h (from logs) ===' && \
+                 docker compose logs --since=1h backend 2>&1 | grep -E 'shadow_worker:.*SIGNAL' | tail -10 && \
+                 echo '(end)'"
               ;;
           esac
