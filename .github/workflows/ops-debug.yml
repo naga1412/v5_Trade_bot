@@ -169,15 +169,16 @@ jobs:
               # the bug is below the application.
               # The script is base64-encoded so it can pass through SSH +
               # docker exec without YAML / shell quoting hell.
-              # Updated 2026-05-11: previous probe showed kline_1h sub returns
-              # zero frames in 10s. Switching test stream to aggTrade which
-              # fires multiple times per second on BTCUSDT — if THIS still
-              # returns no frames, the WS subscription itself is broken
-              # (not just kline timing). Also extended per-frame wait to 15s
-              # and increased open_timeout safety margin.
-              SCRIPT_B64='aW1wb3J0IGFzeW5jaW8sIGpzb24sIHdlYnNvY2tldHMKVVJMID0gJ3dzczovL2ZzdHJlYW0uYmluYW5jZS5jb20vc3RyZWFtP3N0cmVhbXM9YnRjdXNkdEBhZ2dUcmFkZS9ldGh1c2R0QGFnZ1RyYWRlJwphc3luYyBkZWYgbWFpbigpOgogICAgcHJpbnQoJ2Nvbm5lY3RpbmcgVVJMOicsIFVSTCwgZmx1c2g9VHJ1ZSkKICAgIHRyeToKICAgICAgICBhc3luYyB3aXRoIHdlYnNvY2tldHMuY29ubmVjdChVUkwsIHBpbmdfaW50ZXJ2YWw9MTUsIHBpbmdfdGltZW91dD0xMCwgb3Blbl90aW1lb3V0PTEwKSBhcyB3czoKICAgICAgICAgICAgcHJpbnQoJ2hhbmRzaGFrZSBPSycsIGZsdXNoPVRydWUpCiAgICAgICAgICAgIGZvciBpIGluIHJhbmdlKDUpOgogICAgICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgICAgIHJhdyA9IGF3YWl0IGFzeW5jaW8ud2FpdF9mb3Iod3MucmVjdigpLCB0aW1lb3V0PTE1KQogICAgICAgICAgICAgICAgZXhjZXB0IGFzeW5jaW8uVGltZW91dEVycm9yOgogICAgICAgICAgICAgICAgICAgIHByaW50KGYnZnJhbWUgI3tpfTogVElNRU9VVCAobm8gbWVzc2FnZSBpbiAxNXMpJywgZmx1c2g9VHJ1ZSkKICAgICAgICAgICAgICAgICAgICByZXR1cm4KICAgICAgICAgICAgICAgIHByaW50KGYnZnJhbWUgI3tpfSAoe2xlbihyYXcpfWIpOiB7cmF3WzoyMDBdfScsIGZsdXNoPVRydWUpCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgcHJpbnQoZidjb25uZWN0L3JlY3YgZmFpbGVkOiB7dHlwZShlKS5fX25hbWVfX306IHtlfScsIGZsdXNoPVRydWUpCiAgICAgICAgcmFpc2UKYXN5bmNpby5ydW4obWFpbigpKQo='
+              # Updated 2026-05-11: prior aggTrade probe showed handshake OK
+              # but ZERO frames — Binance accepts the connection then sends
+              # nothing. Likely cause: regional / IP geoblock on Futures
+              # market data. New script also tests SPOT WS as a control:
+              # SPOT works + FUTURES doesn't = clear geoblock signal.
+              # Plus dumps our public IP and ipapi.co geo info so we know
+              # which Hetzner DC region we're in.
+              SCRIPT_B64='aW1wb3J0IGFzeW5jaW8sIGpzb24sIHdlYnNvY2tldHMsIHVybGxpYi5yZXF1ZXN0CnByaW50KCctLS0gcHVibGljIElQIC0tLScsIGZsdXNoPVRydWUpCnRyeToKICAgIHByaW50KHVybGxpYi5yZXF1ZXN0LnVybG9wZW4oJ2h0dHBzOi8vYXBpLmlwaWZ5Lm9yZycsIHRpbWVvdXQ9NSkucmVhZCgpLmRlY29kZSgpLCBmbHVzaD1UcnVlKQpleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICBwcmludChmJ2lwaWZ5IGZhaWxlZDoge2V9JywgZmx1c2g9VHJ1ZSkKcHJpbnQoJy0tLSBJUCBnZW8gKGlwYXBpLmNvKSAtLS0nLCBmbHVzaD1UcnVlKQp0cnk6CiAgICBwcmludCh1cmxsaWIucmVxdWVzdC51cmxvcGVuKCdodHRwczovL2lwYXBpLmNvL2pzb24vJywgdGltZW91dD01KS5yZWFkKCkuZGVjb2RlKClbOjQwMF0sIGZsdXNoPVRydWUpCmV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgIHByaW50KGYnaXBhcGkgZmFpbGVkOiB7ZX0nLCBmbHVzaD1UcnVlKQphc3luYyBkZWYgdGVzdF93cyhuYW1lLCB1cmwpOgogICAgcHJpbnQoZictLS0ge25hbWV9OiB7dXJsfSAtLS0nLCBmbHVzaD1UcnVlKQogICAgdHJ5OgogICAgICAgIGFzeW5jIHdpdGggd2Vic29ja2V0cy5jb25uZWN0KHVybCwgcGluZ19pbnRlcnZhbD0xNSwgcGluZ190aW1lb3V0PTEwLCBvcGVuX3RpbWVvdXQ9MTApIGFzIHdzOgogICAgICAgICAgICBwcmludChmJ3tuYW1lfTogaGFuZHNoYWtlIE9LJywgZmx1c2g9VHJ1ZSkKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgcmF3ID0gYXdhaXQgYXN5bmNpby53YWl0X2Zvcih3cy5yZWN2KCksIHRpbWVvdXQ9MTApCiAgICAgICAgICAgICAgICBwcmludChmJ3tuYW1lfTogRlJBTUUgKHtsZW4ocmF3KX1iKToge3Jhd1s6MjAwXX0nLCBmbHVzaD1UcnVlKQogICAgICAgICAgICBleGNlcHQgYXN5bmNpby5UaW1lb3V0RXJyb3I6CiAgICAgICAgICAgICAgICBwcmludChmJ3tuYW1lfTogVElNRU9VVCAobm8gbWVzc2FnZSBpbiAxMHMpJywgZmx1c2g9VHJ1ZSkKICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICBwcmludChmJ3tuYW1lfTogY29ubmVjdCBmYWlsZWQ6IHt0eXBlKGUpLl9fbmFtZV9ffToge2V9JywgZmx1c2g9VHJ1ZSkKYXN5bmMgZGVmIG1haW4oKToKICAgIGF3YWl0IHRlc3Rfd3MoJ1NQT1QtYWdnVHJhZGUnLCAnd3NzOi8vc3RyZWFtLmJpbmFuY2UuY29tOjk0NDMvd3MvYnRjdXNkdEBhZ2dUcmFkZScpCiAgICBhd2FpdCB0ZXN0X3dzKCdGVVRVUkVTLWFnZ1RyYWRlJywgJ3dzczovL2ZzdHJlYW0uYmluYW5jZS5jb20vd3MvYnRjdXNkdEBhZ2dUcmFkZScpCmFzeW5jaW8ucnVuKG1haW4oKSkK'
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
-                "cd $DIR_DEFAULTED && timeout 30 docker compose exec -T backend python -c 'import base64; exec(base64.b64decode(\"$SCRIPT_B64\").decode())' || echo 'ws-probe killed by timeout=30s — TCP connect to fstream.binance.com:443 is not completing'"
+                "cd $DIR_DEFAULTED && timeout 60 docker compose exec -T backend python -c 'import base64; exec(base64.b64decode(\"$SCRIPT_B64\").decode())' || echo 'ws-probe killed by timeout=60s'"
               ;;
             net-probe)
               # Three quick reachability tests from inside the backend
