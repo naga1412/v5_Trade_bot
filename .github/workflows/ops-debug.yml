@@ -18,6 +18,7 @@ on:
           - checkpoints # ml_checkpoints + rl_checkpoints rows (is anything active?)
           - stats       # paper-trade win rate, P&L, open positions, prediction direction split
           - shadow-debug # why are zero shadow_trades being created? checks worker, thresholds, universe, errors
+          - ws-probe    # one-shot direct WS test against fstream.binance.com — diagnoses silent multi-stream
 
 jobs:
   probe:
@@ -155,5 +156,20 @@ jobs:
                  docker compose exec -T backend env | grep -iE '^(ENV|WORKER_ENABLED|AUTONOMOUS_TRADING_ENABLED|BINANCE)=' | sort && \
                  echo '=== container restart counts (anything > 0 = crash loop) ===' && \
                  docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} health={{.State.Health.Status}}'"
+              ;;
+            ws-probe)
+              # Direct one-shot test: open a WS to fstream.binance.com from
+              # inside the backend container with a 2-symbol subscription
+              # (BTCUSDT + ETHUSDT — known-valid). Print the first 10 frames.
+              # If this works → the bug is the 30-symbol universe contains
+              # invalid streams and Binance rejects the whole sub silently.
+              # If this hangs → outbound to fstream.binance.com is blocked
+              # at the network layer (Hetzner firewall / DNS / etc.) and
+              # the bug is below the application.
+              # The script is base64-encoded so it can pass through SSH +
+              # docker exec without YAML / shell quoting hell.
+              SCRIPT_B64='aW1wb3J0IGFzeW5jaW8sIGpzb24sIHdlYnNvY2tldHMKVVJMID0gJ3dzczovL2ZzdHJlYW0uYmluYW5jZS5jb20vc3RyZWFtP3N0cmVhbXM9YnRjdXNkdEBrbGluZV8xaC9ldGh1c2R0QGtsaW5lXzFoJwphc3luYyBkZWYgbWFpbigpOgogICAgcHJpbnQoJ2Nvbm5lY3RpbmcgVVJMOicsIFVSTCwgZmx1c2g9VHJ1ZSkKICAgIHRyeToKICAgICAgICBhc3luYyB3aXRoIHdlYnNvY2tldHMuY29ubmVjdChVUkwsIHBpbmdfaW50ZXJ2YWw9MTUsIHBpbmdfdGltZW91dD0xMCwgb3Blbl90aW1lb3V0PTEwKSBhcyB3czoKICAgICAgICAgICAgcHJpbnQoJ2hhbmRzaGFrZSBPSycsIGZsdXNoPVRydWUpCiAgICAgICAgICAgIGZvciBpIGluIHJhbmdlKDEwKToKICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICByYXcgPSBhd2FpdCBhc3luY2lvLndhaXRfZm9yKHdzLnJlY3YoKSwgdGltZW91dD0xMCkKICAgICAgICAgICAgICAgIGV4Y2VwdCBhc3luY2lvLlRpbWVvdXRFcnJvcjoKICAgICAgICAgICAgICAgICAgICBwcmludChmJ2ZyYW1lICN7aX06IHRpbWVvdXQgKG5vIG1lc3NhZ2UgaW4gMTBzKScsIGZsdXNoPVRydWUpCiAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgIHBheWxvYWQgPSBqc29uLmxvYWRzKHJhdykKICAgICAgICAgICAgICAgIHN0cmVhbSA9IHBheWxvYWQuZ2V0KCdzdHJlYW0nLCAnbm8tc3RyZWFtJykKICAgICAgICAgICAgICAgIGsgPSBwYXlsb2FkLmdldCgnZGF0YScsIHt9KS5nZXQoJ2snLCB7fSkKICAgICAgICAgICAgICAgIHByaW50KGYnZnJhbWUgI3tpfTogc3RyZWFtPXtzdHJlYW19IGNsb3NlZD17ay5nZXQoIngiKX0gc3ltPXtrLmdldCgicyIpfScsIGZsdXNoPVRydWUpCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgcHJpbnQoZidjb25uZWN0L3JlY3YgZmFpbGVkOiB7dHlwZShlKS5fX25hbWVfX306IHtlfScsIGZsdXNoPVRydWUpCiAgICAgICAgcmFpc2UKYXN5bmNpby5ydW4obWFpbigpKQo='
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python -c 'import base64; exec(base64.b64decode(\"$SCRIPT_B64\").decode())'"
               ;;
           esac
