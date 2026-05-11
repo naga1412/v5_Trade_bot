@@ -16,6 +16,7 @@ on:
           - tables      # row counts on universe_history + asset_universe + predictions
           - scanner     # show scanner endpoint internals (live SQL EXPLAIN + count)
           - checkpoints # ml_checkpoints + rl_checkpoints rows (is anything active?)
+          - stats       # paper-trade win rate, P&L, open positions, prediction direction split
 
 jobs:
   probe:
@@ -80,5 +81,33 @@ jobs:
                     activated_at, deactivated_at \
                     FROM rl_checkpoints ORDER BY id DESC LIMIT 10;\" && \
                  docker compose exec -T backend ls -la /app/data/ml-cache/ 2>/dev/null || true"
+              ;;
+            stats)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT 'paper trades closed' AS kind, count(*) AS n FROM shadow_trades WHERE closed_at IS NOT NULL \
+                   UNION ALL SELECT 'paper trades open', count(*) FROM shadow_trades WHERE closed_at IS NULL \
+                   UNION ALL SELECT 'live trades open', count(*) FROM live_trades WHERE closed_at IS NULL \
+                   UNION ALL SELECT 'live trades closed', count(*) FROM live_trades WHERE closed_at IS NOT NULL;\" -c \
+                 \"SELECT direction, count(*) AS trades, \
+                    round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
+                    round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
+                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
+                    FROM shadow_trades WHERE closed_at IS NOT NULL GROUP BY direction \
+                    UNION ALL SELECT 'TOTAL', count(*), \
+                      round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1), \
+                      round(sum(pnl_usdt)::numeric, 2), \
+                      round(avg(pnl_pct)::numeric * 100, 2) \
+                    FROM shadow_trades WHERE closed_at IS NOT NULL;\" -c \
+                 \"SELECT direction, count(*) AS predictions, \
+                    round(avg(final_score)::numeric, 3) AS avg_score, \
+                    round(avg(confidence)::numeric, 3) AS avg_conf, \
+                    max(ts) AS last_seen \
+                    FROM predictions WHERE ts > now() - interval '24 hours' \
+                    GROUP BY direction ORDER BY direction;\" -c \
+                 \"SELECT date_trunc('hour', ts) AS hour, count(*) AS predictions \
+                    FROM predictions WHERE ts > now() - interval '6 hours' \
+                    GROUP BY 1 ORDER BY 1 DESC LIMIT 6;\""
               ;;
           esac
