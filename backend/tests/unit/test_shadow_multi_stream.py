@@ -14,6 +14,32 @@ def test_combined_stream_url_lowercase_and_joined() -> None:
     assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h"
 
 
+def test_combined_stream_url_default_base_is_spot() -> None:
+    """Regression guard: default WS base must be SPOT, never Futures.
+
+    Binance silently geoblocks Futures market-data WS streams from EEA
+    jurisdictions (confirmed from Hetzner Helsinki on 2026-05-11 — handshake
+    OK, zero frames delivered). The shadow worker MUST default to SPOT WS
+    (stream.binance.com:9443) or the worker silently processes zero candles
+    in production. See ops-debug ws-probe history + multi_stream.py for the
+    full root-cause writeup.
+    """
+    url = build_combined_stream_url(symbols=["BTCUSDT"], timeframe="1h")
+    assert url.startswith("wss://stream.binance.com:9443"), (
+        f"default WS base regressed to non-SPOT: {url}. "
+        "EEA Futures geoblock will silently kill the shadow worker."
+    )
+    assert "fstream.binance.com" not in url
+
+
+def test_multi_stream_reader_default_base_is_spot() -> None:
+    """Same regression guard at the reader-init layer."""
+    reader = MultiStreamReader(symbols=["BTCUSDT"], timeframe="1h")
+    assert reader.url.startswith("wss://stream.binance.com:9443"), (
+        f"MultiStreamReader default URL regressed: {reader.url}"
+    )
+
+
 def test_combined_stream_url_empty_symbols_raises() -> None:
     with pytest.raises(ValueError):
         build_combined_stream_url(symbols=[], timeframe="1h")
