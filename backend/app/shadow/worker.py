@@ -90,14 +90,26 @@ class ShadowWorker:
 
     async def setup(self) -> None:
         """Load open positions + cooldowns + seed REST history."""
+        log.info(
+            "shadow_worker: setup begin (symbols=%d timeframe=%s)",
+            len(self.symbols), SHADOW_TIMEFRAME,
+        )
         async with self.session_factory() as session:
             for pos in await list_open_positions(session, user_id=self.user_id):
                 self.open_positions[pos.symbol] = pos
             self.cooldowns = await load_cooldowns(session, user_id=self.user_id)
+        log.info(
+            "shadow_worker: loaded %d open positions, %d cooldowns from db",
+            len(self.open_positions), len(self.cooldowns),
+        )
 
         if self.seed_history is not None:
             for sym, df in self.seed_history.items():
                 self.bars[sym] = df.copy()
+            log.info(
+                "shadow_worker: setup done (seeded from injection: %d symbols)",
+                len(self.bars),
+            )
             return
 
         async with httpx.AsyncClient() as http:
@@ -131,10 +143,15 @@ class ShadowWorker:
                 df["ts"] = pd.to_datetime(df["ts"], utc=True)
                 df = df.set_index("ts")[["open", "high", "low", "close", "volume"]]
                 self.bars[sym] = df
+        log.info(
+            "shadow_worker: setup done (REST-seeded %d/%d symbols)",
+            len(self.bars), len(self.symbols),
+        )
 
     async def run(self) -> None:
         """Setup + consume the multi-stream until it ends or is cancelled."""
         await self.setup()
+        log.info("shadow_worker: entering stream loop")
         async for candle in self.reader.stream():
             try:
                 await self._handle_candle(candle)
@@ -294,7 +311,23 @@ class ShadowWorker:
             ts=candle.ts,
         )
         if signal is None:
+            # Visibility into why the gate rejected this bar — score below
+            # ±threshold or confidence below 0.50. Without this, prod runs
+            # silent for hours and we can't tell if the worker is alive.
+            log.info(
+                "shadow_worker: %s no-signal score=%.3f conf=%.3f "
+                "(needs score>%.2f LONG or score<%.2f SHORT, conf>=%.2f)",
+                candle.symbol, pred.final.score, pred.final.confidence,
+                self.evaluator.long_threshold,
+                self.evaluator.short_threshold,
+                self.evaluator.min_confidence,
+            )
             return
+        log.info(
+            "shadow_worker: %s SIGNAL %s score=%.3f conf=%.3f entry=%.6f sl=%.6f tp=%.6f",
+            candle.symbol, signal.direction.value, signal.score, signal.confidence,
+            signal.entry_price, signal.stop_loss, signal.take_profit,
+        )
 
         position = ShadowPosition.from_signal(
             signal, position_size_usdt=SHADOW_POSITION_SIZE_USDT,

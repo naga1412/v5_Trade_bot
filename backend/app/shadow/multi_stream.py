@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import websockets
+
+log = logging.getLogger(__name__)
 
 
 def build_combined_stream_url(
@@ -69,7 +72,17 @@ class MultiStreamReader:
     async def stream(self) -> AsyncIterator[MultiStreamCandle]:
         connect = self._connect or self._real_connect
         backoff = 1.0
+        # Visibility: production was running silent for hours with zero
+        # shadow trades because every disconnect/error here was swallowed.
+        # We now log connect, the first few candles per session, and any
+        # exception with its type so we can tell a clean disconnect from
+        # an auth/network/parse failure.
+        log.info(
+            "MultiStreamReader: connecting (symbols=%d timeframe=%s)",
+            len(self.symbols), self.timeframe,
+        )
         while True:
+            candles_seen = 0
             try:
                 async for raw in connect(self.url):
                     backoff = 1.0
@@ -80,7 +93,7 @@ class MultiStreamReader:
                     kline = data.get("k") if isinstance(data, dict) else None
                     if not kline or not kline.get("x"):
                         continue
-                    yield MultiStreamCandle(
+                    candle = MultiStreamCandle(
                         symbol=kline["s"],
                         timeframe=kline["i"],
                         ts=datetime.fromtimestamp(kline["t"] / 1000, tz=timezone.utc),
@@ -90,6 +103,22 @@ class MultiStreamReader:
                         close=float(kline["c"]),
                         volume=float(kline["v"]),
                     )
-            except Exception:  # noqa: BLE001
+                    candles_seen += 1
+                    if candles_seen <= 3:
+                        log.info(
+                            "MultiStreamReader: closed candle #%d %s ts=%s close=%s",
+                            candles_seen, candle.symbol, candle.ts, candle.close,
+                        )
+                    yield candle
+                log.warning(
+                    "MultiStreamReader: stream ended cleanly after %d candles; reconnecting",
+                    candles_seen,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "MultiStreamReader: %s after %d candles; backing off %.1fs",
+                    type(e).__name__, candles_seen, min(30.0, backoff),
+                    exc_info=True,
+                )
                 await asyncio.sleep(min(30.0, backoff))
                 backoff = min(30.0, backoff * 2)
