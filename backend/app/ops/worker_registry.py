@@ -115,7 +115,10 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
     WorkerSpec(
         name="intermarket_snapshot_task",
         description="5-min funding rate + open interest snapshot",
-        liveness_query="SELECT max(ts) FROM intermarket_snapshots",
+        # Column is captured_at (verified against migration 0014), not ts.
+        # The first prod watchdog run hit UndefinedColumnError here, which
+        # also exposed the InFailedSQLTransactionError-cascade bug below.
+        liveness_query="SELECT max(captured_at) FROM intermarket_snapshots",
         max_staleness_seconds=15 * 60,
         stateful=False,
     ),

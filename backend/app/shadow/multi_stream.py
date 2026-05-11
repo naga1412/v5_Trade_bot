@@ -74,21 +74,43 @@ class MultiStreamReader:
         backoff = 1.0
         # Visibility: production was running silent for hours with zero
         # shadow trades because every disconnect/error here was swallowed.
-        # We now log connect, the first few candles per session, and any
-        # exception with its type so we can tell a clean disconnect from
-        # an auth/network/parse failure.
+        # We now log connect, the first few raw frames + candles per
+        # session, and any exception with its type so we can tell:
+        #   - clean disconnect (stream ended) from auth/network/parse failure
+        #   - successful subscription (raw frames flowing) from a rejected
+        #     combined-stream subscription (silence after handshake).
+        # The post-PR-95 prod run uncovered the second mode: WS handshake
+        # OK, "connecting" logged, then literal silence for 20+ minutes
+        # because one or more invalid symbols in the combined sub left the
+        # whole subscription rejected by Binance.
         log.info(
-            "MultiStreamReader: connecting (symbols=%d timeframe=%s)",
-            len(self.symbols), self.timeframe,
+            "MultiStreamReader: connecting (symbols=%d timeframe=%s url=%s)",
+            len(self.symbols), self.timeframe, self.url[:200],
         )
         while True:
             candles_seen = 0
+            frames_seen = 0
             try:
                 async for raw in connect(self.url):
                     backoff = 1.0
+                    frames_seen += 1
+                    if frames_seen <= 3:
+                        log.info(
+                            "MultiStreamReader: raw frame #%d (len=%d) %.200s",
+                            frames_seen, len(raw), raw,
+                        )
                     payload = json.loads(raw)
                     data = payload.get("data") if isinstance(payload, dict) else None
                     if not data:
+                        # Binance returns {"error": {...}} or {"result": null,
+                        # "id": N} on subscription confirmations / rejections.
+                        # Surface those once so we know *why* no klines flow.
+                        if isinstance(payload, dict) and (
+                            "error" in payload or "result" in payload
+                        ):
+                            log.warning(
+                                "MultiStreamReader: control frame: %.300s", raw,
+                            )
                         continue
                     kline = data.get("k") if isinstance(data, dict) else None
                     if not kline or not kline.get("x"):
@@ -111,14 +133,16 @@ class MultiStreamReader:
                         )
                     yield candle
                 log.warning(
-                    "MultiStreamReader: stream ended cleanly after %d candles; reconnecting",
-                    candles_seen,
+                    "MultiStreamReader: stream ended cleanly after %d frames "
+                    "/ %d candles; reconnecting",
+                    frames_seen, candles_seen,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "MultiStreamReader: %s after %d candles; backing off %.1fs",
-                    type(e).__name__, candles_seen, min(30.0, backoff),
-                    exc_info=True,
+                    "MultiStreamReader: %s after %d frames / %d candles; "
+                    "backing off %.1fs",
+                    type(e).__name__, frames_seen, candles_seen,
+                    min(30.0, backoff), exc_info=True,
                 )
                 await asyncio.sleep(min(30.0, backoff))
                 backoff = min(30.0, backoff * 2)
