@@ -126,8 +126,10 @@ jobs:
                  \"SELECT 'shadow_open_positions' AS t, count(*) FROM shadow_open_positions \
                    UNION ALL SELECT 'shadow_trades (closed)', count(*) FROM shadow_trades \
                    UNION ALL SELECT 'shadow_cooldowns', count(*) FROM shadow_cooldowns \
-                   UNION ALL SELECT 'asset_universe', count(*) FROM asset_universe \
-                   UNION ALL SELECT 'asset_universe (active)', count(*) FROM asset_universe WHERE is_active = true;\" && \
+                   UNION ALL SELECT 'asset_universe (total rows)', count(*) FROM asset_universe \
+                   UNION ALL SELECT 'asset_universe (latest snapshot symbols)', \
+                     count(*) FROM asset_universe \
+                     WHERE snapshot_at = (SELECT max(snapshot_at) FROM asset_universe);\" && \
                  echo '=== prediction score distribution (24h) — entry needs score > 0.30 LONG or < -0.50 SHORT, conf >= 0.50 ===' && \
                  docker compose exec -T postgres \
                  psql -U postgres -d trading_radar -c \
