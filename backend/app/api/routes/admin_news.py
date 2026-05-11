@@ -158,7 +158,13 @@ async def refresh_news() -> NewsRefreshOut:
 
     total = 0
     polled: list[str] = []
+    # _build_adapters() returns (CryptoPanicAdapter | None, YahooRssAdapter) —
+    # crypto is None when CRYPTOPANIC_API_KEY isn't configured. Skip it so
+    # the manual refresh endpoint matches the background worker's behavior
+    # (graceful degradation to Yahoo-only).
     for adapter in adapters:
+        if adapter is None:
+            continue
         try:
             n = await _refresh_single_adapter(sf, adapter, since)
             total += n
