@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import GhostOut, LivePredictionOut, SignalMarkersOut
+from app.api.schemas import (
+    GhostOut,
+    GhostPathStepOut,
+    LivePredictionOut,
+    SignalMarkersOut,
+)
 from app.auth.deps import current_user_or_impersonated
 from app.auth.models import User
 from app.core.dataquality.validator import Candle
@@ -18,6 +23,7 @@ from app.data.universe import is_tradable
 from app.db.session import get_session
 from app.ml.checkpoints import get_active_model_and_checkpoint
 from app.ml.inference import predict_ghost_candle
+from app.ml.inference_path import predict_ghost_path
 
 _log = logging.getLogger(__name__)
 
@@ -211,6 +217,28 @@ async def predict(
             )})
         except Exception as e:  # noqa: BLE001
             _log.warning("predict_ghost_candle failed in REST predict: %s", e)
+        # Feature 3: 20-step forward ghost path. Additive — failure to
+        # produce the path leaves pred.ghost_path empty but the
+        # single-bar ghost above still renders. Capped at 20 steps
+        # because uncertainty after that is too wide to be useful.
+        try:
+            path = predict_ghost_path(
+                model=model,
+                bars=bars,
+                last_close=float(bars["close"].iloc[-1]),
+                n_steps=20,
+            )
+            pred = pred.model_copy(update={"ghost_path": [
+                GhostPathStepOut(
+                    step=s.step,
+                    open=s.open, high=s.high, low=s.low, close=s.close,
+                    p5_low=s.p5_low, p95_high=s.p95_high,
+                    uncertainty=s.uncertainty,
+                )
+                for s in path
+            ]})
+        except Exception as e:  # noqa: BLE001
+            _log.warning("predict_ghost_path failed in REST predict: %s", e)
 
     if markers is not None:
         pred = pred.model_copy(update={"signal_markers": markers})

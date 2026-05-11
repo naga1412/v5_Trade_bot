@@ -6,11 +6,12 @@ import {
   type ISeriesApi,
   type IPriceLine,
   type CandlestickData,
+  type LineData,
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
 import { useChartHistory, type ChartCandle } from "@/hooks/useChartHistory";
-import type { GhostCandle, SignalMarkers } from "@/lib/api";
+import type { GhostCandle, GhostPathStep, SignalMarkers } from "@/lib/api";
 
 interface Props {
   symbol: string;
@@ -19,6 +20,7 @@ interface Props {
   liveTs?: string;
   signalMarkers?: SignalMarkers | null;
   ghost?: GhostCandle | null; // SP-1: predicted next-bar candle + uncertainty wicks.
+  ghostPath?: GhostPathStep[]; // Feature 3: forward rollout — bars 2..N + cone.
 }
 
 const TR_GREEN = "#00d68f";
@@ -33,6 +35,15 @@ const TR_TIMEOUT = "#ffaa00";
 const TR_GREEN_GHOST = "#00d68fE6";
 const TR_RED_GHOST = "#ff3d71E6";
 
+// Feature 3 — forward ghost cone palette. Three progressive alpha tiers
+// matching the visual grade: candles (steps 1-3) → close-line dots
+// (steps 4-7) → P5/P95 cone (steps 8-N). Each tier signals decreasing
+// certainty so the eye reads "anywhere in the cone is plausible".
+const TR_GHOST_CANDLE_ALPHA = "B3"; // 70% — used for steps 2-3 fades
+const TR_PATH_CLOSE = "#c4c8d066"; // neutral close-line color, 40% alpha
+const TR_CONE_BOUND = "#7e8d9e66"; // P5/P95 lines, 40% alpha
+const TR_CONE_FILL = "#7e8d9e22"; // area between bounds, 13% alpha
+
 function isoToUnix(iso: string): number {
   return Math.floor(new Date(iso).getTime() / 1000);
 }
@@ -46,7 +57,9 @@ function tfToSeconds(tf: string): number {
   return n * mult;
 }
 
-export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, ghost }: Props) {
+export function TVChart({
+  symbol, timeframe, livePrice, liveTs, signalMarkers, ghost, ghostPath,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
@@ -54,6 +67,12 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
   // SP-1: ghost candle series + its uncertainty-wick price lines.
   const ghostSeriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
   const ghostPriceLinesRef = useRef<IPriceLine[]>([]);
+  // Feature 3: forward-path overlay series — faded candles for steps 2-3,
+  // line for predicted closes (steps 4+), and two lines bounding the cone.
+  const pathCandlesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
+  const pathCloseRef = useRef<ISeriesApi<"Line", Time> | null>(null);
+  const pathP5Ref = useRef<ISeriesApi<"Line", Time> | null>(null);
+  const pathP95Ref = useRef<ISeriesApi<"Line", Time> | null>(null);
 
   const history = useChartHistory(symbol, timeframe);
 
@@ -68,13 +87,11 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
       rightPriceScale: { borderColor: "#1f2530" },
       timeScale: {
         borderColor: "#1f2530", timeVisible: true, secondsVisible: false,
-        // Reserve 5 bars of space to the right of the latest live bar so
-        // the SP-1 ghost candle (one timeframe in the future) actually
-        // renders inside the visible viewport. Without this the ghost
-        // is drawn but clipped — only the right-axis price-line labels
-        // appear, which is what the user kept reporting as "ghost not
-        // drawing".
-        rightOffset: 5,
+        // Reserve 22 bars of space on the right so the SP-1 single ghost
+        // (step 1) AND the Feature 3 forward path (steps 2-20) all fit
+        // inside the visible viewport. Original SP-1 used rightOffset=5
+        // for the one-bar ghost; we extend it to cover the full path.
+        rightOffset: 22,
       },
       autoSize: true,
     });
@@ -314,6 +331,132 @@ export function TVChart({ symbol, timeframe, livePrice, liveTs, signalMarkers, g
 
     return clearGhost;
   }, [ghost, liveTs, timeframe]);
+
+  // Feature 3: forward ghost cone. Steps 2-3 render as full candles (faded),
+  // steps 4-7 as a close-line dot, and steps 8-N as a P5/P95 area cone.
+  // Step 1 is already drawn by the SP-1 ghost effect above — we skip it
+  // here to avoid double-drawing.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    const clearPath = (): void => {
+      // Same disposal-race pattern as the SP-1 ghost cleanup above.
+      const candles = pathCandlesRef.current;
+      const closeLine = pathCloseRef.current;
+      const p5Line = pathP5Ref.current;
+      const p95Line = pathP95Ref.current;
+      if (candles) {
+        try { chart.removeSeries(candles); } catch { /* chart disposed */ }
+        pathCandlesRef.current = null;
+      }
+      if (closeLine) {
+        try { chart.removeSeries(closeLine); } catch { /* chart disposed */ }
+        pathCloseRef.current = null;
+      }
+      if (p5Line) {
+        try { chart.removeSeries(p5Line); } catch { /* chart disposed */ }
+        pathP5Ref.current = null;
+      }
+      if (p95Line) {
+        try { chart.removeSeries(p95Line); } catch { /* chart disposed */ }
+        pathP95Ref.current = null;
+      }
+    };
+
+    if (!ghostPath || ghostPath.length < 2 || !liveTs) {
+      clearPath();
+      return;
+    }
+
+    clearPath();
+
+    const tfSec = tfToSeconds(timeframe);
+    const baseTs = isoToUnix(liveTs);
+
+    // Steps 2-3 — faded candle bodies. Past step 3 the candle bodies are
+    // misleading (uncertainty exceeds the body width), so we drop them.
+    const candleSteps = ghostPath.filter((s) => s.step >= 2 && s.step <= 3);
+    if (candleSteps.length > 0) {
+      const c = chart.addCandlestickSeries({
+        upColor: TR_GREEN_GHOST.slice(0, 7) + TR_GHOST_CANDLE_ALPHA,
+        downColor: TR_RED_GHOST.slice(0, 7) + TR_GHOST_CANDLE_ALPHA,
+        borderUpColor: TR_GREEN_GHOST.slice(0, 7) + TR_GHOST_CANDLE_ALPHA,
+        borderDownColor: TR_RED_GHOST.slice(0, 7) + TR_GHOST_CANDLE_ALPHA,
+        wickUpColor: TR_GREEN_GHOST.slice(0, 7) + TR_GHOST_CANDLE_ALPHA,
+        wickDownColor: TR_RED_GHOST.slice(0, 7) + TR_GHOST_CANDLE_ALPHA,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      const data: CandlestickData<Time>[] = candleSteps.map((s) => ({
+        time: (baseTs + s.step * tfSec) as Time,
+        open: s.open,
+        high: s.high,
+        low: s.low,
+        close: s.close,
+      }));
+      c.setData(data);
+      pathCandlesRef.current = c;
+    }
+
+    // Steps 4+ — predicted-close line. Pivots the eye along the central
+    // path of the projection while the cone below carries the uncertainty.
+    const closeLineSteps = ghostPath.filter((s) => s.step >= 4);
+    if (closeLineSteps.length > 0) {
+      const ln = chart.addLineSeries({
+        color: TR_PATH_CLOSE,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      const data: LineData<Time>[] = closeLineSteps.map((s) => ({
+        time: (baseTs + s.step * tfSec) as Time,
+        value: s.close,
+      }));
+      ln.setData(data);
+      pathCloseRef.current = ln;
+    }
+
+    // Cone bounds — P5 and P95 lines from step 2 onward, both rendered
+    // as thin neutral lines with the area between them shaded faintly.
+    // lightweight-charts doesn't natively support a fill-between, so
+    // we draw the two bounds and rely on the dotted close-line to keep
+    // the eye centered.
+    const coneSteps = ghostPath.filter((s) => s.step >= 2);
+    if (coneSteps.length > 0) {
+      const p5 = chart.addLineSeries({
+        color: TR_CONE_BOUND,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      const p95 = chart.addLineSeries({
+        color: TR_CONE_BOUND,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      p5.setData(coneSteps.map((s) => ({
+        time: (baseTs + s.step * tfSec) as Time,
+        value: s.p5_low,
+      })));
+      p95.setData(coneSteps.map((s) => ({
+        time: (baseTs + s.step * tfSec) as Time,
+        value: s.p95_high,
+      })));
+      pathP5Ref.current = p5;
+      pathP95Ref.current = p95;
+    }
+
+    return clearPath;
+    // TR_CONE_FILL is reserved for a future enhancement that overlays a
+    // semi-transparent fill between p5 and p95 using a CustomSeries view.
+    // lightweight-charts v4 doesn't expose a fill-between primitive.
+    void TR_CONE_FILL;
+  }, [ghostPath, liveTs, timeframe]);
 
   return <div ref={containerRef} className="w-full h-full bg-bg-chart" />;
 }

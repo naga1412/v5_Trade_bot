@@ -55,6 +55,19 @@ export interface GhostCandle {
   uncertainty: number; // [0, ∞), lower = more confident
 }
 
+// Feature 3: one step in the forward ghost path. Steps 1-3 render as
+// full candles, 4-7 as faded close-line dots, 8-N as the P5/P95 cone.
+export interface GhostPathStep {
+  step: number;       // 1-indexed
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  p5_low: number;
+  p95_high: number;
+  uncertainty: number;
+}
+
 // SP-9 Phase F2: F&G index + L9 news bias summary surfaced on Tab 1.
 export interface SentimentSummary {
   fng_value: number;
@@ -103,6 +116,7 @@ export interface LivePrediction {
   inputs_hash: string;
   signal_markers?: SignalMarkers | null;
   ghost?: GhostCandle | null; // SP-1: null when no active ML checkpoint loaded.
+  ghost_path?: GhostPathStep[]; // Feature 3: forward rollout, [] when no model.
   sentiment?: SentimentSummary | null; // SP-9
   news?: NewsSummary | null;            // SP-9
 }
