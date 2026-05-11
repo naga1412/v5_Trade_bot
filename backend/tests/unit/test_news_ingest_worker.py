@@ -358,3 +358,96 @@ async def test_loop_propagates_cancellation_immediately(
 
     # Cancellation propagated before any sleep call.
     assert sleep_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Optional CryptoPanic — graceful degradation when api_key is empty
+# ---------------------------------------------------------------------------
+
+
+def test_build_adapters_returns_none_for_crypto_when_no_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty CRYPTOPANIC_API_KEY should not crash the worker.
+
+    Production was crashing the entire news_ingest task at startup because
+    the CryptoPanicAdapter constructor raised ValueError on the missing
+    key. With the fix, _build_adapters logs a warning and returns
+    (None, YahooRssAdapter) — the worker keeps running with macro news.
+    """
+    from app.config import Settings
+
+    monkeypatch.setattr(
+        "app.news.ingest_worker.get_settings",
+        lambda: Settings(
+            database_url="postgresql+asyncpg://x:x@h/d",
+            redis_url="redis://h:0/0",
+            cryptopanic_api_key="",
+        ),
+    )
+    crypto, yahoo = iw._build_adapters()
+    assert crypto is None
+    assert yahoo is not None
+    assert yahoo.name == "yahoo_rss"
+
+
+def test_build_adapters_constructs_crypto_when_api_key_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import Settings
+
+    monkeypatch.setattr(
+        "app.news.ingest_worker.get_settings",
+        lambda: Settings(
+            database_url="postgresql+asyncpg://x:x@h/d",
+            redis_url="redis://h:0/0",
+            cryptopanic_api_key="real-key",
+        ),
+    )
+    crypto, yahoo = iw._build_adapters()
+    assert crypto is not None
+    assert crypto.name == "cryptopanic"
+    assert yahoo.name == "yahoo_rss"
+
+
+@pytest.mark.asyncio
+async def test_one_iteration_handles_none_crypto_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When crypto_adapter is None, only yahoo is polled and persisted."""
+    yahoo = _FakeAdapter("yahoo_rss", scripted=[[_make_article(
+        source="yahoo_rss", url="https://y.example/1",
+        published_at=datetime(2026, 5, 6, 12, tzinfo=timezone.utc),
+    )]])
+
+    captured: list[Any] = []
+    persisted: list[list[NewsArticle]] = []
+
+    async def _fake_persist(_session: Any, articles: list[NewsArticle],
+                            _sentiments: list[SentimentResult]) -> int:
+        persisted.append(list(articles))
+        return len(articles)
+
+    def _fake_classify(titles: list[str]) -> list[SentimentResult]:
+        return [
+            SentimentResult(score=0.0, label="neutral", confidence=0.5)
+            for _ in titles
+        ]
+
+    monkeypatch.setattr(
+        "app.news.persistence.persist_news_items", _fake_persist,
+    )
+    monkeypatch.setattr("app.news.sentiment.classify_batch", _fake_classify)
+
+    factory = _session_factory_factory(captured)
+
+    # last_macro_run far enough in the past that yahoo IS polled.
+    last_macro_run = datetime(2026, 5, 6, 0, 0, tzinfo=timezone.utc)
+    await iw._run_one_iteration(factory, None, yahoo, last_macro_run)
+
+    # Yahoo was polled, persistence happened, only yahoo articles in the batch.
+    assert len(yahoo.calls) == 1
+    assert len(persisted) == 1
+    assert all(a.source == "yahoo_rss" for a in persisted[0])
+    # Crypto cursor stays empty since crypto was skipped entirely.
+    assert "cryptopanic" not in iw._last_fetch_ts

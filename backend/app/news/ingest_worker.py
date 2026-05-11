@@ -55,22 +55,40 @@ BACKFILL_HOURS: int = 1               # cold-start window
 
 def _build_adapters(
     rate_limited_client_factory: Callable[..., httpx.AsyncClient] | None = None,
-) -> tuple[CryptoPanicAdapter, YahooRssAdapter]:
+) -> tuple[CryptoPanicAdapter | None, YahooRssAdapter]:
     """Construct the production adapter pair.
 
     The ``rate_limited_client_factory`` hook is currently unused — kept
     in the signature so a future test can swap the underlying client
     without monkey-patching this whole function.
+
+    CryptoPanic is optional: ``CryptoPanicAdapter`` requires an api_key
+    and raises ``ValueError`` if empty. Production was crashing the
+    entire news_ingest worker at startup because ``CRYPTOPANIC_API_KEY``
+    isn't set (see watchdog 'news_ingest_task: never_heartbeated' alert
+    that surfaced after PR #97). Return ``None`` for the crypto adapter
+    when no key is configured so the worker keeps running with Yahoo
+    macro news as the sole source. The operator can set the key later
+    to re-enable CryptoPanic without code changes.
     """
     settings = get_settings()
-    crypto = CryptoPanicAdapter(api_key=settings.cryptopanic_api_key)
+    crypto: CryptoPanicAdapter | None
+    if settings.cryptopanic_api_key:
+        crypto = CryptoPanicAdapter(api_key=settings.cryptopanic_api_key)
+    else:
+        log.warning(
+            "news_ingest: CRYPTOPANIC_API_KEY not set; "
+            "crypto headline ingest is disabled. "
+            "Yahoo macro RSS continues to run."
+        )
+        crypto = None
     yahoo = YahooRssAdapter()
     return crypto, yahoo
 
 
 async def _run_one_iteration(
     session_factory: Any,
-    crypto_adapter: CryptoPanicAdapter | Any,
+    crypto_adapter: CryptoPanicAdapter | Any | None,
     yahoo_adapter: YahooRssAdapter | Any,
     last_macro_run: datetime,
 ) -> None:
@@ -79,12 +97,17 @@ async def _run_one_iteration(
     Extracted from :func:`run_news_ingest_loop` so it can be unit-tested
     in isolation. The macro adapter is only polled if at least
     :data:`MACRO_INTERVAL_S` seconds have elapsed since ``last_macro_run``.
+
+    ``crypto_adapter`` may be ``None`` when CRYPTOPANIC_API_KEY is not
+    configured — in that case the iteration only polls Yahoo macro news.
     """
     now = datetime.now(timezone.utc)
-    cutoff_crypto = _last_fetch_ts.get(
-        crypto_adapter.name, now - timedelta(hours=BACKFILL_HOURS),
-    )
-    crypto_articles = await crypto_adapter.fetch_recent(since=cutoff_crypto)
+    crypto_articles: list[NewsArticle] = []
+    if crypto_adapter is not None:
+        cutoff_crypto = _last_fetch_ts.get(
+            crypto_adapter.name, now - timedelta(hours=BACKFILL_HOURS),
+        )
+        crypto_articles = list(await crypto_adapter.fetch_recent(since=cutoff_crypto))
 
     macro_articles: list[NewsArticle] = []
     if datetime.now(timezone.utc) - last_macro_run >= timedelta(seconds=MACRO_INTERVAL_S):
@@ -109,7 +132,7 @@ async def _run_one_iteration(
         await persist_news_items(session, all_articles, sentiments)
         await session.commit()
 
-    if crypto_articles:
+    if crypto_articles and crypto_adapter is not None:
         _last_fetch_ts[crypto_adapter.name] = max(
             a.published_at for a in crypto_articles
         )
