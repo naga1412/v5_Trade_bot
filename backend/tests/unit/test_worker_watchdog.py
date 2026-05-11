@@ -95,6 +95,40 @@ async def test_no_heartbeat_row_is_never_heartbeated(heartbeat_factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_heartbeat_row_with_pending_flag_is_pending_heartbeat(heartbeat_factory) -> None:
+    factory = heartbeat_factory
+    spec = WorkerSpec(
+        name="w_pending", description="not yet instrumented",
+        liveness_query=HEARTBEAT, max_staleness_seconds=60, stateful=False,
+        pending_heartbeat=True,
+    )
+    with patch.object(worker_watchdog, "WORKER_REGISTRY", (spec,)):
+        statuses = await worker_watchdog.check_all_workers(factory)
+    assert statuses[0]["state"] == "pending_heartbeat"
+
+
+@pytest.mark.asyncio
+async def test_pending_heartbeat_does_not_trigger_alert() -> None:
+    statuses = [
+        {"name": "w_pending", "state": "pending_heartbeat"},
+        {"name": "w_real_dead", "state": "stale", "stateful": False,
+         "staleness_seconds": 7200, "max_staleness_seconds": 3600},
+    ]
+    sent: list[str] = []
+
+    async def _capture(message: str, *, severity: str = "warning") -> bool:
+        sent.append(message)
+        return True
+
+    with patch.object(worker_watchdog, "alert_admin", _capture):
+        await worker_watchdog._alert_if_dead(statuses)
+
+    assert len(sent) == 1
+    assert "w_real_dead" in sent[0]
+    assert "w_pending" not in sent[0]
+
+
+@pytest.mark.asyncio
 async def test_required_env_unset_is_expected_absent(heartbeat_factory, monkeypatch) -> None:
     factory = heartbeat_factory
     monkeypatch.delenv("AUTONOMOUS_TRADING_ENABLED", raising=False)

@@ -102,7 +102,14 @@ async def check_all_workers(
         if stale is None:
             entry["state"] = "no_signal"
         elif stale == float("inf"):
-            entry["state"] = "never_heartbeated"
+            # Workers flagged pending_heartbeat haven't had record_heartbeat()
+            # wired into their loop yet — their MAX(beat_at) is legitimately
+            # NULL. Surface that distinctly so the watchdog doesn't false-
+            # alarm 8x on every tick (would drown out a real never-beat).
+            if spec.pending_heartbeat:
+                entry["state"] = "pending_heartbeat"
+            else:
+                entry["state"] = "never_heartbeated"
         elif stale > spec.max_staleness_seconds:
             entry["state"] = "stale"
         else:
@@ -112,6 +119,8 @@ async def check_all_workers(
 
 
 async def _alert_if_dead(statuses: list[dict[str, object]]) -> None:
+    # pending_heartbeat is intentionally NOT in the alert set — those
+    # workers are known-pending instrumentation, not real failures.
     dead = [s for s in statuses if s["state"] in {"stale", "never_heartbeated"}]
     if not dead:
         return
