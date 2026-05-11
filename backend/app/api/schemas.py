@@ -57,6 +57,21 @@ class GhostOut(BaseModel):
     uncertainty: float = Field(ge=0.0)
 
 
+class GhostPathStepOut(BaseModel):
+    """One step in the forward-rollout path (Feature 3).
+
+    step is 1-indexed. P5/P95 widens by √step (~normal-walk fan).
+    """
+    step: int = Field(ge=1)
+    open: float
+    high: float
+    low: float
+    close: float
+    p5_low: float
+    p95_high: float
+    uncertainty: float = Field(ge=0.0)
+
+
 # --- SP-9 Phase F5: admin news REST schemas -------------------------------
 
 
@@ -119,6 +134,9 @@ class LivePredictionOut(BaseModel):
     signal_markers: SignalMarkersOut | None = None
     # SP-1: ghost candle prediction (None when no checkpoint loaded).
     ghost: GhostOut | None = None
+    # Feature 3: forward path of N ghost steps with widening uncertainty
+    # cone. Empty list when no checkpoint loaded or insufficient bars.
+    ghost_path: list[GhostPathStepOut] = Field(default_factory=list)
     # SP-5 Phase F1: enriched payload (traps fired, raw scores, tier) the
     # persistence sites merge into ``predictions.layer_scores`` JSONB. Kept
     # off the strict ``layer_scores`` field so the API response shape stays

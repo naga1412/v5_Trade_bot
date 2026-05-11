@@ -76,6 +76,7 @@ export function Tab1LivePrediction({
               {...(data?.ts != null ? { liveTs: data.ts } : {})}
               signalMarkers={data?.signal_markers ?? null}
               ghost={data?.ghost ?? null}
+              ghostPath={data?.ghost_path ?? []}
             />
           </div>
         </div>
