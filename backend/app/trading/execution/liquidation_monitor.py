@@ -186,6 +186,9 @@ async def run_liquidation_monitor_loop(
     iteration using the vault-decrypted keys. Per-call construction
     avoids stale clients after key rotation.
     """
+    log.info(
+        "liq monitor: starting (poll_interval=%.1fs)", poll_interval_s,
+    )
     while True:
         try:
             await _sleep(poll_interval_s)
@@ -196,6 +199,11 @@ async def run_liquidation_monitor_loop(
             async with session_factory() as session:
                 positions = await _list_open_positions(session)
             if not positions:
+                # Heartbeat-via-log so the watchdog has a signal even when
+                # there are zero open live trades (the steady state in
+                # Manual mode). Capped to once per minute to keep volume
+                # reasonable.
+                log.info("liq monitor: tick (no open positions)")
                 continue
 
             client = binance_factory()

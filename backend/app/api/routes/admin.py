@@ -31,7 +31,8 @@ from app.auth.impersonation import (
     set_active_target,
 )
 from app.auth.models import PendingInvitation, User
-from app.db.session import get_session
+from app.db.session import get_session, get_session_factory
+from app.ops.worker_watchdog import check_all_workers
 
 router = APIRouter(
     prefix="/api/v1/admin",
@@ -380,3 +381,19 @@ async def audit_trail(
 
     entries.sort(key=lambda e: e.ts, reverse=True)
     return entries[offset : offset + limit]
+
+
+@router.get("/workers")
+async def worker_status() -> list[dict[str, Any]]:
+    """Per-worker liveness as computed by the watchdog.
+
+    Returns one row per registered worker with state in:
+      - ok: heartbeat fresher than max_staleness_seconds
+      - stale: heartbeat older than max_staleness_seconds
+      - never_heartbeated: liveness query returned NULL
+      - no_signal: worker has no liveness signal declared
+      - expected_absent: required_env not set (worker not spawned)
+
+    The same data is what the watchdog uses to decide alerts.
+    """
+    return await check_all_workers(get_session_factory())  # type: ignore[return-value]
