@@ -146,16 +146,14 @@ jobs:
                     WHERE ts > now() - interval '24 hours' AND final_score < -0.50 AND confidence >= 0.50 \
                     UNION ALL SELECT 'conf-blocked (score passes, conf<0.50)', count(*) FROM predictions \
                     WHERE ts > now() - interval '24 hours' AND (final_score > 0.30 OR final_score < -0.50) AND confidence < 0.50;\" && \
-                 echo '=== shadow worker log activity (last 24h, last 60 lines) ===' && \
-                 docker compose logs --since=24h --tail=2000 backend 2>&1 | \
-                   grep -iE 'shadow|persist open|persist close' | tail -60 && \
-                 echo '=== shadow-related errors (last 24h) ===' && \
-                 docker compose logs --since=24h --tail=5000 backend 2>&1 | \
-                   grep -iE 'shadow|persist open|persist close' | grep -iE 'error|fail|exception|traceback' | tail -40 && \
-                 echo '=== worker_enabled + env settings the lifespan checks ===' && \
-                 docker compose exec -T backend python -c \
-                   'from app.core.settings import settings; \
-                    print(\\\"env =\\\", settings.env); \
-                    print(\\\"worker_enabled =\\\", settings.worker_enabled)'"
+                 echo '=== shadow worker activity over the entire log buffer ===' && \
+                 docker compose logs --tail=20000 backend 2>&1 | \
+                   grep -iE 'shadow|MultiStreamReader|start_shadow|worker:' | tail -80 && \
+                 echo '=== startup banner (first 80 lines of log buffer) ===' && \
+                 docker compose logs --tail=20000 backend 2>&1 | head -80 && \
+                 echo '=== ENV + WORKER_ENABLED that lifespan checks ===' && \
+                 docker compose exec -T backend env | grep -iE '^(ENV|WORKER_ENABLED|AUTONOMOUS_TRADING_ENABLED|BINANCE)=' | sort && \
+                 echo '=== container restart counts (anything > 0 = crash loop) ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} health={{.State.Health.Status}}'"
               ;;
           esac
