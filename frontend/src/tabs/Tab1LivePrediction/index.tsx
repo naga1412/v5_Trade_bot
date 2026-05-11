@@ -1,10 +1,15 @@
 import { TimeframeRow } from "@/components/layout/TimeframeRow";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TVChart } from "@/components/chart/TVChart";
+import { PredictionAccuracyBadge } from "@/components/PredictionAccuracyBadge";
 import { useLivePrediction } from "@/hooks/useLivePrediction";
 import { useHashRoute } from "@/lib/useHashRoute";
 
 // Tab 1 sidebar panels — order follows MASTER_PLAN §9 lines 280-298.
+// TradeSignalCard is a new top-of-sidebar summary that consolidates the
+// most important fields into one SMC-Pro-style card. The 17 detail
+// panels below remain unchanged.
+import { TradeSignalCard } from "./panels/TradeSignalCard";
 import { TradeStatusBar } from "./panels/TradeStatusBar";
 import { MasterBiasScore } from "./panels/MasterBiasScore";
 import { FinalValue } from "./panels/FinalValue";
@@ -56,19 +61,29 @@ export function Tab1LivePrediction({
       ) : null}
       <TimeframeRow active={timeframe} onChange={onTimeframeChange} />
       <main className="flex-1 flex min-h-0">
-        <div className="flex-1 min-w-0">
-          <TVChart
-            symbol={symbol}
-            timeframe={timeframe}
-            {...(data?.price != null ? { livePrice: data.price } : {})}
-            {...(data?.ts != null ? { liveTs: data.ts } : {})}
-            signalMarkers={data?.signal_markers ?? null}
-            ghost={data?.ghost ?? null}
-          />
+        <div className="flex-1 min-w-0 flex flex-col">
+          <div className="px-2 py-1 border-b border-border bg-bg-panel/50">
+            <PredictionAccuracyBadge
+              symbolPath={symbol.replace("/", "-")}
+              timeframe={timeframe}
+            />
+          </div>
+          <div className="flex-1 min-h-0">
+            <TVChart
+              symbol={symbol}
+              timeframe={timeframe}
+              {...(data?.price != null ? { livePrice: data.price } : {})}
+              {...(data?.ts != null ? { liveTs: data.ts } : {})}
+              signalMarkers={data?.signal_markers ?? null}
+              ghost={data?.ghost ?? null}
+              ghostPath={data?.ghost_path ?? []}
+            />
+          </div>
         </div>
         {/* MASTER_PLAN §9 panels in order. DeepLearningSupervisor (#5)
             renders null when no L8 alert; all other slots are permanent. */}
         <Sidebar open={drawerOpen} onClose={onDrawerClose}>
+          <TradeSignalCard data={data} />
           <TradeStatusBar data={data} />
           <MasterBiasScore data={data} />
           <FinalValue data={data} />

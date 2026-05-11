@@ -55,6 +55,19 @@ export interface GhostCandle {
   uncertainty: number; // [0, ∞), lower = more confident
 }
 
+// Feature 3: one step in the forward ghost path. Steps 1-3 render as
+// full candles, 4-7 as faded close-line dots, 8-N as the P5/P95 cone.
+export interface GhostPathStep {
+  step: number;       // 1-indexed
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  p5_low: number;
+  p95_high: number;
+  uncertainty: number;
+}
+
 // SP-9 Phase F2: F&G index + L9 news bias summary surfaced on Tab 1.
 export interface SentimentSummary {
   fng_value: number;
@@ -103,6 +116,7 @@ export interface LivePrediction {
   inputs_hash: string;
   signal_markers?: SignalMarkers | null;
   ghost?: GhostCandle | null; // SP-1: null when no active ML checkpoint loaded.
+  ghost_path?: GhostPathStep[]; // Feature 3: forward rollout, [] when no model.
   sentiment?: SentimentSummary | null; // SP-9
   news?: NewsSummary | null;            // SP-9
 }
@@ -183,6 +197,63 @@ export interface RecentTrade {
 export interface LongShortBreakdown {
   long: WindowStats;
   short: WindowStats;
+}
+
+// Feature 4 — multi-asset fast-scanner types.
+export interface FastScanModule {
+  name: string;
+  score: number;
+  weight: number;
+  notes: string;
+}
+
+export type FastScanTier = "confirmed" | "probable" | "weak" | "diverging" | "neutral";
+export type FastScanPhase = "markup" | "markdown" | "accumulation" | "distribution" | "neutral";
+
+export interface FastScanCard {
+  symbol: string;
+  timeframe: string;
+  final_score: number;
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  confidence: number;
+  tier: FastScanTier;
+  phase: FastScanPhase;
+  modules: FastScanModule[];
+  last_close: number;
+  expected_move_pct: number | null;
+  rr_estimate: number | null;
+  scanned_at: string;
+}
+
+export interface FastScanRadar {
+  timeframe: string;
+  cache_size: number;
+  bullish: FastScanCard[];
+  bearish: FastScanCard[];
+  by_tier: Record<string, number>;
+}
+
+// Feature 2 — prediction accuracy telemetry.
+export interface DirectionAccuracy {
+  n: number;
+  correct: number;
+  accuracy_pct: number;
+}
+
+export interface PredictionAccuracy {
+  symbol: string;
+  timeframe: string;
+  validated_count: number;
+  correct_count: number;
+  accuracy_pct: number;
+  pending_count: number;
+  by_direction: {
+    LONG: DirectionAccuracy;
+    SHORT: DirectionAccuracy;
+    NEUTRAL: DirectionAccuracy;
+  };
+  avg_pnl_pct: number | null;
+  last_validated_at: string | null;
 }
 
 export interface EquityCurvePoint {
@@ -513,6 +584,10 @@ export const api = {
     const qs = signal ? `?signal=${encodeURIComponent(signal)}` : "";
     return fetchJson<LivePrediction>(`/predict/${symbolPath}/${tf}${qs}`);
   },
+  predictionAccuracy: (symbolPath: string, tf: string, window = 100) =>
+    fetchJson<PredictionAccuracy>(
+      `/predictions/accuracy/${symbolPath}/${tf}?window=${window}`,
+    ),
   botOverview: () => fetchJson<BotOverview>("/bot-status/overview"),
   promotionGate: () => fetchJson<PromotionGate>("/bot-status/promotion-gate"),
   openPositions: () => fetchJson<OpenPosition[]>("/bot-status/open-positions"),
@@ -629,6 +704,14 @@ export const api = {
     return fetchJson<ScannerRadar>(
       `/scanner/radar?market=${market}&tf=${tf}&limit=${limit}`,
     );
+  },
+  // --- Feature 4 — fast indicator-only scanner ---
+  scannerFast: (opts: { timeframe?: string; tier?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    qs.set("timeframe", opts.timeframe ?? "1h");
+    if (opts.tier) qs.set("tier", opts.tier);
+    qs.set("limit", String(opts.limit ?? 200));
+    return fetchJson<FastScanRadar>(`/scanner/fast?${qs.toString()}`);
   },
 
   // --- SP-6 Phase A5: admin sub-pages ---

@@ -176,6 +176,22 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
         pending_heartbeat=True,
     ),
+    # 14. Feature 4 — 60s multi-asset fast scanner.
+    WorkerSpec(
+        name="scanner_batch_task",
+        description="60s deterministic fast-scan over the asset universe",
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=10 * 60,  # 60s cadence + 9min slack
+        stateful=False,
+    ),
+    # 15. Feature 2 — 60s prediction accuracy validator.
+    WorkerSpec(
+        name="prediction_validator_task",
+        description="60s loop validating predictions against next-bar actual close",
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=10 * 60,
+        stateful=False,
+    ),
 )
 
 

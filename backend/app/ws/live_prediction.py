@@ -13,6 +13,7 @@ from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.session import get_session_factory
+from app.ml.validator import record_pending_validation
 from app.trading.execution.glue import dispatch_if_eligible, vault_keys
 
 log = logging.getLogger(__name__)
@@ -141,6 +142,22 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                     "cold_start": pred.cold_start,
                     **ghost_payload,
                 })
+                # Feature 2: insert a pending-validation row so the
+                # 60s validator worker can compute hit/miss at the next
+                # bar close. Best-effort — failure must not block the
+                # actual prediction persistence above.
+                await record_pending_validation(
+                    session,
+                    prediction_id=None,
+                    user_id=BOOTSTRAP_ADMIN_USER_ID,
+                    symbol=pred.symbol,
+                    timeframe=pred.timeframe,
+                    direction=pred.final.direction,
+                    score=pred.final.score,
+                    confidence=pred.final.confidence,
+                    anchor_ts=pred.ts,
+                    anchor_close=float(bars["close"].iloc[-1]),
+                )
                 await session.commit()
         except Exception as e:  # noqa: BLE001
             log.error("persist_prediction failed; suppressing publish: %s", e)
