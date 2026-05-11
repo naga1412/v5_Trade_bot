@@ -17,6 +17,7 @@ on:
           - scanner     # show scanner endpoint internals (live SQL EXPLAIN + count)
           - checkpoints # ml_checkpoints + rl_checkpoints rows (is anything active?)
           - stats       # paper-trade win rate, P&L, open positions, prediction direction split
+          - shadow-debug # why are zero shadow_trades being created? checks worker, thresholds, universe, errors
 
 jobs:
   probe:
@@ -109,5 +110,50 @@ jobs:
                  \"SELECT date_trunc('hour', ts) AS hour, count(*) AS predictions \
                     FROM predictions WHERE ts > now() - interval '6 hours' \
                     GROUP BY 1 ORDER BY 1 DESC LIMIT 6;\""
+              ;;
+            shadow-debug)
+              # Why are zero shadow_trades being created? Checks the four
+              # things that can prevent the shadow worker from opening
+              # positions: (1) the worker isn't running / has crashed,
+              # (2) asset_universe is empty so it falls back to BTCUSDT only,
+              # (3) prediction scores never clear the 0.30 LONG threshold,
+              # (4) the worker is opening positions but persist is failing.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== row counts (REAL open count from shadow_open_positions) ===' && \
+                 docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT 'shadow_open_positions' AS t, count(*) FROM shadow_open_positions \
+                   UNION ALL SELECT 'shadow_trades (closed)', count(*) FROM shadow_trades \
+                   UNION ALL SELECT 'shadow_cooldowns', count(*) FROM shadow_cooldowns \
+                   UNION ALL SELECT 'asset_universe', count(*) FROM asset_universe \
+                   UNION ALL SELECT 'asset_universe (active)', count(*) FROM asset_universe WHERE is_active = true;\" && \
+                 echo '=== prediction score distribution (24h) — entry needs score > 0.30 LONG or < -0.50 SHORT, conf >= 0.50 ===' && \
+                 docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT count(*) AS total_24h, \
+                    round(min(final_score)::numeric, 3) AS min_score, \
+                    round(max(final_score)::numeric, 3) AS max_score, \
+                    round((percentile_cont(0.95) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p95_score, \
+                    round(min(confidence)::numeric, 3) AS min_conf, \
+                    round(max(confidence)::numeric, 3) AS max_conf \
+                    FROM predictions WHERE ts > now() - interval '24 hours';\" -c \
+                 \"SELECT 'long-eligible (score>0.30 AND conf>=0.50)' AS gate, count(*) FROM predictions \
+                    WHERE ts > now() - interval '24 hours' AND final_score > 0.30 AND confidence >= 0.50 \
+                    UNION ALL SELECT 'short-eligible (score<-0.50 AND conf>=0.50)', count(*) FROM predictions \
+                    WHERE ts > now() - interval '24 hours' AND final_score < -0.50 AND confidence >= 0.50 \
+                    UNION ALL SELECT 'conf-blocked (score passes, conf<0.50)', count(*) FROM predictions \
+                    WHERE ts > now() - interval '24 hours' AND (final_score > 0.30 OR final_score < -0.50) AND confidence < 0.50;\" && \
+                 echo '=== shadow worker log activity (last 24h, last 60 lines) ===' && \
+                 docker compose logs --since=24h --tail=2000 backend 2>&1 | \
+                   grep -iE 'shadow|persist open|persist close' | tail -60 && \
+                 echo '=== shadow-related errors (last 24h) ===' && \
+                 docker compose logs --since=24h --tail=5000 backend 2>&1 | \
+                   grep -iE 'shadow|persist open|persist close' | grep -iE 'error|fail|exception|traceback' | tail -40 && \
+                 echo '=== worker_enabled + env settings the lifespan checks ===' && \
+                 docker compose exec -T backend python -c \
+                   'from app.core.settings import settings; \
+                    print(\\\"env =\\\", settings.env); \
+                    print(\\\"worker_enabled =\\\", settings.worker_enabled)'"
               ;;
           esac
