@@ -47,6 +47,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "liquidation_monitor_task": "app/trading/execution/liquidation_monitor.py",
     "telegram_poller_task": "app/ops/telegram_polling.py",
     "auto_promote_task": "app/trading/auto_promote.py",
+    "scanner_batch_task": "app/scanner/batch.py",
 }
 
 
