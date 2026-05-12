@@ -22,6 +22,7 @@ on:
           - net-probe   # DNS + TCP + HTTPS reachability test from backend container to fstream.binance.com
           - health-summary # one-page production health: container, workers, errors, recent shadow + prediction activity
           - watchdog-audit # diagnostic: what watchdog script is the host cron actually running, vs the in-tree copy
+          - score-distribution # all-time score/confidence/gate/validation stats for predictions — answers "is the model predictive"
 
 jobs:
   probe:
@@ -280,5 +281,72 @@ jobs:
                  (tail -20 $DIR_DEFAULTED/scripts/watchdog.log 2>/dev/null || \
                   tail -20 /var/log/watchdog.log 2>/dev/null || \
                   echo '(no watchdog.log found at common paths)')"
+              ;;
+            score-distribution)
+              # Goal-question probe: is the ConvLSTM+indicator ensemble actually
+              # predictive on 1h crypto candles, or are we just noise on noise?
+              # All read-only SQL against the predictions, prediction_validations,
+              # shadow_trades, and shadow_cooldowns tables. NO time-window filter
+              # (full life of the table). Counts how many predictions would have
+              # cleared the conservative entry gates, and how often the model
+              # was directionally right when the validator graded it.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== predictions table — global stats ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) AS total_rows, min(ts) AS first_ts, max(ts) AS last_ts \
+                       FROM predictions;\" && \
+                 echo '=== predictions — direction split (all time) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, count(*) AS n, \
+                       round(avg(final_score)::numeric, 3) AS avg_score, \
+                       round(avg(confidence)::numeric, 3) AS avg_conf \
+                     FROM predictions GROUP BY direction ORDER BY direction;\" && \
+                 echo '=== predictions — score distribution (all time, percentile) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT \
+                       round((percentile_cont(0.05) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p05, \
+                       round((percentile_cont(0.25) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p25, \
+                       round((percentile_cont(0.50) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS median, \
+                       round((percentile_cont(0.75) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p75, \
+                       round((percentile_cont(0.95) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p95, \
+                       round((percentile_cont(0.99) WITHIN GROUP (ORDER BY final_score))::numeric, 3) AS p99 \
+                     FROM predictions;\" && \
+                 echo '=== predictions — would-be signal counts (all time, with breakdown) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'all rows' AS bucket, count(*) FROM predictions \
+                     UNION ALL SELECT 'score>0.30 (LONG threshold)', count(*) FROM predictions WHERE final_score > 0.30 \
+                     UNION ALL SELECT 'score<-0.50 (SHORT threshold)', count(*) FROM predictions WHERE final_score < -0.50 \
+                     UNION ALL SELECT 'LONG-fireable (score>0.30 AND conf>=0.50)', count(*) FROM predictions WHERE final_score > 0.30 AND confidence >= 0.50 \
+                     UNION ALL SELECT 'SHORT-fireable (score<-0.50 AND conf>=0.50)', count(*) FROM predictions WHERE final_score < -0.50 AND confidence >= 0.50 \
+                     UNION ALL SELECT 'conf-blocked LONG (score>0.30 BUT conf<0.50)', count(*) FROM predictions WHERE final_score > 0.30 AND confidence < 0.50 \
+                     UNION ALL SELECT 'conf-blocked SHORT (score<-0.50 BUT conf<0.50)', count(*) FROM predictions WHERE final_score < -0.50 AND confidence < 0.50;\" && \
+                 echo '=== prediction_validations — accuracy ledger (PR #109) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) AS total_validated, \
+                       sum(CASE WHEN direction_correct THEN 1 ELSE 0 END) AS correct, \
+                       round((100.0 * sum(CASE WHEN direction_correct THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct \
+                     FROM prediction_validations;\" && \
+                 echo '=== prediction_validations — accuracy by direction ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT p.direction, count(v.*) AS n, \
+                       sum(CASE WHEN v.direction_correct THEN 1 ELSE 0 END) AS correct, \
+                       round((100.0 * sum(CASE WHEN v.direction_correct THEN 1 ELSE 0 END) / nullif(count(v.*), 0))::numeric, 1) AS accuracy_pct \
+                     FROM prediction_validations v JOIN predictions p ON p.id = v.prediction_id \
+                     GROUP BY p.direction ORDER BY p.direction;\" && \
+                 echo '=== shadow_cooldowns — currently active ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) AS active_cooldowns FROM shadow_cooldowns WHERE expires_at > now();\" && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, expires_at - now() AS time_remaining FROM shadow_cooldowns WHERE expires_at > now() ORDER BY expires_at;\" && \
+                 echo '=== shadow_trades — closed P&L ledger (raw) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, symbol, direction, \
+                       round(entry_price::numeric, 4) AS entry, \
+                       round(exit_price::numeric, 4) AS exit, \
+                       round(pnl_pct::numeric, 4) AS pnl_pct, \
+                       round(pnl_usdt::numeric, 2) AS pnl_usdt, \
+                       opened_at, closed_at, close_reason \
+                     FROM shadow_trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC;\""
               ;;
           esac
