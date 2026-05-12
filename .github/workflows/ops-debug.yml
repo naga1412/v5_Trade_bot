@@ -323,17 +323,20 @@ jobs:
                      UNION ALL SELECT 'conf-blocked SHORT (score<-0.50 BUT conf<0.50)', count(*) FROM predictions WHERE final_score < -0.50 AND confidence < 0.50;\" && \
                  echo '=== prediction_validations — accuracy ledger (PR #109) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT count(*) AS total_validated, \
-                       sum(CASE WHEN direction_correct THEN 1 ELSE 0 END) AS correct, \
-                       round((100.0 * sum(CASE WHEN direction_correct THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct \
+                   \"SELECT count(*) AS total_rows, \
+                       count(*) FILTER (WHERE validated_at IS NOT NULL) AS validated, \
+                       sum(CASE WHEN was_correct THEN 1 ELSE 0 END) AS correct, \
+                       round((100.0 * sum(CASE WHEN was_correct THEN 1 ELSE 0 END) / nullif(count(*) FILTER (WHERE validated_at IS NOT NULL), 0))::numeric, 1) AS accuracy_pct, \
+                       round(avg(pnl_pct) FILTER (WHERE validated_at IS NOT NULL)::numeric, 4) AS avg_pnl_pct \
                      FROM prediction_validations;\" && \
-                 echo '=== prediction_validations — accuracy by direction ===' && \
+                 echo '=== prediction_validations — accuracy by direction (validated only) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT p.direction, count(v.*) AS n, \
-                       sum(CASE WHEN v.direction_correct THEN 1 ELSE 0 END) AS correct, \
-                       round((100.0 * sum(CASE WHEN v.direction_correct THEN 1 ELSE 0 END) / nullif(count(v.*), 0))::numeric, 1) AS accuracy_pct \
-                     FROM prediction_validations v JOIN predictions p ON p.id = v.prediction_id \
-                     GROUP BY p.direction ORDER BY p.direction;\" && \
+                   \"SELECT direction, count(*) AS n, \
+                       sum(CASE WHEN was_correct THEN 1 ELSE 0 END) AS correct, \
+                       round((100.0 * sum(CASE WHEN was_correct THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct, \
+                       round(avg(pnl_pct)::numeric, 4) AS avg_pnl_pct \
+                     FROM prediction_validations WHERE validated_at IS NOT NULL \
+                     GROUP BY direction ORDER BY direction;\" && \
                  echo '=== shadow_cooldowns — currently active ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT count(*) AS active_cooldowns FROM shadow_cooldowns WHERE expires_at > now();\" && \
