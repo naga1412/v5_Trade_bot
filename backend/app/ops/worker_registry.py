@@ -112,7 +112,15 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         name="news_ingest_task",
         description="5-min crypto + 30-min macro news ingest",
         liveness_query="SELECT max(fetched_at) FROM news_items",
-        max_staleness_seconds=45 * 60,  # 30min macro cadence + 15min slack
+        # 2 hours, not 45 min. The liveness signal is "MAX(fetched_at)
+        # in news_items" — but that only advances when an adapter
+        # successfully writes a NEW article. Yahoo RSS macro polls
+        # every 30 min but frequently returns 0 new articles (news flow
+        # isn't constant); CryptoPanic is disabled in prod (no api_key).
+        # 45 min was tripping the stale alert almost continuously,
+        # generating ~12 log warnings/hour with no real failure.
+        # 2 h is generous and reflects the actual cadence of real news.
+        max_staleness_seconds=2 * 60 * 60,
         stateful=False,
     ),
     # 8. Nightly 04:00 UTC news cleanup.
