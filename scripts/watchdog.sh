@@ -119,8 +119,26 @@ check_disk() {
 }
 
 # ============================================================
-# Check 4: Predictions stale (no writes in last 2h → restart worker)
+# Check 4: Predictions table activity (informational only — DO NOT auto-restart)
 # ============================================================
+# The live worker is per-user-WebSocket-subscription, NOT a cron. It only
+# writes predictions when a user is actively watching a symbol on the
+# dashboard. Empty rows in the last 2h is the EXPECTED behavior when
+# nobody is viewing the app — NOT a sign that anything is stuck.
+#
+# Previous revision auto-restarted the backend on this signal. That caused
+# a restart loop every ~15 min whenever the operator was away from the
+# dashboard:
+#   - watchdog sees 0 predictions in 2h → restarts container
+#   - new container has no active WS subscribers → still 0 predictions
+#   - 15 min later, restart again
+# The shadow worker (which holds open paper-trade positions) survives
+# restart but the multi-stream WS reconnects can drop in-flight candle
+# bars. Several overnight restarts on 2026-05-11/12 triggered this loop.
+#
+# The right "is the trading engine stuck" signal is shadow_open_positions
+# transitions or the worker_heartbeats table (Python worker_watchdog).
+# Both are tracked elsewhere — no need to alert here.
 check_predictions_fresh() {
   local count
   count=$(docker exec tr-postgres psql -U postgres -d trading_radar -t -c \
@@ -133,9 +151,8 @@ check_predictions_fresh() {
   fi
 
   if [ "$count" = "0" ]; then
-    ALERTS+=("no predictions written in 2h (live worker stuck?)")
-    run docker compose -f "$INSTALL_DIR/docker-compose.yml" restart backend
-    ACTIONS+=("restarted backend (stale predictions)")
+    # Log-only — no Telegram alert, no auto-restart. This is informational.
+    log "predictions_fresh: 0 rows in last 2h (expected if dashboard not in use)"
   fi
 }
 
