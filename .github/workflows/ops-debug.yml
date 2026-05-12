@@ -21,6 +21,7 @@ on:
           - ws-probe    # one-shot direct WS test against fstream.binance.com — diagnoses silent multi-stream
           - net-probe   # DNS + TCP + HTTPS reachability test from backend container to fstream.binance.com
           - health-summary # one-page production health: container, workers, errors, recent shadow + prediction activity
+          - watchdog-audit # diagnostic: what watchdog script is the host cron actually running, vs the in-tree copy
 
 jobs:
   probe:
@@ -239,5 +240,45 @@ jobs:
                  echo '=== shadow signals fired in last 1h (from logs) ===' && \
                  docker compose logs --since=1h backend 2>&1 | grep -E 'shadow_worker:.*SIGNAL' | tail -10 && \
                  echo '(end)'"
+              ;;
+            watchdog-audit)
+              # Diagnostic only — read-only on host, no docker exec.
+              # Goal: find out exactly which file the host cron is invoking
+              # as the watchdog, hash it, dump its check_predictions_fresh
+              # block, and compare to the in-tree /opt/trading-radar copy
+              # (which should match origin/main). Also surface any local
+              # git modifications that might be blocking `git pull` from
+              # updating the file on deploys.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "echo '=== root crontab ===' && \
+                 (crontab -l 2>/dev/null || echo '(no root crontab)') && \
+                 echo '=== /etc/crontab ===' && \
+                 (cat /etc/crontab 2>/dev/null || echo '(missing)') && \
+                 echo '=== /etc/cron.d/ contents ===' && \
+                 (ls -la /etc/cron.d/ 2>/dev/null && \
+                  for f in /etc/cron.d/*; do \
+                    [ -f \"\$f\" ] && echo \"-- \$f --\" && cat \"\$f\"; \
+                  done) && \
+                 echo '=== systemd timers (if any watchdog-related) ===' && \
+                 (systemctl list-timers --all 2>/dev/null | grep -iE 'watch|trading' || echo '(none)') && \
+                 echo '=== candidate watchdog script paths ===' && \
+                 for p in $DIR_DEFAULTED/scripts/watchdog.sh /usr/local/bin/watchdog.sh /usr/local/sbin/watchdog.sh /root/watchdog.sh /opt/watchdog.sh; do \
+                   if [ -f \"\$p\" ]; then \
+                     echo \"-- \$p sha1=\$(sha1sum \"\$p\" | awk '{print \$1}') mtime=\$(stat -c '%y' \"\$p\")\"; \
+                   fi; \
+                 done && \
+                 echo '=== in-tree script: check_predictions_fresh block ===' && \
+                 echo \"-- sha1=\$(sha1sum $DIR_DEFAULTED/scripts/watchdog.sh | awk '{print \$1}')\" && \
+                 sed -n '115,165p' $DIR_DEFAULTED/scripts/watchdog.sh && \
+                 echo '=== prod git tree state ===' && \
+                 cd $DIR_DEFAULTED && \
+                 git rev-parse --abbrev-ref HEAD && \
+                 git rev-parse HEAD && \
+                 git status -s -- scripts/watchdog.sh && \
+                 git log --oneline -3 -- scripts/watchdog.sh && \
+                 echo '=== watchdog log tail (if exists) ===' && \
+                 (tail -20 $DIR_DEFAULTED/scripts/watchdog.log 2>/dev/null || \
+                  tail -20 /var/log/watchdog.log 2>/dev/null || \
+                  echo '(no watchdog.log found at common paths)')"
               ;;
           esac
