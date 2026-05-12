@@ -138,6 +138,14 @@ async def _create_shadow_tables(engine: Any) -> None:
             "ts TEXT NOT NULL, "
             "price REAL, "
             "layer_scores TEXT NOT NULL, "
+            # Mirrors the prod migration 0002 columns. Required so the
+            # scanner radar endpoint can read direction/final_score/
+            # confidence directly from the row instead of digging into
+            # layer_scores JSONB (the latter is unsafe when the 'final'
+            # key is a scalar float — see scanner.py:_build_card).
+            "direction TEXT, "
+            "final_score REAL, "
+            "confidence REAL, "
             "inputs_hash TEXT NOT NULL DEFAULT '')"
         ))
         # SP-7 Phase B4: backtests table. SQLite-friendly mirror of

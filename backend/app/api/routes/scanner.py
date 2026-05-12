@@ -71,29 +71,61 @@ def _wyckoff_phase_from_notes(notes: str) -> str:
 
 def _build_card(row: Any) -> SignalCardOut | None:
     ls = _coerce_layer_scores(row.layer_scores)
-    final = ls.get("final") or {}
-    direction = final.get("direction") or "NEUTRAL"
+    # direction / final_score / confidence live on dedicated top-level
+    # columns of the predictions row. Read them from there first.
+    # Historical fallback: very old rows MAY only have these in
+    # layer_scores["final"] as a dict. But _build_extras (current
+    # writer) stores layer_scores["final"] as a SCALAR FLOAT, not a
+    # dict. Calling .get("direction") on a float crashed production
+    # with AttributeError on 2026-05-12 — only protect the fallback
+    # path when the JSONB value really is a dict.
+    direction_raw = getattr(row, "direction", None)
+    if not direction_raw:
+        fallback_final = ls.get("final")
+        if isinstance(fallback_final, dict):
+            direction_raw = fallback_final.get("direction")
+    direction = direction_raw or "NEUTRAL"
     if direction not in ("LONG", "SHORT"):
         # Defensive: NEUTRAL rows are filtered out at this point so the
         # bullish/bearish split downstream stays clean.
         return None
-    tier = ls.get("tier") or "NO_SIGNAL"
-    if tier not in ("NO_SIGNAL", "PAPER", "SMALL", "STANDARD", "A+"):
+    tier_raw = ls.get("tier")
+    if not isinstance(tier_raw, str) or tier_raw not in (
+        "NO_SIGNAL", "PAPER", "SMALL", "STANDARD", "A+",
+    ):
         tier = "NO_SIGNAL"
-    raw_score = float(final.get("score") or 0.0)
-    raw_conf = float(final.get("confidence") or 0.0)
+    else:
+        tier = tier_raw
+    score_raw = getattr(row, "final_score", None)
+    conf_raw = getattr(row, "confidence", None)
+    if score_raw is None or conf_raw is None:
+        fallback_final = ls.get("final")
+        if isinstance(fallback_final, dict):
+            if score_raw is None:
+                score_raw = fallback_final.get("score")
+            if conf_raw is None:
+                conf_raw = fallback_final.get("confidence")
+    raw_score = float(score_raw or 0.0)
+    raw_conf = float(conf_raw or 0.0)
 
-    smc = ls.get("4") or {}
-    wyckoff_layer = ls.get("1") or {}
-    micro = ls.get("6") or {}
-    momentum_layer = ls.get("3") or {}
+    # Defensive: layer entries in layer_scores can be dicts, None, or
+    # (post-extras-merge) raw scalars (floats, strings). Coerce non-dict
+    # values to {} so the .get(...) calls below never explode.
+    def _as_dict(v: Any) -> dict[str, Any]:
+        return cast(dict[str, Any], v) if isinstance(v, dict) else {}
+
+    smc = _as_dict(ls.get("4"))
+    wyckoff_layer = _as_dict(ls.get("1"))
+    micro = _as_dict(ls.get("6"))
+    momentum_layer = _as_dict(ls.get("3"))
     scores = SignalCardScores(
         smc=int(round(float(smc.get("strength") or 0.0) * 100)),
         wyckoff=int(round(float(wyckoff_layer.get("strength") or 0.0) * 100)),
         microstructure=int(round(float(micro.get("strength") or 0.0) * 100)),
         momentum=int(round(float(momentum_layer.get("strength") or 0.0) * 100)),
     )
-    notes = wyckoff_layer.get("notes") or ""
+    notes_raw = wyckoff_layer.get("notes")
+    notes = notes_raw if isinstance(notes_raw, str) else ""
     wyckoff_phase = _wyckoff_phase_from_notes(notes)
 
     sparkline: list[float] = []
@@ -155,6 +187,9 @@ async def radar(
         "  GROUP BY symbol "
         ") "
         "SELECT p.symbol AS symbol, p.ts AS ts, p.layer_scores AS layer_scores, "
+        "       p.direction AS direction, "
+        "       p.final_score AS final_score, "
+        "       p.confidence AS confidence, "
         # Cast JSONB metadata to text so COALESCE-with-text works in
         # Postgres (without the cast, '' is parsed as JSON and fails:
         # 'invalid input syntax for type json'). CAST(.. AS TEXT) is

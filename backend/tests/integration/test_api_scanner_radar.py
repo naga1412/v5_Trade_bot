@@ -38,12 +38,13 @@ async def _seed_predictions(session, *, user_id: int, n: int) -> None:
         }
         await session.execute(sa.text(
             "INSERT INTO predictions (user_id, symbol, timeframe, ts, price, "
-            "layer_scores, inputs_hash) VALUES "
-            "(:u, :s, '1h', :t, :p, :ls, 'h0')"
+            "layer_scores, direction, final_score, confidence, inputs_hash) "
+            "VALUES (:u, :s, '1h', :t, :p, :ls, :d, :sc, :cf, 'h0')"
         ), {
             "u": user_id, "s": sym,
             "t": (base_ts - timedelta(minutes=i)).isoformat(),
             "p": 100.0 + i, "ls": json.dumps(layer_scores),
+            "d": direction, "sc": score, "cf": 0.7,
         })
 
 
