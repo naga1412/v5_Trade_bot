@@ -117,6 +117,21 @@ describe("OpenPositions", () => {
     });
   });
 
+  test("clicking a position card navigates to live-prediction with that symbol", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    window.location.hash = "";
+    vi.mocked(api.openPositions).mockResolvedValue(samplePos);
+    render(<OpenPositions />);
+    await waitFor(() => {
+      expect(screen.getByText("BTC/USDT")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByLabelText(/open BTC\/USDT LONG chart/i));
+    expect(window.location.hash).toBe(
+      "#/live-prediction?symbol=BTC%2FUSDT&tf=1h",
+    );
+    window.location.hash = "";
+  });
+
   test("opened event triggers refetch", async () => {
     vi.mocked(api.openPositions).mockResolvedValue(samplePos);
     const { rerender } = render(<OpenPositions />);
