@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type FastScanRadar as FastScanRadarData, type FastScanCard } from "@/lib/api";
+import { buildLivePredictionHash } from "./applyFilter";
 
 interface Props {
   timeframe?: string;
@@ -27,7 +28,15 @@ function fmtPct(v: number | null, dp: number = 2): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(dp)}%`;
 }
 
-function ScanCardRow({ card, side }: { card: FastScanCard; side: "long" | "short" }) {
+function ScanCardRow({
+  card,
+  side,
+  onOpen,
+}: {
+  card: FastScanCard;
+  side: "long" | "short";
+  onOpen: (symbol: string) => void;
+}) {
   const dirColor = side === "long" ? "text-green" : "text-red";
   const scoreColor =
     card.final_score > 0 ? "text-green"
@@ -35,8 +44,17 @@ function ScanCardRow({ card, side }: { card: FastScanCard; side: "long" | "short
         : "text-text-secondary";
   return (
     <article
-      className="bg-bg-panel rounded border border-border px-2 py-1.5 mb-1 hover:border-text-tertiary/40 transition-colors"
+      className="bg-bg-panel rounded border border-border px-2 py-1.5 mb-1 hover:border-text-tertiary/40 transition-colors cursor-pointer focus:outline-none focus:border-text-tertiary"
       aria-label={`scan card ${card.symbol}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(card.symbol)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(card.symbol);
+        }
+      }}
     >
       <header className="flex items-center justify-between mb-1">
         <span className="font-mono text-[11px] font-semibold">{card.symbol}</span>
@@ -99,6 +117,10 @@ export function FastScanRadar({
   const [data, setData] = useState<FastScanRadarData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tier, setTier] = useState<string>("");
+
+  function openLivePrediction(symbol: string): void {
+    window.location.hash = buildLivePredictionHash(symbol, timeframe);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -197,7 +219,12 @@ export function FastScanRadar({
               </div>
             ) : (
               data.bullish.map((c) => (
-                <ScanCardRow key={c.symbol} card={c} side="long" />
+                <ScanCardRow
+                  key={c.symbol}
+                  card={c}
+                  side="long"
+                  onOpen={openLivePrediction}
+                />
               ))
             )}
           </div>
@@ -211,7 +238,12 @@ export function FastScanRadar({
               </div>
             ) : (
               data.bearish.map((c) => (
-                <ScanCardRow key={c.symbol} card={c} side="short" />
+                <ScanCardRow
+                  key={c.symbol}
+                  card={c}
+                  side="short"
+                  onOpen={openLivePrediction}
+                />
               ))
             )}
           </div>

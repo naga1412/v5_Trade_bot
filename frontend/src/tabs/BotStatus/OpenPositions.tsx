@@ -1,5 +1,6 @@
 import { Panel } from "@/components/ui/Panel";
 import { useOpenPositionsLive } from "./hooks/useOpenPositionsLive";
+import { buildLivePredictionHash } from "@/tabs/Tab3Scanner/applyFilter";
 import type { OpenPosition } from "@/lib/api";
 
 function fmtNum(v: number | null | undefined, dp = 2): string {
@@ -31,8 +32,25 @@ function pnlClass(v: number | null | undefined): string {
 function PositionCard({ pos }: { pos: OpenPosition }) {
   const arrow = pos.direction === "LONG" ? "↗" : "↘";
   const dirClass = pos.direction === "LONG" ? "text-green" : "text-red";
+  const open = (): void => {
+    // Bot Status has no explicit timeframe context — shadow worker runs 1h,
+    // and 1h matches the chart's default tf, so hard-code it here.
+    window.location.hash = buildLivePredictionHash(pos.symbol, "1h");
+  };
   return (
-    <div className="border border-border rounded p-1 bg-bg-elevated min-w-[140px]">
+    <div
+      className="border border-border rounded p-1 bg-bg-elevated min-w-[140px] cursor-pointer hover:border-text-tertiary/40 focus:outline-none focus:border-text-tertiary transition-colors"
+      role="button"
+      tabIndex={0}
+      aria-label={`open ${pos.symbol} ${pos.direction} chart`}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      }}
+    >
       <div className="flex items-center justify-between mb-1">
         <span className="font-bold">{pos.symbol}</span>
         <span className={dirClass}>{arrow}</span>
