@@ -26,7 +26,12 @@ _TRAP_PENALTY: float = 0.15
 _TRAP_CAP: int = 4
 _BRAIN_ADJUST_MIN: float = 0.0
 _BRAIN_ADJUST_MAX: float = 2.0
-_SHORT_DIRECTION_PENALTY: float = 0.95
+# Symmetric LONG/SHORT as of 2026-05-14: the original 0.95 SHORT penalty
+# shrank raw SHORT scores by 5% before they reached the entry threshold,
+# stacking with the threshold asymmetry to make the SHORT path effectively
+# unreachable. Removed so the validation ledger accumulates SHORT data on
+# the same magnitude bar as LONG. See app/shadow/engine.py + tiers.py.
+_SHORT_DIRECTION_PENALTY: float = 1.0
 
 
 def aggregate(
