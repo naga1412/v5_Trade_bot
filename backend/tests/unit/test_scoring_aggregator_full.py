@@ -68,11 +68,14 @@ def test_news_multiplier_multiplies() -> None:
     assert boosted == pytest.approx(base * 0.8, abs=1e-6)
 
 
-def test_short_direction_penalty_0p95() -> None:
+def test_short_direction_penalty_neutralised_to_1p0() -> None:
+    # 2026-05-14: the 0.95 SHORT penalty was removed (operator decision to
+    # trade both sides symmetrically). SHORT now produces the same raw
+    # magnitude as the equivalent LONG.
     scores: dict[int, LayerScore | None] = {i: None for i in range(1, 11)}
     scores[1] = L(Direction.SHORT, 1.0, 1.0)
     fs = aggregate(scores)
-    assert fs.score == pytest.approx(-0.95, abs=1e-6)
+    assert fs.score == pytest.approx(-1.0, abs=1e-6)
 
 
 def test_long_direction_penalty_1p0() -> None:
@@ -80,3 +83,14 @@ def test_long_direction_penalty_1p0() -> None:
     scores[1] = L(Direction.LONG, 1.0, 1.0)
     fs = aggregate(scores)
     assert fs.score == pytest.approx(1.0, abs=1e-6)
+
+
+def test_short_and_long_now_symmetric_in_magnitude() -> None:
+    """Equivalent strengths in opposite directions produce equal |scores|."""
+    long_scores: dict[int, LayerScore | None] = {i: None for i in range(1, 11)}
+    short_scores: dict[int, LayerScore | None] = {i: None for i in range(1, 11)}
+    long_scores[1] = L(Direction.LONG, 0.7, 0.9)
+    short_scores[1] = L(Direction.SHORT, 0.7, 0.9)
+    fs_l = aggregate(long_scores)
+    fs_s = aggregate(short_scores)
+    assert fs_l.score == pytest.approx(-fs_s.score, abs=1e-9)

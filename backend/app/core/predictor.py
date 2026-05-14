@@ -42,7 +42,9 @@ log = logging.getLogger(__name__)
 
 _TRAP_PENALTY: float = 0.15
 _TRAP_CAP: int = 4
-_SHORT_DIRECTION_PENALTY: float = 0.95
+# Kept in sync with app/core/scoring/aggregator.py. 1.0 = no penalty
+# (symmetric LONG/SHORT, 2026-05-14).
+_SHORT_DIRECTION_PENALTY: float = 1.0
 
 
 def _layer_to_out(layer: LayerScore | None) -> LayerScoreOut | None:

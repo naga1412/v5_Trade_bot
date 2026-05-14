@@ -135,9 +135,16 @@ def test_full_pipeline_strong_long_inputs_yield_strong_tier() -> None:
     assert tier in {"SMALL", "STANDARD", "A+", "PAPER"}
 
 
-def test_full_pipeline_short_inputs_apply_asymmetric_penalty() -> None:
-    """Stacked SHORT layers should land below the +10pp SHORT thresholds when
-    the static score is moderate."""
+def test_full_pipeline_moderate_short_demoted_by_trap_penalties() -> None:
+    """A moderate stacked SHORT (0.56 raw) should still drop to NO_SIGNAL once
+    the trap penalty pipeline runs against this synthetic bar series.
+
+    Prior to the 2026-05-14 symmetric flip this assertion was justified by
+    the 0.95 SHORT direction penalty + the +10pp SHORT tier bias (combined
+    they buried 0.56 well below the SHORT PAPER threshold of 65%). Under
+    the new symmetric thresholds (PAPER = 55% both sides), the same final
+    tier still resolves to NO_SIGNAL but for a different reason — the trap
+    factor (0.85^N) knocks the score below 55%."""
     bars = _bars()
     layer_scores: dict[int, LayerScore | None] = {i: None for i in range(1, 11)}
     for i in (1, 3, 5):
@@ -156,8 +163,6 @@ def test_full_pipeline_short_inputs_apply_asymmetric_penalty() -> None:
         brain_adjust=1.0,
         news_multiplier=1.0,
     )
-    # static = 0.7 * 0.8 = 0.56 -> after 0.95 SHORT penalty -> 0.532.
-    # 53.2% < 65% (SHORT PAPER threshold) -> NO_SIGNAL.
     assert final.direction is Direction.SHORT
     assert classify_tier(final) == "NO_SIGNAL"
 

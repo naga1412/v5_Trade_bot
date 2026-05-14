@@ -1,22 +1,18 @@
-"""SP-5 Phase E2 — tier classification with asymmetric SHORT bias.
+"""SP-5 Phase E2 — tier classification (symmetric LONG/SHORT as of 2026-05-14).
 
-Per CLAUDE.md rule 9 + MASTER_PLAN §6 line 230: shorts require a +10
-percentage-point higher score than longs for each tier (asymmetric risk —
-longs go up slowly, shorts go down fast and skip-stops blow up sizing).
+Original design (CLAUDE.md rule 9 + MASTER_PLAN §6 line 230) added a +10pp
+SHORT bias on every tier because crypto squeezes can blow through short
+stops. Operator decision: trade both sides on equal terms so the validation
+ledger actually accumulates SHORT data on the same magnitude bar.
+The constant ``SHORT_BIAS_PP`` is kept (and set to 0.0) rather than deleted
+so that re-enabling asymmetry later is a one-line change.
 
-LONG thresholds (|final|*100):
+Thresholds (|final|*100), LONG and SHORT both:
     <55%   NO_SIGNAL
     55-65% PAPER
     65-75% SMALL
     75-85% STANDARD
     >=85%  A+
-
-SHORT thresholds (each shifted +10pp):
-    <65%   NO_SIGNAL
-    65-75% PAPER
-    75-85% SMALL
-    85-95% STANDARD
-    >=95%  A+
 
 NEUTRAL direction always returns NO_SIGNAL regardless of magnitude.
 """
@@ -35,7 +31,7 @@ LONG_THRESHOLDS: list[tuple[float, Tier]] = [
     (65.0, "SMALL"),
     (55.0, "PAPER"),
 ]
-SHORT_BIAS_PP: float = 10.0
+SHORT_BIAS_PP: float = 0.0
 
 
 def classify_tier(final: FinalScore) -> Tier:

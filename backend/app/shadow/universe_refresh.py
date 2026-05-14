@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.shadow.universe import (
     AssetUniverseEntry,
-    fetch_top_n_usdt_futures,
+    fetch_top_n_usdt_spot,
     save_universe_snapshot,
 )
 
@@ -58,7 +58,7 @@ def seconds_until_next_utc(hour: int, now: datetime) -> int:
 async def _default_fetch(
     http: httpx.AsyncClient, *, n: int = UNIVERSE_TOP_N,
 ) -> list[AssetUniverseEntry]:
-    return await fetch_top_n_usdt_futures(http, n=n)
+    return await fetch_top_n_usdt_spot(http, n=n)
 
 
 async def _persist(

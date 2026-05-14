@@ -13,10 +13,23 @@ from app.shadow.engine import (
 
 
 def test_thresholds_match_spec() -> None:
-    # Spec §5.1
+    # Spec §5.1 + 2026-05-14 symmetric flip — SHORT_THRESHOLD mirrors LONG.
     assert LONG_THRESHOLD == 0.30
-    assert SHORT_THRESHOLD == -0.50
+    assert SHORT_THRESHOLD == -0.30
     assert MIN_CONFIDENCE == 0.50
+    assert LONG_THRESHOLD == -SHORT_THRESHOLD  # symmetric magnitude
+
+
+def test_short_threshold_symmetric_with_long() -> None:
+    # A SHORT signal at -0.31 (just past the new -0.30 gate) should now fire.
+    # Under the old -0.50 gate it would have been rejected.
+    ev = SignalEvaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=-0.31, confidence=0.60,
+        last_close=100.0, atr=2.0, layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is not None
+    assert sig.direction is Direction.SHORT
 
 
 def test_shadow_signal_construction() -> None:
@@ -97,9 +110,13 @@ def test_evaluator_returns_none_when_below_long_threshold() -> None:
 
 
 def test_evaluator_returns_none_when_above_short_threshold() -> None:
+    # -0.30 was a SHORT rejection under the old -0.50 gate; under the new
+    # -0.30 symmetric gate it sits exactly AT the boundary, which the
+    # strict-less-than comparison still rejects. Use -0.29 to confirm a
+    # value clearly above the gate.
     ev = make_evaluator()
     sig = ev.evaluate(
-        symbol="BTCUSDT", score=-0.30, confidence=0.80,
+        symbol="BTCUSDT", score=-0.29, confidence=0.80,
         last_close=78000.0, atr=500.0, layer_scores={}, ts=datetime.now(timezone.utc),
     )
     assert sig is None

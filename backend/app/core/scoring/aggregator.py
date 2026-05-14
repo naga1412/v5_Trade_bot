@@ -26,7 +26,12 @@ _TRAP_PENALTY: float = 0.15
 _TRAP_CAP: int = 4
 _BRAIN_ADJUST_MIN: float = 0.0
 _BRAIN_ADJUST_MAX: float = 2.0
-_SHORT_DIRECTION_PENALTY: float = 0.95
+# Symmetric LONG/SHORT as of 2026-05-14: the original 0.95 SHORT penalty
+# shrank raw SHORT scores by 5% before they reached the entry threshold,
+# stacking with the threshold asymmetry to make the SHORT path effectively
+# unreachable. Removed so the validation ledger accumulates SHORT data on
+# the same magnitude bar as LONG. See app/shadow/engine.py + tiers.py.
+_SHORT_DIRECTION_PENALTY: float = 1.0
 
 
 def aggregate(
@@ -35,6 +40,7 @@ def aggregate(
     trap_fires: list[TrapFire] | None = None,
     brain_adjust: float = 1.0,
     news_multiplier: float = 1.0,
+    direction_calibration: dict[str, float] | None = None,
 ) -> FinalScore:
     """Apply the full SP-5 FINAL_SCORE formula.
 
@@ -81,7 +87,16 @@ def aggregate(
         direction = Direction.NEUTRAL
 
     direction_penalty = _SHORT_DIRECTION_PENALTY if direction is Direction.SHORT else 1.0
-    final = raw_final * direction_penalty
+    # Per-direction online calibration (best-effort): when supplied,
+    # multiplies the raw_final by an empirical multiplier learned from
+    # prediction_validations realized outcomes. See
+    # app/core/scoring/calibration.py — the multiplier is capped to
+    # [0.7, 1.3] so it cannot run away. When direction_calibration is
+    # None (legacy path), this is a no-op.
+    calibration_multiplier = 1.0
+    if direction_calibration is not None:
+        calibration_multiplier = direction_calibration.get(direction.value, 1.0)
+    final = raw_final * direction_penalty * calibration_multiplier
     final = max(-1.0, min(1.0, final))
 
     avg_conf = sum(confidences) / len(confidences) if confidences else 0.0

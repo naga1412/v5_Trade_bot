@@ -2,7 +2,11 @@ import pytest
 import respx
 import httpx
 
-from app.shadow.universe import fetch_top_n_usdt_futures, AssetUniverseEntry
+from app.shadow.universe import (
+    AssetUniverseEntry,
+    fetch_top_n_usdt_futures,  # backward-compat alias
+    fetch_top_n_usdt_spot,
+)
 
 
 SAMPLE_24H_RESPONSE = [
@@ -17,15 +21,19 @@ SAMPLE_24H_RESPONSE = [
 
 
 @pytest.mark.asyncio
-async def test_fetch_top_n_usdt_futures_returns_sorted_usdt_only() -> None:
+async def test_fetch_top_n_usdt_spot_returns_sorted_usdt_only() -> None:
+    """As of 2026-05-15 the universe source is Binance SPOT
+    (api.binance.com/api/v3/ticker/24hr), not Futures. This guarantees
+    every selected symbol resolves on the SPOT WS the shadow worker
+    actually subscribes to."""
     async with httpx.AsyncClient() as http, respx.mock(
-        base_url="https://fapi.binance.com"
+        base_url="https://api.binance.com"
     ) as router:
-        router.get("/fapi/v1/ticker/24hr").mock(
+        router.get("/api/v3/ticker/24hr").mock(
             return_value=httpx.Response(200, json=SAMPLE_24H_RESPONSE)
         )
-        entries = await fetch_top_n_usdt_futures(
-            http=http, base_url="https://fapi.binance.com", n=3
+        entries = await fetch_top_n_usdt_spot(
+            http=http, base_url="https://api.binance.com", n=3
         )
 
     assert len(entries) == 3
@@ -38,6 +46,15 @@ async def test_fetch_top_n_usdt_futures_returns_sorted_usdt_only() -> None:
     assert entries[2].symbol == "SOLUSDT"
     # USDC excluded
     assert all(e.symbol.endswith("USDT") for e in entries)
+
+
+@pytest.mark.asyncio
+async def test_backward_compat_alias_still_resolves() -> None:
+    """The old name ``fetch_top_n_usdt_futures`` keeps importing and
+    behaving identically — it now points at the SPOT impl internally.
+    Kept for one release cycle so external callers / operator notes
+    don't break."""
+    assert fetch_top_n_usdt_futures is fetch_top_n_usdt_spot
 
 
 import sqlalchemy as sa

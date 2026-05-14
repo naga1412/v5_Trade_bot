@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TabNav } from "@/components/layout/TabNav";
 import { TopNav } from "@/components/layout/TopNav";
 import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
@@ -15,6 +15,15 @@ import { Settings } from "@/tabs/Settings";
 import { Admin } from "@/tabs/Admin";
 
 export type Tf = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
+
+const VALID_TFS: ReadonlySet<string> = new Set([
+  "1m",
+  "5m",
+  "15m",
+  "1h",
+  "4h",
+  "1d",
+]);
 
 // Coerce a user-typed symbol to the canonical SYMBOL/QUOTE form.
 // Accepts:
@@ -33,7 +42,7 @@ function normaliseSymbol(raw: string): string {
 }
 
 export default function App() {
-  const { tab, setTab } = useHashRoute("live-prediction");
+  const { tab, query, setTab } = useHashRoute("live-prediction");
   const { user, isAdmin, isImpersonating, reload } = useCurrentUser();
 
   // Hoisted from Tab1LivePrediction so the chosen symbol survives tab
@@ -42,6 +51,20 @@ export default function App() {
   const [symbol, setSymbol] = useState<string>("BTC/USDT");
   const [timeframe, setTimeframe] = useState<Tf>("1h");
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Deep-link sync: when the hash carries ?symbol=… and/or ?tf=…
+  // (e.g. user clicked a card in Scanner or Bot Status to jump here),
+  // adopt those into local state so the chart actually reflects them.
+  useEffect(() => {
+    if (query.symbol) {
+      setSymbol(normaliseSymbol(query.symbol));
+    }
+  }, [query.symbol]);
+  useEffect(() => {
+    if (query.tf && VALID_TFS.has(query.tf)) {
+      setTimeframe(query.tf as Tf);
+    }
+  }, [query.tf]);
 
   const handleExitImpersonation = async (): Promise<void> => {
     try {
