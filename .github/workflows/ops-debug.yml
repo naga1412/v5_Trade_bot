@@ -21,6 +21,7 @@ on:
           - ws-probe    # one-shot direct WS test against fstream.binance.com — diagnoses silent multi-stream
           - net-probe   # DNS + TCP + HTTPS reachability test from backend container to fstream.binance.com
           - health-summary # one-page production health: container, workers, errors, recent shadow + prediction activity
+          - direction-performance # LONG vs SHORT hit rate + realized pnl from prediction_validations — answers "is the model directionally accurate per side"
 
 jobs:
   probe:
@@ -239,5 +240,69 @@ jobs:
                  echo '=== shadow signals fired in last 1h (from logs) ===' && \
                  docker compose logs --since=1h backend 2>&1 | grep -E 'shadow_worker:.*SIGNAL' | tail -10 && \
                  echo '(end)'"
+              ;;
+            direction-performance)
+              # Read-only diagnostic. Answers: "is the model actually
+              # directionally accurate, broken down by LONG vs SHORT?"
+              # All queries hit prediction_validations (filled by the
+              # validator worker added in PR #109) so they require at
+              # least one validated row to produce output.
+              #
+              # The split also surfaces:
+              #   - how many SHORT predictions exist at all (the 8 SHORT
+              #     predictions historically averaged score=-0.103 — well
+              #     above any reasonable SHORT entry gate);
+              #   - whether the few SHORT predictions that DO happen are
+              #     better/worse than LONG (hit rate + avg pnl_pct);
+              #   - threshold-crossing counts for both the old asymmetric
+              #     gate (-0.50) and the new symmetric gate (-0.30 from
+              #     PR #121) so we know what flipping the threshold would
+              #     have changed historically.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== prediction_validations — global summary ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) AS total_rows, \
+                       count(*) FILTER (WHERE validated_at IS NOT NULL) AS validated, \
+                       count(*) FILTER (WHERE was_correct) AS correct, \
+                       round((100.0 * count(*) FILTER (WHERE was_correct) / nullif(count(*) FILTER (WHERE validated_at IS NOT NULL), 0))::numeric, 1) AS accuracy_pct \
+                     FROM prediction_validations;\" && \
+                 echo '=== accuracy by direction (validated rows only) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, count(*) AS n, \
+                       count(*) FILTER (WHERE was_correct) AS correct, \
+                       round((100.0 * count(*) FILTER (WHERE was_correct) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct, \
+                       round(avg(pnl_pct)::numeric, 4) AS avg_pnl_pct, \
+                       round(min(pnl_pct)::numeric, 4) AS worst_pnl, \
+                       round(max(pnl_pct)::numeric, 4) AS best_pnl \
+                     FROM prediction_validations WHERE validated_at IS NOT NULL \
+                     GROUP BY direction ORDER BY direction;\" && \
+                 echo '=== score-magnitude buckets per direction (would-be SHORT signal counts) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT \
+                       count(*) AS total_predictions, \
+                       count(*) FILTER (WHERE score > 0.30 AND direction = 'LONG') AS long_score_gt_0p30, \
+                       count(*) FILTER (WHERE score < -0.50 AND direction = 'SHORT') AS short_score_lt_neg0p50_OLD_GATE, \
+                       count(*) FILTER (WHERE score < -0.30 AND direction = 'SHORT') AS short_score_lt_neg0p30_NEW_GATE, \
+                       count(*) FILTER (WHERE score < -0.20 AND direction = 'SHORT') AS short_score_lt_neg0p20_LOOSE \
+                     FROM prediction_validations;\" && \
+                 echo '=== hit rate by direction over last 7 days ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, count(*) AS n, \
+                       round((100.0 * count(*) FILTER (WHERE was_correct) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct, \
+                       round(avg(pnl_pct)::numeric, 4) AS avg_pnl_pct \
+                     FROM prediction_validations \
+                     WHERE validated_at IS NOT NULL AND validated_at > now() - interval '7 days' \
+                     GROUP BY direction ORDER BY direction;\" && \
+                 echo '=== closed shadow trades — actual P&L by direction ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, count(*) AS trades, \
+                       count(*) FILTER (WHERE pnl_pct > 0) AS wins, \
+                       round((100.0 * count(*) FILTER (WHERE pnl_pct > 0) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
+                       round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
+                       round(avg(pnl_pct)::numeric, 4) AS avg_pnl_pct, \
+                       close_reason \
+                     FROM shadow_trades WHERE closed_at IS NOT NULL \
+                     GROUP BY direction, close_reason ORDER BY direction, close_reason;\""
               ;;
           esac
