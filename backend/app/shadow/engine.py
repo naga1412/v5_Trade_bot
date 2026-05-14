@@ -6,8 +6,17 @@ from typing import Any
 
 
 # --- Spec thresholds (§5.1) ---
+# Symmetric LONG/SHORT entry as of 2026-05-14: the original SHORT_THRESHOLD
+# of -0.50 (vs LONG +0.30) reflected a CLAUDE.md / MASTER_PLAN policy that
+# crypto squeezes can gap over short stops, so shorts needed stronger
+# conviction. Combined with the model's empirical score distribution
+# (p99=+0.353, p05=-0.074 over 95 historical predictions) it meant the
+# SHORT gate was effectively unreachable — 0 / 95 historical scores cleared
+# it, 0 / 8 paper trades were ever SHORT. Operator decision: trade both
+# sides on equal terms so the validation ledger actually accumulates SHORT
+# data. Pair with the matching changes in aggregator.py and tiers.py.
 LONG_THRESHOLD: float = 0.30
-SHORT_THRESHOLD: float = -0.50
+SHORT_THRESHOLD: float = -0.30
 MIN_CONFIDENCE: float = 0.50
 
 # --- ATR multipliers (matches predictor.py) ---
