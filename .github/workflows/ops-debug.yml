@@ -23,6 +23,7 @@ on:
           - health-summary # one-page production health: container, workers, errors, recent shadow + prediction activity
           - watchdog-audit # diagnostic: what watchdog script is the host cron actually running, vs the in-tree copy
           - score-distribution # all-time score/confidence/gate/validation stats for predictions — answers "is the model predictive"
+          - host-unstick # STATE-CHANGING: stash dirty scripts/, git pull, rebuild, alembic — fixes the cfdf230-stuck-deploy condition
 
 jobs:
   probe:
@@ -351,5 +352,59 @@ jobs:
                        round(pnl_usdt::numeric, 2) AS pnl_usdt, \
                        opened_at, closed_at, close_reason \
                      FROM shadow_trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC;\""
+              ;;
+            host-unstick)
+              # STATE-CHANGING. Unlike every other probe in this workflow,
+              # this one writes to the host. It fixes the silent-deploy-
+              # failure condition where /opt/trading-radar has dirty files
+              # under scripts/ blocking `git pull` from advancing past
+              # cfdf230 (PR #114 merge).
+              #
+              # Steps (set -e at remote — fail loud unlike deploy.yml):
+              #   1. fetch origin; if HEAD already matches origin/main, no-op
+              #      and exit. Safe to re-run.
+              #   2. git stash push -- scripts/  (preserves any host edits;
+              #      recoverable later via `git stash pop`. NOT destructive.)
+              #   3. git pull (now fast-forwards)
+              #   4. docker compose up -d --build
+              #   5. alembic upgrade head
+              #   6. wait 20s + curl /api/v1/health
+              #   7. echo post-state (HEAD, RestartCount, StartedAt)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "set -eu; cd $DIR_DEFAULTED && \
+                 echo '=== PRE: branch / HEAD / dirty files ===' && \
+                 git rev-parse --abbrev-ref HEAD && \
+                 git rev-parse HEAD && \
+                 git status -s && \
+                 echo '=== fetching origin ===' && \
+                 git fetch origin && \
+                 LOCAL_HEAD=\$(git rev-parse HEAD) && \
+                 ORIGIN_HEAD=\$(git rev-parse origin/main) && \
+                 if [ \"\$LOCAL_HEAD\" = \"\$ORIGIN_HEAD\" ]; then \
+                   echo 'HEAD already matches origin/main — nothing to unstick, exiting clean'; \
+                   exit 0; \
+                 fi && \
+                 echo '=== stashing host-local edits under scripts/ ===' && \
+                 if git diff --quiet -- scripts/; then \
+                   echo '(no local changes under scripts/ — proceeding directly to pull)'; \
+                 else \
+                   git stash push -m \"host-unstick \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" -- scripts/; \
+                   echo 'stashed — recover later with: git stash list && git stash show -p stash@{0}'; \
+                 fi && \
+                 echo '=== git pull ===' && \
+                 git pull && \
+                 echo '=== docker compose up -d --build ===' && \
+                 docker compose up -d --build && \
+                 echo '=== alembic upgrade head ===' && \
+                 docker compose exec -T backend alembic upgrade head && \
+                 echo '=== waiting 20s for backend to bind port 8000... ===' && \
+                 sleep 20 && \
+                 echo '=== health check ===' && \
+                 curl -fsS --retry 3 --retry-delay 3 --retry-connrefused http://localhost:8000/api/v1/health && \
+                 echo '' && \
+                 echo '=== POST: HEAD / container ===' && \
+                 git rev-parse HEAD && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '=== DONE ==='"
               ;;
           esac
