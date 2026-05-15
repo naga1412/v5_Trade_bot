@@ -21,6 +21,22 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/trading-radar}"
 LOG_FILE="${LOG_FILE:-/var/log/trading-radar-watchdog.log}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/trading-radar}"
 
+# Cross-tick state. Two files:
+#   prev-alerts → list of alerts that fired last tick, one per line.
+#                 Used to edge-trigger NEW / RESOLVED / PERSISTING.
+#   heartbeat   → unix timestamp of the last all-clear daily summary
+#                 send, so we send the "all systems clean" Telegram at
+#                 most once per 24h.
+STATE_DIR="${STATE_DIR:-/var/lib/trading-radar}"
+PREV_ALERTS_FILE="$STATE_DIR/watchdog-prev-alerts"
+HEARTBEAT_FILE="$STATE_DIR/watchdog-last-heartbeat"
+mkdir -p "$STATE_DIR"
+
+# How long between "all clear" daily heartbeat Telegrams. 24h is the
+# right cadence — frequent enough to confirm the watchdog itself is
+# alive, sparse enough not to spam.
+HEARTBEAT_INTERVAL_SECONDS=$((24 * 60 * 60))
+
 set -a; [ -f "$INSTALL_DIR/.env" ] && . "$INSTALL_DIR/.env"; set +a
 
 DRY_RUN=0
@@ -276,25 +292,133 @@ check_predictions_fresh
 check_backup_fresh
 check_binance
 
-if [ "${#ALERTS[@]}" -eq 0 ]; then
-  log "✓ all clear"
-  exit 0
+# ============================================================
+# Edge-triggered notification: diff current alerts vs last tick.
+# ============================================================
+# Without edge triggering, a stuck-but-persistent alert (e.g. backup
+# stale and backup.sh keeps failing) sends a Telegram EVERY 15 min,
+# 96 messages a day — noise that trains the operator to ignore alerts.
+# Edge triggering sends only on state CHANGE: new failures + recoveries.
+PREV_ALERTS=()
+if [ -f "$PREV_ALERTS_FILE" ]; then
+  mapfile -t PREV_ALERTS < "$PREV_ALERTS_FILE"
 fi
 
-# Build summary message.
-SUMMARY="${#ALERTS[@]} alert(s):"$'\n'
+# alert key = the leading word up to the first space/colon. Lets us match
+# "memory 92% used" against last tick's "memory 95% used" as the same
+# issue, instead of treating each percentage drift as new+resolved+new.
+alert_key() {
+  echo "${1%% *}"
+}
+
+CURRENT_KEYS=()
 for a in "${ALERTS[@]}"; do
-  SUMMARY+="• $a"$'\n'
+  CURRENT_KEYS+=("$(alert_key "$a")")
 done
-if [ "${#ACTIONS[@]}" -gt 0 ]; then
-  SUMMARY+="Actions taken:"$'\n'
-  for a in "${ACTIONS[@]}"; do
-    SUMMARY+="→ $a"$'\n'
+PREV_KEYS=()
+for p in "${PREV_ALERTS[@]}"; do
+  PREV_KEYS+=("$(alert_key "$p")")
+done
+
+NEW_ALERTS=()
+PERSISTING_ALERTS=()
+for i in "${!ALERTS[@]}"; do
+  if printf '%s\n' "${PREV_KEYS[@]}" | grep -qxF "${CURRENT_KEYS[$i]}"; then
+    PERSISTING_ALERTS+=("${ALERTS[$i]}")
+  else
+    NEW_ALERTS+=("${ALERTS[$i]}")
+  fi
+done
+RESOLVED_ALERTS=()
+for j in "${!PREV_ALERTS[@]}"; do
+  if ! printf '%s\n' "${CURRENT_KEYS[@]}" | grep -qxF "${PREV_KEYS[$j]}"; then
+    RESOLVED_ALERTS+=("${PREV_ALERTS[$j]}")
+  fi
+done
+
+# Persist current alerts for next tick's diff.
+printf '%s\n' "${ALERTS[@]}" > "$PREV_ALERTS_FILE"
+
+# ============================================================
+# Telegram dispatch (one message per state-change category).
+# ============================================================
+
+# ✅ Recoveries: previous-tick alerts that are gone this tick. This is
+# the positive-confirmation signal the operator asked for — silence
+# alone is ambiguous (could be watchdog crashed), an explicit ✅ Telegram
+# is unambiguous.
+if [ "${#RESOLVED_ALERTS[@]}" -gt 0 ]; then
+  RESOLVED_MSG="${#RESOLVED_ALERTS[@]} resolved:"$'\n'
+  for r in "${RESOLVED_ALERTS[@]}"; do
+    RESOLVED_MSG+="✓ $r"$'\n'
   done
+  notify_telegram "✅" "self-heal succeeded — $RESOLVED_MSG"
+  log "RESOLVED: ${RESOLVED_ALERTS[*]}"
 fi
 
-log "ALERTS: ${ALERTS[*]}"
-log "ACTIONS: ${ACTIONS[*]}"
-notify_telegram "🚨" "$SUMMARY"
+# 🚨 New alerts: first tick this issue has appeared. Always send with
+# any heal actions the watchdog took.
+if [ "${#NEW_ALERTS[@]}" -gt 0 ]; then
+  NEW_MSG="${#NEW_ALERTS[@]} new alert(s):"$'\n'
+  for a in "${NEW_ALERTS[@]}"; do
+    NEW_MSG+="• $a"$'\n'
+  done
+  if [ "${#ACTIONS[@]}" -gt 0 ]; then
+    NEW_MSG+="Actions taken:"$'\n'
+    for a in "${ACTIONS[@]}"; do
+      NEW_MSG+="→ $a"$'\n'
+    done
+  fi
+  notify_telegram "🚨" "$NEW_MSG"
+  log "NEW: ${NEW_ALERTS[*]}"
+fi
+
+# ⏱ Persisting alerts: same issue as last tick. We do NOT spam Telegram
+# on every persisting tick — that's the noise we're trying to eliminate.
+# But we DO log it so the watchdog log shows what's stuck, and we ESCALATE
+# to Telegram once we cross a "stuck for 1 hour" threshold (4 ticks).
+# Tracked via a counter file per alert key.
+PERSIST_DIR="$STATE_DIR/persist-counts"
+mkdir -p "$PERSIST_DIR"
+for i in "${!PERSISTING_ALERTS[@]}"; do
+  key="${PERSISTING_ALERTS[$i]%% *}"
+  count_file="$PERSIST_DIR/$key"
+  count=$(cat "$count_file" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  echo "$count" > "$count_file"
+  if [ "$count" = "4" ]; then
+    # 4 consecutive 15-min ticks = 1h of being stuck. Re-alert once.
+    notify_telegram "⏱" "alert STUCK for 1h, manual investigation needed: ${PERSISTING_ALERTS[$i]}"
+    log "PERSIST-ESCALATE: ${PERSISTING_ALERTS[$i]}"
+  fi
+done
+# Clear persist counters for keys that resolved this tick.
+for r in "${RESOLVED_ALERTS[@]}"; do
+  rm -f "$PERSIST_DIR/${r%% *}"
+done
+if [ "${#PERSISTING_ALERTS[@]}" -gt 0 ]; then
+  log "PERSISTING (no spam): ${PERSISTING_ALERTS[*]}"
+fi
+
+# ============================================================
+# Daily heartbeat — positive "watchdog is alive" signal.
+# ============================================================
+# If we have zero alerts AND zero actions this tick AND we haven't sent
+# a heartbeat in 24h, send one. Operator gets a single "✓ N ticks clean"
+# Telegram per day so silence is unambiguous.
+if [ "${#ALERTS[@]}" -eq 0 ] && [ "${#ACTIONS[@]}" -eq 0 ]; then
+  log "✓ all clear"
+  last_hb=$(cat "$HEARTBEAT_FILE" 2>/dev/null || echo 0)
+  now_unix=$(date +%s)
+  age=$((now_unix - last_hb))
+  if [ "$age" -ge "$HEARTBEAT_INTERVAL_SECONDS" ]; then
+    notify_telegram "💚" "all systems clean — heartbeat $(ts)"
+    echo "$now_unix" > "$HEARTBEAT_FILE"
+    log "heartbeat sent"
+  fi
+fi
+
+# Always log a summary line.
+log "DONE: alerts=${#ALERTS[@]} new=${#NEW_ALERTS[@]} persisting=${#PERSISTING_ALERTS[@]} resolved=${#RESOLVED_ALERTS[@]} actions=${#ACTIONS[@]}"
 
 exit 0
