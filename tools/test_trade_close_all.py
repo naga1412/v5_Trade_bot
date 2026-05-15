@@ -16,6 +16,18 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
+
+# Path setup mirrors tools/populate_universe_history.py — needed because
+# the file is bind-mounted at /app/host-tools/ in the container while the
+# actual `app/` package lives at /app/app/.
+for _candidate in (
+    Path(__file__).resolve().parent.parent / "backend",  # repo layout
+    Path("/app"),                                         # container layout
+):
+    if (_candidate / "app").is_dir():
+        sys.path.insert(0, str(_candidate))
+        break
 
 
 ALLOWED_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
