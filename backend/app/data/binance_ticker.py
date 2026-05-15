@@ -59,8 +59,12 @@ async def fetch_spot_prices(
 
     try:
         # The query param is a JSON-encoded array of strings, NOT a
-        # comma-separated list. Binance is strict about this.
-        params = {"symbols": json.dumps(symbols)}
+        # comma-separated list. Binance is strict about this — AND it
+        # rejects the array if json.dumps' default separators inject a
+        # space after each comma (URL-encodes to `+`/`%20`). Use
+        # compact separators so the wire form is `["BTCUSDT","ETHUSDT"]`
+        # not `["BTCUSDT", "ETHUSDT"]`.
+        params = {"symbols": json.dumps(symbols, separators=(",", ":"))}
         resp = await http.get(
             f"{base_url}/api/v3/ticker/price", params=params,
         )

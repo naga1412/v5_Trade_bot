@@ -110,9 +110,15 @@ async def test_happy_path_returns_symbol_price_map() -> None:
 
 
 @pytest.mark.asyncio
-async def test_symbols_param_passes_as_json_array() -> None:
+async def test_symbols_param_passes_as_compact_json_array() -> None:
     """Binance is strict about the symbols param: it must be a JSON-encoded
-    array of strings, not a comma-separated list."""
+    array of strings with NO whitespace between elements. The default
+    `json.dumps` separators inject a space after each comma, which
+    URL-encodes to `+`/`%20` and triggers a 400 on Binance's end.
+
+    Wire format must be: `["BTCUSDT","ETHUSDT"]`
+    NOT:                 `["BTCUSDT", "ETHUSDT"]`
+    """
     captured_request: list[httpx.Request] = []
 
     def _record(request: httpx.Request) -> httpx.Response:
@@ -128,8 +134,12 @@ async def test_symbols_param_passes_as_json_array() -> None:
     assert len(captured_request) == 1
     raw = captured_request[0].url.params.get("symbols")
     assert raw is not None
+    # Logical: parses back to the same list
     parsed = json.loads(raw)
     assert parsed == ["BTCUSDT", "ETHUSDT"]
+    # Wire-format pin: NO space between elements (the regression we just hit).
+    assert raw == '["BTCUSDT","ETHUSDT"]'
+    assert " " not in raw  # belt + braces — any whitespace breaks Binance
 
 
 @pytest.mark.asyncio
