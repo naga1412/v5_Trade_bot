@@ -65,6 +65,13 @@ jobs:
              ( crontab -l 2>/dev/null | grep -v -F '/opt/trading-radar/scripts/watchdog.sh' ; \
                echo '*/15 * * * * INSTALL_DIR=/opt/trading-radar /opt/trading-radar/scripts/watchdog.sh >> /var/log/trading-radar-watchdog.log 2>&1' ) | crontab - && \
              crontab -l | grep -F '/opt/trading-radar/scripts/watchdog.sh' && \
+             echo '--- installing daily Postgres backup cron (idempotent) ---' && \
+             chmod +x /opt/trading-radar/scripts/backup.sh /opt/trading-radar/scripts/restore_backup.sh && \
+             touch /var/log/trading-radar-backup.log && \
+             mkdir -p /var/backups/trading-radar && \
+             ( crontab -l 2>/dev/null | grep -v -F '/opt/trading-radar/scripts/backup.sh' ; \
+               echo '15 3 * * * /opt/trading-radar/scripts/backup.sh >> /var/log/trading-radar-backup.log 2>&1' ) | crontab - && \
+             crontab -l | grep -F '/opt/trading-radar/scripts/backup.sh' && \
              echo '--- recent backend logs (last 30 lines) ---' && \
              docker compose logs --tail=30 backend"
 
