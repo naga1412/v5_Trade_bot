@@ -19,6 +19,7 @@ from app.api.routes import (
     admin_news,  # SP-9 Phase F5
     admin_patterns,
     admin_system,  # SP-PAUSE master pause/resume
+    admin_test_trade,  # ad-hoc testnet round-trip smoke test
     admin_traps,
     bot_status,
     health,
@@ -430,6 +431,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_news.router)  # SP-9 Phase F5
     app.include_router(admin_patterns.router)
     app.include_router(admin_system.router)  # SP-PAUSE
+    app.include_router(admin_test_trade.router)  # testnet smoke test
     app.include_router(admin_traps.router)
     app.include_router(me.router)
     app.include_router(predictions.router)  # Feature 2 — accuracy telemetry
