@@ -733,7 +733,43 @@ export const api = {
       `/admin/traps/${encodeURIComponent(id)}/${enable ? "enable" : "disable"}`,
       { method: "POST", body: enable ? {} : { reason: reason ?? "" } },
     ),
+
+  // --- Admin testnet smoke test (validates the live-dispatch path) ---
+  adminTestTradeOpen: (body: {
+    symbol: "BTCUSDT" | "ETHUSDT";
+    direction: "LONG" | "SHORT";
+    notional_usdt?: number;
+  }) =>
+    fetchJson<TestTradeOpenResponse>("/admin/test-trade/open", {
+      method: "POST",
+      body,
+    }),
+  adminTestTradeCloseAll: () =>
+    fetchJson<TestTradeCloseAllResponse>("/admin/test-trade/close-all", {
+      method: "POST",
+    }),
 };
+
+export interface TestTradeOpenResponse {
+  outcome: string;
+  detail: string;
+  signal_id: string | null;
+  binance_order_id: string | null;
+  entry_price: number;
+  stop_loss_price: number;
+  take_profit_price: number;
+  next_step: string;
+}
+
+export interface TestTradeCloseAllResponse {
+  closed: Array<{
+    symbol: string;
+    qty: number;
+    avg_fill_price: number;
+    binance_order_id: string;
+  }>;
+  skipped: Array<{ symbol: string; reason: string }>;
+}
 
 // SP-3.5 Phase E3: intermarket snapshot
 export interface IntermarketSnapshot {
