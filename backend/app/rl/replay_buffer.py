@@ -87,6 +87,8 @@ class _TradeRow:
     stop_loss: float
     pnl_usdt: float | None      # NULL while still open; we filter open trades out
     position_size_usdt: float
+    signal_id: str | None       # joins to shadow_observations.signal_id; None for legacy rows
+    obs_components: dict | None  # the JSONB stored at trade-open, or None for pre-0019 trades
 
 
 @dataclass(frozen=True)
@@ -111,15 +113,21 @@ async def _fetch_closed_trades(
     SQLite stores timestamps as ISO-8601 text; PostgreSQL as TIMESTAMPTZ.
     We use raw text comparison on ISO strings — works on both dialects.
     """
+    # LEFT JOIN to shadow_observations so we can pull the exact obs
+    # components captured at trade-open time when available (migration
+    # 0019+). For pre-0019 trades the JOIN yields NULL and we fall back
+    # to the time-based reconstruction below.
     rows = (await session.execute(sa.text(
         """
-        SELECT id, symbol, direction, opened_at, layer_scores,
-               entry_atr, entry_price, stop_loss,
-               pnl_usdt, position_size_usdt
-        FROM shadow_trades
-        WHERE closed_at IS NOT NULL
-          AND pnl_usdt IS NOT NULL
-        ORDER BY symbol, opened_at
+        SELECT t.id, t.symbol, t.direction, t.opened_at, t.layer_scores,
+               t.entry_atr, t.entry_price, t.stop_loss,
+               t.pnl_usdt, t.position_size_usdt, t.signal_id,
+               o.components AS obs_components
+        FROM shadow_trades t
+        LEFT JOIN shadow_observations o ON o.signal_id = t.signal_id
+        WHERE t.closed_at IS NOT NULL
+          AND t.pnl_usdt IS NOT NULL
+        ORDER BY t.symbol, t.opened_at
         """
     ))).all()
 
@@ -134,6 +142,16 @@ async def _fetch_closed_trades(
             r.opened_at if isinstance(r.opened_at, str)
             else r.opened_at.isoformat()
         )
+        comp_raw = r.obs_components
+        if comp_raw is None:
+            obs_components: dict | None = None
+        elif isinstance(comp_raw, str):
+            try:
+                obs_components = json.loads(comp_raw)
+            except (json.JSONDecodeError, ValueError):
+                obs_components = None
+        else:
+            obs_components = dict(comp_raw)
         out.append(_TradeRow(
             id=int(r.id),
             symbol=str(r.symbol),
@@ -145,6 +163,8 @@ async def _fetch_closed_trades(
             stop_loss=float(r.stop_loss),
             pnl_usdt=float(r.pnl_usdt),
             position_size_usdt=float(r.position_size_usdt),
+            signal_id=(str(r.signal_id) if r.signal_id is not None else None),
+            obs_components=obs_components,
         ))
     return out
 
@@ -308,24 +328,60 @@ async def load_from_shadow_trades(
 
         reward = compute_reward(reward_trade, recent=recent_for_sigma)
 
-        # Build observation
+        # Build observation. Prefer the exact components captured at
+        # trade-open time (shadow_observations row, migration 0019+);
+        # fall back to time-based reconstruction for pre-0019 trades.
         asset_id = sym_to_id.get(tr.symbol, 0)
         embedding = embeds.get(asset_id, embed_zero)
-        layer_tuple = _layer_scores_to_tuple(tr.layer_scores)
-        funding, oi_delta = await _nearest_intermarket(
-            session, symbol=tr.symbol, opened_at_iso=tr.opened_at_iso,
-        )
-        market = MarketFeatures(
-            atr_pct=tr.entry_atr / tr.entry_price if tr.entry_price > 0 else 0.0,
-            funding_rate=funding,
-            oi_delta_24h=oi_delta,
-            dxy_corr_30d=0.0,
-            gold_corr_30d=0.0,
-            regime=_resolve_regime(tr.opened_at_iso),
-        )
-        position = PositionState(cur_position=0, unrealized_pnl_R=0.0, bars_in_position=0)
-        macro = _macro_defaults()
         asset_state = AssetState(asset_id=asset_id, embedding=embedding)
+        position = PositionState(
+            cur_position=0, unrealized_pnl_R=0.0, bars_in_position=0,
+        )
+
+        if tr.obs_components is not None:
+            # EXACT path — use snapshot captured at trade-open.
+            comp = tr.obs_components
+            ls_array = comp.get("layer_scores") or [0.0] * 9
+            # Be defensive: shadow_observations stores 9 floats but pad/clip
+            # if the schema drifts.
+            ls_array = [float(x) for x in ls_array[:9]] + [0.0] * max(
+                0, 9 - len(ls_array)
+            )
+            layer_tuple = tuple(ls_array)
+            mkt = comp.get("market") or {}
+            market = MarketFeatures(
+                atr_pct=float(mkt.get("atr_pct", 0.0) or 0.0),
+                funding_rate=float(mkt.get("funding_rate") or 0.0),
+                oi_delta_24h=float(mkt.get("oi_delta_24h") or 0.0),
+                dxy_corr_30d=float(mkt.get("dxy_corr_30d") or 0.0),
+                gold_corr_30d=float(mkt.get("gold_corr_30d") or 0.0),
+                regime=str(mkt.get("regime") or "sideways_grind"),
+            )
+            mc = comp.get("macro") or {}
+            macro = MacroFeatures(
+                hours_to_next_high_impact=float(
+                    mc.get("hours_to_next_high_impact", 24.0)
+                ),
+                fomc_window=bool(mc.get("fomc_window", False)),
+                weekend=bool(mc.get("weekend", False)),
+                asia_open=bool(mc.get("asia_open", False)),
+            )
+        else:
+            # LEGACY path — reconstruct from time-based joins.
+            layer_tuple = _layer_scores_to_tuple(tr.layer_scores)
+            funding, oi_delta = await _nearest_intermarket(
+                session, symbol=tr.symbol, opened_at_iso=tr.opened_at_iso,
+            )
+            market = MarketFeatures(
+                atr_pct=tr.entry_atr / tr.entry_price if tr.entry_price > 0 else 0.0,
+                funding_rate=funding,
+                oi_delta_24h=oi_delta,
+                dxy_corr_30d=0.0,
+                gold_corr_30d=0.0,
+                regime=_resolve_regime(tr.opened_at_iso),
+            )
+            macro = _macro_defaults()
+
         obs = build_observation(asset_state, layer_tuple, market, position, macro)
 
         action = _direction_to_action(tr.direction)

@@ -1,0 +1,259 @@
+"""Snapshot full RL observation components at shadow-trade-open time.
+
+When the shadow worker opens a new position, we serialize the components
+needed to reconstruct the 58-float observation that the brain's PPO
+policy would see at that exact moment. Stored as a JSONB blob in the
+`shadow_observations` table (migration 0019), one row per position,
+keyed on `signal_id` (which survives the move from
+shadow_open_positions → shadow_trades on close).
+
+This gives the offline trainer (host-tools/ml/train_brain.py via
+replay_buffer.load_from_shadow_trades) EXACT obs values instead of
+lossy time-based JOINs against intermarket_snapshots and regime
+classifications.
+
+Component format (stored as JSON dict, not pre-assembled float vector,
+so future obs-layout changes can re-assemble from stored components):
+
+    {
+        "schema_version": 1,
+        "captured_at": "2026-05-15T07:00:00.000000+00:00",
+        "symbol": "ETHUSDT",
+        "atr": 22.5,
+        "last_close": 2245.41,
+        "layer_scores": [0.1, -0.2, 0.0, 0.3, ...],   # length 9
+        "market": {
+            "atr_pct": 0.01,
+            "funding_rate": 0.0001 | None,
+            "open_interest": 1234567.0 | None,
+            "oi_delta_24h": 0.0 | None,
+            "dxy_corr_30d": 0.0,
+            "gold_corr_30d": 0.0,
+            "regime": "neutral"
+        },
+        "position": {
+            "cur_position": 0,
+            "unrealized_pnl_R": 0.0,
+            "bars_in_position": 0
+        },
+        "macro": {
+            "hours_to_next_high_impact": 24.0,
+            "fomc_window": false,
+            "weekend": false,
+            "asia_open": true
+        }
+    }
+
+A few components (DXY corr, gold corr, hours_to_next_high_impact) are
+currently not computed at signal time and are stored as best-effort
+defaults. They become exact data the moment those workers start writing
+their own snapshots — the loader at training time can still reconstruct
+from the same JOIN pattern then. For everything ELSE, this is the
+canonical record.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION: int = 1
+
+
+def _macro_from_ts(ts: datetime) -> dict[str, Any]:
+    """Derive the 4 macro features from a single timestamp (no DB needed)."""
+    ts = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    weekday = ts.weekday()  # 0=Mon ... 6=Sun
+    hour = ts.hour
+    # asia_open: 00:00-08:00 UTC (Tokyo opens ~00:00 UTC, lunch ~03:00, closes ~07:00)
+    asia_open = 0 <= hour < 8
+    weekend = weekday >= 5
+    return {
+        # Placeholder — real impl needs an econ-calendar DB. Default to "far away"
+        # so the policy doesn't get spurious panic-near-news signals.
+        "hours_to_next_high_impact": 24.0,
+        # FOMC days aren't yet wired to a calendar source. Default False.
+        "fomc_window": False,
+        "weekend": weekend,
+        "asia_open": asia_open,
+    }
+
+
+async def _latest_intermarket_snapshot(
+    session: AsyncSession, symbol: str,
+) -> dict[str, Any] | None:
+    """Return the most recent intermarket_snapshots row for ``symbol``, or None."""
+    try:
+        result = await session.execute(
+            sa.text(
+                "SELECT funding_rate, mark_price, open_interest, captured_at "
+                "FROM intermarket_snapshots "
+                "WHERE symbol = :s "
+                "ORDER BY captured_at DESC LIMIT 1"
+            ),
+            {"s": symbol},
+        )
+        row = result.first()
+        if row is None:
+            return None
+        return {
+            "funding_rate": (
+                float(row.funding_rate) if row.funding_rate is not None else None
+            ),
+            "mark_price": (
+                float(row.mark_price) if row.mark_price is not None else None
+            ),
+            "open_interest": (
+                float(row.open_interest) if row.open_interest is not None else None
+            ),
+        }
+    except Exception as e:  # noqa: BLE001 — observation capture is best-effort
+        log.warning("_latest_intermarket_snapshot failed for %s: %s", symbol, e)
+        return None
+
+
+def _build_components(
+    *,
+    symbol: str,
+    captured_at: datetime,
+    atr: float,
+    last_close: float,
+    layer_scores_array: list[float],
+    intermarket: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pure assembler — no I/O. Easy to unit-test."""
+    atr_pct = (atr / last_close) if last_close > 0 else 0.0
+    funding = intermarket.get("funding_rate") if intermarket else None
+    open_interest = intermarket.get("open_interest") if intermarket else None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "captured_at": captured_at.astimezone(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "atr": atr,
+        "last_close": last_close,
+        "layer_scores": layer_scores_array,
+        "market": {
+            "atr_pct": atr_pct,
+            "funding_rate": funding,
+            "open_interest": open_interest,
+            # Placeholders — real values will arrive once their feature
+            # workers start populating dedicated tables. Loader at
+            # training time falls back to the same lookups for these.
+            "oi_delta_24h": 0.0,
+            "dxy_corr_30d": 0.0,
+            "gold_corr_30d": 0.0,
+            # Regime classifier integration is a follow-up — for now we
+            # stamp "sideways_grind" as the safe default (no regime
+            # interpretation rather than wrong interpretation).
+            "regime": "sideways_grind",
+        },
+        # At open, every position is by definition flat/just-opened.
+        "position": {
+            "cur_position": 0,
+            "unrealized_pnl_R": 0.0,
+            "bars_in_position": 0,
+        },
+        "macro": _macro_from_ts(captured_at),
+    }
+
+
+async def build_obs_components(
+    session: AsyncSession,
+    *,
+    symbol: str,
+    captured_at: datetime,
+    atr: float,
+    last_close: float,
+    layer_scores_array: list[float],
+) -> dict[str, Any]:
+    """Build the per-component obs dict for one shadow-trade-open event.
+
+    Best-effort — failures in the intermarket lookup fall back to None
+    values for that section (loader handles None at training time).
+    """
+    intermarket = await _latest_intermarket_snapshot(session, symbol)
+    return _build_components(
+        symbol=symbol,
+        captured_at=captured_at,
+        atr=atr,
+        last_close=last_close,
+        layer_scores_array=layer_scores_array,
+        intermarket=intermarket,
+    )
+
+
+async def persist_observation(
+    session: AsyncSession,
+    *,
+    signal_id: str,
+    user_id: int,
+    symbol: str,
+    opened_at: datetime,
+    components: dict[str, Any],
+) -> None:
+    """Insert one row in shadow_observations.
+
+    Best-effort — any DB error is logged and swallowed. Missing
+    observation rows degrade training quality but never crash the
+    shadow worker (which is critical-path).
+    """
+    try:
+        await session.execute(
+            sa.text(
+                "INSERT INTO shadow_observations "
+                "(signal_id, user_id, symbol, opened_at, components) "
+                "VALUES (:sid, :uid, :sym, :oa, :comp)"
+            ),
+            {
+                "sid": signal_id,
+                "uid": user_id,
+                "sym": symbol,
+                "oa": opened_at,
+                "comp": json.dumps(components),
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — observation persist is best-effort
+        log.warning(
+            "persist_observation failed for signal_id=%s symbol=%s: %s",
+            signal_id, symbol, e,
+        )
+
+
+async def load_observation_components(
+    session: AsyncSession, signal_id: str,
+) -> dict[str, Any] | None:
+    """Read the stored components dict for ``signal_id``. None if absent."""
+    try:
+        result = await session.execute(
+            sa.text(
+                "SELECT components FROM shadow_observations "
+                "WHERE signal_id = :sid"
+            ),
+            {"sid": signal_id},
+        )
+        row = result.first()
+        if row is None:
+            return None
+        raw = row.components
+        # Postgres returns dict (via JSONB), SQLite returns str (TEXT).
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw  # type: ignore[no-any-return]
+    except Exception as e:  # noqa: BLE001
+        log.warning("load_observation_components failed for %s: %s", signal_id, e)
+        return None
+
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "build_obs_components",
+    "persist_observation",
+    "load_observation_components",
+]

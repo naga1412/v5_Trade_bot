@@ -37,6 +37,7 @@ from app.shadow.engine import (
 )
 from app.shadow.exit_monitor import ExitDecision, check_exit
 from app.shadow.multi_stream import MultiStreamCandle, MultiStreamReader
+from app.shadow.observation import build_obs_components, persist_observation
 from app.shadow.persistence import (
     delete_open_position,
     list_open_positions,
@@ -333,11 +334,57 @@ class ShadowWorker:
             signal, position_size_usdt=SHADOW_POSITION_SIZE_USDT,
         )
 
+        # Build the 9-float layer_scores array (signed_strength * confidence,
+        # per the aggregator's contribution formula) in deterministic L1..L9
+        # order. None layers → 0.0. Used by the obs-snapshot for the brain's
+        # 58-float observation reconstruction.
+        layer_scores_array: list[float] = []
+        for i in range(1, 10):
+            ls = pred.layer_scores.get(i)
+            if ls is None:
+                layer_scores_array.append(0.0)
+                continue
+            try:
+                dir_val = getattr(ls, "direction", "NEUTRAL")
+                if hasattr(dir_val, "value"):
+                    dir_val = dir_val.value
+                sign = 1.0 if dir_val == "LONG" else -1.0 if dir_val == "SHORT" else 0.0
+                strength = float(getattr(ls, "strength", 0.0) or 0.0)
+                confidence = float(getattr(ls, "confidence", 0.0) or 0.0)
+                layer_scores_array.append(sign * strength * confidence)
+            except Exception:  # noqa: BLE001 — obs-builder is best-effort
+                layer_scores_array.append(0.0)
+
         try:
             async with self.session_factory() as session:
                 await persist_open_position(
                     session, position, user_id=self.user_id,
                 )
+                # Capture the full RL obs components for offline PPO training.
+                # Best-effort — failures here don't block the position open;
+                # missing obs rows only degrade future training-data quality.
+                try:
+                    components = await build_obs_components(
+                        session,
+                        symbol=candle.symbol,
+                        captured_at=candle.ts,
+                        atr=atr_value,
+                        last_close=candle.close,
+                        layer_scores_array=layer_scores_array,
+                    )
+                    await persist_observation(
+                        session,
+                        signal_id=signal.signal_id,
+                        user_id=self.user_id,
+                        symbol=candle.symbol,
+                        opened_at=candle.ts,
+                        components=components,
+                    )
+                except Exception as obs_err:  # noqa: BLE001
+                    log.warning(
+                        "shadow obs capture failed for %s (signal_id=%s): %s",
+                        candle.symbol, signal.signal_id, obs_err,
+                    )
                 await session.commit()
         except Exception as e:
             log.error("persist open failed for %s; suppressing publish: %s",
