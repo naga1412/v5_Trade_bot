@@ -36,6 +36,7 @@ from app.api.schemas import (
 )
 from app.auth.deps import current_user_or_impersonated
 from app.auth.models import User
+from app.data.binance_ticker import compute_unrealized_pnl_pct, fetch_spot_prices
 from app.db.session import get_session
 from app.shadow.stats import (
     Trade,
@@ -302,13 +303,13 @@ async def open_positions(
     current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[OpenPositionOut]:
-    """Return the open shadow positions.
+    """Return the open shadow positions with current price + unrealized P&L.
 
-    `current_price`, `unrealized_pnl_pct`, and `unrealized_pnl_usdt` are
-    intentionally returned as `None`. The Bot Status tab subscribes to the
-    WebSocket `shadow_pnl_tick` stream for live mark prices; this REST
-    endpoint exists only for cold-load / refresh fallback so we avoid an
-    expensive Binance round-trip on every page load.
+    Cold-load fills these from a single Binance SPOT batch ticker call so
+    the dashboard shows real numbers immediately. The WebSocket
+    `shadow_pnl_tick` stream continues to deliver real-time updates on
+    each candle close. Any Binance-side failure here is logged and we
+    fall back to None for the price/pnl fields (UI shows "—" as before).
     """
     sql = (
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
@@ -318,11 +319,32 @@ async def open_positions(
         "ORDER BY opened_at ASC"
     )
     result = await session.execute(sa.text(sql), {"user_id": current_user.id})
+    rows = list(result)
+
+    # Batch-fetch SPOT prices once for all open symbols. Symbols stored in
+    # `shadow_open_positions` are already in Binance no-slash form
+    # (BTCUSDT, etc.) — the shadow worker subscribes to that exact form.
+    symbols = [r.symbol for r in rows]
+    prices = await fetch_spot_prices(symbols)
+
     out: list[OpenPositionOut] = []
-    for r in result:
+    for r in rows:
         opened_at = r.opened_at
         if isinstance(opened_at, str):
             opened_at = datetime.fromisoformat(opened_at)
+
+        current_price: float | None = prices.get(r.symbol)
+        pnl_pct: float | None = None
+        pnl_usdt: float | None = None
+        if current_price is not None:
+            pnl_pct = compute_unrealized_pnl_pct(
+                direction=r.direction,
+                entry_price=r.entry_price,
+                current_price=current_price,
+            )
+            if pnl_pct is not None:
+                pnl_usdt = r.position_size_usdt * pnl_pct / 100.0
+
         out.append(OpenPositionOut(
             symbol=r.symbol,
             direction=r.direction,  # type: ignore[arg-type]
@@ -333,9 +355,9 @@ async def open_positions(
             bars_held=r.bars_held,
             opened_at=opened_at,
             signal_id=r.signal_id,
-            current_price=None,
-            unrealized_pnl_pct=None,
-            unrealized_pnl_usdt=None,
+            current_price=current_price,
+            unrealized_pnl_pct=pnl_pct,
+            unrealized_pnl_usdt=pnl_usdt,
         ))
     return out
 
