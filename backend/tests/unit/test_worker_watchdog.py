@@ -212,3 +212,153 @@ async def test_stateful_workers_marked_alert_only_in_message() -> None:
 
     assert "ALERT-ONLY (stateful)" in sent[0]
     assert "auto_restart_candidate" not in sent[0]
+
+
+# ---------------------------------------------------------------------------
+# Auto-restart wiring (self-healing).
+
+
+@pytest.mark.asyncio
+async def test_supervised_nonstateful_worker_is_restarted_and_severity_downgrades() -> None:
+    """A stale non-stateful worker that is registered with the supervisor
+    must be auto-restarted; if every dead worker self-heals, the admin
+    alert severity drops from 'critical' to 'warning' so the pager stays
+    quiet."""
+    from app.ops import worker_supervisor as ws
+
+    ws._reset_for_tests()
+
+    restart_calls: list[str] = []
+
+    async def _fake_restart(name: str) -> bool:
+        restart_calls.append(name)
+        return True
+
+    statuses = [
+        {"name": "scanner_batch_task", "state": "stale", "stateful": False,
+         "staleness_seconds": 1200, "max_staleness_seconds": 600},
+    ]
+    sent: list[tuple[str, str]] = []
+
+    async def _capture(message: str, *, severity: str = "warning") -> bool:
+        sent.append((severity, message))
+        return True
+
+    with (
+        patch.object(ws, "is_registered", lambda n: True),
+        patch.object(ws, "restart", _fake_restart),
+        patch.object(worker_watchdog, "alert_admin", _capture),
+    ):
+        await worker_watchdog._alert_if_dead(statuses)
+
+    assert restart_calls == ["scanner_batch_task"]
+    assert len(sent) == 1
+    severity, body = sent[0]
+    # Self-heal succeeded → severity downgraded.
+    assert severity == "warning"
+    assert "action=restarted" in body
+
+
+@pytest.mark.asyncio
+async def test_unsupervised_nonstateful_worker_alerts_critical() -> None:
+    """A non-stateful worker that's NOT registered with the supervisor
+    (legacy / not-yet-migrated) still gets the critical alert path —
+    we can't restart what we don't know about."""
+    from app.ops import worker_supervisor as ws
+
+    ws._reset_for_tests()
+
+    statuses = [
+        {"name": "legacy_worker", "state": "stale", "stateful": False,
+         "staleness_seconds": 1200, "max_staleness_seconds": 600},
+    ]
+    sent: list[tuple[str, str]] = []
+
+    async def _capture(message: str, *, severity: str = "warning") -> bool:
+        sent.append((severity, message))
+        return True
+
+    with patch.object(worker_watchdog, "alert_admin", _capture):
+        await worker_watchdog._alert_if_dead(statuses)
+
+    assert len(sent) == 1
+    severity, body = sent[0]
+    assert severity == "critical"
+    assert "action=alert (not_supervised)" in body
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_keeps_severity_critical() -> None:
+    """If supervisor.restart() returns False (factory raised), we keep
+    severity=critical so the operator gets paged — self-heal failed."""
+    from app.ops import worker_supervisor as ws
+
+    ws._reset_for_tests()
+
+    async def _failing_restart(name: str) -> bool:
+        return False
+
+    statuses = [
+        {"name": "scanner_batch_task", "state": "stale", "stateful": False,
+         "staleness_seconds": 1200, "max_staleness_seconds": 600},
+    ]
+    sent: list[tuple[str, str]] = []
+
+    async def _capture(message: str, *, severity: str = "warning") -> bool:
+        sent.append((severity, message))
+        return True
+
+    with (
+        patch.object(ws, "is_registered", lambda n: True),
+        patch.object(ws, "restart", _failing_restart),
+        patch.object(worker_watchdog, "alert_admin", _capture),
+    ):
+        await worker_watchdog._alert_if_dead(statuses)
+
+    severity, body = sent[0]
+    assert severity == "critical"
+    assert "restart_FAILED" in body
+
+
+@pytest.mark.asyncio
+async def test_mixed_dead_workers_severity_critical_unless_all_healed() -> None:
+    """Three dead workers: one stateful (alert-only), one supervised
+    (will heal), one unsupervised (cannot heal). Severity must stay
+    critical because at least one cannot self-heal."""
+    from app.ops import worker_supervisor as ws
+
+    ws._reset_for_tests()
+
+    async def _ok_restart(name: str) -> bool:
+        return True
+
+    statuses = [
+        {"name": "live_worker", "state": "stale", "stateful": True,
+         "staleness_seconds": 1200, "max_staleness_seconds": 600},
+        {"name": "scanner_batch_task", "state": "stale", "stateful": False,
+         "staleness_seconds": 1200, "max_staleness_seconds": 600},
+        {"name": "legacy", "state": "stale", "stateful": False,
+         "staleness_seconds": 1200, "max_staleness_seconds": 600},
+    ]
+    sent: list[tuple[str, str]] = []
+
+    async def _capture(message: str, *, severity: str = "warning") -> bool:
+        sent.append((severity, message))
+        return True
+
+    def _fake_is_registered(name: str) -> bool:
+        return name == "scanner_batch_task"
+
+    with (
+        patch.object(ws, "is_registered", _fake_is_registered),
+        patch.object(ws, "restart", _ok_restart),
+        patch.object(worker_watchdog, "alert_admin", _capture),
+    ):
+        await worker_watchdog._alert_if_dead(statuses)
+
+    severity, body = sent[0]
+    assert severity == "critical"
+    # All three actions are correctly classified in the body.
+    assert "ALERT-ONLY (stateful)" in body
+    assert "action=restarted" in body
+    assert "not_supervised" in body
