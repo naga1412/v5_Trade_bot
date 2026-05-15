@@ -24,8 +24,21 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 
-import httpx
+# Path setup mirrors tools/populate_universe_history.py — needed because
+# the file is bind-mounted at /app/host-tools/ in the container while the
+# actual `app/` package lives at /app/app/. uvicorn already has /app on
+# sys.path; ad-hoc `python` invocations don't, so we add it explicitly.
+for _candidate in (
+    Path(__file__).resolve().parent.parent / "backend",  # repo layout
+    Path("/app"),                                         # container layout
+):
+    if (_candidate / "app").is_dir():
+        sys.path.insert(0, str(_candidate))
+        break
+
+import httpx  # noqa: E402
 
 
 async def main() -> int:
