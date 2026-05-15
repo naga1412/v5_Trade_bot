@@ -46,7 +46,8 @@ jobs:
           ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
             "cd $DIR_DEFAULTED && \
              git fetch --all && \
-             git checkout main && git pull && \
+             git checkout main && \
+             git reset --hard origin/main && \
              docker compose up -d --build && \
              docker compose exec -T backend alembic upgrade head && \
              echo 'waiting 15s for backend to bind port 8000…' && \
@@ -54,8 +55,8 @@ jobs:
              curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
                   http://localhost:8000/api/v1/health && \
              echo '--- populating universe_history (idempotent) ---' && \
-             docker compose exec -T backend \
-                 python /app/host-tools/populate_universe_history.py || true && \
+             ( docker compose exec -T backend \
+                 python /app/host-tools/populate_universe_history.py || true ) && \
              echo '--- installing brain-trainer nightly cron (idempotent) ---' && \
              ( crontab -l 2>/dev/null | grep -v -F 'hetzner_brain_cron.sh' ; \
                echo '30 3 * * * /opt/trading-radar/backend/scripts/hetzner_brain_cron.sh >> /var/log/trading-radar-brain-cron.log 2>&1' ) | crontab - && \
@@ -94,7 +95,8 @@ jobs:
           ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
             "cd $DIR_DEFAULTED && \
              git fetch --all && \
-             git checkout dev && git pull origin dev && \
+             git checkout dev && \
+             git reset --hard origin/dev && \
              docker compose -f docker-compose.staging.yml --env-file .env.staging \
                  up -d --build && \
              docker compose -f docker-compose.staging.yml --env-file .env.staging \
@@ -104,9 +106,9 @@ jobs:
              curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
                   http://localhost:8001/api/v1/health && \
              echo '--- staging populate ---' && \
-             docker compose -f docker-compose.staging.yml --env-file .env.staging \
+             ( docker compose -f docker-compose.staging.yml --env-file .env.staging \
                  exec -T backend-staging \
-                 python /app/host-tools/populate_universe_history.py || true && \
+                 python /app/host-tools/populate_universe_history.py || true ) && \
              echo '--- staging backend logs ---' && \
              docker compose -f docker-compose.staging.yml --env-file .env.staging \
                  logs --tail=30 backend-staging"
