@@ -56,6 +56,10 @@ jobs:
              echo '--- populating universe_history (idempotent) ---' && \
              docker compose exec -T backend \
                  python /app/host-tools/populate_universe_history.py || true && \
+             echo '--- installing brain-trainer nightly cron (idempotent) ---' && \
+             ( crontab -l 2>/dev/null | grep -v -F 'hetzner_brain_cron.sh' ; \
+               echo '30 3 * * * /opt/trading-radar/backend/scripts/hetzner_brain_cron.sh >> /var/log/trading-radar-brain-cron.log 2>&1' ) | crontab - && \
+             crontab -l | grep -F 'hetzner_brain_cron.sh' && \
              echo '--- recent backend logs (last 30 lines) ---' && \
              docker compose logs --tail=30 backend"
 
