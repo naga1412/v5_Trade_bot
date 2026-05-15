@@ -64,6 +64,20 @@ CREATE_INTERMARKET_TABLE = (
     "funding_rate REAL, mark_price REAL, open_interest REAL, source TEXT NOT NULL)"
 )
 
+# Added by migration 0019 — replay_buffer.load_from_shadow_trades LEFT-JOINs
+# against this table, so the fixture must create it even if the test doesn't
+# populate it (LEFT JOIN with empty table is fine; missing table is not).
+CREATE_SHADOW_OBSERVATIONS_TABLE = (
+    "CREATE TABLE shadow_observations ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "signal_id TEXT NOT NULL UNIQUE, "
+    "user_id INTEGER NOT NULL, "
+    "symbol TEXT NOT NULL, "
+    "opened_at TEXT NOT NULL, "
+    "components TEXT NOT NULL, "
+    "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+)
+
 
 @pytest_asyncio.fixture
 async def session() -> AsyncSession:
@@ -71,6 +85,7 @@ async def session() -> AsyncSession:
     async with engine.begin() as conn:
         await conn.execute(sa.text(CREATE_SHADOW_TRADES_TABLE))
         await conn.execute(sa.text(CREATE_INTERMARKET_TABLE))
+        await conn.execute(sa.text(CREATE_SHADOW_OBSERVATIONS_TABLE))
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with sm() as s:
         yield s
