@@ -4,18 +4,20 @@ Runs every 5 minutes. For each entry in WORKER_REGISTRY:
   - Skip if any of ``required_env`` is unset (worker is "expected absent").
   - Run ``liveness_query``; compute ``now() - max(beat_at)``.
   - If staleness > ``max_staleness_seconds``: log.error + alert_admin.
-  - For ``stateful=False`` workers, the watchdog ALSO emits a structured
-    log line with ``action=auto_restart_candidate`` so a future
-    auto-restart hook can fire. We deliberately do NOT call task.cancel()
-    + respawn here — the lifespan owns the task lifecycle, and a
-    watchdog-owned restart would race with it. Restart is a follow-up.
+  - For ``stateful=False`` workers that are registered with
+    ``app.ops.worker_supervisor``: also call ``supervisor.restart(name)``
+    to cancel the dead task and spawn a fresh one. The respawn is logged
+    with ``action=restarted`` and re-alerts only if the worker stays
+    stale on the next tick.
 
 Stateful workers (live_worker, shadow_worker, liquidation_monitor,
-telegram_poller) get ALERT-ONLY treatment regardless. Restarting them
-risks lost open positions, duplicate orders, or vault re-init issues.
+telegram_poller, ws_keepalive_task) get ALERT-ONLY treatment regardless.
+Restarting them risks lost open positions, duplicate orders, vault
+re-init issues, or Binance per-IP WS rate-limit hits.
 
 The watchdog itself never raises. A query failure for one worker is
-logged and the loop continues to the next.
+logged and the loop continues to the next. A restart failure is logged
+and the alert is sent normally.
 """
 
 from __future__ import annotations
@@ -27,12 +29,20 @@ from datetime import datetime, timezone
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.ops import worker_supervisor
 from app.ops.alerts import alert_admin
+from app.ops.heartbeat import record_heartbeat
 from app.ops.worker_registry import WORKER_REGISTRY, WorkerSpec
 
 log = logging.getLogger(__name__)
 
 WATCHDOG_INTERVAL_SECONDS: int = 5 * 60
+
+# Name the watchdog uses to record its OWN heartbeat. Without this the
+# watchdog itself is a blind spot — if it crashes silently, the workers
+# go unobserved and nothing notices. Host-level watchdog.sh reads this
+# row to decide whether the in-process self-healer is still alive.
+WATCHDOG_HEARTBEAT_NAME: str = "worker_watchdog_task"
 
 
 async def _staleness_seconds(
@@ -118,15 +128,50 @@ async def check_all_workers(
     return statuses
 
 
+async def _attempt_restart(name: str) -> bool:
+    """Best-effort restart of a stale, non-stateful, registered worker.
+
+    Returns True on successful respawn, False otherwise. Never raises —
+    the watchdog loop must keep ticking even if the supervisor itself is
+    misbehaving.
+    """
+    if not worker_supervisor.is_registered(name):
+        return False
+    try:
+        return await worker_supervisor.restart(name)
+    except Exception as e:  # noqa: BLE001
+        log.error("watchdog: restart(%s) raised: %s", name, e)
+        return False
+
+
 async def _alert_if_dead(statuses: list[dict[str, object]]) -> None:
     # pending_heartbeat is intentionally NOT in the alert set — those
     # workers are known-pending instrumentation, not real failures.
     dead = [s for s in statuses if s["state"] in {"stale", "never_heartbeated"}]
     if not dead:
         return
+
+    # First pass: try to restart each non-stateful registered worker.
+    # Restart actions are recorded so the operator can see them in the
+    # same alert body as the staleness report.
+    restart_results: dict[str, str] = {}
+    for s in dead:
+        name = str(s["name"])
+        if s.get("stateful"):
+            restart_results[name] = "ALERT-ONLY (stateful)"
+            continue
+        if not worker_supervisor.is_registered(name):
+            # Non-stateful but not registered with the supervisor — older
+            # workers that still own their own lifecycle in main.py.
+            # Falls back to the alert-only path until they migrate.
+            restart_results[name] = "alert (not_supervised)"
+            continue
+        ok = await _attempt_restart(name)
+        restart_results[name] = "restarted" if ok else "restart_FAILED"
+
     lines = [f"watchdog: {len(dead)} worker(s) appear DEAD"]
     for s in dead:
-        action = "ALERT-ONLY (stateful)" if s.get("stateful") else "auto_restart_candidate"
+        name = str(s["name"])
         stale_raw = s.get("staleness_seconds")
         if stale_raw == float("inf"):
             stale_str = "never"
@@ -134,13 +179,21 @@ async def _alert_if_dead(statuses: list[dict[str, object]]) -> None:
             stale_str = f"{int(stale_raw)}s"
         else:
             stale_str = "?"
+        action = restart_results.get(name, "alert")
         lines.append(
-            f"  - {s['name']}: {s['state']} (stale={stale_str}, "
+            f"  - {name}: {s['state']} (stale={stale_str}, "
             f"max={s.get('max_staleness_seconds')}s) action={action}",
         )
     body = "\n".join(lines)
     log.error(body)
-    await alert_admin(body, severity="critical")
+    # If every dead worker was successfully restarted, downgrade severity
+    # to "warning" so the operator's pager doesn't fire for self-healed
+    # incidents. Anything left in ALERT-ONLY / restart_FAILED keeps the
+    # critical severity that pages.
+    healed_all = all(
+        v == "restarted" for v in restart_results.values()
+    ) and bool(restart_results)
+    await alert_admin(body, severity="warning" if healed_all else "critical")
 
 
 async def _watchdog_loop(
@@ -151,13 +204,28 @@ async def _watchdog_loop(
         WATCHDOG_INTERVAL_SECONDS, len(WORKER_REGISTRY),
     )
     while True:
+        n_dead = 0
         try:
             statuses = await check_all_workers(session_factory)
+            n_dead = sum(
+                1 for s in statuses
+                if s["state"] in {"stale", "never_heartbeated"}
+            )
             await _alert_if_dead(statuses)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("worker_watchdog: tick failed: %s", e)
+        # Heartbeat ourselves AFTER the work so the timestamp reflects a
+        # completed tick, not just an attempted one. Best-effort — a DB
+        # blip on the heartbeat row must not kill the watchdog. The
+        # host-level watchdog.sh reads this row to nuke-restart the
+        # backend container if the in-process watchdog itself goes silent.
+        await record_heartbeat(
+            session_factory, WATCHDOG_HEARTBEAT_NAME,
+            status="ok",
+            details={"workers_tracked": len(WORKER_REGISTRY), "dead": n_dead},
+        )
         await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
 
 

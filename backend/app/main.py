@@ -3,6 +3,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +54,7 @@ from app.ops.telegram_polling import (
 )
 from app.ml.validator import start_prediction_validator_task
 from app.ops.verifier_scheduler import start_audit_verifier_task
+from app.ops import worker_supervisor
 from app.ops.worker_watchdog import start_worker_watchdog
 from app.scanner.batch import start_scanner_batch_task
 from app.shadow.worker import start_shadow_worker
@@ -142,46 +144,81 @@ async def lifespan(_app: FastAPI):
         universe_refresh_task = start_universe_refresh_task(
             get_session_factory(), universe_refreshed_event,
         )
+        # The non-stateful workers below register themselves with
+        # worker_supervisor so that worker_watchdog can replace a dead
+        # task with a fresh one (self-healing). The supervisor is a
+        # process-local registry of name->factory mappings — see
+        # app/ops/worker_supervisor.py for the safety contract on what
+        # is safe to register here.
+        def _wrap(name: str, factory: Any) -> asyncio.Task[None]:
+            return worker_supervisor.register(name, factory)
+
         # SP-3 Phase F: daily 02:00 UTC universe sync across all registered
         # adapters. Skipped in test/ci so the test event loop isn't racing
         # background tasks.
-        universe_sync_task = start_universe_sync_task(get_session_factory())
+        universe_sync_task = _wrap(
+            "universe_sync_task",
+            lambda: start_universe_sync_task(get_session_factory()),
+        )
         # SP-3 Phase F: every 5 min ping each adapter's health endpoint and
         # write to adapter_health (read by /api/v1/admin/adapters/health).
-        health_pinger_task = start_health_pinger_task(get_session_factory())
+        health_pinger_task = _wrap(
+            "health_pinger_task",
+            lambda: start_health_pinger_task(get_session_factory()),
+        )
         # SP-7 Phase D3: nightly 03:00 UTC audit hash-chain verifier across
         # the chained tables (predictions, paper_trades, shadow_trades). Any
         # detected break triggers alert_admin + an auth_violations row with
         # attempted_email='system'. Skipped in test/ci so the suite doesn't
         # carry the nightly background overhead.
-        audit_verifier_task = start_audit_verifier_task(get_session_factory())
+        audit_verifier_task = _wrap(
+            "audit_verifier_task",
+            lambda: start_audit_verifier_task(get_session_factory()),
+        )
         # SP-9 Phase D4: news ingest (5min crypto / 30min macro) + nightly
         # 04:00 UTC retention cleanup. Both are gated on the same env/worker
         # check so test/ci never hits CryptoPanic or downloads FinBERT.
-        news_ingest_task = start_news_ingest_task(get_session_factory())
-        news_cleanup_task = start_news_cleanup_task(get_session_factory())
+        news_ingest_task = _wrap(
+            "news_ingest_task",
+            lambda: start_news_ingest_task(get_session_factory()),
+        )
+        news_cleanup_task = _wrap(
+            "news_cleanup_task",
+            lambda: start_news_cleanup_task(get_session_factory()),
+        )
         # SP-3.5: 5min funding/OI snapshot worker + nightly 04:30 UTC cleanup.
         # Skipped in test/ci (no FAPI calls, no DB churn during pytest).
-        intermarket_snapshot_task = start_intermarket_snapshot_task(get_session_factory())
-        intermarket_cleanup_task = start_intermarket_cleanup_task(get_session_factory())
+        intermarket_snapshot_task = _wrap(
+            "intermarket_snapshot_task",
+            lambda: start_intermarket_snapshot_task(get_session_factory()),
+        )
+        intermarket_cleanup_task = _wrap(
+            "intermarket_cleanup_task",
+            lambda: start_intermarket_cleanup_task(get_session_factory()),
+        )
         # PR #97: 5-min watchdog that reads each worker's liveness signal
         # (DB MAX(timestamp) for workers with natural signals; heartbeats
-        # for the rest) and alerts via SMTP on staleness. Stateful workers
-        # are alert-only — auto-restart is unsafe for them. See
-        # app/ops/worker_registry.py for the full list.
+        # for the rest), alerts via SMTP on staleness, and AUTO-RESTARTS
+        # registered non-stateful workers via worker_supervisor.
+        # Stateful workers (live_worker, shadow_worker, liquidation_monitor,
+        # telegram_poller, ws_keepalive_task) stay alert-only.
         worker_watchdog_task = start_worker_watchdog(get_session_factory())
         # Feature 4 — multi-asset fast scanner. Every 60s, fetches klines
         # for the asset_universe (or fallback watchlist) and runs the
         # deterministic indicator-only fast_scan. Results cached in a
         # module-level dict; the /api/v1/scanner/fast endpoint reads
         # from that cache so requests are O(1).
-        scanner_batch_task = start_scanner_batch_task(get_session_factory())
+        scanner_batch_task = _wrap(
+            "scanner_batch_task",
+            lambda: start_scanner_batch_task(get_session_factory()),
+        )
         # Feature 2: 60s prediction validator. Picks up rows from
         # prediction_validations where target_ts has passed and the
         # actual close is available; computes was_correct + pnl_pct
         # so the chart UI can surface live accuracy telemetry.
-        prediction_validator_task = start_prediction_validator_task(
-            get_session_factory(),
+        prediction_validator_task = _wrap(
+            "prediction_validator_task",
+            lambda: start_prediction_validator_task(get_session_factory()),
         )
         # Server-side WS keepalive — fans live-prediction WS subscriptions
         # across top-N universe so prediction_validations is populated 24/7

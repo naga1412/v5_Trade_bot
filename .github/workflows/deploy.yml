@@ -60,6 +60,11 @@ jobs:
              ( crontab -l 2>/dev/null | grep -v -F 'hetzner_brain_cron.sh' ; \
                echo '30 3 * * * /opt/trading-radar/backend/scripts/hetzner_brain_cron.sh >> /var/log/trading-radar-brain-cron.log 2>&1' ) | crontab - && \
              crontab -l | grep -F 'hetzner_brain_cron.sh' && \
+             echo '--- installing self-healing watchdog cron (idempotent) ---' && \
+             chmod +x /opt/trading-radar/scripts/watchdog.sh && \
+             ( crontab -l 2>/dev/null | grep -v -F '/opt/trading-radar/scripts/watchdog.sh' ; \
+               echo '*/15 * * * * INSTALL_DIR=/opt/trading-radar /opt/trading-radar/scripts/watchdog.sh >> /var/log/trading-radar-watchdog.log 2>&1' ) | crontab - && \
+             crontab -l | grep -F '/opt/trading-radar/scripts/watchdog.sh' && \
              echo '--- recent backend logs (last 30 lines) ---' && \
              docker compose logs --tail=30 backend"
 
