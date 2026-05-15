@@ -22,6 +22,8 @@ on:
           - net-probe   # DNS + TCP + HTTPS reachability test from backend container to fstream.binance.com
           - health-summary # one-page production health: container, workers, errors, recent shadow + prediction activity
           - direction-performance # LONG vs SHORT hit rate + realized pnl from prediction_validations — answers "is the model directionally accurate per side"
+          - test-trade-open # fire a 20 USDT BTCUSDT LONG signal via the real dispatcher → testnet only; operator approves in Telegram
+          - test-trade-close-all # market-close every open position on Binance Futures testnet
 
 jobs:
   probe:
@@ -304,5 +306,27 @@ jobs:
                        close_reason \
                      FROM shadow_trades WHERE closed_at IS NOT NULL \
                      GROUP BY direction, close_reason ORDER BY direction, close_reason;\""
+              ;;
+            test-trade-open)
+              # Fires the same dispatch the /admin/test-trade/open endpoint
+              # would fire, but from inside the backend container so we
+              # bypass Cloudflare Access auth. Hard-coded for safety:
+              #   use_testnet=True, mode=telegram-approve, BTCUSDT LONG, 20 USDT.
+              # The dispatcher sends a Telegram message with Approve/Reject
+              # buttons; the operator taps Approve and the existing
+              # telegram_poller_task places the order on Binance Futures
+              # testnet. No real money can be touched from this code path.
+              # Script lives in host-tools/ so the YAML stays clean.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend \
+                 python /app/host-tools/test_trade_open.py"
+              ;;
+            test-trade-close-all)
+              # Market-close every open position on Binance Futures testnet.
+              # Uses BinanceLiveClient with use_testnet=True hard-coded so
+              # this code path cannot reach live Binance.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend \
+                 python /app/host-tools/test_trade_close_all.py"
               ;;
           esac
