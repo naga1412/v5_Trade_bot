@@ -5,6 +5,7 @@ import { MlCheckpoints } from "@/tabs/Admin/MlCheckpoints";
 import { PatternsAdmin } from "@/tabs/Admin/PatternsAdmin";
 import { AdaptersAdmin } from "@/tabs/Admin/AdaptersAdmin";
 import { TrapsAdmin } from "@/tabs/Admin/TrapsAdmin";
+import { TestTrade } from "@/tabs/Admin/TestTrade";
 
 type SubTab =
   | "users"
@@ -12,7 +13,8 @@ type SubTab =
   | "ml-checkpoints"
   | "patterns"
   | "adapters"
-  | "traps";
+  | "traps"
+  | "test-trade";
 
 const SUB_TABS: readonly { id: SubTab; label: string }[] = [
   { id: "users", label: "Users" },
@@ -21,6 +23,7 @@ const SUB_TABS: readonly { id: SubTab; label: string }[] = [
   { id: "patterns", label: "Patterns" },
   { id: "adapters", label: "Adapters" },
   { id: "traps", label: "Traps" },
+  { id: "test-trade", label: "Test Trade" },
 ];
 
 // SP-0.7 Phase J + SP-1 Phase F + SP-6 Phase E: Admin tab —
@@ -68,8 +71,10 @@ export function Admin() {
           <PatternsAdmin />
         ) : sub === "adapters" ? (
           <AdaptersAdmin />
-        ) : (
+        ) : sub === "traps" ? (
           <TrapsAdmin />
+        ) : (
+          <TestTrade />
         )}
       </div>
     </div>
