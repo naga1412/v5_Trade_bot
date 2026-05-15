@@ -52,13 +52,30 @@ async def main() -> int:
     )
     from app.trading.execution.glue import vault_keys
 
-    keys = vault_keys()
-    if keys is None:
+    # `docker compose exec backend python ...` starts a fresh Python
+    # process — it does NOT share the running uvicorn process's in-memory
+    # vault cache. Re-initialise here from the same secrets.enc + master
+    # passphrase the uvicorn lifespan used.
+    import os
+    from pathlib import Path as _Path
+    from app.config import get_settings
+    from app.trading.execution.glue import initialize_vault_cache
+
+    settings = get_settings()
+    secrets_path = _Path(os.environ.get("VAULT_SECRETS_PATH", "/app/secrets.enc"))
+    if not initialize_vault_cache(
+        passphrase=settings.master_passphrase, secrets_path=secrets_path,
+    ):
         print(
-            "FAIL: vault not loaded — AUTONOMOUS_TRADING_ENABLED must be true "
-            "and preflight must have passed at startup.",
+            f"FAIL: initialize_vault_cache failed (passphrase mismatch or "
+            f"missing keys in {secrets_path})",
             file=sys.stderr,
         )
+        return 1
+
+    keys = vault_keys()
+    if keys is None:
+        print("FAIL: vault_keys() returned None after init", file=sys.stderr)
         return 1
 
     # Use testnet mark price for the entry. The Futures testnet runs its

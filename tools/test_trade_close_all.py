@@ -34,16 +34,29 @@ ALLOWED_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
 
 
 async def main() -> int:
+    import os
+    from pathlib import Path as _Path
+    from app.config import get_settings
     from app.exchanges.binance_live import BinanceLiveClient, BinanceLiveError
-    from app.trading.execution.glue import vault_keys
+    from app.trading.execution.glue import initialize_vault_cache, vault_keys
+
+    # `docker compose exec backend python ...` starts a fresh Python process
+    # without the uvicorn lifespan's vault cache — re-init from secrets.enc.
+    settings = get_settings()
+    secrets_path = _Path(os.environ.get("VAULT_SECRETS_PATH", "/app/secrets.enc"))
+    if not initialize_vault_cache(
+        passphrase=settings.master_passphrase, secrets_path=secrets_path,
+    ):
+        print(
+            f"FAIL: initialize_vault_cache failed (passphrase mismatch or "
+            f"missing keys in {secrets_path})",
+            file=sys.stderr,
+        )
+        return 1
 
     keys = vault_keys()
     if keys is None:
-        print(
-            "FAIL: vault not loaded — AUTONOMOUS_TRADING_ENABLED must be true "
-            "and preflight must have passed at startup.",
-            file=sys.stderr,
-        )
+        print("FAIL: vault_keys() returned None after init", file=sys.stderr)
         return 1
 
     client = BinanceLiveClient(
