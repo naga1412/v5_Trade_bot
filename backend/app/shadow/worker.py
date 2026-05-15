@@ -338,9 +338,13 @@ class ShadowWorker:
         # per the aggregator's contribution formula) in deterministic L1..L9
         # order. None layers → 0.0. Used by the obs-snapshot for the brain's
         # 58-float observation reconstruction.
+        # Keys in pred.layer_scores are stringified ints ("1".."9") — see
+        # core/predictor.py:471 — not raw ints. The int-keyed lookup was a
+        # silent always-None bug masked by the None-guard below; mypy caught
+        # it 2026-05-15 once the dict type tightened.
         layer_scores_array: list[float] = []
         for i in range(1, 10):
-            ls = pred.layer_scores.get(i)
+            ls = pred.layer_scores.get(str(i))
             if ls is None:
                 layer_scores_array.append(0.0)
                 continue

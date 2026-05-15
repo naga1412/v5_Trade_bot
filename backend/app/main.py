@@ -69,6 +69,7 @@ from app.trading.execution.liquidation_monitor import (
     start_liquidation_monitor,
 )
 from app.trading.preflight import run_preflight
+from app.ws.keepalive import start_keepalive_task
 from app.ws.live_prediction import start_background_worker
 
 # Configure root logger from LOG_LEVEL env var. docker-compose passes
@@ -118,6 +119,7 @@ async def lifespan(_app: FastAPI):
     worker_watchdog_task = None
     scanner_batch_task = None
     prediction_validator_task = None
+    ws_keepalive_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -181,6 +183,11 @@ async def lifespan(_app: FastAPI):
         prediction_validator_task = start_prediction_validator_task(
             get_session_factory(),
         )
+        # Server-side WS keepalive — fans live-prediction WS subscriptions
+        # across top-N universe so prediction_validations is populated 24/7
+        # without anyone leaving a browser tab open. Replaces the
+        # "open chart, leave tab open" trick we relied on before.
+        ws_keepalive_task = start_keepalive_task(get_session_factory())
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
         # AUTONOMOUS_TRADING_ENABLED + a passing pre-flight. Pre-flight
@@ -343,6 +350,8 @@ async def lifespan(_app: FastAPI):
             scanner_batch_task.cancel()
         if prediction_validator_task is not None:
             prediction_validator_task.cancel()
+        if ws_keepalive_task is not None:
+            ws_keepalive_task.cancel()
         await _aclose_adapters()
 
 

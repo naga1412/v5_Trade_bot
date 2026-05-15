@@ -18,13 +18,13 @@ import { api } from "@/lib/api";
 import { FastScanRadar } from "@/tabs/Tab3Scanner/FastScanRadar";
 
 const sample: FastScanRadarData = {
-  generated_at: "2026-05-13T22:00:00Z",
   cache_size: 2,
   timeframe: "1h",
   by_tier: {},
   bullish: [
     {
       symbol: "DOGEUSDT",
+      timeframe: "1h",
       direction: "LONG",
       tier: "probable",
       confidence: 0.55,
@@ -34,11 +34,13 @@ const sample: FastScanRadarData = {
       last_close: 0.11,
       phase: "markup",
       modules: [],
+      scanned_at: "2026-05-13T22:00:00Z",
     },
   ],
   bearish: [
     {
       symbol: "ZECUSDT",
+      timeframe: "1h",
       direction: "SHORT",
       tier: "confirmed",
       confidence: 1.0,
@@ -48,6 +50,7 @@ const sample: FastScanRadarData = {
       last_close: 521.42,
       phase: "markdown",
       modules: [],
+      scanned_at: "2026-05-13T22:00:00Z",
     },
   ],
 };
