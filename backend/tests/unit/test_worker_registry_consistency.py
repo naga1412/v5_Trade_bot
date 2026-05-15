@@ -49,6 +49,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "auto_promote_task": "app/trading/auto_promote.py",
     "scanner_batch_task": "app/scanner/batch.py",
     "prediction_validator_task": "app/ml/validator.py",
+    "ws_keepalive_task": "app/ws/keepalive.py",
 }
 
 

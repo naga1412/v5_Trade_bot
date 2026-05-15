@@ -200,6 +200,19 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=10 * 60,
         stateful=False,
     ),
+    # 16. Server-side WS keepalive fleet — fans run_live_prediction across
+    #     the top-N universe so prediction_validations is populated 24/7
+    #     without a human leaving a browser tab open.
+    WorkerSpec(
+        name="ws_keepalive_task",
+        description="Fans live-prediction WS subscriptions across top-N universe (1h)",
+        liveness_query=HEARTBEAT,
+        # 5-min heartbeat cadence + 10-min slack.
+        max_staleness_seconds=15 * 60,
+        # Owns N live Binance WS connections; auto-restart could re-open
+        # WS faster than Binance's per-IP rate window — alert-only is safer.
+        stateful=True,
+    ),
 )
 
 
