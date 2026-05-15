@@ -207,12 +207,69 @@ check_postgres() {
 }
 
 # ============================================================
+# Check 8: HTTP /api/v1/health endpoint
+# ============================================================
+# The container can be "running" while uvicorn itself is wedged
+# (e.g. event loop blocked on a sync call). Docker only sees the
+# process is up; the user sees a hung dashboard. A direct HTTP
+# probe distinguishes these two states cheaply.
+check_health_endpoint() {
+  if ! curl -sf -o /dev/null -m 10 \
+       --retry 3 --retry-delay 2 --retry-connrefused \
+       http://localhost:8000/api/v1/health; then
+    ALERTS+=("/api/v1/health not responding")
+    run docker compose -f "$INSTALL_DIR/docker-compose.yml" restart backend
+    ACTIONS+=("restarted backend (health endpoint unresponsive)")
+  fi
+}
+
+# ============================================================
+# Check 9: In-process watchdog heartbeat is fresh
+# ============================================================
+# The in-process worker_watchdog is responsible for auto-restarting
+# stale non-stateful workers (scanner, validator, news_ingest, ...).
+# If the watchdog itself goes silent, the self-healing loop dies — at
+# that point only a backend container restart resurrects it. The
+# host-level watchdog (this script) is the outermost safety net that
+# catches "the in-process watchdog is dead" — a meta-check the
+# in-process layer fundamentally cannot do.
+#
+# Threshold: 20 minutes = 4x WATCHDOG_INTERVAL_SECONDS (5min). Anything
+# under that is normal jitter. Anything over it means the watchdog has
+# missed at least 3 consecutive ticks — backend restart is justified.
+check_in_process_watchdog() {
+  local age_seconds
+  age_seconds=$(docker exec tr-postgres psql -U postgres -d trading_radar -t -c \
+    "SELECT EXTRACT(EPOCH FROM (NOW() - beat_at))::int FROM worker_heartbeats \
+     WHERE worker_name='worker_watchdog_task';" 2>/dev/null \
+    | tr -d ' ' || echo "")
+
+  if [ -z "$age_seconds" ]; then
+    return  # Postgres unreachable — check_postgres handles it.
+  fi
+
+  if ! [[ "$age_seconds" =~ ^[0-9]+$ ]]; then
+    # No row → watchdog has never beaten on this deploy. Treat as DEAD
+    # only after a generous startup grace via the threshold below.
+    age_seconds=99999
+  fi
+
+  if [ "$age_seconds" -gt 1200 ]; then
+    ALERTS+=("in-process watchdog silent for ${age_seconds}s")
+    run docker compose -f "$INSTALL_DIR/docker-compose.yml" restart backend
+    ACTIONS+=("restarted backend (in-process watchdog dead)")
+  fi
+}
+
+# ============================================================
 # MAIN
 # ============================================================
 log "▶ watchdog tick$([ $DRY_RUN = 1 ] && echo ' (dry-run)')"
 
 check_containers
 check_postgres
+check_health_endpoint
+check_in_process_watchdog
 check_memory
 check_disk
 check_predictions_fresh
