@@ -5,6 +5,73 @@ Each entry has root cause, scope of impact, and remediation options.
 
 ---
 
+## Tracked follow-up PRs (out of scope for the 9-PR upgrade rollout)
+
+Operational fixes orthogonal to the upgrade plan. Acknowledged by
+operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
+
+### FU-1 — Wire heartbeats for all 16 registered workers
+- **Problem**: 12 of 16 workers in `worker_registry.py` are flagged
+  `pending_heartbeat=True` — the watchdog cannot tell whether they are
+  alive or dead. Verified via `worker_heartbeats` query on 2026-05-16
+  (only 4 workers have ever heartbeated).
+- **Scope**: Add `record_heartbeat(session_factory, name)` inside the
+  main loop of each `pending_heartbeat=True` worker. Pattern visible
+  in `ws_keepalive_task`. Remove `pending_heartbeat=True` flag once
+  wired.
+- **Effort**: ~1 day. Touches ~12 worker modules + their tests.
+- **Tracking**: this file (FU-1). See also the "Worker heartbeats" section below.
+- **Status**: queued; high-priority operational hygiene.
+
+### FU-2 — Audit chain v2 — canonical JSONB hashing + alert routing fix + CHAINED_TABLES expansion
+- **Problem (a)**: JSONB column tampering not detectable (root cause
+  documented below in "Audit hash chain" section).
+- **Problem (b)**: Verifier alerts route through `alert_admin` → SMTP,
+  but SMTP is not configured in prod — alerts fall back to WARNING
+  logs that scroll out within minutes.
+- **Problem (c)**: `verifier_scheduler.py CHAINED_TABLES` only walks
+  3 of 7 hash-chained tables (`predictions`, `paper_trades`,
+  `shadow_trades`). The other 4 (`live_trades`, `brain_decisions`,
+  `mode_change_log`, `tax_events`) are written but never verified.
+- **Scope (estimated 1-2 days)**:
+  1. Add canonical JSONB column hashing at write time: e.g. write a
+     `{col}_hash_canonical TEXT` column computed via
+     `json.dumps(value, sort_keys=True, separators=(",", ":"))`.
+     Verifier hashes the canonical-text column. Trade-off: doubles
+     storage for JSONB cells; cheaper than schema-cast-to-TEXT.
+  2. Route audit chain alerts to Telegram (matches the operational
+     alerting that already exists for self-healing — see
+     `app/ops/alerts.py`). Bypasses SMTP requirement.
+  3. Extend `CHAINED_TABLES` in `verifier_scheduler.py` to iterate
+     `HASH_PAYLOAD_COLUMNS.keys()` automatically (no hardcoded list).
+- **Tracking**: this file (FU-2). See also "Audit hash chain" section.
+- **Status**: queued; needed before audit chain can be trusted for
+  forensics on JSONB-bearing tables.
+
+### FU-3 — Investigate 5-each-in-8-seconds auth_violations pattern
+- **Problem**: Today's nightly audit_verifier run (2026-05-16
+  02:59:59 — 03:00:00 UTC) produced 10 `audit_chain_broken` rows in
+  8 seconds, alternating `predictions:1` and `shadow_trades:1` —
+  5 entries per table per second instead of the expected 1 per table.
+- **Hypotheses to test**:
+  1. Retry storm: `_record_violation` commit fails + something retries.
+  2. Multiple verifier task instances running concurrently (would
+     manifest as a docker-compose scale issue or duplicate
+     `start_audit_verifier_task` in lifespan).
+  3. Logging artifact: same DB row visible from multiple async
+     iterations.
+- **Scope**: read-only investigation — grep `tr-backend` logs around
+  03:00 UTC for the verifier's log lines, count how many times
+  `_check_all_chains` executed, and trace `_record_violation` paths.
+- **Effort**: ~2 hours.
+- **Tracking**: this file (FU-3).
+- **Status**: queued; low-impact (alerts already silent) but worth
+  knowing to inform FU-2's design.
+
+---
+
+---
+
 ## Audit hash chain — JSONB column tampering is not detectable
 
 Verified 2026-05-16 during PR1 implementation. The audit hash
