@@ -43,6 +43,11 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.audit import insert_with_chain
+from app.exchanges.binance_filters import (
+    SymbolFilters,
+    get_symbol_filters,
+    quantize_qty,
+)
 from app.exchanges.binance_live import (
     BinanceLiveClient,
     BinanceLiveError,
@@ -301,7 +306,36 @@ async def _place_live_order(
     side: Literal["BUY", "SELL"] = (
         "BUY" if proposal.direction == "LONG" else "SELL"
     )
-    qty = (margin_usdt * leverage) / proposal.entry_price
+    raw_qty = (margin_usdt * leverage) / proposal.entry_price
+
+    # Quantize qty to the symbol's LOT_SIZE.stepSize. Without this,
+    # Binance rejects with -1111 "Precision is over the maximum" for
+    # any qty that isn't a clean multiple of the step (e.g. 0.000637
+    # BTC at $79k mark vs BTCUSDT's stepSize=0.001). Caught
+    # 2026-05-16 via test-trade-fully-auto-round-trip probe.
+    binance_native_sym = _binance_native(proposal.symbol)
+    filters = await get_symbol_filters(
+        binance_native_sym, use_testnet=user.use_testnet,
+    )
+    if filters is None:
+        raise OrderRejected(
+            f"_place_live_order: no Binance filters for {binance_native_sym} "
+            f"(symbol delisted or exchangeInfo fetch failed)",
+        )
+    qty = quantize_qty(raw_qty, filters.step_size)
+    if qty < filters.min_qty:
+        raise OrderRejected(
+            f"_place_live_order: quantized qty {qty} below symbol min "
+            f"{filters.min_qty} for {binance_native_sym}. Increase "
+            f"margin (currently {margin_usdt}) or leverage (currently "
+            f"{leverage}x) so margin × leverage / entry_price ≥ min_qty.",
+        )
+    notional = qty * proposal.entry_price
+    if filters.min_notional > 0 and notional < filters.min_notional:
+        raise OrderRejected(
+            f"_place_live_order: notional {notional:.2f} below symbol min "
+            f"{filters.min_notional:.2f} for {binance_native_sym}",
+        )
 
     client = BinanceLiveClient(
         api_key=user.binance_api_key,
@@ -310,7 +344,7 @@ async def _place_live_order(
     )
     try:
         order = await client.place_order(
-            symbol=_binance_native(proposal.symbol),
+            symbol=binance_native_sym,
             side=side, quantity=qty, leverage=leverage,
             order_type="MARKET",
         )
