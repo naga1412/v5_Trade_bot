@@ -44,18 +44,19 @@ from app.db.audit import insert_with_chain
 
 @pytest.mark.asyncio
 async def test_insert_with_chain_links_rows_correctly() -> None:
+    # Use a whitelisted table (predictions) with minimal required schema.
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.execute(sa.text(
-            "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "data TEXT NOT NULL, prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
+            "CREATE TABLE predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
         ))
     async with AsyncSession(engine) as session:
-        h1 = await insert_with_chain(session, "t", {"data": "first"})
-        h2 = await insert_with_chain(session, "t", {"data": "second"})
+        h1 = await insert_with_chain(session, "predictions", {"symbol": "BTCUSDT"})
+        h2 = await insert_with_chain(session, "predictions", {"symbol": "ETHUSDT"})
         await session.commit()
         rows = (await session.execute(
-            sa.text("SELECT id, data, prev_hash, row_hash FROM t ORDER BY id")
+            sa.text("SELECT id, symbol, prev_hash, row_hash FROM predictions ORDER BY id")
         )).all()
     assert len(rows) == 2
     assert rows[0].prev_hash == GENESIS_HASH
