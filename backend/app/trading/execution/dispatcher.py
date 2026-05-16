@@ -43,6 +43,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.audit import insert_with_chain
+from app.db.payload_builders import build_live_trade_payload
 from app.exchanges.binance_filters import (
     get_symbol_filters,
     quantize_qty,
@@ -350,27 +351,26 @@ async def _place_live_order(
     finally:
         await client.aclose()
 
-    payload = {
-        "user_id": user.user_id,
-        "symbol": proposal.symbol,
-        "direction": proposal.direction,
-        "margin_usdt": margin_usdt,
-        "leverage": leverage,
-        "position_value_usdt": margin_usdt * leverage,
-        "entry_price": float(order.avg_fill_price or proposal.entry_price),
-        "stop_loss": proposal.stop_loss_price,
-        "take_profit": proposal.take_profit_price,
-        "binance_order_id": order.binance_order_id,
-        "opened_at": now,
-        "mode_at_open": user.mode,
-        "approved_via": "auto",
-        "reasoning": json.dumps({
+    payload = build_live_trade_payload(
+        user_id=user.user_id,
+        symbol=proposal.symbol,
+        direction=proposal.direction,
+        margin_usdt=margin_usdt,
+        leverage=leverage,
+        entry_price=float(order.avg_fill_price or proposal.entry_price),
+        stop_loss=proposal.stop_loss_price,
+        take_profit=proposal.take_profit_price,
+        binance_order_id=order.binance_order_id,
+        opened_at=now,
+        mode_at_open=user.mode,
+        approved_via="auto",
+        reasoning_json=json.dumps({
             "confidence_pct": proposal.confidence_pct,
             "layer_summary": proposal.layer_summary,
             "signal_id": sig_id,
         }),
-        "inputs_hash": proposal.inputs_hash,
-    }
+        inputs_hash=proposal.inputs_hash,
+    )
     await insert_with_chain(session, "live_trades", payload)
     return order.binance_order_id, sig_id
 

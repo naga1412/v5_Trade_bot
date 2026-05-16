@@ -74,6 +74,10 @@ from app.trading.execution.liquidation_monitor import (
 from app.trading.preflight import run_preflight
 from app.ws.keepalive import start_keepalive_task
 from app.ws.live_prediction import start_background_worker
+from app.core.scoring.mtf_confluence import (
+    start_mtf_cache_prewarm_task,
+    start_mtf_cache_ttl_refresh_task,
+)
 
 # Configure root logger from LOG_LEVEL env var. docker-compose passes
 # LOG_LEVEL=INFO from .env, but Python's default is WARNING for unconfigured
@@ -123,6 +127,8 @@ async def lifespan(_app: FastAPI):
     scanner_batch_task = None
     prediction_validator_task = None
     ws_keepalive_task = None
+    mtf_cache_prewarm_task = None
+    mtf_cache_ttl_refresh_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -226,6 +232,17 @@ async def lifespan(_app: FastAPI):
         # without anyone leaving a browser tab open. Replaces the
         # "open chart, leave tab open" trick we relied on before.
         ws_keepalive_task = start_keepalive_task(get_session_factory())
+
+        # PR1 Phase 3: MTF kline cache workers. The pre-warm is single-shot
+        # (60s deadline, fail-open); the TTL-refresh loop runs indefinitely,
+        # refreshing entries within 20% of expiry every 30s. Both registered
+        # in worker_registry.py (Correction 2 — no orphan tasks).
+        mtf_cache_prewarm_task = start_mtf_cache_prewarm_task(
+            get_session_factory(),
+        )
+        mtf_cache_ttl_refresh_task = start_mtf_cache_ttl_refresh_task(
+            get_session_factory(),
+        )
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
         # AUTONOMOUS_TRADING_ENABLED + a passing pre-flight. Pre-flight
@@ -390,6 +407,10 @@ async def lifespan(_app: FastAPI):
             prediction_validator_task.cancel()
         if ws_keepalive_task is not None:
             ws_keepalive_task.cancel()
+        if mtf_cache_prewarm_task is not None:
+            mtf_cache_prewarm_task.cancel()
+        if mtf_cache_ttl_refresh_task is not None:
+            mtf_cache_ttl_refresh_task.cancel()
         await _aclose_adapters()
 
 

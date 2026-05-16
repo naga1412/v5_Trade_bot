@@ -46,6 +46,13 @@ jobs:
         run: |
           ruff check .
           mypy app
+      - name: Apply alembic migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:testpw@localhost:5432/trading_radar
+          REDIS_URL: redis://localhost:6379/0
+          ENV: ci
+        run: python -m alembic upgrade head
       - name: Unit + integration tests
         working-directory: backend
         env:

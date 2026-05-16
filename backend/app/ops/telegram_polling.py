@@ -43,6 +43,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.audit import insert_with_chain
+from app.db.payload_builders import build_live_trade_payload
 from app.exchanges.binance_filters import (
     get_symbol_filters,
     quantize_qty,
@@ -189,26 +190,25 @@ async def _place_approved_order(
     finally:
         await client.aclose()
 
-    trade_payload = {
-        "user_id": row.user_id or user_id,
-        "symbol": symbol,
-        "direction": direction,
-        "margin_usdt": margin_usdt,
-        "leverage": leverage,
-        "position_value_usdt": margin_usdt * leverage,
-        "entry_price": float(order.avg_fill_price or entry_price),
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "binance_order_id": order.binance_order_id,
-        "opened_at": n,
-        "mode_at_open": "telegram-approve",
-        "approved_via": "telegram",
-        "reasoning": json.dumps({
+    trade_payload = build_live_trade_payload(
+        user_id=row.user_id or user_id,
+        symbol=symbol,
+        direction=direction,
+        margin_usdt=margin_usdt,
+        leverage=leverage,
+        entry_price=float(order.avg_fill_price or entry_price),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        binance_order_id=order.binance_order_id,
+        opened_at=n,
+        mode_at_open="telegram-approve",
+        approved_via="telegram",
+        reasoning_json=json.dumps({
             "signal_id": signal_id,
             "confidence_pct": payload.get("confidence_pct"),
         }),
-        "inputs_hash": payload.get("inputs_hash", ""),
-    }
+        inputs_hash=payload.get("inputs_hash", ""),
+    )
     await insert_with_chain(session, "live_trades", trade_payload)
     return order.binance_order_id
 

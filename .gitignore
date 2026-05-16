@@ -84,6 +84,8 @@ pnpm-debug.log*
 *.joblib
 *.h5
 *.hdf5
+# p_win calibrator fitted models (PR5 creates these on first fit)
+backend/app/data/p_win_models/
 checkpoints/
 mlruns/
 mlflow.db
