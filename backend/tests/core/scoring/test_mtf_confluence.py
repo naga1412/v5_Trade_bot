@@ -316,6 +316,101 @@ async def test_prewarm_cache_respects_deadline() -> None:
     assert n < 6
 
 
+@pytest.mark.asyncio
+async def test_prewarm_cache_enforces_hard_deadline_mid_batch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Hard-deadline enforcement MID-BATCH within a single symbol's gather.
+
+    This documents the prewarm_cache deviation from the original plan
+    (which checked deadline only BETWEEN symbols). The implementation
+    wraps the per-symbol asyncio.gather in asyncio.wait_for(remaining)
+    so a slow batch cannot exceed the deadline.
+
+    Synthetic conditions:
+      - Mock _fetch_one_tf to sleep 5s per call.
+      - deadline_seconds=3.0
+      - 3-symbol universe — first symbol's gather alone would take 5s.
+
+    Expected: prewarm_cache returns within ~3s + slack; cache is
+    incomplete; the "deadline reached" log fires; no leaked tasks.
+    """
+    import logging
+    from app.core.scoring import mtf_confluence as mod
+
+    _KLINE_CACHE.clear()
+
+    # Slow fetch: each call sleeps 5s before returning klines.
+    # Per-symbol gather of 6 TFs runs in PARALLEL → wall-clock ~5s,
+    # which exceeds the 3s deadline → asyncio.wait_for cancels mid-batch.
+    async def _slow_fetch(
+        http: httpx.AsyncClient, symbol: str, tf: str, **_kwargs: object,
+    ) -> list[list] | None:
+        await asyncio.sleep(5.0)
+        return _make_uptrend_klines()
+
+    monkeypatch.setattr(mod, "_fetch_one_tf", _slow_fetch)
+
+    # Snapshot tasks BEFORE so we can detect leaks AFTER.
+    tasks_before = {t for t in asyncio.all_tasks() if not t.done()}
+
+    caplog.set_level(logging.INFO, logger="app.core.scoring.mtf_confluence")
+
+    start = time.monotonic()
+    n_cached = await prewarm_cache(
+        ["BTCUSDT", "ETHUSDT", "BNBUSDT"], deadline_seconds=3.0,
+    )
+    elapsed = time.monotonic() - start
+
+    # Returned within deadline + small slack (asyncio.wait_for + cancellation
+    # propagation overhead). 1s slack is generous.
+    assert elapsed < 3.0 + 1.0, (
+        f"prewarm exceeded hard deadline: {elapsed:.2f}s "
+        f"(expected < {3.0 + 1.0}s)"
+    )
+
+    # At least one symbol's TFs must be ABSENT from the cache (deadline
+    # interrupted mid-batch). With 5s-per-fetch and 3s deadline, all
+    # entries should actually be missing — but we assert the looser
+    # "at least one missing" to tolerate any future timing shift.
+    cached_keys = set(_KLINE_CACHE.keys())
+    all_expected_keys = {
+        (sym, tf)
+        for sym in ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+        for tf in TIMEFRAMES
+    }
+    missing = all_expected_keys - cached_keys
+    assert missing, (
+        f"expected at least one (symbol, tf) to be uncached due to deadline; "
+        f"all 18 keys are cached: {cached_keys}"
+    )
+    # n_cached should reflect missing entries
+    assert n_cached < len(all_expected_keys)
+
+    # Log assertion: at least one "mtf_prewarm: deadline reached" message.
+    deadline_msgs = [
+        r for r in caplog.records
+        if "deadline reached" in r.getMessage()
+    ]
+    assert deadline_msgs, (
+        "expected 'mtf_prewarm: deadline reached at sym=...' log; "
+        f"got {[r.getMessage() for r in caplog.records]}"
+    )
+
+    # Let the event loop settle so any pending cancellations propagate.
+    await asyncio.sleep(0.1)
+
+    # No leaked tasks: anything spawned during prewarm_cache must be
+    # cancelled cleanly by the asyncio.wait_for + finally block.
+    tasks_after = {t for t in asyncio.all_tasks() if not t.done()}
+    new_tasks = tasks_after - tasks_before
+    new_tasks.discard(asyncio.current_task())
+    assert not new_tasks, (
+        f"prewarm_cache leaked tasks after returning: "
+        f"{[t.get_name() for t in new_tasks]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 4.4c: _entries_due_for_refresh test
 # ---------------------------------------------------------------------------
