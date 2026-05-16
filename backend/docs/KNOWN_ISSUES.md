@@ -161,6 +161,40 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 - **Status**: queued. Not blocking PR1 — these tests are
   Postgres-only-passing in CI which is what determines mergeability.
 
+### FU-9 — Per-call `httpx.AsyncClient` construction across ~20 modules
+- **Problem**: The PR1 latency benchmark (Phase 7) surfaced a 560ms
+  cold-construction cost in `httpx.AsyncClient.__init__` loading the
+  OS trust store. `compute_mtf_confluence` constructs httpx per call
+  when `_http=None`. This pattern is NOT unique to PR1 — the codebase
+  uses per-call construction across ~20 modules:
+  `binance_live.py`, `binance_filters.py`, `binance_ticker.py`,
+  `binance_futures_intermarket.py`, `scanner/batch.py`,
+  `news/fear_greed.py`, `news/adapters/cryptopanic.py`,
+  `telegram/trade_signals.py`, `ops/telegram_bot.py`,
+  `ops/telegram_polling.py`, `ops/telegram_timeout.py`,
+  `trading/tax/inr_converter.py`, `ml/validator.py`,
+  `api/routes/tab1.py`, `api/routes/admin_test_trade.py`,
+  `shadow/worker.py`, `shadow/universe_refresh.py`,
+  `data/adapters/twelvedata.py`, `data/adapters/binance.py`,
+  `ws/live_prediction.py`, `deps.py`.
+- **Steady-state**: After the first construction in a process,
+  httpx's trust-store loading is cached — subsequent constructions
+  are fast (~µs). Cold cost only bites at process startup or after
+  GC cycles that drop the cache. The V-7 latency gate measures
+  steady-state and passes with comfortable margin (delta_p50=7.3ms,
+  delta_p99=8.8ms vs budgets 50/200ms).
+- **Scope**: Audit each call site + decide:
+  1. Module-level singleton `httpx.AsyncClient` constructed at
+     import time, closed at lifespan teardown.
+  2. Or a dependency-injected client passed down from `main.py`
+     lifespan (cleaner for testing).
+  Pick approach, refactor ~20 files. ~1 day work.
+- **Tracking**: this file (FU-9). Surfaced during PR1 Phase 7 V-7
+  gate on 2026-05-17.
+- **Status**: queued. **Not blocking PR1** — pattern is pre-existing
+  + steady-state measurements pass V-7 gate. Should land before any
+  latency-sensitive feature in PR2+.
+
 ### FU-8 — CI backend job missing `alembic upgrade head` step before pytest
 - **Problem**: `.github/workflows/ci.yml` backend job runs pytest
   against the Postgres service container but does NOT run
@@ -180,10 +214,8 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 - **Effort**: ~15 minutes (single ci.yml edit + verify).
 - **Tracking**: this file (FU-8). Surfaced during PR1 Phase 6 CI
   matrix verification on 2026-05-17.
-- **Status**: **BLOCKING for PR1 merge** — without this fix the 8
-  migration tests can't pass in CI. Should be a tiny standalone
-  PR landed BEFORE the PR1 merge, OR included in the same PR. My
-  read: include in PR1 since the migration is PR1's contribution.
+- **Status**: **CLOSED 2026-05-17** by commit `e8513c8` (ci.yml
+  edit included in PR1).
 
 ---
 
