@@ -67,7 +67,9 @@ HASH_PAYLOAD_COLUMNS: dict[str, frozenset[str]] = {
 # Per-table allowlist of columns that exist on the table but are NOT
 # part of the audit hash chain. Recording-only analytics columns live
 # here. Test test_audit_whitelist_consistency.py fails if a column
-# appears on the schema but is in neither set.
+# appears on the schema but is in neither set (requires Postgres + a
+# migrated schema; the test skips on SQLite/in-memory). Run the test
+# against the migrated test DB to validate.
 NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
     "predictions": frozenset({
         "id", "prev_hash", "row_hash",  # chain metadata + autoincrement PK
@@ -118,13 +120,13 @@ def compute_row_hash(prev_hash: str, row: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _filter_for_hash(table: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Drop keys not in HASH_PAYLOAD_COLUMNS[table] before hashing.
+def _assert_table_registered(table: str) -> frozenset[str]:
+    """Fail-secure validation that ``table`` is a registered hash-chained
+    table. Returns the whitelist for that table on success.
 
-    Per Correction 1 (fail-secure on BOTH branches): unknown table raises
-    ValueError. Hash-chained tables must be explicitly registered — any
-    caller for a non-whitelisted table is a bug we want surfaced, not
-    silently hashed-and-forgotten.
+    Per Correction 1: unknown table raises ValueError loudly — any caller
+    of insert_with_chain for a non-whitelisted table is a bug we want
+    surfaced, not silently hashed-and-forgotten.
     """
     whitelist = HASH_PAYLOAD_COLUMNS.get(table)
     if whitelist is None:
@@ -132,6 +134,15 @@ def _filter_for_hash(table: str, payload: dict[str, Any]) -> dict[str, Any]:
             f"Table {table!r} not in HASH_PAYLOAD_COLUMNS. "
             f"Hash-chained tables must be explicitly registered."
         )
+    return whitelist
+
+
+def _filter_for_hash(table: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys not in HASH_PAYLOAD_COLUMNS[table] before hashing.
+
+    Raises ValueError if ``table`` is not a registered hash-chained table.
+    """
+    whitelist = _assert_table_registered(table)
     return {k: v for k, v in payload.items() if k in whitelist}
 
 

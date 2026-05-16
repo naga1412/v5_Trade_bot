@@ -4,7 +4,16 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.audit import GENESIS_HASH, _filter_for_hash, compute_row_hash
+from app.db.audit import (
+    GENESIS_HASH,
+    _assert_table_registered,
+    _filter_for_hash,
+    compute_row_hash,
+)
+
+
+# Columns auto-managed by insert_with_chain — never part of the hashed payload.
+_CHAIN_META: frozenset[str] = frozenset({"id", "prev_hash", "row_hash"})
 
 
 @dataclass
@@ -32,13 +41,14 @@ async def verify_chain(
     all non-chain-metadata columns are selected and filtered — so recording-only
     columns (not in ``HASH_PAYLOAD_COLUMNS``) are silently dropped from the
     hash computation, matching the behaviour of ``insert_with_chain``.
+
+    Fail-secure: raises ValueError if ``table`` is not registered in
+    HASH_PAYLOAD_COLUMNS.
     """
-    _CHAIN_META = {"id", "prev_hash", "row_hash"}
+    _assert_table_registered(table)  # fail-secure on unknown table
 
     if columns is not None:
-        # Legacy path: explicit column list.  Validate table is whitelisted
-        # (fail-secure) then select exactly those columns.
-        _filter_for_hash(table, {})  # raises ValueError for unknown table
+        # Legacy path: explicit column list.
         select_cols = list(columns)
         cols_sql = ", ".join(["id"] + select_cols + ["prev_hash", "row_hash"])
         rows = (await session.execute(
@@ -62,8 +72,6 @@ async def verify_chain(
     # Whitelist-native path: select * then filter through HASH_PAYLOAD_COLUMNS.
     # This is the forward path for new callers; tolerates recording-only columns
     # that are present in the schema but absent from the whitelist.
-    _filter_for_hash(table, {})  # raises ValueError for unknown table (fail-secure)
-
     rows = (await session.execute(
         sa.text(f"SELECT * FROM {table} ORDER BY id ASC")
     )).all()

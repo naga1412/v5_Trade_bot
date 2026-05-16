@@ -44,7 +44,6 @@ async def test_verifier_ignores_non_whitelisted_column(session_with_recording_on
     }
     await insert_with_chain(s, "predictions", payload)
     # verify_chain without explicit columns — uses HASH_PAYLOAD_COLUMNS internally
-    # verify_chain without explicit columns — uses HASH_PAYLOAD_COLUMNS internally
     result = await verify_chain(s, "predictions")
     assert result.violations == [], (
         f"verifier reported false break — recording-only column "

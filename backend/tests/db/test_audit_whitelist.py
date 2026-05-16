@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 
 from app.db.audit import (
     HASH_PAYLOAD_COLUMNS,
-    compute_row_hash,
     insert_with_chain,
 )
 

@@ -17,6 +17,11 @@ from app.db.audit import (
 async def chain_session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
+        # Subset of HASH_PAYLOAD_COLUMNS["predictions"] — the 8 ghost_* /
+        # model_checkpoint_id columns are intentionally absent. Callers
+        # only include them when an active ML checkpoint is loaded;
+        # _filter_for_hash drops missing-from-payload keys naturally,
+        # so this fixture exercises the chain on a minimal-row case.
         for table, cols in [
             ("predictions", "user_id INTEGER, symbol TEXT, timeframe TEXT, "
                            "ts TEXT, layer_scores TEXT, final_score REAL, "

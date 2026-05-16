@@ -34,7 +34,9 @@ async def db_inspector():
     Uses the application's standard DATABASE_URL env var so this test
     runs against whatever schema is currently migrated.
     """
-    url = os.environ["DATABASE_URL"]
+    url = os.environ.get("DATABASE_URL")
+    if url is None:
+        pytest.skip("DATABASE_URL not set — run against migrated Postgres")
     engine = create_async_engine(url)
     yield engine
     await engine.dispose()
