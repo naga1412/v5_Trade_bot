@@ -1,7 +1,10 @@
+import asyncio
 import hashlib
+import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import numpy as np
@@ -300,6 +303,122 @@ async def _build_sentiment_summary(
     )
 
 
+async def _none_coro() -> None:
+    """Returns None — used as a placeholder coroutine in asyncio.gather when
+    a real async call can't be made (e.g., session is None)."""
+    return None
+
+
+async def _compute_aggregator_hook_fields(
+    *,
+    symbol: str,
+    timeframe: str,
+    bars: pd.DataFrame,
+    final: Any,
+    session: AsyncSession | None,
+) -> tuple[
+    int | None,    # mtf_agreement
+    str | None,    # mtf_dominant_tf
+    str | None,    # mtf_directions_json
+    float | None,  # p_win
+    float | None,  # effective_score
+    float | None,  # realized_vol_20d
+    float | None,  # funding_directional_adj
+]:
+    """Compute the 7 PR1 record-only analytics fields.
+
+    Record-only: NEVER modifies final_score, confidence, direction,
+    layer_scores. Fail-open on every helper.
+
+    Three async helpers are fired in parallel via asyncio.gather, then
+    two sync helpers compute on their results. Parallelism matters for
+    the V-7 latency gate (Phase 7).
+    """
+    from app.core.scoring.mtf_confluence import compute_mtf_confluence
+    from app.core.scoring.p_win_calibrator import predict_p_win
+    from app.core.scoring.intermarket_lookup import lookup_latest_funding_rate
+    from app.core.scoring.vol_normalization import (
+        compute_effective_score,
+        compute_realized_vol_20d,
+    )
+    from app.core.scoring.funding_directional import compute_funding_directional_adj
+
+    # Adapter: pd.DataFrame (ts is DatetimeIndex) → list[Bar-like] objects
+    # with .ts + .close attributes. compute_realized_vol_20d expects this
+    # shape per the operator-locked contract.
+    _bar_list = [
+        SimpleNamespace(
+            ts=_ts.to_pydatetime() if hasattr(_ts, "to_pydatetime") else _ts,
+            close=float(_close),
+        )
+        for _ts, _close in zip(bars.index, bars["close"])
+    ]
+
+    # Synthesize three async tasks. Each helper individually fails-open
+    # (returns None on internal error), but we wrap the whole gather in
+    # try/except as defense against unexpected exceptions.
+    _binance_symbol_for_mtf = symbol.replace("/", "")  # BTC/USDT → BTCUSDT
+    mtf = None
+    p_win_val = None
+    funding_rate = None
+    try:
+        mtf, p_win_val, funding_rate = await asyncio.gather(
+            compute_mtf_confluence(_binance_symbol_for_mtf, final.direction),
+            predict_p_win(final.score, final.direction),
+            (
+                lookup_latest_funding_rate(session, _binance_symbol_for_mtf)
+                if session is not None
+                else _none_coro()
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — recording-only fail-open
+        log.exception("aggregator_hook: unexpected async failure: %s", exc)
+        # mtf, p_win_val, funding_rate stay None — see initialization above
+
+    # Sync helpers (CPU-only, can't raise meaningfully if inputs are sane,
+    # but wrap to preserve fail-open contract).
+    realized_vol = None
+    effective = None
+    funding_adj = None
+    try:
+        realized_vol = compute_realized_vol_20d(_bar_list)
+        effective = compute_effective_score(final.score, realized_vol)
+        funding_adj = compute_funding_directional_adj(funding_rate, final.direction)
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        log.exception("aggregator_hook: sync compute failed: %s", exc)
+
+    # Pack MTF result into the 3 Pydantic fields.
+    mtf_agreement_val: int | None = None
+    mtf_dominant_tf_val: str | None = None
+    mtf_directions_json_val: str | None = None
+    if mtf is not None:
+        mtf_agreement_val = mtf.agreement
+        mtf_dominant_tf_val = mtf.dominant_tf
+        try:
+            mtf_directions_json_val = json.dumps(mtf.directions)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("aggregator_hook: mtf.directions json.dumps failed: %s", exc)
+
+    log.info(
+        "aggregator_hook %s/%s: mtf_attached=%s p_win=%s effective_score=%s funding_adj=%s",
+        symbol, timeframe,
+        mtf is not None,
+        p_win_val if p_win_val is not None else "none",
+        effective if effective is not None else "none",
+        funding_adj if funding_adj is not None else "none",
+    )
+
+    return (
+        mtf_agreement_val,
+        mtf_dominant_tf_val,
+        mtf_directions_json_val,
+        p_win_val,
+        effective,
+        realized_vol,
+        funding_adj,
+    )
+
+
 async def build_prediction(
     *,
     symbol: str,
@@ -458,6 +577,26 @@ async def build_prediction(
             log.warning("sentiment summary build failed; skipping", exc_info=True)
             sentiment_summary = None
 
+    # ─── PR1 Task 3.4: aggregator hook ───────────────────────────────────
+    # Record-only attach of 7 analytics fields. NEVER modifies final_score,
+    # confidence, direction, layer_scores. Fail-open on every helper.
+    (
+        _mtf_agreement,
+        _mtf_dominant_tf,
+        _mtf_directions_json,
+        _p_win,
+        _effective_score,
+        _realized_vol_20d,
+        _funding_directional_adj,
+    ) = await _compute_aggregator_hook_fields(
+        symbol=symbol,
+        timeframe=timeframe,
+        bars=bars,
+        final=final,
+        session=session,
+    )
+    # ─── end aggregator hook ─────────────────────────────────────────────
+
     return LivePredictionOut(
         symbol=symbol,
         timeframe=timeframe,
@@ -476,6 +615,14 @@ async def build_prediction(
         prediction_extras=extras,
         sentiment=sentiment_summary,
         news=news_summary,
+        # PR1 Task 3.4 record-only attachments:
+        mtf_agreement=_mtf_agreement,
+        mtf_dominant_tf=_mtf_dominant_tf,
+        mtf_directions_json=_mtf_directions_json,
+        p_win=_p_win,
+        effective_score=_effective_score,
+        realized_vol_20d=_realized_vol_20d,
+        funding_directional_adj=_funding_directional_adj,
     )
 
 
