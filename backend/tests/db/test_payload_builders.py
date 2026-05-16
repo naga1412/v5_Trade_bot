@@ -60,6 +60,20 @@ def _make_pred(*, direction: str = "LONG") -> SimpleNamespace:
     )
 
 
+def _build_layer_payload(pred: SimpleNamespace) -> dict[str, object]:
+    """Construct the same `_layer_payload` dict the production call site builds
+    before calling build_predictions_payload — used in tests to mirror the
+    caller-side responsibility post-refactor.
+    """
+    layer_payload: dict[str, object] = {
+        k: (v.model_dump() if v else None)
+        for k, v in pred.layer_scores.items()
+    }
+    if pred.prediction_extras is not None:
+        layer_payload.update(pred.prediction_extras)
+    return layer_payload
+
+
 def _make_pos(*, direction: Direction = Direction.LONG) -> SimpleNamespace:
     """Duck-typed ShadowPosition for build_shadow_trade_payload."""
     return SimpleNamespace(
@@ -85,7 +99,11 @@ def _make_pos(*, direction: Direction = Direction.LONG) -> SimpleNamespace:
 class TestBuildPredictionsPayload:
     def test_long_no_ghost(self) -> None:
         pred = _make_pred(direction="LONG")
-        result = build_predictions_payload(pred, user_id=1, ghost_payload=None)
+        result = build_predictions_payload(
+            pred, user_id=1,
+            layer_payload=_build_layer_payload(pred),
+            ghost_payload=None,
+        )
 
         expected_layer_scores = json.dumps({
             "L1": {"score": 0.75},
@@ -109,7 +127,11 @@ class TestBuildPredictionsPayload:
 
     def test_short_no_ghost(self) -> None:
         pred = _make_pred(direction="SHORT")
-        result = build_predictions_payload(pred, user_id=1, ghost_payload=None)
+        result = build_predictions_payload(
+            pred, user_id=1,
+            layer_payload=_build_layer_payload(pred),
+            ghost_payload=None,
+        )
 
         expected_layer_scores = json.dumps({
             "L1": {"score": 0.75},
@@ -143,7 +165,11 @@ class TestBuildPredictionsPayload:
             "ghost_uncertainty": 0.005,
             "model_checkpoint_id": 42,
         }
-        result = build_predictions_payload(pred, user_id=1, ghost_payload=ghost_payload)
+        result = build_predictions_payload(
+            pred, user_id=1,
+            layer_payload=_build_layer_payload(pred),
+            ghost_payload=ghost_payload,
+        )
 
         expected_layer_scores = json.dumps({
             "L1": {"score": 0.75},
@@ -177,14 +203,23 @@ class TestBuildPredictionsPayload:
     def test_empty_ghost_payload_not_merged(self) -> None:
         """Empty dict is falsy — builder must NOT call update with it."""
         pred = _make_pred(direction="LONG")
-        result_none = build_predictions_payload(pred, user_id=1, ghost_payload=None)
-        result_empty = build_predictions_payload(pred, user_id=1, ghost_payload={})
+        layer_payload = _build_layer_payload(pred)
+        result_none = build_predictions_payload(
+            pred, user_id=1, layer_payload=layer_payload, ghost_payload=None,
+        )
+        result_empty = build_predictions_payload(
+            pred, user_id=1, layer_payload=layer_payload, ghost_payload={},
+        )
         # Both should be identical (11 keys, no ghost keys)
         assert result_none == result_empty
         assert "ghost_open" not in result_empty
 
     def test_prediction_extras_merged_into_layer_scores(self) -> None:
-        """When prediction_extras is not None it must be merged into layer_scores."""
+        """When the caller pre-merges prediction_extras into layer_payload,
+        the merged keys must appear inside the JSON-serialized layer_scores
+        column. Builder no longer does the merge itself (post-refactor) —
+        the caller (live_prediction.py) is responsible.
+        """
         extras = {"traps_fired": ["L4"], "tier": "A"}
         pred = _make_pred(direction="LONG")
         pred = SimpleNamespace(
@@ -197,7 +232,13 @@ class TestBuildPredictionsPayload:
             prediction_extras=extras,
             final=pred.final,
         )
-        result = build_predictions_payload(pred, user_id=1, ghost_payload=None)
+        layer_payload = _build_layer_payload(pred)  # helper does the merge
+        # Confirm helper merged extras into layer_payload
+        assert layer_payload["traps_fired"] == ["L4"]
+        assert layer_payload["tier"] == "A"
+        result = build_predictions_payload(
+            pred, user_id=1, layer_payload=layer_payload, ghost_payload=None,
+        )
         decoded = json.loads(result["layer_scores"])
         assert decoded["traps_fired"] == ["L4"]
         assert decoded["tier"] == "A"

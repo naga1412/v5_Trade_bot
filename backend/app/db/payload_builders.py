@@ -22,30 +22,30 @@ def build_predictions_payload(
     pred: Any,  # LivePredictionOut-shaped (duck-typed for testability)
     *,
     user_id: int,
+    layer_payload: dict[str, Any],
     ghost_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the dict passed to ``persist_prediction`` for the predictions table.
 
-    Constructs ``_layer_payload`` internally (dict-comprehension over
-    ``pred.layer_scores`` + update with ``pred.prediction_extras`` if not
-    None), then builds the 11-key base dict, then ``update``s with
-    ``ghost_payload`` if truthy.
+    ``layer_payload`` is the already-constructed dict that will be
+    serialized into the ``layer_scores`` JSONB column. The caller owns
+    its construction (dict-comprehension over ``pred.layer_scores`` +
+    update with ``pred.prediction_extras`` if not None) — this keeps the
+    same Python object available to downstream consumers without a
+    JSON round-trip.
+
+    Then builds the 11-key base dict (serializing ``layer_payload`` to
+    JSON for the column), and ``update``s with ``ghost_payload`` if
+    truthy.
 
     Bit-identical reference: backend/app/ws/live_prediction.py:122-144.
     """
-    _layer_payload: dict[str, Any] = {
-        k: (v.model_dump() if v else None)
-        for k, v in pred.layer_scores.items()
-    }
-    if pred.prediction_extras is not None:
-        _layer_payload.update(pred.prediction_extras)
-
     result: dict[str, Any] = {
         "user_id": user_id,
         "symbol": pred.symbol,
         "timeframe": pred.timeframe,
         "ts": pred.ts,
-        "layer_scores": json.dumps(_layer_payload),
+        "layer_scores": json.dumps(layer_payload),
         "final_score": pred.final.score,
         "direction": pred.final.direction,
         "confidence": pred.final.confidence,
