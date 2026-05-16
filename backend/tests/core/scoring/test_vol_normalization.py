@@ -12,10 +12,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from app.core.scoring.vol_normalization import (
-    MIN_DAILY_BARS_FOR_VOL,
     MIN_VOL,
     TARGET_VOL,
     compute_effective_score,

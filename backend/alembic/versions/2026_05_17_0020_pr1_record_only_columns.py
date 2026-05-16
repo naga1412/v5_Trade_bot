@@ -114,8 +114,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    dialect = op.get_bind().dialect.name
-    is_pg = dialect.startswith("postgres")
+    # No dialect gate needed: DROP COLUMN on both Postgres and SQLite 3.35+
+    # automatically removes NOT NULL + DEFAULT constraints, so there is no
+    # analogue to upgrade()'s is_pg branch (which sets those constraints).
 
     # Step 3 reverse: drop indexes
     for table in _TABLES:

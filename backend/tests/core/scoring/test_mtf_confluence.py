@@ -19,7 +19,6 @@ from httpx import Response
 from app.core.scoring.mtf_confluence import (
     CACHE_TTL_S,
     TIMEFRAMES,
-    MtfConfluence,
     _KLINE_CACHE,
     _cache_get,
     _cache_set,
@@ -50,7 +49,7 @@ def _make_uptrend_klines(n: int = 200) -> list[list]:
             i * 60_000,
             float(c * 0.999),
             float(h),
-            float(l),
+            float(last),
             float(c),
             100.0,
             i * 60_000 + 59999,
@@ -60,7 +59,7 @@ def _make_uptrend_klines(n: int = 200) -> list[list]:
             0,
             0,
         ]
-        for i, (c, h, l) in enumerate(zip(closes, highs, lows))
+        for i, (c, h, last) in enumerate(zip(closes, highs, lows))
     ]
 
 
@@ -74,7 +73,7 @@ def _make_downtrend_klines(n: int = 200) -> list[list]:
             i * 60_000,
             float(c * 1.001),
             float(h),
-            float(l),
+            float(last),
             float(c),
             100.0,
             i * 60_000 + 59999,
@@ -84,7 +83,7 @@ def _make_downtrend_klines(n: int = 200) -> list[list]:
             0,
             0,
         ]
-        for i, (c, h, l) in enumerate(zip(closes, highs, lows))
+        for i, (c, h, last) in enumerate(zip(closes, highs, lows))
     ]
 
 
@@ -99,7 +98,7 @@ def _make_chop_klines(n: int = 200) -> list[list]:
             i * 60_000,
             float(c),
             float(h),
-            float(l),
+            float(last),
             float(c),
             100.0,
             i * 60_000 + 59999,
@@ -109,7 +108,7 @@ def _make_chop_klines(n: int = 200) -> list[list]:
             0,
             0,
         ]
-        for i, (c, h, l) in enumerate(zip(closes, highs, lows))
+        for i, (c, h, last) in enumerate(zip(closes, highs, lows))
     ]
 
 

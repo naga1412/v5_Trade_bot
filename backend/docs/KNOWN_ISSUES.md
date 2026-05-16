@@ -217,6 +217,34 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 - **Status**: **CLOSED 2026-05-17** by commit `e8513c8` (ci.yml
   edit included in PR1).
 
+### FU-10 — Migration downgrade path is untested on every dialect
+- **Problem**: 0 of 8 existing migration tests in
+  `backend/tests/db/test_pr1_migration.py` exercise
+  `alembic downgrade -1`. Every test asserts the post-upgrade state
+  only. PR1's migration introduces 3 DROP COLUMN sweeps + 3 DROP
+  INDEX statements + reverse of `live_trades.timeframe`; a future
+  migration could silently break the rollback story (e.g., a typo in
+  a DROP statement, a missing IF EXISTS, dialect-asymmetric ALTER)
+  and CI would not catch it.
+- **Scope**: Add `test_migration_downgrade_cleanly` +
+  `test_migration_upgrade_downgrade_upgrade_round_trip` that:
+  1. `alembic upgrade head` → introspect schema → assert post-state
+  2. `alembic downgrade -1` → introspect → assert pre-state
+     (7 PR1 cols absent, indexes absent, `live_trades.timeframe`
+     absent)
+  3. `alembic upgrade head` again → assert post-state matches step 1
+  Parametrize over SQLite (in-memory) and Postgres (CI service
+  container). Mirrors the round-trip pattern from
+  `test_audit_replay_identity.py`.
+- **Effort**: ~3 hours.
+- **Tracking**: this file (FU-10). Surfaced during PR1 Phase 7 lint
+  cleanup on 2026-05-17 (F841 on a dead `is_pg` variable in
+  `downgrade()` revealed that the downgrade path had never been
+  exercised on either dialect).
+- **Status**: queued. **Not blocking PR1** — no production downgrade
+  planned. Should land before any future PR that adds a non-trivial
+  migration body.
+
 ---
 
 ---

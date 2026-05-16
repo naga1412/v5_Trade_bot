@@ -248,17 +248,23 @@ async def _verify_table(conn, table: str) -> dict[str, Any]:
 
         any_match = False
         if prev_link_ok and hash_a == stored_hash:
-            matches_a += 1; any_match = True
+            matches_a += 1
+            any_match = True
         if prev_link_ok and hash_b == stored_hash:
-            matches_b += 1; any_match = True
+            matches_b += 1
+            any_match = True
         if prev_link_ok and hash_c == stored_hash:
-            matches_c += 1; any_match = True
+            matches_c += 1
+            any_match = True
         if prev_link_ok and hash_d == stored_hash:
-            matches_d += 1; any_match = True
+            matches_d += 1
+            any_match = True
         if prev_link_ok and hash_e == stored_hash:
-            matches_e += 1; any_match = True
+            matches_e += 1
+            any_match = True
         if prev_link_ok and hash_f == stored_hash:
-            matches_f += 1; any_match = True
+            matches_f += 1
+            any_match = True
 
         if not any_match:
             # Sample the JSONB value as both forms for diagnostic
