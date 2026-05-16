@@ -122,6 +122,14 @@ class TestBuildPredictionsPayload:
             "inputs_hash": "abc123hash",
             "model_version": "sp-0",
             "cold_start": False,
+            # PR1 Phase 5 additions — None when not passed
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
+            "p_win": None,
+            "effective_score": None,
+            "realized_vol_20d": None,
+            "funding_directional_adj": None,
         }
         assert result == expected
 
@@ -150,6 +158,14 @@ class TestBuildPredictionsPayload:
             "inputs_hash": "abc123hash",
             "model_version": "sp-0",
             "cold_start": False,
+            # PR1 Phase 5 additions — None when not passed
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
+            "p_win": None,
+            "effective_score": None,
+            "realized_vol_20d": None,
+            "funding_directional_adj": None,
         }
         assert result == expected
 
@@ -188,6 +204,14 @@ class TestBuildPredictionsPayload:
             "inputs_hash": "abc123hash",
             "model_version": "sp-0",
             "cold_start": False,
+            # PR1 Phase 5 additions — None when not passed
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
+            "p_win": None,
+            "effective_score": None,
+            "realized_vol_20d": None,
+            "funding_directional_adj": None,
             # ghost keys merged in
             "ghost_open": 80_100.0,
             "ghost_high": 80_300.0,
@@ -210,9 +234,44 @@ class TestBuildPredictionsPayload:
         result_empty = build_predictions_payload(
             pred, user_id=1, layer_payload=layer_payload, ghost_payload={},
         )
-        # Both should be identical (11 keys, no ghost keys)
+        # Both should be identical (18 keys: 11 base + 7 PR1 None fields; no ghost keys)
         assert result_none == result_empty
         assert "ghost_open" not in result_empty
+
+    def test_predictions_builder_passes_through_hook_fields(self) -> None:
+        """All 7 hook fields passed in are present in the output dict."""
+        pred = _make_pred(direction="LONG")
+        layer_payload = _build_layer_payload(pred)
+        result = build_predictions_payload(
+            pred, user_id=1,
+            layer_payload=layer_payload,
+            mtf_agreement=4, mtf_dominant_tf="1h",
+            mtf_directions_json='{"5m": 1, "1h": 1}',
+            p_win=0.62, effective_score=0.45,
+            realized_vol_20d=0.018, funding_directional_adj=0.10,
+        )
+        assert result["mtf_agreement"] == 4
+        assert result["mtf_dominant_tf"] == "1h"
+        assert result["mtf_directions_json"] == '{"5m": 1, "1h": 1}'
+        assert result["p_win"] == 0.62
+        assert result["effective_score"] == 0.45
+        assert result["realized_vol_20d"] == 0.018
+        assert result["funding_directional_adj"] == 0.10
+
+    def test_predictions_builder_defaults_hook_fields_to_none(self) -> None:
+        """When no hook kwargs are passed, all 7 keys are still present with None."""
+        pred = _make_pred(direction="LONG")
+        layer_payload = _build_layer_payload(pred)
+        result = build_predictions_payload(
+            pred, user_id=1, layer_payload=layer_payload,
+        )
+        assert result["mtf_agreement"] is None
+        assert result["mtf_dominant_tf"] is None
+        assert result["mtf_directions_json"] is None
+        assert result["p_win"] is None
+        assert result["effective_score"] is None
+        assert result["realized_vol_20d"] is None
+        assert result["funding_directional_adj"] is None
 
     def test_prediction_extras_merged_into_layer_scores(self) -> None:
         """When the caller pre-merges prediction_extras into layer_payload,

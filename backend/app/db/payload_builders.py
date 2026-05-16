@@ -24,6 +24,14 @@ def build_predictions_payload(
     user_id: int,
     layer_payload: dict[str, Any],
     ghost_payload: dict[str, Any] | None = None,
+    # PR1 Phase 5 — record-only analytics fields (default None)
+    mtf_agreement: int | None = None,
+    mtf_dominant_tf: str | None = None,
+    mtf_directions_json: str | None = None,
+    p_win: float | None = None,
+    effective_score: float | None = None,
+    realized_vol_20d: float | None = None,
+    funding_directional_adj: float | None = None,
 ) -> dict[str, Any]:
     """Build the dict passed to ``persist_prediction`` for the predictions table.
 
@@ -37,6 +45,11 @@ def build_predictions_payload(
     Then builds the 11-key base dict (serializing ``layer_payload`` to
     JSON for the column), and ``update``s with ``ghost_payload`` if
     truthy.
+
+    The 7 PR1 record-only analytics fields are always written to the
+    returned dict (with ``None`` when not supplied by the caller). The
+    hash chain is unaffected because these keys are in
+    ``NON_HASHED_ALLOW_LIST``, not ``HASH_PAYLOAD_COLUMNS``.
 
     Bit-identical reference: backend/app/ws/live_prediction.py:122-144.
     """
@@ -52,6 +65,14 @@ def build_predictions_payload(
         "inputs_hash": pred.inputs_hash,
         "model_version": "sp-0",
         "cold_start": pred.cold_start,
+        # PR1 Phase 5 — always present; None when aggregator hook not wired
+        "mtf_agreement": mtf_agreement,
+        "mtf_dominant_tf": mtf_dominant_tf,
+        "mtf_directions_json": mtf_directions_json,
+        "p_win": p_win,
+        "effective_score": effective_score,
+        "realized_vol_20d": realized_vol_20d,
+        "funding_directional_adj": funding_directional_adj,
     }
 
     if ghost_payload:
