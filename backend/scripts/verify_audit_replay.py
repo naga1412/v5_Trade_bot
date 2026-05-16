@@ -109,11 +109,57 @@ async def _discover_jsonb_cols(conn, table: str) -> set[str]:
 def _strategy_b_redump(
     row_dict: dict[str, Any], jsonb_cols: set[str],
 ) -> dict[str, Any]:
-    """Re-serialize JSONB dict/list values via json.dumps(separators=(",",":")) ."""
+    """Strategy B: Re-serialize JSONB dict/list values via json.dumps with
+    COMPACT separators (",", ":") — matches Postgres ::text canonical."""
     out: dict[str, Any] = {}
     for k, v in row_dict.items():
         if k in jsonb_cols and isinstance(v, (dict, list)):
             out[k] = json.dumps(v, separators=(",", ":"))
+        else:
+            out[k] = v
+    return out
+
+
+def _strategy_d_default_separators(
+    row_dict: dict[str, Any], jsonb_cols: set[str],
+) -> dict[str, Any]:
+    """Strategy D: Re-serialize JSONB via json.dumps with DEFAULT separators
+    (", ", ": ") — matches how callers wrote it (json.dumps(d) without
+    separators arg). Tests dict-key-insertion-order preservation through
+    Postgres JSONB round-trip."""
+    out: dict[str, Any] = {}
+    for k, v in row_dict.items():
+        if k in jsonb_cols and isinstance(v, (dict, list)):
+            out[k] = json.dumps(v)  # default separators
+        else:
+            out[k] = v
+    return out
+
+
+def _strategy_e_sort_keys(
+    row_dict: dict[str, Any], jsonb_cols: set[str],
+) -> dict[str, Any]:
+    """Strategy E: Re-serialize JSONB with sort_keys=True + default separators.
+    Tests whether Postgres alphabetized keys at storage time and the original
+    write happened to use sort_keys=True (unlikely but worth checking)."""
+    out: dict[str, Any] = {}
+    for k, v in row_dict.items():
+        if k in jsonb_cols and isinstance(v, (dict, list)):
+            out[k] = json.dumps(v, sort_keys=True)
+        else:
+            out[k] = v
+    return out
+
+
+def _strategy_f_compact_sorted(
+    row_dict: dict[str, Any], jsonb_cols: set[str],
+) -> dict[str, Any]:
+    """Strategy F: Re-serialize JSONB with sort_keys=True + COMPACT separators.
+    Postgres canonical with deterministic key order."""
+    out: dict[str, Any] = {}
+    for k, v in row_dict.items():
+        if k in jsonb_cols and isinstance(v, (dict, list)):
+            out[k] = json.dumps(v, sort_keys=True, separators=(",", ":"))
         else:
             out[k] = v
     return out
@@ -171,7 +217,8 @@ async def _verify_table(conn, table: str) -> dict[str, Any]:
         ), {"fid": first_id})).first()
         expected_prev = anchor.row_hash if anchor else GENESIS_HASH
 
-    matches_a = matches_b = matches_c = 0
+    matches_a = matches_b = matches_c = matches_d = matches_e = matches_f = 0
+    chain_breaks = 0
     violations: list[dict[str, Any]] = []
 
     for row_a, row_bc in zip(rows_a, rows_bc, strict=True):
@@ -180,14 +227,22 @@ async def _verify_table(conn, table: str) -> dict[str, Any]:
         filt_a = {k: v for k, v in rd_a.items() if k in whitelist}
         filt_c = {k: v for k, v in rd_bc.items() if k in whitelist}
         filt_b = _strategy_b_redump(filt_c, jsonb_cols)
+        filt_d = _strategy_d_default_separators(filt_c, jsonb_cols)
+        filt_e = _strategy_e_sort_keys(filt_c, jsonb_cols)
+        filt_f = _strategy_f_compact_sorted(filt_c, jsonb_cols)
 
         hash_a = compute_row_hash(expected_prev, filt_a)
         hash_b = compute_row_hash(expected_prev, filt_b)
         hash_c = compute_row_hash(expected_prev, filt_c)
+        hash_d = compute_row_hash(expected_prev, filt_d)
+        hash_e = compute_row_hash(expected_prev, filt_e)
+        hash_f = compute_row_hash(expected_prev, filt_f)
 
         stored_hash = rd_bc["row_hash"]
         stored_prev = rd_bc["prev_hash"]
         prev_link_ok = (stored_prev == expected_prev)
+        if not prev_link_ok:
+            chain_breaks += 1
 
         any_match = False
         if prev_link_ok and hash_a == stored_hash:
@@ -196,22 +251,34 @@ async def _verify_table(conn, table: str) -> dict[str, Any]:
             matches_b += 1; any_match = True
         if prev_link_ok and hash_c == stored_hash:
             matches_c += 1; any_match = True
+        if prev_link_ok and hash_d == stored_hash:
+            matches_d += 1; any_match = True
+        if prev_link_ok and hash_e == stored_hash:
+            matches_e += 1; any_match = True
+        if prev_link_ok and hash_f == stored_hash:
+            matches_f += 1; any_match = True
 
         if not any_match:
+            # Sample the JSONB value as both forms for diagnostic
+            jsonb_samples = {}
+            for j_col in jsonb_cols:
+                txt = filt_a.get(j_col)
+                obj = filt_c.get(j_col)
+                jsonb_samples[j_col] = {
+                    "as_text_first_200": (str(txt)[:200] + "…") if txt is not None and len(str(txt)) > 200 else txt,
+                    "as_object_first_200": (str(obj)[:200] + "…") if obj is not None and len(str(obj)) > 200 else obj,
+                }
             violations.append({
                 "row_id": rd_bc["id"],
-                "stored_prev": stored_prev,
-                "expected_prev_from_chain": expected_prev,
                 "prev_link_ok": prev_link_ok,
-                "stored_row_hash": stored_hash,
-                "hash_a_jsonb_as_text": hash_a,
-                "hash_b_redumped": hash_b,
-                "hash_c_raw_asyncpg": hash_c,
-                "jsonb_cols": sorted(jsonb_cols),
-                "non_jsonb_filt_sample": {
-                    k: (str(v)[:80] + "…") if v is not None and len(str(v)) > 80 else v
-                    for k, v in filt_a.items() if k not in jsonb_cols
-                },
+                "stored_row_hash": stored_hash[:16] + "…",
+                "hash_a_text_compact": hash_a[:16] + "…",
+                "hash_b_compact_redump": hash_b[:16] + "…",
+                "hash_c_raw_asyncpg": hash_c[:16] + "…",
+                "hash_d_default_sep": hash_d[:16] + "…",
+                "hash_e_sort_default": hash_e[:16] + "…",
+                "hash_f_sort_compact": hash_f[:16] + "…",
+                "jsonb_samples": jsonb_samples,
             })
 
         expected_prev = stored_hash  # walk the chain regardless
@@ -223,9 +290,13 @@ async def _verify_table(conn, table: str) -> dict[str, Any]:
         "matches_a": matches_a,
         "matches_b": matches_b,
         "matches_c": matches_c,
+        "matches_d": matches_d,
+        "matches_e": matches_e,
+        "matches_f": matches_f,
+        "chain_breaks": chain_breaks,
         "mismatches": len(violations),
         "jsonb_cols": sorted(jsonb_cols),
-        "violations": violations[:3],  # first 3 only
+        "violations": violations[:2],  # first 2 only
     }
 
 
@@ -253,8 +324,8 @@ async def main() -> int:
         await engine.dispose()
 
     print()
-    print(f"{'Table':<18} {'Rows':>5} {'Chk':>4} {'M-A':>4} {'M-B':>4} {'M-C':>4} {'Bad':>4}  JSONB cols")
-    print("-" * 100)
+    print(f"{'Table':<18} {'Rows':>5} {'Chk':>4} {'M-A':>4} {'M-B':>4} {'M-C':>4} {'M-D':>4} {'M-E':>4} {'M-F':>4} {'Brk':>4} {'Bad':>4}  JSONB cols")
+    print("-" * 120)
     for r in rows_output:
         if "error" in r:
             print(f"{r['table']:<18} ERROR: {r['error']}")
@@ -266,6 +337,10 @@ async def main() -> int:
             f"{r['matches_a']:>4} "
             f"{r['matches_b']:>4} "
             f"{r['matches_c']:>4} "
+            f"{r['matches_d']:>4} "
+            f"{r['matches_e']:>4} "
+            f"{r['matches_f']:>4} "
+            f"{r.get('chain_breaks', 0):>4} "
             f"{r['mismatches']:>4}  "
             f"{','.join(r['jsonb_cols']) or '-'}"
         )
@@ -273,7 +348,7 @@ async def main() -> int:
     has_diagnostics = any(r.get("violations") for r in rows_output)
     if has_diagnostics:
         print()
-        print("=== DIAGNOSTICS (first 3 violations per table) ===")
+        print("=== DIAGNOSTICS (first 2 violations per table) ===")
         for r in rows_output:
             if r.get("violations"):
                 print(f"\n[{r['table']}]")
@@ -281,7 +356,14 @@ async def main() -> int:
 
     print()
     print(f"TOTAL_MISMATCHES={overall_mismatches}")
-    print("Legend: M-A=hash matches when JSONB read as text; M-B=hash matches after re-json.dumps; M-C=hash matches with raw asyncpg-decoded value")
+    print("Legend:")
+    print("  M-A = JSONB read as ::text from Postgres (canonical compact form)")
+    print("  M-B = JSONB re-dumped json.dumps(separators=(',',':'))  [compact, insertion order]")
+    print("  M-C = raw asyncpg-decoded object (dict/list, no re-serialization)")
+    print("  M-D = JSONB re-dumped json.dumps(d)                     [default separators ', ' + ': ' with spaces]")
+    print("  M-E = JSONB re-dumped json.dumps(d, sort_keys=True)     [default sep + alpha key order]")
+    print("  M-F = JSONB re-dumped json.dumps(d, sort_keys=True, separators=(',',':'))  [compact + alpha]")
+    print("  Brk = rows where stored prev_hash != previous row's row_hash (chain link broken)")
     return 0 if overall_mismatches == 0 else 1
 
 
