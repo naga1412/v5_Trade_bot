@@ -132,6 +132,59 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
   divergence audit on 2026-05-16.
 - **Status**: queued.
 
+### FU-7 — Three pre-existing tests fail on SQLite (CI green on Postgres but local SQLite broken)
+- **Problem**: Three tests fail consistently when the suite runs
+  against `sqlite+aiosqlite:///:memory:` (the default for local
+  dev). All three were added pre-PR1 (SP-2 / SP-3 / SP-3.5 era).
+  CI runs Postgres + TimescaleDB and presumably passes these
+  tests, so they're "SQLite-incompatible" rather than "broken in
+  prod":
+    - `tests/integration/test_api_intermarket_route.py::test_get_intermarket_route_returns_latest`
+      — added commit `07cf03e` (SP-3.5)
+    - `tests/unit/test_ml_checkpoints.py::test_load_active_downloads_and_loads_state_dict`
+      — added commit `e9b645a` (SP-2)
+    - `tests/unit/test_ratelimit_client.py::test_multiple_named_buckets_routed_by_endpoint_key`
+      — added commit `2962c8f` (SP-3)
+- **Why this matters now**: PR1's CI matrix verification surfaced
+  them. They're NOT introduced by PR1. They make `pytest tests/`
+  on a developer laptop fail with 3 errors out of ~2400+ tests,
+  which is misleading.
+- **Scope**: For each test, either:
+  1. Add `@pytest.mark.skipif("sqlite" in DATABASE_URL, reason="postgres-only")`
+     decorator, OR
+  2. Refactor the test to be SQLite-compatible (preferred if the
+     incompatibility is incidental — e.g., a feature the test
+     doesn't actually need).
+- **Effort**: ~2-3 hours.
+- **Tracking**: this file (FU-7). Surfaced during PR1 Phase 6
+  flakiness check on 2026-05-17.
+- **Status**: queued. Not blocking PR1 — these tests are
+  Postgres-only-passing in CI which is what determines mergeability.
+
+### FU-8 — CI backend job missing `alembic upgrade head` step before pytest
+- **Problem**: `.github/workflows/ci.yml` backend job runs pytest
+  against the Postgres service container but does NOT run
+  `alembic upgrade head` first. PR1's `test_pr1_migration.py`
+  (8 tests) introspect live Postgres columns and assume the schema
+  is at HEAD. Without the alembic-upgrade step, these tests will
+  either fail (missing columns) or produce wrong results.
+- **Scope**: Add a step between "Install deps" and "Unit +
+  integration tests":
+    ```yaml
+    - name: Apply alembic migrations
+      working-directory: backend
+      env:
+        DATABASE_URL: postgresql+asyncpg://postgres:testpw@localhost:5432/trading_radar
+      run: python -m alembic upgrade head
+    ```
+- **Effort**: ~15 minutes (single ci.yml edit + verify).
+- **Tracking**: this file (FU-8). Surfaced during PR1 Phase 6 CI
+  matrix verification on 2026-05-17.
+- **Status**: **BLOCKING for PR1 merge** — without this fix the 8
+  migration tests can't pass in CI. Should be a tiny standalone
+  PR landed BEFORE the PR1 merge, OR included in the same PR. My
+  read: include in PR1 since the migration is PR1's contribution.
+
 ---
 
 ---
