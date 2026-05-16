@@ -31,6 +31,7 @@ on:
           - disable-live-telegram-approve # SAFETY REVERT: back to mode=manual, sizing 20-50, BINANCE_USE_TESTNET=true, restart
           - test-trade-fully-auto-round-trip # ⚠ REAL MONEY: deterministic fully-auto test through the dispatcher → _place_live_order path. ~$5 margin, ~$0.04 fees, auto-closes
           - audit-replay-verify # READ-ONLY: re-hashes last 100 rows of each of the 7 chained tables (predictions, shadow_trades, live_trades, paper_trades, brain_decisions, mode_change_log, tax_events); reports match counts per JSONB strategy. Used to verify PR1 audit-whitelist refactor.
+          - audit-history # READ-ONLY: dump auth_violations 'audit_chain_broken' rows + worker_heartbeats for audit_verifier_task. Answers "has the verifier been running, what did it find?"
 
 jobs:
   probe:
@@ -444,6 +445,26 @@ jobs:
                  curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
                       http://localhost:8000/api/v1/health && \
                  echo '✓ Reverted to manual mode + testnet routing.'"
+              ;;
+            audit-history)
+              # READ-ONLY: dump verifier history from auth_violations
+              # (verifier writes a row on chain breaks) + worker_heartbeats
+              # (any heartbeat?) + admin_monitoring's last verifier run.
+              # Used to answer "has the audit_verifier_task actually been
+              # running, and if so, what has it detected?"
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT '--- audit_chain_broken auth_violations ---' AS section;\" -c \
+                 \"SELECT created_at, attempted_email, reason FROM auth_violations \
+                   WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%' \
+                   ORDER BY created_at DESC LIMIT 30;\" -c \
+                 \"SELECT '--- worker_heartbeats audit_verifier_task ---' AS section;\" -c \
+                 \"SELECT worker_name, beat_at, status, details FROM worker_heartbeats \
+                   WHERE worker_name='audit_verifier_task' ORDER BY beat_at DESC LIMIT 5;\" -c \
+                 \"SELECT '--- all distinct worker_name ever heartbeated ---' AS section;\" -c \
+                 \"SELECT worker_name, max(beat_at) AS latest, count(*) AS n FROM worker_heartbeats \
+                   GROUP BY worker_name ORDER BY worker_name;\""
               ;;
             audit-replay-verify)
               # READ-ONLY: replay-identity verification across all 7
