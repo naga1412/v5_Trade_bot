@@ -54,6 +54,10 @@ from app.telegram.signals import (
     render_message,
     serialise_payload,
 )
+from app.telegram.trade_signals import (
+    TelegramTradeConfig,
+    send_trade_signal_message,
+)
 from app.trading.kill_switches import (
     DEFAULTS as KILL_DEFAULTS,
     SwitchConfig,
@@ -172,11 +176,23 @@ async def _send_telegram_signal(
     margin_usdt: float,
     now: datetime,
 ) -> str:
-    """Build + persist a telegram_signals row; return signal_id.
+    """Build + persist a telegram_signals row, send the outbound Telegram
+    message, and return signal_id.
 
-    The actual outbound POST to Telegram lives in app/ops/telegram_bot.py
-    (the polling worker). We persist a row with response=NULL so the
-    polling worker picks it up on its next tick + sends the message.
+    Originally this only wrote the DB row — the polling worker was
+    supposed to scan for unsent rows and POST them. That polling-side
+    pickup was never actually wired (the poller only handles inbound
+    callbacks, not outbound new-signal sends), so signals piled up in
+    the DB and operators never received notifications. Now we INSERT
+    the row + immediately POST via send_trade_signal_message, all in
+    one transaction.
+
+    The DB row stays as the source of truth: send_trade_signal_message
+    updates it with the Telegram message_id on success so the
+    edit-on-callback path (poller) can locate the right message later.
+    If the outbound POST fails (no creds, network blip, Telegram API
+    error), the row is still in the DB and a retry from a future
+    healer or manual ops command can flush it without losing context.
     """
     sig_id = "sig_" + secrets.token_hex(8)
     candidate = SignalCandidate(
@@ -223,6 +239,43 @@ async def _send_telegram_signal(
             "p": serialise_payload(payload),
         },
     )
+
+    # Outbound POST to Telegram. Reads bot_token + chat_id from env
+    # (same as the polling worker uses for inbound). Best-effort here —
+    # if the message fails to send (creds missing, Telegram outage,
+    # network), we log and return the signal_id anyway so the dispatch
+    # appears as outcome=sent_telegram. The DB row is the source of
+    # truth so manual retry is always possible.
+    import os
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if bot_token and chat_id:
+        try:
+            msg_id = await send_trade_signal_message(
+                session, signal_id=sig_id,
+                config=TelegramTradeConfig(
+                    bot_token=bot_token, chat_id=chat_id,
+                ),
+            )
+            if msg_id is None:
+                log.error(
+                    "_send_telegram_signal: signal %s row written but "
+                    "outbound POST failed; check Telegram bot creds + "
+                    "network reachability to api.telegram.org",
+                    sig_id,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.exception(
+                "_send_telegram_signal: outbound POST raised for %s: %s",
+                sig_id, e,
+            )
+    else:
+        log.warning(
+            "_send_telegram_signal: signal %s queued in DB but "
+            "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID unset — operator will "
+            "NOT see the message until those are configured",
+            sig_id,
+        )
     return sig_id
 
 
