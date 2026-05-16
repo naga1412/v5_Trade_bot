@@ -146,6 +146,17 @@ class LivePredictionOut(BaseModel):
     # session is passed AND the L9 news layer has data / F&G call succeeds.
     sentiment: SentimentSummary | None = None
     news: NewsSummary | None = None
+    # PR1 record-only analytics (Task 3.4). All 7 fields default None;
+    # populated by the build_prediction aggregator hook from the 4
+    # scoring helper modules: mtf_confluence, p_win_calibrator,
+    # vol_normalization, funding_directional.
+    mtf_agreement: int | None = None
+    mtf_dominant_tf: str | None = None
+    mtf_directions_json: str | None = None
+    p_win: float | None = None
+    effective_score: float | None = None
+    realized_vol_20d: float | None = None
+    funding_directional_adj: float | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---
