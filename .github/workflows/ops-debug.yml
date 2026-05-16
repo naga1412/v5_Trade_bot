@@ -25,6 +25,8 @@ on:
           - test-trade-open # fire a 20 USDT BTCUSDT LONG signal via the real dispatcher → testnet only; operator approves in Telegram
           - test-trade-close-all # market-close every open position on Binance Futures testnet
           - test-trade-verify-keys # READ-ONLY diagnostic: try the vaulted keys against testnet AND live, print Hetzner outbound IP, tell operator exactly what's wrong
+          - test-trade-live-round-trip # ⚠ REAL MONEY: opens + auto-closes 0.001 BTC @ 20× on LIVE Binance (~$4 margin, ~$0.06 fees). Requires explicit operator authorization.
+          - test-trade-live-close-all # SAFETY NET: market-closes any open BTCUSDT/ETHUSDT position on LIVE Binance
 
 jobs:
   probe:
@@ -339,5 +341,23 @@ jobs:
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend \
                  python /app/host-tools/test_trade_verify_keys.py"
+              ;;
+            test-trade-live-round-trip)
+              # ⚠ REAL MONEY — places + auto-closes a 0.001 BTC market order
+              # on LIVE Binance Futures (~$4 margin, ~$0.06 fees expected).
+              # Sizing is a LITERAL in tools/test_trade_live_round_trip.py;
+              # this probe takes no parameters. Script auto-closes in its
+              # finally block; the test-trade-live-close-all probe is the
+              # safety net if even that fails.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend \
+                 python /app/host-tools/test_trade_live_round_trip.py"
+              ;;
+            test-trade-live-close-all)
+              # Safety-net flatten for the live round-trip. Closes any
+              # open BTCUSDT / ETHUSDT position on LIVE Binance.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend \
+                 python /app/host-tools/test_trade_live_close_all.py"
               ;;
           esac
