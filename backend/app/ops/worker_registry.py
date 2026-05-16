@@ -213,6 +213,28 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # WS faster than Binance's per-IP rate window — alert-only is safer.
         stateful=True,
     ),
+    # 17. MTF cache pre-warm — single-shot at startup; loads the top-30
+    #     universe and calls prewarm_cache (60s hard deadline, fail-open).
+    #     pending_heartbeat=True: single-shot by design; no heartbeat
+    #     expected; watchdog staleness check is skipped for this entry.
+    WorkerSpec(
+        name="mtf_cache_prewarm_task",
+        description="Single-shot MTF kline cache pre-warm over the top-30 universe",
+        liveness_query=None,  # single-shot — no DB liveness signal
+        max_staleness_seconds=5 * 60,  # not used (liveness_query=None)
+        stateful=False,
+        pending_heartbeat=True,
+    ),
+    # 18. MTF cache TTL-refresh loop — long-running; every 30s scans for
+    #     cache entries within 20% of expiry and refreshes them proactively.
+    #     Heartbeats each iteration so the watchdog can detect stalls.
+    WorkerSpec(
+        name="mtf_cache_ttl_refresh_task",
+        description="30s MTF kline cache TTL-refresh loop (simple, no stampede protection)",
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=5 * 60,  # 30s cadence + ~4.5min slack
+        stateful=False,
+    ),
 )
 
 
