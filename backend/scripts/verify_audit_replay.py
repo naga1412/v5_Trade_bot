@@ -178,6 +178,8 @@ async def _verify_table(conn, table: str) -> dict[str, Any]:
         return {
             "table": table, "row_count": 0, "checked": 0,
             "matches_a": 0, "matches_b": 0, "matches_c": 0,
+            "matches_d": 0, "matches_e": 0, "matches_f": 0,
+            "chain_breaks": 0,
             "mismatches": 0, "jsonb_cols": sorted(jsonb_cols),
             "violations": [],
         }
