@@ -136,6 +136,16 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                     user_id=BOOTSTRAP_ADMIN_USER_ID,
                     layer_payload=_layer_payload,
                     ghost_payload=ghost_payload if ghost_payload else None,
+                    # PR1 Phase 5 — pass through the 7 record-only fields from pred
+                    # (populated by the aggregator hook added in Task 3.4;
+                    # None when hook returns no data, which is fail-open safe).
+                    mtf_agreement=pred.mtf_agreement,
+                    mtf_dominant_tf=pred.mtf_dominant_tf,
+                    mtf_directions_json=pred.mtf_directions_json,
+                    p_win=pred.p_win,
+                    effective_score=pred.effective_score,
+                    realized_vol_20d=pred.realized_vol_20d,
+                    funding_directional_adj=pred.funding_directional_adj,
                 )
                 await persist_prediction(session, _predictions_payload)
                 # Feature 2: insert a pending-validation row so the
