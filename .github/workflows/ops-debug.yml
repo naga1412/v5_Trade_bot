@@ -30,6 +30,7 @@ on:
           - enable-live-telegram-approve # ⚠ ENABLES autonomous trading: lowers size 5-10 USDT, mode=telegram-approve, BINANCE_USE_TESTNET=false, restarts backend
           - disable-live-telegram-approve # SAFETY REVERT: back to mode=manual, sizing 20-50, BINANCE_USE_TESTNET=true, restart
           - test-trade-fully-auto-round-trip # ⚠ REAL MONEY: deterministic fully-auto test through the dispatcher → _place_live_order path. ~$5 margin, ~$0.04 fees, auto-closes
+          - audit-replay-verify # READ-ONLY: re-hashes last 100 rows of each of the 7 chained tables (predictions, shadow_trades, live_trades, paper_trades, brain_decisions, mode_change_log, tax_events); reports match counts per JSONB strategy. Used to verify PR1 audit-whitelist refactor.
 
 jobs:
   probe:
@@ -40,6 +41,9 @@ jobs:
       HETZNER_USER: ${{ secrets.HETZNER_USER }}
       HETZNER_INSTALL_DIR: ${{ secrets.HETZNER_INSTALL_DIR }}
     steps:
+      - name: Checkout (for probes that need repo files like audit-replay-verify)
+        uses: actions/checkout@v4
+
       - name: Set up SSH
         if: env.HETZNER_HOST != ''
         run: |
@@ -440,5 +444,19 @@ jobs:
                  curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
                       http://localhost:8000/api/v1/health && \
                  echo '✓ Reverted to manual mode + testnet routing.'"
+              ;;
+            audit-replay-verify)
+              # READ-ONLY: replay-identity verification across all 7
+              # hash-chained tables. Reads each row's columns, recomputes
+              # row_hash via 3 strategies (JSONB-as-text, asyncpg-redumped,
+              # raw-asyncpg), compares to stored row_hash, reports per-table
+              # match counts. Script is base64-encoded and piped via SSH
+              # stdin to `docker compose exec -T backend python -` so it
+              # runs against prod's DATABASE_URL without modifying prod
+              # filesystem or git state.
+              SCRIPT_B64=$(base64 -w0 backend/scripts/verify_audit_replay.py)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && echo '$SCRIPT_B64' | base64 -d | \
+                 docker compose exec -T backend python -"
               ;;
           esac
