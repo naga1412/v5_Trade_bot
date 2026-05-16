@@ -1,9 +1,11 @@
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 import httpx
 import pandas as pd
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.routes.ws import manager
 from app.config import get_settings
@@ -21,6 +23,66 @@ log = logging.getLogger(__name__)
 # SP-0.7: the singleton live-prediction worker writes rows on behalf of the
 # bootstrap admin (id=1, see migration 0005). SP-8 will fan out per user.
 BOOTSTRAP_ADMIN_USER_ID: int = 1
+
+
+async def _persist_prediction_and_schedule_validation(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    predictions_payload: dict[str, Any],
+    user_id: int,
+    symbol: str,
+    timeframe: str,
+    direction: str,
+    score: float,
+    confidence: float,
+    anchor_ts: datetime,
+    anchor_close: float,
+) -> int:
+    """Persist the prediction in transaction 1, schedule its pending-validation
+    row in transaction 2 (best-effort). Returns the new prediction's id.
+
+    Two-session pattern is the 2026-05-17 hotfix for a 6-day production
+    silence: pre-hotfix, both writes lived in the same session, and a
+    ``NotNullViolationError`` from the validator's INSERT (caused by
+    ``prediction_id=None`` being hardcoded at the call site) put the
+    Postgres transaction into the aborted state. The subsequent
+    ``session.commit()`` failed and ``__aexit__`` rolled back the
+    prediction insert. Net effect: ``build_prediction`` ran, the
+    aggregator-hook log line fired, but zero rows persisted.
+
+    Splitting into two sessions isolates the writes: validator failure
+    can no longer poison the prediction's transaction. The validator is
+    explicitly best-effort per its docstring; this code matches that
+    contract.
+    """
+    # --- Transaction 1: persist the prediction (source-of-truth write) ---
+    async with session_factory() as session:
+        pred_id, _row_hash = await persist_prediction(session, predictions_payload)
+        await session.commit()
+
+    # --- Transaction 2: best-effort validator record ---
+    try:
+        async with session_factory() as session:
+            await record_pending_validation(
+                session,
+                prediction_id=pred_id,
+                user_id=user_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                score=score,
+                confidence=confidence,
+                anchor_ts=anchor_ts,
+                anchor_close=anchor_close,
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — telemetry is best-effort
+        log.warning(
+            "record_pending_validation failed; prediction %s persisted ok: %s",
+            pred_id, exc,
+        )
+
+    return pred_id
 
 
 async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h") -> None:
@@ -114,57 +176,60 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                 )
 
         # Persist BEFORE publishing — audit chain is the source of truth.
+        # SP-5 Phase F1: merge prediction_extras (traps_fired, tier, raw scores,
+        # multipliers, final) into the persisted JSONB so downstream backtest
+        # replays + audit can recover full state. Build _layer_payload at the
+        # call site so it stays available for _maybe_dispatch below without a
+        # JSON round-trip. ts is a datetime, NOT isoformat() string — asyncpg's
+        # PostgreSQL TIMESTAMPTZ binding rejects strings; SQLite tests bind
+        # datetime->TEXT automatically. SP-1.1 hotfix.
+        _layer_payload: dict[str, Any] = {
+            k: (v.model_dump() if v else None)
+            for k, v in pred.layer_scores.items()
+        }
+        if pred.prediction_extras is not None:
+            _layer_payload.update(pred.prediction_extras)
+        _predictions_payload = build_predictions_payload(
+            pred,
+            user_id=BOOTSTRAP_ADMIN_USER_ID,
+            layer_payload=_layer_payload,
+            ghost_payload=ghost_payload if ghost_payload else None,
+            # PR1 Phase 5 — pass through the 7 record-only fields from pred
+            # (populated by the aggregator hook added in Task 3.4;
+            # None when hook returns no data, which is fail-open safe).
+            mtf_agreement=pred.mtf_agreement,
+            mtf_dominant_tf=pred.mtf_dominant_tf,
+            mtf_directions_json=pred.mtf_directions_json,
+            p_win=pred.p_win,
+            effective_score=pred.effective_score,
+            realized_vol_20d=pred.realized_vol_20d,
+            funding_directional_adj=pred.funding_directional_adj,
+        )
+
+        # 2026-05-17 HOTFIX: two-session pattern. The validator INSERT lives
+        # in its OWN transaction so a NotNullViolationError (or any other
+        # validator-side error) cannot poison the prediction's transaction
+        # and roll back the prediction insert. Pre-hotfix this exact pattern
+        # silently lost ~6 days of predictions in prod. See
+        # docs/superpowers/specs/2026-05-17-hotfix-validator-transaction-scope.md
+        # and tests/integration/test_live_prediction_validator_isolation.py.
         try:
-            async with session_factory() as session:
-                # SP-5 Phase F1: merge prediction_extras (traps_fired, tier,
-                # raw scores, multipliers, final) into the persisted JSONB so
-                # downstream backtest replays + audit can recover full state.
-                # Build _layer_payload at the call site so it stays available
-                # for _maybe_dispatch below without a JSON round-trip.
-                # ts is a datetime, NOT isoformat() string — asyncpg's
-                # PostgreSQL TIMESTAMPTZ binding rejects strings; SQLite
-                # tests bind datetime->TEXT automatically. SP-1.1 hotfix.
-                _layer_payload: dict[str, Any] = {
-                    k: (v.model_dump() if v else None)
-                    for k, v in pred.layer_scores.items()
-                }
-                if pred.prediction_extras is not None:
-                    _layer_payload.update(pred.prediction_extras)
-                _predictions_payload = build_predictions_payload(
-                    pred,
-                    user_id=BOOTSTRAP_ADMIN_USER_ID,
-                    layer_payload=_layer_payload,
-                    ghost_payload=ghost_payload if ghost_payload else None,
-                    # PR1 Phase 5 — pass through the 7 record-only fields from pred
-                    # (populated by the aggregator hook added in Task 3.4;
-                    # None when hook returns no data, which is fail-open safe).
-                    mtf_agreement=pred.mtf_agreement,
-                    mtf_dominant_tf=pred.mtf_dominant_tf,
-                    mtf_directions_json=pred.mtf_directions_json,
-                    p_win=pred.p_win,
-                    effective_score=pred.effective_score,
-                    realized_vol_20d=pred.realized_vol_20d,
-                    funding_directional_adj=pred.funding_directional_adj,
-                )
-                await persist_prediction(session, _predictions_payload)
-                # Feature 2: insert a pending-validation row so the
-                # 60s validator worker can compute hit/miss at the next
-                # bar close. Best-effort — failure must not block the
-                # actual prediction persistence above.
-                await record_pending_validation(
-                    session,
-                    prediction_id=None,
-                    user_id=BOOTSTRAP_ADMIN_USER_ID,
-                    symbol=pred.symbol,
-                    timeframe=pred.timeframe,
-                    direction=pred.final.direction,
-                    score=pred.final.score,
-                    confidence=pred.final.confidence,
-                    anchor_ts=pred.ts,
-                    anchor_close=float(bars["close"].iloc[-1]),
-                )
-                await session.commit()
+            await _persist_prediction_and_schedule_validation(
+                session_factory,
+                predictions_payload=_predictions_payload,
+                user_id=BOOTSTRAP_ADMIN_USER_ID,
+                symbol=pred.symbol,
+                timeframe=pred.timeframe,
+                direction=pred.final.direction,
+                score=pred.final.score,
+                confidence=pred.final.confidence,
+                anchor_ts=pred.ts,
+                anchor_close=float(bars["close"].iloc[-1]),
+            )
         except Exception as e:  # noqa: BLE001
+            # Only reached if the prediction itself failed to persist (e.g.,
+            # DB unreachable, hash chain assertion). Validator failures are
+            # absorbed inside the helper.
             log.error("persist_prediction failed; suppressing publish: %s", e)
             continue
 

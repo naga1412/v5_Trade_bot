@@ -76,7 +76,7 @@ async def test_persist_prediction_writes_with_hash_chain() -> None:
     )
 
     async with AsyncSession(engine) as session:
-        h = await persist_prediction(session, payload)
+        _pred_id, h = await persist_prediction(session, payload)
         await session.commit()
         row = (await session.execute(sa.text(
             "SELECT prev_hash, row_hash, user_id FROM predictions"
@@ -85,6 +85,65 @@ async def test_persist_prediction_writes_with_hash_chain() -> None:
     assert row.prev_hash == "0" * 64
     assert row.row_hash == h
     assert row.user_id == 1
+
+
+@pytest.mark.asyncio
+async def test_persist_prediction_returns_id_and_hash_tuple() -> None:
+    """HOTFIX: persist_prediction returns ``tuple[int, str]`` so callers
+    can pass a real ``prediction_id`` to ``record_pending_validation`` in
+    a SECOND transaction (avoiding the pre-2026-05-17 bug where a single
+    shared transaction silently rolled back predictions whenever the
+    validator's NOT NULL constraint fired).
+
+    See backend/tests/integration/test_live_prediction_validator_isolation.py
+    for the integration-level coverage of the two-session pattern.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE predictions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "symbol TEXT, timeframe TEXT, "
+            "ts TEXT, layer_scores TEXT, final_score REAL, direction TEXT, "
+            "confidence REAL, inputs_hash TEXT, model_version TEXT, "
+            "cold_start INTEGER, prev_hash TEXT, row_hash TEXT)"
+        ))
+
+    payload = dict(
+        user_id=1,
+        symbol="BTC/USDT", timeframe="1h",
+        ts=datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+        layer_scores='{"1":"long"}',
+        final_score=0.42, direction="LONG", confidence=0.7,
+        inputs_hash="abc123", model_version="sp-0", cold_start=1,
+    )
+
+    async with AsyncSession(engine) as session:
+        result = await persist_prediction(session, payload)
+        await session.commit()
+
+    # Assert tuple shape — this is the new contract.
+    assert isinstance(result, tuple) and len(result) == 2
+    pred_id, row_hash = result
+    assert isinstance(pred_id, int) and pred_id > 0, (
+        f"Expected positive int prediction id, got {pred_id!r}"
+    )
+    assert isinstance(row_hash, str) and len(row_hash) == 64, (
+        f"Expected 64-char hex hash, got {row_hash!r}"
+    )
+
+    # Cross-check: the returned id actually exists in the DB and the
+    # row_hash matches.
+    async with AsyncSession(engine) as session:
+        row = (
+            await session.execute(sa.text(
+                "SELECT id, row_hash FROM predictions WHERE id = :i"
+            ), {"i": pred_id})
+        ).first()
+    assert row is not None
+    assert row.id == pred_id
+    assert row.row_hash == row_hash
 
 
 @pytest.mark.asyncio
