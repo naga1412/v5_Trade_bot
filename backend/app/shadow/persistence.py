@@ -10,7 +10,6 @@ SQLAlchemy event layer so any future helper that forgets the predicate
 raises in dev.
 """
 
-import json
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +17,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.audit import insert_with_chain
+from app.db.payload_builders import build_shadow_trade_payload
 from app.shadow.engine import Direction, ShadowPosition
 from app.shadow.exit_monitor import ExitReason
 
@@ -115,37 +115,15 @@ async def persist_closed_trade(
     Spec §13: user_id participates in the canonical row hash payload so any
     cross-user tampering surfaces during chain verification.
     """
-    if pos.direction is Direction.LONG:
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
-    else:
-        pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100.0
-    pnl_usdt = pos.position_size_usdt * pnl_pct / 100.0
-
-    payload = {
-        "user_id": user_id,
-        "symbol": pos.symbol,
-        "timeframe": "1h",
-        "direction": pos.direction.value,
-        "entry_price": pos.entry_price,
-        "stop_loss": pos.stop_loss,
-        "take_profit": pos.take_profit,
-        "position_size_usdt": pos.position_size_usdt,
-        "entry_score": pos.entry_score,
-        "entry_confidence": pos.entry_confidence,
-        "layer_scores": json.dumps(pos.layer_scores),
-        "entry_atr": pos.entry_atr,
-        "exit_price": exit_price,
-        "exit_reason": exit_reason.value,
-        "pnl_pct": pnl_pct,
-        "pnl_usdt": pnl_usdt,
-        "bars_held": bars_held,
-        # Raw datetimes — Postgres TIMESTAMPTZ binding requires this.
-        "opened_at": pos.opened_at,
-        "closed_at": closed_at,
-        "inputs_hash": inputs_hash,
-        "model_version": "sp-0.5",
-        "signal_id": pos.signal_id,
-    }
+    payload = build_shadow_trade_payload(
+        pos,
+        user_id=user_id,
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        closed_at=closed_at,
+        bars_held=bars_held,
+        inputs_hash=inputs_hash,
+    )
     return await insert_with_chain(session, "shadow_trades", payload)
 
 
