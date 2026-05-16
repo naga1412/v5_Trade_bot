@@ -35,8 +35,14 @@ P_WIN_MODEL_PATH_LONG: Path = P_WIN_MODEL_DIR / "long.pkl"
 P_WIN_MODEL_PATH_SHORT: Path = P_WIN_MODEL_DIR / "short.pkl"
 
 
-def fit_p_win_models(session: Any) -> None:
+async def fit_p_win_models(session: Any) -> None:
     """PR1: NOOP. PR5 will populate this.
+
+    Async signature is locked NOW (PR1) even though the body doesn't
+    await — PR5 will need `await session.execute(...)` against an
+    AsyncSession to fetch closed shadow_trades for isotonic fitting.
+    Declaring async here means PR5 ships without a breaking signature
+    change at every caller.
 
     Args:
         session: AsyncSession or similar (unused in PR1; accepted so the

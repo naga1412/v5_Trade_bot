@@ -64,20 +64,20 @@ async def test_predict_p_win_returns_none_for_extreme_scores() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fit_p_win_models_is_noop() -> None:
-    """fit_p_win_models(None) must not raise and must return None."""
+async def test_fit_p_win_models_is_noop() -> None:
+    """fit_p_win_models(None) must not raise and must return None (async)."""
     from app.core.scoring.p_win_calibrator import fit_p_win_models
 
-    result = fit_p_win_models(None)
+    result = await fit_p_win_models(None)
     assert result is None
 
 
-def test_fit_p_win_models_logs_intent(caplog: pytest.LogCaptureFixture) -> None:
-    """fit_p_win_models must log an INFO message referencing PR5."""
+async def test_fit_p_win_models_logs_intent(caplog: pytest.LogCaptureFixture) -> None:
+    """fit_p_win_models must log an INFO message referencing PR5 (async)."""
     from app.core.scoring.p_win_calibrator import fit_p_win_models
 
     with caplog.at_level(logging.INFO, logger="app.core.scoring.p_win_calibrator"):
-        fit_p_win_models(None)
+        await fit_p_win_models(None)
 
     assert any(
         "PR5" in record.message
