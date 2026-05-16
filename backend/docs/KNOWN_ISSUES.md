@@ -217,6 +217,34 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 - **Status**: **CLOSED 2026-05-17** by commit `e8513c8` (ci.yml
   edit included in PR1).
 
+### FU-11 — ci.yml has duplicated env blocks across steps; hoist to job level
+- **Problem**: The backend job's `Apply alembic migrations` step and
+  `Unit + integration tests` step both require identical `DATABASE_URL`
+  + `REDIS_URL` + `ENV` env vars (because both load `Settings()` via
+  `get_settings()`). Currently each step duplicates the env block. PR1
+  shipped a 3-line per-step env addition twice — the FU-8 onion-peel
+  pattern: each new step that touches app code requires re-declaring
+  the same envs. Future steps that load app modules will hit the same
+  trap silently (CI fails on the new step, gets per-step env added,
+  next new step trips again).
+- **Scope**: Move `DATABASE_URL` + `REDIS_URL` + `ENV` from per-step
+  env blocks to `jobs.backend.env` so all steps inherit. Retain
+  per-step env only for vars that genuinely differ per step
+  (`WORKER_ENABLED: "false"` is pytest-only; `ENV: development` vs
+  `ENV: ci` differs between steps and is the only reason a per-step
+  override would be needed — pick one consistent value or document the
+  divergence).
+- **Effort**: ~1 hour including diff review + CI re-run to confirm.
+- **Tracking**: this file (FU-11). Surfaced 2026-05-17 when the
+  `Apply alembic migrations` step (added by FU-8 close, commit
+  `e8513c8`) failed with `redis_url Field required` because only
+  `DATABASE_URL` was propagated. Fixed inline with FU-8 follow-up
+  commit adding `REDIS_URL` + `ENV: ci` to the alembic step. The
+  underlying duplication pattern remains.
+- **Status**: queued. **Not blocking PR1** — Fix A landed for PR1 to
+  ship cleanly. FU-11 is the permanent fix for the per-step env
+  duplication pattern.
+
 ### FU-10 — Migration downgrade path is untested on every dialect
 - **Problem**: 0 of 8 existing migration tests in
   `backend/tests/db/test_pr1_migration.py` exercise
