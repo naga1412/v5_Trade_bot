@@ -12,6 +12,7 @@ from app.core.execution.persistence import persist_prediction
 from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
+from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
 from app.ml.validator import record_pending_validation
 from app.trading.execution.glue import dispatch_if_eligible, vault_keys
@@ -119,29 +120,21 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                 # SP-5 Phase F1: merge prediction_extras (traps_fired, tier,
                 # raw scores, multipliers, final) into the persisted JSONB so
                 # downstream backtest replays + audit can recover full state.
-                _layer_payload: dict[str, Any] = {
-                    k: (v.model_dump() if v else None)
-                    for k, v in pred.layer_scores.items()
-                }
-                if pred.prediction_extras is not None:
-                    _layer_payload.update(pred.prediction_extras)
-                await persist_prediction(session, {
-                    "user_id": BOOTSTRAP_ADMIN_USER_ID,
-                    "symbol": pred.symbol,
-                    "timeframe": pred.timeframe,
-                    # ts is a datetime, NOT isoformat() string. asyncpg's
-                    # PostgreSQL TIMESTAMPTZ binding rejects strings; SQLite
-                    # tests bind datetime->TEXT automatically. SP-1.1 hotfix.
-                    "ts": pred.ts,
-                    "layer_scores": json.dumps(_layer_payload),
-                    "final_score": pred.final.score,
-                    "direction": pred.final.direction,
-                    "confidence": pred.final.confidence,
-                    "inputs_hash": pred.inputs_hash,
-                    "model_version": "sp-0",
-                    "cold_start": pred.cold_start,
-                    **ghost_payload,
-                })
+                # build_predictions_payload constructs _layer_payload internally
+                # and merges ghost_payload when truthy. ts is a datetime, NOT
+                # isoformat() string — asyncpg's PostgreSQL TIMESTAMPTZ binding
+                # rejects strings; SQLite tests bind datetime->TEXT automatically.
+                # SP-1.1 hotfix.
+                _predictions_payload = build_predictions_payload(
+                    pred,
+                    user_id=BOOTSTRAP_ADMIN_USER_ID,
+                    ghost_payload=ghost_payload if ghost_payload else None,
+                )
+                # Re-expose _layer_payload for _maybe_dispatch below.
+                _layer_payload: dict[str, Any] = json.loads(
+                    _predictions_payload["layer_scores"]
+                )
+                await persist_prediction(session, _predictions_payload)
                 # Feature 2: insert a pending-validation row so the
                 # 60s validator worker can compute hit/miss at the next
                 # bar close. Best-effort — failure must not block the
