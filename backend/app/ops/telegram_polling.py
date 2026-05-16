@@ -43,6 +43,10 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.audit import insert_with_chain
+from app.exchanges.binance_filters import (
+    get_symbol_filters,
+    quantize_qty,
+)
 from app.exchanges.binance_live import (
     BinanceLiveClient,
     BinanceLiveError,
@@ -147,7 +151,6 @@ async def _place_approved_order(
     # Quantize qty to the symbol's LOT_SIZE.stepSize (same fix as
     # _place_live_order — Binance rejects raw floats with -1111).
     binance_native_sym = symbol.replace("/", "")
-    from app.exchanges.binance_filters import get_symbol_filters, quantize_qty
     filters = await get_symbol_filters(
         binance_native_sym, use_testnet=use_testnet,
     )

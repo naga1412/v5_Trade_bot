@@ -22,6 +22,28 @@ from app.ops.telegram_polling import (
 _NOW = datetime(2026, 5, 9, 14, 0, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _stub_symbol_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock get_symbol_filters so tests don't hit real Binance for
+    LOT_SIZE / MIN_NOTIONAL lookups. Returns step=0.001 + min_qty=0.001
+    so the test fixture's (30 USDT × 5 / 80k = 0.001875) qty quantizes
+    cleanly to 0.001 — caller-observable behaviour matches what BTCUSDT
+    on Binance actually returns.
+    """
+    from app.exchanges.binance_filters import SymbolFilters
+
+    async def _stub(symbol: str, *, use_testnet: bool, http=None):
+        return SymbolFilters(
+            symbol=symbol,
+            step_size=0.001,
+            min_qty=0.001,
+            tick_size=0.10,
+            min_notional=5.0,
+        )
+
+    monkeypatch.setattr(telegram_polling, "get_symbol_filters", _stub)
+
+
 def _config() -> PollerConfig:
     return PollerConfig(bot_token="bot-token", chat_id="123456")
 
@@ -124,9 +146,12 @@ async def test_place_approved_order_writes_live_trade() -> None:
         )
         await s.commit()
     assert order_id == "bin-9"
+    # Raw qty (30 × 5) / 80k = 0.001875, but the poller quantizes to
+    # BTCUSDT's stepSize (0.001) before submitting — Binance otherwise
+    # rejects with -1111 "Precision is over the maximum".
     assert stub.placed == [{
         "symbol": "BTCUSDT", "side": "BUY",
-        "quantity": (30.0 * 5) / 80_000.0, "leverage": 5, "type": "MARKET",
+        "quantity": 0.001, "leverage": 5, "type": "MARKET",
     }]
     async with AsyncSession(engine) as s:
         row = (await s.execute(sa.text(
