@@ -29,6 +29,7 @@ on:
           - test-trade-live-close-all # SAFETY NET: market-closes any open BTCUSDT/ETHUSDT position on LIVE Binance
           - enable-live-telegram-approve # ⚠ ENABLES autonomous trading: lowers size 5-10 USDT, mode=telegram-approve, BINANCE_USE_TESTNET=false, restarts backend
           - disable-live-telegram-approve # SAFETY REVERT: back to mode=manual, sizing 20-50, BINANCE_USE_TESTNET=true, restart
+          - test-trade-fully-auto-round-trip # ⚠ REAL MONEY: deterministic fully-auto test through the dispatcher → _place_live_order path. ~$5 margin, ~$0.04 fees, auto-closes
 
 jobs:
   probe:
@@ -396,6 +397,20 @@ jobs:
                  curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
                       http://localhost:8000/api/v1/health && \
                  echo '✓ LIVE telegram-approve ENABLED. Next shadow signal will fire a real Telegram notification + real-money order on Approve.'"
+              ;;
+            test-trade-fully-auto-round-trip)
+              # ⚠ REAL MONEY — exercises the dispatcher's fully-auto
+              # path through _place_live_order. Atomic: open, hold 3s,
+              # auto-close. Safety:
+              #   - script flips users.trading_mode='fully-auto' for
+              #     the dispatch then restores in finally
+              #   - pre-flight refuses if BTCUSDT position already open
+              #   - $5 margin + 10x leverage = ~$50 notional, ~$0.04 fees
+              #   - if even the script's auto-close fails, the disable
+              #     probe + binance app are manual recovery options
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend \
+                 python /app/host-tools/test_trade_fully_auto_round_trip.py"
               ;;
             disable-live-telegram-approve)
               # SAFETY REVERT of enable-live-telegram-approve. Same three
