@@ -26,7 +26,6 @@ import pytest
 import respx
 
 from app.exchanges.binance_filters import (
-    SymbolFilters,
     get_symbol_filters,
     quantize_price,
     quantize_qty,
