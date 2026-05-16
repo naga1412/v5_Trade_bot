@@ -33,6 +33,7 @@ on:
           - audit-replay-verify # READ-ONLY: re-hashes last 100 rows of each of the 7 chained tables (predictions, shadow_trades, live_trades, paper_trades, brain_decisions, mode_change_log, tax_events); reports match counts per JSONB strategy. Used to verify PR1 audit-whitelist refactor.
           - audit-history # READ-ONLY: dump auth_violations 'audit_chain_broken' rows + worker_heartbeats for audit_verifier_task. Answers "has the verifier been running, what did it find?"
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
+          - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
 
 jobs:
   probe:
@@ -214,6 +215,47 @@ jobs:
                  docker compose exec -T backend bash -c 'timeout 5 bash -c \"</dev/tcp/fapi.binance.com/443\" && echo TCP_OK_fapi || echo TCP_FAIL_fapi' && \
                  echo '=== HTTPS GET https://fstream.binance.com/ (10s timeout) ===' && \
                  docker compose exec -T backend bash -c 'curl -s -o /dev/null -m 10 -w \"http_code=%{http_code} time=%{time_total}s\\n\" https://fstream.binance.com/'"
+              ;;
+            pr1-rows-spot-check)
+              # READ-ONLY: spot-check most-recent predictions rows for the
+              # 7 PR1 analytics columns. Answers "is the aggregator hook
+              # populating the new columns?" (V5 verification).
+              # Wider 6h window than the operator's 2h spec because the
+              # known pre-existing live_worker gap may push the most-recent
+              # prediction row back; if 6h shows zero, the issue is the
+              # live_worker not writing predictions, not PR1.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== last 10 predictions (any age) — PR1 analytics columns ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, symbol, timeframe, ts, \
+                       mtf_agreement, mtf_dominant_tf, p_win, \
+                       effective_score, realized_vol_20d, \
+                       funding_directional_adj \
+                     FROM predictions \
+                     ORDER BY ts DESC LIMIT 10;\" && \
+                 echo '=== prediction count in trailing windows ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'last 2h' AS window, count(*) FROM predictions WHERE ts > now() - interval '2 hours' \
+                     UNION ALL SELECT 'last 6h', count(*) FROM predictions WHERE ts > now() - interval '6 hours' \
+                     UNION ALL SELECT 'last 24h', count(*) FROM predictions WHERE ts > now() - interval '24 hours' \
+                     UNION ALL SELECT 'last 7d', count(*) FROM predictions WHERE ts > now() - interval '7 days' \
+                     UNION ALL SELECT 'all-time', count(*) FROM predictions;\" && \
+                 echo '=== aggregator-hook column coverage (rows with each col non-null) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT \
+                       count(*) FILTER (WHERE mtf_agreement IS NOT NULL) AS mtf_agreement_set, \
+                       count(*) FILTER (WHERE mtf_dominant_tf IS NOT NULL) AS mtf_dominant_set, \
+                       count(*) FILTER (WHERE p_win IS NOT NULL) AS p_win_set, \
+                       count(*) FILTER (WHERE effective_score IS NOT NULL) AS effective_score_set, \
+                       count(*) FILTER (WHERE realized_vol_20d IS NOT NULL) AS realized_vol_set, \
+                       count(*) FILTER (WHERE funding_directional_adj IS NOT NULL) AS funding_adj_set, \
+                       count(*) AS total_rows \
+                     FROM predictions \
+                     WHERE ts > now() - interval '7 days';\" && \
+                 echo '=== alembic version ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT version_num FROM alembic_version;\""
               ;;
             health-summary)
               # One-page production health check: container status,
