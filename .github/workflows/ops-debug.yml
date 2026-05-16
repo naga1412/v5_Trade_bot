@@ -24,6 +24,7 @@ on:
           - direction-performance # LONG vs SHORT hit rate + realized pnl from prediction_validations — answers "is the model directionally accurate per side"
           - test-trade-open # fire a 20 USDT BTCUSDT LONG signal via the real dispatcher → testnet only; operator approves in Telegram
           - test-trade-close-all # market-close every open position on Binance Futures testnet
+          - test-trade-verify-keys # READ-ONLY diagnostic: try the vaulted keys against testnet AND live, print Hetzner outbound IP, tell operator exactly what's wrong
 
 jobs:
   probe:
@@ -328,5 +329,15 @@ jobs:
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend \
                  python /app/host-tools/test_trade_close_all.py"
+              ;;
+            test-trade-verify-keys)
+              # Read-only diagnostic for when test-trade-open succeeds at
+              # the dispatch + Telegram layer but the operator's Approve
+              # tap fails at the Binance API layer (-2015 etc.). Reports
+              # the Hetzner outbound IP, tries the vaulted keys against
+              # both testnet and live, prints exactly what to fix.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend \
+                 python /app/host-tools/test_trade_verify_keys.py"
               ;;
           esac
