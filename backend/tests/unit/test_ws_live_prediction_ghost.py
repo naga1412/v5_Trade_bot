@@ -63,7 +63,7 @@ async def test_persist_prediction_accepts_ghost_columns() -> None:
         "model_checkpoint_id": 42,
     }
     async with AsyncSession(engine) as session:
-        row_hash = await persist_prediction(session, payload)
+        pred_id, row_hash = await persist_prediction(session, payload)
         await session.commit()
         row = (
             await session.execute(
@@ -75,6 +75,7 @@ async def test_persist_prediction_accepts_ghost_columns() -> None:
     assert row.ghost_close == 80200.0
     assert row.model_checkpoint_id == 42
     assert isinstance(row_hash, str) and len(row_hash) == 64
+    assert isinstance(pred_id, int) and pred_id > 0
 
 
 @pytest.mark.asyncio
