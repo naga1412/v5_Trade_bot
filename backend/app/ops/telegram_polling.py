@@ -43,6 +43,10 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.audit import insert_with_chain
+from app.exchanges.binance_filters import (
+    get_symbol_filters,
+    quantize_qty,
+)
 from app.exchanges.binance_live import (
     BinanceLiveClient,
     BinanceLiveError,
@@ -142,12 +146,40 @@ async def _place_approved_order(
     direction = payload["direction"]
     symbol = payload["symbol"]
     side: Literal["BUY", "SELL"] = "BUY" if direction == "LONG" else "SELL"
-    qty = (margin_usdt * leverage) / entry_price
+    raw_qty = (margin_usdt * leverage) / entry_price
+
+    # Quantize qty to the symbol's LOT_SIZE.stepSize (same fix as
+    # _place_live_order — Binance rejects raw floats with -1111).
+    binance_native_sym = symbol.replace("/", "")
+    filters = await get_symbol_filters(
+        binance_native_sym, use_testnet=use_testnet,
+    )
+    if filters is None:
+        log.error(
+            "place_approved_order: no Binance filters for %s; cannot place",
+            binance_native_sym,
+        )
+        return None
+    qty = quantize_qty(raw_qty, filters.step_size)
+    if qty < filters.min_qty:
+        log.error(
+            "place_approved_order: quantized qty %s below symbol min %s "
+            "for %s (margin=%s, leverage=%s)",
+            qty, filters.min_qty, binance_native_sym, margin_usdt, leverage,
+        )
+        return None
+    notional = qty * entry_price
+    if filters.min_notional > 0 and notional < filters.min_notional:
+        log.error(
+            "place_approved_order: notional %.2f below symbol min %.2f for %s",
+            notional, filters.min_notional, binance_native_sym,
+        )
+        return None
 
     client = binance_factory()
     try:
         order = await client.place_order(
-            symbol=symbol.replace("/", ""),
+            symbol=binance_native_sym,
             side=side, quantity=qty, leverage=leverage,
             order_type="MARKET",
         )
