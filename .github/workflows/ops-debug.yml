@@ -27,6 +27,8 @@ on:
           - test-trade-verify-keys # READ-ONLY diagnostic: try the vaulted keys against testnet AND live, print Hetzner outbound IP, tell operator exactly what's wrong
           - test-trade-live-round-trip # ⚠ REAL MONEY: opens + auto-closes 0.001 BTC @ 20× on LIVE Binance (~$4 margin, ~$0.06 fees). Requires explicit operator authorization.
           - test-trade-live-close-all # SAFETY NET: market-closes any open BTCUSDT/ETHUSDT position on LIVE Binance
+          - enable-live-telegram-approve # ⚠ ENABLES autonomous trading: lowers size 5-10 USDT, mode=telegram-approve, BINANCE_USE_TESTNET=false, restarts backend
+          - disable-live-telegram-approve # SAFETY REVERT: back to mode=manual, sizing 20-50, BINANCE_USE_TESTNET=true, restart
 
 jobs:
   probe:
@@ -359,5 +361,69 @@ jobs:
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend \
                  python /app/host-tools/test_trade_live_close_all.py"
+              ;;
+            enable-live-telegram-approve)
+              # ⚠ ENABLES autonomous trading on REAL money. Three changes
+              # in one atomic probe:
+              #   1. UPDATE users SET trading_mode='telegram-approve',
+              #      fixed_size_min_usdt=5, fixed_size_max_usdt=10 WHERE id=1
+              #      (bypasses the promotion gates — testnet path already
+              #       validated, operator explicitly authorized)
+              #   2. sed BINANCE_USE_TESTNET=false in /opt/trading-radar/.env
+              #      (orders now route to LIVE Binance)
+              #   3. docker compose restart backend (reload env + re-init
+              #      vault + recreate binance_factory)
+              # Reverts via the disable-live-telegram-approve probe.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '--- 1/4 backing up .env ---' && \
+                 cp .env .env.bak.\$(date +%s) && \
+                 echo '--- 2/4 setting BINANCE_USE_TESTNET=false ---' && \
+                 if grep -q '^BINANCE_USE_TESTNET=' .env; then \
+                   sed -i 's/^BINANCE_USE_TESTNET=.*/BINANCE_USE_TESTNET=false/' .env; \
+                 else \
+                   echo 'BINANCE_USE_TESTNET=false' >> .env; \
+                 fi && \
+                 grep '^BINANCE_USE_TESTNET=' .env && \
+                 echo '--- 3/4 DB: mode=telegram-approve, size=5-10 USDT ---' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"UPDATE users SET trading_mode='telegram-approve', \
+                        fixed_size_min_usdt=5, fixed_size_max_usdt=10 WHERE id=1 \
+                     RETURNING id, trading_mode, fixed_size_min_usdt, fixed_size_max_usdt;\" && \
+                 echo '--- 4/4 restarting backend ---' && \
+                 docker compose up -d --build && \
+                 sleep 15 && \
+                 curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
+                      http://localhost:8000/api/v1/health && \
+                 echo '✓ LIVE telegram-approve ENABLED. Next shadow signal will fire a real Telegram notification + real-money order on Approve.'"
+              ;;
+            disable-live-telegram-approve)
+              # SAFETY REVERT of enable-live-telegram-approve. Same three
+              # steps in reverse:
+              #   1. sed BINANCE_USE_TESTNET=true in .env (orders back to testnet)
+              #   2. UPDATE users SET trading_mode='manual', sizing 20-50
+              #   3. docker compose restart backend
+              # Use this immediately after a successful test, OR if anything
+              # looks wrong during the enabled window.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '--- 1/4 setting BINANCE_USE_TESTNET=true ---' && \
+                 if grep -q '^BINANCE_USE_TESTNET=' .env; then \
+                   sed -i 's/^BINANCE_USE_TESTNET=.*/BINANCE_USE_TESTNET=true/' .env; \
+                 else \
+                   echo 'BINANCE_USE_TESTNET=true' >> .env; \
+                 fi && \
+                 grep '^BINANCE_USE_TESTNET=' .env && \
+                 echo '--- 2/4 DB: mode=manual, size=20-50 USDT ---' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"UPDATE users SET trading_mode='manual', \
+                        fixed_size_min_usdt=20, fixed_size_max_usdt=50 WHERE id=1 \
+                     RETURNING id, trading_mode, fixed_size_min_usdt, fixed_size_max_usdt;\" && \
+                 echo '--- 3/4 restarting backend ---' && \
+                 docker compose up -d --build && \
+                 sleep 15 && \
+                 curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
+                      http://localhost:8000/api/v1/health && \
+                 echo '✓ Reverted to manual mode + testnet routing.'"
               ;;
           esac
