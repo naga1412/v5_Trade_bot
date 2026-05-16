@@ -68,6 +68,70 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 - **Status**: queued; low-impact (alerts already silent) but worth
   knowing to inform FU-2's design.
 
+### FU-4 — Investigate telegram_polling user_id fallback masking potential telegram_signals.user_id NULL rows
+- **Problem**: `telegram_polling.py:193` uses `row.user_id or user_id`
+  defensively. If `row.user_id` is ever falsy (NULL, 0), the
+  function kwarg `user_id` silently substitutes. The auto-dispatch
+  path (`dispatcher.py:354`) trusts `user.user_id` directly with no
+  fallback. The defensive fallback in telegram could be masking a
+  data integrity issue in `telegram_signals`.
+- **Scope**:
+  1. Query for any `telegram_signals` rows where `user_id IS NULL`
+     or `user_id = 0`.
+  2. If found, investigate root cause (which writer left it
+     unset?).
+  3. If clean, remove the fallback in a follow-up PR so the path
+     fails loudly on missing data.
+- **Effort**: ~2 hours investigation + 0.5 day fix if needed.
+- **Tracking**: this file (FU-4). Surfaced during PR1 Phase 2
+  divergence audit on 2026-05-16.
+- **Status**: queued.
+
+### FU-5 — Telegram-approve path loses layer_summary in live_trades.reasoning
+- **Problem**: `dispatcher.py:367-371` (auto-dispatch) includes
+  `proposal.layer_summary` in the `reasoning` JSON column.
+  `telegram_polling.py:206-209` (telegram-approve callback) omits
+  `layer_summary` because `telegram_signals.payload` doesn't carry
+  it through. Result: telegram-approved live trades have strictly
+  less audit/debug info than fully-auto trades.
+- **Scope**:
+  1. Modify dispatcher's `send_trade_signal_message` to include
+     `layer_summary` in `telegram_signals.payload` at write time.
+  2. Modify `telegram_polling._place_approved_order` to read it
+     back and include in the reasoning dict.
+  3. Backfill existing `live_trades` rows: **not possible** —
+     the data was never captured at write time.
+- **Note**: The key-ordering inconsistency between the two
+  reasoning dicts (`{confidence_pct, layer_summary, signal_id}` vs
+  `{signal_id, confidence_pct}`) is intentionally NOT addressed
+  here — FU-2's canonical JSONB hashing will resolve ordering
+  naturally.
+- **Effort**: ~0.5 day.
+- **Tracking**: this file (FU-5). Surfaced during PR1 Phase 2
+  divergence audit on 2026-05-16.
+- **Status**: queued.
+
+### FU-6 — Telegram-approve path silently defaults empty inputs_hash when missing from payload
+- **Problem**: `telegram_polling.py:210` uses
+  `payload.get("inputs_hash", "")`. An empty-string `inputs_hash`
+  defeats the audit chain's input traceability — you can't
+  reconstruct what inputs led to that trade. The auto-dispatch
+  path (`dispatcher.py:372`) uses `proposal.inputs_hash` directly
+  (AttributeError if absent — fails loud). For a live-money system
+  this is a real audit gap.
+- **Scope**:
+  1. Verify dispatcher always writes `inputs_hash` to
+     `telegram_signals.payload` (it should — `inputs_hash` is
+     required on `SignalProposal`).
+  2. Query for any existing `telegram_signals` rows where the
+     payload doesn't have `inputs_hash`; if found, investigate.
+  3. Remove the silent `""` default in `telegram_polling` — make
+     it raise `KeyError` if missing.
+- **Effort**: ~2 hours investigation + 0.5 day fix.
+- **Tracking**: this file (FU-6). Surfaced during PR1 Phase 2
+  divergence audit on 2026-05-16.
+- **Status**: queued.
+
 ---
 
 ---
