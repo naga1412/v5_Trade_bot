@@ -157,3 +157,59 @@ async def test_replay_3_row_chain_identity(chain_session):
             f"stored={expected_stored} recomputed={recomputed}"
         )
         prev = expected_stored
+
+
+async def test_replay_short_direction_chain_identity(chain_session):
+    """SHORT direction rows replay identically — direction string is in the
+    hash whitelist and must match exactly on re-hash.
+
+    Adding this negative test per Phase 6 audit: existing replay tests
+    only used direction='LONG'; this verifies the chain is direction-sensitive.
+    """
+    s = chain_session
+    rows = [
+        {"user_id": 2, "symbol": "ETHUSDT", "timeframe": "1h",
+         "ts": f"2026-05-16T2{i}:00:00+00:00",
+         "layer_scores": "{}", "final_score": -(0.30 + i * 0.05),
+         "direction": "SHORT", "confidence": 0.55, "inputs_hash": f"short-h{i}",
+         "model_version": "sp-0", "cold_start": 0}
+        for i in range(3)
+    ]
+    stored_hashes = []
+    for row in rows:
+        stored_hashes.append(await insert_with_chain(s, "predictions", row))
+
+    db_rows = (await s.execute(sa.text(
+        "SELECT * FROM predictions ORDER BY id"
+    ))).all()
+    prev = GENESIS_HASH
+    for db_row, expected_stored in zip(db_rows, stored_hashes, strict=True):
+        row_dict = dict(db_row._mapping)
+        row_dict.pop("id", None)
+        row_dict.pop("prev_hash", None)
+        row_dict.pop("row_hash", None)
+        filtered = _filter_for_hash("predictions", row_dict)
+        recomputed = compute_row_hash(prev, filtered)
+        assert recomputed == expected_stored, (
+            f"SHORT replay mismatch row id={db_row.id}: "
+            f"stored={expected_stored} recomputed={recomputed}"
+        )
+        prev = expected_stored
+
+    # Cross-check: a LONG row at the same final_score produces a DIFFERENT hash
+    # than a SHORT row — direction IS in the whitelist.
+    long_row = {
+        "user_id": 2, "symbol": "ETHUSDT", "timeframe": "1h",
+        "ts": "2026-05-16T23:00:00+00:00",
+        "layer_scores": "{}", "final_score": -0.30,
+        "direction": "LONG",  # flipped vs the SHORT rows above
+        "confidence": 0.55, "inputs_hash": "long-cross-check",
+        "model_version": "sp-0", "cold_start": 0,
+    }
+    long_hash = await insert_with_chain(s, "predictions", long_row)
+    short_row = {**long_row, "inputs_hash": "short-cross-check", "direction": "SHORT"}
+    short_hash = await insert_with_chain(s, "predictions", short_row)
+    assert long_hash != short_hash, (
+        "direction='LONG' vs direction='SHORT' must produce different row_hashes "
+        "because 'direction' is in HASH_PAYLOAD_COLUMNS['predictions']"
+    )

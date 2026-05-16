@@ -84,3 +84,41 @@ async def test_refresh_task_cancellable() -> None:
             pass
 
         assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_task_fail_open_on_universe_exception() -> None:
+    """prewarm task must complete cleanly even when load_current_universe raises.
+
+    Per Phase 6 audit: the runner body wraps everything in
+    ``except Exception`` (fail-open), so any upstream failure (DB down,
+    universe empty with exception, etc.) must not propagate as an
+    unhandled task exception.
+    """
+    _KLINE_CACHE.clear()
+    session_factory = _make_session_factory()
+
+    # Patch load_current_universe to raise an unexpected exception
+    with patch(
+        "app.shadow.universe.load_current_universe",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("simulated universe DB failure"),
+    ):
+        task = start_mtf_cache_prewarm_task(session_factory)
+        assert task.get_name() == WORKER_NAME_PREWARM
+
+        # Task must complete without re-raising the exception
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            pytest.fail("prewarm_task hung after universe exception; expected fail-open")
+
+    assert task.done(), "Task must be done after fail-open exception handling"
+    assert not task.cancelled(), "Task must not be cancelled — it should complete normally"
+    # Fail-open: the RuntimeError must be caught, NOT re-raised as task exception
+    exc = task.exception()
+    assert exc is None, (
+        f"prewarm_task must swallow universe exception (fail-open); "
+        f"got task.exception()={exc!r}"
+    )
