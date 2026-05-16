@@ -90,9 +90,21 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         "mtf_agreement", "mtf_dominant_tf", "mtf_directions_json",
         "p_win", "effective_score", "realized_vol_20d",
         "funding_directional_adj",
+        # Trade-closure columns. These are written by close-trade UPDATEs,
+        # never present at insert_with_chain time. Classifying as hashed
+        # would hash NULLs at open (false tamper-detection on every close).
+        "binance_position_id", "closed_at", "exit_price", "exit_reason",
+        "fees_paid_usdt", "funding_paid_usdt", "liquidation_price",
+        "pnl_pct", "pnl_usdt",
     }),
     "paper_trades": frozenset({
         "id", "prev_hash", "row_hash",
+        # user_id present but unclassified pre-PR1. paper_trades has 0 rows
+        # in prod and no active writers; classifying as NOT hashed matches
+        # current runtime behavior exactly (the fail-secure whitelist never
+        # included it, so no hashing was ever happening). See FU-13 for the
+        # delete-vs-revive decision.
+        "user_id",
     }),
     "brain_decisions": frozenset({
         "id", "prev_hash", "row_hash",

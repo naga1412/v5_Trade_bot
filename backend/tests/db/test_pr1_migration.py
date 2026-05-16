@@ -174,10 +174,15 @@ async def test_composite_indexes_exist(postgres_engine):
 
 
 async def test_new_analytics_columns_default_null_on_insert(postgres_engine):
-    """Rows inserted without specifying analytics cols must have NULL values."""
+    """Rows inserted without specifying analytics cols must have NULL values.
+
+    Uses user_id=1 (the bootstrap admin seeded by alembic migration
+    0005_user_id_columns.py:36). Hardcoding user_id=0 trips Postgres FK
+    enforcement; SQLite's FK behavior is lax by default so this surfaced
+    only after FU-8 + the FU-8-followup CI fix made pytest actually run
+    against Postgres in CI.
+    """
     async with postgres_engine.connect() as conn:
-        # Use a temp row in predictions — pick a symbol that won't conflict
-        # with real data; clean up after ourselves.
         await conn.execute(sa.text(
             """
             INSERT INTO predictions (
@@ -186,7 +191,7 @@ async def test_new_analytics_columns_default_null_on_insert(postgres_engine):
                 confidence, inputs_hash, model_version, cold_start,
                 prev_hash, row_hash
             ) VALUES (
-                0, '__test_pr1_null_check__', '1h', NOW(),
+                1, '__test_pr1_null_check__', '1h', NOW(),
                 '{}', 0.0, 'LONG', 0.0, 'test-hash-pr1', 'sp-0', false,
                 'GENESIS', 'test-row-hash-pr1-unique'
             )

@@ -217,6 +217,37 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 - **Status**: **CLOSED 2026-05-17** by commit `e8513c8` (ci.yml
   edit included in PR1).
 
+### FU-13 — paper_trades table: verify dead, decide delete vs revive
+- **Problem**: `paper_trades` is registered as a hash-chained table
+  (key exists in `HASH_PAYLOAD_COLUMNS`) but appears unused — 0 rows in
+  prod and no active call sites found during PR1 Phase 1 audit. PR1's
+  audit-whitelist consistency test (now running on Postgres in CI per
+  FU-8 + Fix A) surfaced that `paper_trades.user_id` was unclassified;
+  the FU-8-followup commit added it to `NON_HASHED_ALLOW_LIST` to
+  match current runtime behavior (no hashing was happening before).
+  This leaves `paper_trades` asymmetric with its sibling chained
+  tables — `predictions`, `shadow_trades`, `live_trades` all hash
+  `user_id`; `paper_trades` does not.
+- **Scope**:
+  1. Grep for any `insert_with_chain(..., "paper_trades", ...)` call
+     sites. Check the worker registry + lifespan startup paths.
+  2. **If zero callers**: delete the `paper_trades` table via alembic
+     downgrade-or-drop migration; remove from `HASH_PAYLOAD_COLUMNS`,
+     `NON_HASHED_ALLOW_LIST`, and `verifier_scheduler.py
+     CHAINED_TABLES`. Clean removal.
+  3. **If callers exist**: align `paper_trades` whitelist with sibling
+     tables — move `user_id` from `NON_HASHED_ALLOW_LIST` to
+     `HASH_PAYLOAD_COLUMNS`. This changes hashing behavior on future
+     inserts (existing 0 rows unaffected). Document the schema bump.
+- **Effort**: ~2 hours.
+- **Tracking**: this file (FU-13). Surfaced 2026-05-17 during PR1
+  Phase 7 CI cleanup when the audit-whitelist consistency test ran on
+  Postgres for the first time and flagged `paper_trades.user_id`.
+- **Status**: queued. **Not blocking PR1** — current asymmetric
+  classification matches actual runtime behavior exactly; no hashing
+  semantics change. FU-13 fixes the underlying dead-or-asymmetric
+  question.
+
 ### FU-11 — ci.yml has duplicated env blocks across steps; hoist to job level
 - **Problem**: The backend job's `Apply alembic migrations` step and
   `Unit + integration tests` step both require identical `DATABASE_URL`
