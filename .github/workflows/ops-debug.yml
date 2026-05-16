@@ -447,22 +447,19 @@ jobs:
                  echo '✓ Reverted to manual mode + testnet routing.'"
               ;;
             audit-history)
-              # READ-ONLY: dump verifier history from auth_violations
-              # (verifier writes a row on chain breaks) + worker_heartbeats
-              # (any heartbeat?) + admin_monitoring's last verifier run.
-              # Used to answer "has the audit_verifier_task actually been
-              # running, and if so, what has it detected?"
+              # READ-ONLY: dump verifier history from auth_violations + worker_heartbeats.
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T postgres \
                  psql -U postgres -d trading_radar -c \
-                 \"SELECT '--- audit_chain_broken auth_violations ---' AS section;\" -c \
-                 \"SELECT created_at, attempted_email, reason FROM auth_violations \
+                 \"SELECT column_name, data_type FROM information_schema.columns \
+                   WHERE table_name='auth_violations' ORDER BY ordinal_position;\" -c \
+                 \"SELECT column_name, data_type FROM information_schema.columns \
+                   WHERE table_name='worker_heartbeats' ORDER BY ordinal_position;\" -c \
+                 \"SELECT count(*) AS audit_chain_broken_rows FROM auth_violations \
+                   WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%';\" -c \
+                 \"SELECT * FROM auth_violations \
                    WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%' \
-                   ORDER BY created_at DESC LIMIT 30;\" -c \
-                 \"SELECT '--- worker_heartbeats audit_verifier_task ---' AS section;\" -c \
-                 \"SELECT worker_name, beat_at, status, details FROM worker_heartbeats \
-                   WHERE worker_name='audit_verifier_task' ORDER BY beat_at DESC LIMIT 5;\" -c \
-                 \"SELECT '--- all distinct worker_name ever heartbeated ---' AS section;\" -c \
+                   ORDER BY id DESC LIMIT 10;\" -c \
                  \"SELECT worker_name, max(beat_at) AS latest, count(*) AS n FROM worker_heartbeats \
                    GROUP BY worker_name ORDER BY worker_name;\""
               ;;
