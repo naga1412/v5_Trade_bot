@@ -95,10 +95,14 @@ export function ModeSwitcher() {
               aria-pressed={isActive}
               className={[
                 "flex-1 px-3 py-2 text-[10px] uppercase tracking-wide rounded",
-                "border transition-colors",
+                "border-2 transition-colors font-bold",
+                // Active state inverted (light bg + dark text) so the
+                // current mode pops in the dark theme. The previous
+                // bg-bg-panel vs bg-bg-base was a ~5% lightness delta
+                // and operators couldn't tell which mode was selected.
                 isActive
-                  ? "bg-bg-panel border-text-primary text-text-primary"
-                  : "bg-bg-base border-border text-text-secondary hover:text-text-primary",
+                  ? "bg-text-primary border-text-primary text-bg-base"
+                  : "bg-bg-base border-border text-text-secondary hover:border-text-primary hover:text-text-primary",
                 busy ? "opacity-50 cursor-not-allowed" : "cursor-pointer",
               ].join(" ")}
             >
@@ -112,9 +116,20 @@ export function ModeSwitcher() {
       </p>
 
       {error !== null ? (
-        <p className="text-[10px] text-text-bearish mt-1" role="alert">
-          {error}
-        </p>
+        <div
+          className="mt-2 p-2 rounded bg-red/10 border border-red/40"
+          role="alert"
+        >
+          <p className="text-[10px] uppercase tracking-wide font-bold text-red mb-0.5">
+            Mode change failed
+          </p>
+          <p className="text-[11px] text-red leading-snug">{error}</p>
+          <p className="text-[9px] text-text-tertiary mt-1 leading-snug">
+            Common causes: TOTP code wrong, promotion gates not yet
+            satisfied (see Promotion Gates panel below), or the new mode
+            requires admin override.
+          </p>
+        </div>
       ) : null}
 
       {pending !== null ? (
