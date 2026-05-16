@@ -176,6 +176,81 @@ async def test_telegram_approve_writes_signal_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_approve_sends_outbound_when_creds_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set, the dispatcher
+    must POST the message to Telegram synchronously — not just write the
+    DB row. Regression: the original code wrote the row but no worker
+    was wired to send it, so operators never received notifications."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    sent: list[dict[str, object]] = []
+
+    async def _capture_send(session, *, signal_id, config, http=None):
+        sent.append({
+            "signal_id": signal_id,
+            "bot_token": config.bot_token,
+            "chat_id": config.chat_id,
+        })
+        return 9999  # fake telegram message_id
+
+    monkeypatch.setattr(
+        dispatcher_mod, "send_trade_signal_message", _capture_send,
+    )
+
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=_proposal(), user=_user())
+        await s.commit()
+
+    assert result.outcome == "sent_telegram"
+    assert result.signal_id and result.signal_id.startswith("sig_")
+    assert len(sent) == 1, "send_trade_signal_message must be invoked once"
+    assert sent[0]["signal_id"] == result.signal_id
+    assert sent[0]["bot_token"] == "test-token"
+    assert sent[0]["chat_id"] == "12345"
+
+
+@pytest.mark.asyncio
+async def test_telegram_approve_skips_outbound_when_creds_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When creds are missing, dispatch must still write the DB row and
+    return sent_telegram (the row is the source of truth, can be flushed
+    later). It must NOT raise, and must log a clear warning."""
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    sent: list[object] = []
+
+    async def _should_not_call(*_a, **_k):
+        sent.append(1)
+        return 9999
+
+    monkeypatch.setattr(
+        dispatcher_mod, "send_trade_signal_message", _should_not_call,
+    )
+
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=_proposal(), user=_user())
+        await s.commit()
+
+    assert result.outcome == "sent_telegram"
+    assert sent == []
+    # Row still persisted so a manual retry can flush it.
+    async with AsyncSession(engine) as s:
+        n = (await s.execute(sa.text(
+            "SELECT count(*) FROM telegram_signals"
+        ))).scalar()
+    assert n == 1
+
+
+@pytest.mark.asyncio
 async def test_fully_auto_places_live_order_and_writes_audit_chain() -> None:
     engine = await _mk_engine()
     await _seed_user(engine, mode="fully-auto")
