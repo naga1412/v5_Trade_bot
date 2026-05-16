@@ -64,8 +64,11 @@ for _candidate in (
 SYMBOL: str = "BTC/USDT"          # dispatcher uses slash form
 DIRECTION: str = "LONG"
 MARGIN_USDT: float = 5.0           # uses ~$5 of operator's ~$16 balance
-LEVERAGE_HINT: int = 10            # caller-supplied leverage (the dispatcher
-                                   # may cap this lower via recommended_leverage)
+# Leverage hint MUST satisfy: margin × lev / entry_price ≥ BTCUSDT min_qty
+# (0.001 BTC). At BTC ~$78k that means margin × lev ≥ $78, so with margin=5
+# we need lev ≥ ~16. 20× gives headroom: 5 × 20 / 78000 = 0.00128 BTC,
+# which quantizes DOWN to 0.001 (the minimum) cleanly.
+LEVERAGE_HINT: int = 20
 HOLD_SECONDS: float = 3.0
 SL_PCT: float = 0.005              # 0.5% — wide enough that natural noise
                                    # in 3s won't trip it
