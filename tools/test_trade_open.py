@@ -127,10 +127,41 @@ async def main() -> int:
         open_positions_count=0,
     )
 
+    # The dispatcher re-reads ``trading_mode`` from the DB (avoid stale
+    # state); UserContext.mode is ignored. Production users are locked at
+    # ``manual`` for SP-0.7 + require promotion gates + TOTP to upgrade —
+    # gates that exist to protect REAL MONEY. Since this script is
+    # testnet-locked, we flip the DB mode to ``telegram-approve`` for the
+    # one dispatch call and restore in finally. No real-money exposure
+    # because BinanceLiveClient downstream is hard-coded use_testnet=True.
+    import sqlalchemy as sa  # noqa: E402
+
     factory = get_session_factory()
     async with factory() as session:
-        result = await dispatch(session, proposal=proposal, user=user)
-        await session.commit()
+        original_row = await session.execute(
+            sa.text("SELECT trading_mode FROM users WHERE id = 1"),
+        )
+        original_mode = original_row.scalar() or "manual"
+        print(f"original user.trading_mode = {original_mode}")
+        try:
+            await session.execute(
+                sa.text(
+                    "UPDATE users SET trading_mode = 'telegram-approve' "
+                    "WHERE id = 1",
+                ),
+            )
+            await session.commit()
+            print("flipped trading_mode -> telegram-approve for this dispatch")
+
+            result = await dispatch(session, proposal=proposal, user=user)
+            await session.commit()
+        finally:
+            await session.execute(
+                sa.text("UPDATE users SET trading_mode = :m WHERE id = 1"),
+                {"m": original_mode},
+            )
+            await session.commit()
+            print(f"restored trading_mode -> {original_mode}")
 
     print(f"outcome={result.outcome}")
     print(f"detail={result.detail}")
