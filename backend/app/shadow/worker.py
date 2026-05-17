@@ -165,8 +165,17 @@ class ShadowWorker:
         # REST-fetch and best-effort populate the MTF cache so subsequent
         # MTF compute calls hit warm. mtf_confluence._cache_get returns
         # `list[list[Any]]` (raw Binance kline rows) or None.
+        from app.config import get_settings as _get_settings_for_setup
         from app.core.scoring.mtf_confluence import _cache_get, _cache_set
         import time as _time
+
+        # Spec §4.3 D1: cache-hit threshold is SHADOW_PREWARM_BARS, NOT
+        # HISTORY_BARS. PR1's prewarm caches 200 klines (MTF compute's
+        # need); HISTORY_BARS=300 was the legacy REST-fetch target. Using
+        # SHADOW_PREWARM_BARS here ensures any cache entry from PR1
+        # prewarm is reusable. The rolling buffer accumulates to ~300
+        # as live candles flow in (spec §4.3 D2).
+        _prewarm_bars = _get_settings_for_setup().SHADOW_PREWARM_BARS
 
         cache_hits = 0
         rest_fetched = 0
@@ -176,7 +185,7 @@ class ShadowWorker:
                 for sym in self.symbols:
                     # 1. Try the MTF cache first (raw kline rows).
                     cached_klines = _cache_get(sym, tf)
-                    if cached_klines is not None and len(cached_klines) >= HISTORY_BARS:
+                    if cached_klines is not None and len(cached_klines) >= _prewarm_bars:
                         df = _klines_to_dataframe(cached_klines)
                         self.bars[(sym, tf)] = df
                         cache_hits += 1
@@ -261,6 +270,12 @@ class ShadowWorker:
         Per-TF error handling: a crash here only affects this TF's stream;
         other TFs continue consuming. Cancellation propagates up to the
         gather() in run().
+
+        The error-path heartbeat is itself wrapped so a heartbeat failure
+        (DB blip, session_factory hiccup, anything) can't propagate up
+        and tear down this consumer — which `run()`'s gather() would
+        then cascade into cancelling the other TF tasks. Per-TF
+        isolation is the contract the docstring promises.
         """
         async for candle in reader.stream():
             try:
@@ -272,20 +287,29 @@ class ShadowWorker:
                     "shadow worker handler failed for %s/%s: %s",
                     candle.symbol, tf, e,
                 )
-                # FU-1 follow-up: error heartbeat. _handle_candle's normal
-                # success path heartbeats inline; if it raises, the outer
-                # handler swallows the exception and the next ok-heartbeat
-                # might never come (per-symbol bug → no candle reaches
-                # success path for that symbol). Heartbeat with status=error
-                # so the watchdog surfaces a sustained handler crash.
-                await record_heartbeat(
-                    self.session_factory, "shadow_worker",
-                    status="error",
-                    details={
-                        "symbol": candle.symbol, "tf": tf,
-                        "error": str(e)[:200],
-                    },
-                )
+                # FU-1 follow-up: error heartbeat. record_heartbeat is
+                # already best-effort wrapped at the helper level, but
+                # belt-and-braces a second try/except here so even an
+                # unexpected propagation (e.g. session_factory misbehaving
+                # before record_heartbeat's own try-block engages) can't
+                # cancel sibling TF consumers via gather().
+                try:
+                    await record_heartbeat(
+                        self.session_factory, "shadow_worker",
+                        status="error",
+                        details={
+                            "symbol": candle.symbol, "tf": tf,
+                            "error": str(e)[:200],
+                        },
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as hb_err:  # noqa: BLE001
+                    log.warning(
+                        "shadow_worker error-heartbeat itself failed for "
+                        "%s/%s; suppressing to preserve per-TF isolation: %s",
+                        candle.symbol, tf, hb_err,
+                    )
 
     # --- internals -----------------------------------------------------
 
@@ -363,7 +387,14 @@ class ShadowWorker:
             return
 
         inputs_hash = _inputs_hash(candle)
-        cooldown_until = candle.ts + timedelta(minutes=COOLDOWN_MINUTES)
+        # PR3: per-TF cooldown from settings. Falls back to the legacy
+        # COOLDOWN_MINUTES (30) for any TF not in the dict — preserves
+        # pre-PR3 behavior + signals "operator forgot to wire this TF"
+        # in the env config.
+        from app.config import get_settings as _get_settings_for_cooldown
+        _cooldown_table = _get_settings_for_cooldown().SHADOW_COOLDOWN_HOURS
+        _cooldown_hours = _cooldown_table.get(tf, COOLDOWN_MINUTES / 60.0)
+        cooldown_until = candle.ts + timedelta(hours=_cooldown_hours)
 
         try:
             async with self.session_factory() as session:
@@ -511,6 +542,11 @@ class ShadowWorker:
         # NULL when scaling is OFF — bit-identical to pre-G1 trades.
         from app.config import get_settings as _get_pr3_settings
         _pr3_settings = _get_pr3_settings()
+        # Pre-bind so the fail-open log call below can reference it even
+        # if the getattr() itself raises (theoretical — pred could be a
+        # misbehaving proxy). Avoids UnboundLocalError defeating the
+        # fail-open contract.
+        _mtf_agreement: int | None = None
         if _pr3_settings.HOLD_TP_SCALING_ENABLED:
             from app.shadow.scaling import effective_hold_tp
             try:
