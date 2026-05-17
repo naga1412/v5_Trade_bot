@@ -22,6 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.data.adapters import get_adapter, list_registered
 from app.data.adapters._base import ExchangeAdapter, SymbolInfo
+from app.ops.heartbeat import record_heartbeat
+
+WORKER_NAME: str = "universe_sync_task"
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +174,8 @@ async def run_universe_sync_loop(
         wait_s = _seconds_until_next_utc(wake_at_utc_hour, now_fn())
         await _sleep(float(wait_s))
 
+        exchanges_ok = 0
+        exchanges_failed = 0
         for ex in targets:
             try:
                 adapter = get_adapter(ex)
@@ -182,10 +187,24 @@ async def run_universe_sync_loop(
                     "newly_delisted=%d", ex,
                     result.added, result.still_active, result.newly_delisted,
                 )
+                exchanges_ok += 1
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 log.error("sync_universe(%s) failed: %s", ex, e)
+                exchanges_failed += 1
+        # FU-1 N4: defense-in-depth heartbeat alongside the natural
+        # MAX(last_synced_at) FROM universe_history liveness query.
+        # Status reflects per-exchange results: ok if all succeeded,
+        # error if any exchange failed (operator can drill into logs).
+        await record_heartbeat(
+            session_factory, WORKER_NAME,
+            status="ok" if exchanges_failed == 0 else "error",
+            details={
+                "exchanges_ok": exchanges_ok,
+                "exchanges_failed": exchanges_failed,
+            },
+        )
 
 
 def start_universe_sync_task(
