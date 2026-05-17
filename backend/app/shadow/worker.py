@@ -46,7 +46,7 @@ from app.shadow.persistence import (
     persist_open_position,
     set_cooldown,
 )
-from app.shadow.universe import load_current_universe
+from app.shadow.universe import load_shadow_universe
 from app.ws import shadow_updates
 
 log = logging.getLogger(__name__)
@@ -570,17 +570,39 @@ def _pnl(pos: ShadowPosition, exit_price: float) -> tuple[float, float]:
 
 
 async def _build_default_worker() -> ShadowWorker:
-    """Build a worker using the production session factory and current universe."""
+    """Build a worker using the production session factory + settings.
+
+    PR3: reads ``SHADOW_TIMEFRAMES`` and ``SHADOW_NARROW_UNIVERSE`` from
+    Settings. Spawns one ``MultiStreamReader`` per TF and registers them
+    via the worker's ``readers`` dict. Pre-PR3 callers that imported the
+    legacy single-reader build path can continue to construct the worker
+    directly with ``reader=...`` — this helper is the production wiring
+    only.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+    timeframes: list[str] = list(settings.SHADOW_TIMEFRAMES) or [SHADOW_TIMEFRAME]
+    narrow: list[str] = list(settings.SHADOW_NARROW_UNIVERSE)
+
     factory = get_session_factory()
     async with factory() as session:
-        universe = await load_current_universe(session)
-    symbols = [e.symbol for e in universe]
-    if not symbols:
-        log.warning("shadow worker: empty universe — using BTCUSDT fallback")
-        symbols = ["BTCUSDT"]
-    reader = MultiStreamReader(symbols=symbols, timeframe=SHADOW_TIMEFRAME)
+        symbols = await load_shadow_universe(session, narrow=narrow)
+
+    readers: dict[str, _StreamReader] = {
+        tf: MultiStreamReader(symbols=symbols, timeframe=tf) for tf in timeframes
+    }
+    log.info(
+        "shadow_worker: build_default → %d symbols × %d TF(s) %s",
+        len(symbols), len(timeframes), timeframes,
+    )
     return ShadowWorker(
-        symbols=symbols, session_factory=factory, reader=reader,
+        symbols=symbols,
+        session_factory=factory,
+        # `reader` is the primary (first TF) — backward-compat with the
+        # legacy single-reader code path. `readers` carries the full set.
+        reader=readers[timeframes[0]],
+        timeframes=timeframes,
+        readers=readers,
     )
 
 
