@@ -304,6 +304,56 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
   planned. Should land before any future PR that adds a non-trivial
   migration body.
 
+### FU-18 — staging-verify probe windows mismatched 1h cadence
+- **Problem**: The `staging-verify` and analogous prod-side probes
+  use criteria designed for 5m/15m continuous cadence systems:
+    1. Predictions count: `SELECT COUNT(*) FROM predictions WHERE ts > NOW() - INTERVAL '60 minutes'`
+    2. Log signal count: `docker compose logs --tail=500 backend | grep -c 'aggregator_hook'`
+  For the production 1h candle cadence, both windows are always
+  mis-timed relative to the most-recent prediction batch:
+  - The hourly batch is written ~5-10 seconds after each top-of-hour
+    candle close. Its `ts` is the candle open time, so the row's
+    `ts` is ~1 hour in the past relative to write time.
+  - For criterion 1: between hourly closes, `ts > NOW() - 60m` does
+    not match any rows. Right after a close, the just-written rows
+    have `ts ≈ NOW() - 1h`, still outside the window.
+  - For criterion 3: the 500-line tail covers ~5-10 minutes of
+    log activity; the hourly aggregator_hook burst is 30+ lines
+    in a single second every 60 minutes, almost always outside
+    the 500-line window.
+- **Evidence**: Hotfix #171 staging verification run 25987406217
+  (2026-05-17) showed criterion 1=0 + criterion 3=0 INDETERMINATE
+  while Section 4's direct row-inspection query showed 10
+  predictions persisted with PR1 analytics populated. Required
+  operator override on both criteria. Prod verification run
+  25988802156 PASSED criterion 1 strictly via the 2h column
+  (window 2h matched the 51-min-old batch) but still failed
+  criterion 3 (200-line tail too narrow).
+- **Scope**:
+  1. Replace criterion 1 query with an id-based monotonic check:
+     `SELECT COUNT(*) FROM predictions WHERE id > <baseline_max_id_captured_at_deploy>`.
+     The baseline is captured by a pre-deploy probe call or stored
+     in a deploy-side marker. Robust across timeframe cadences.
+  2. Replace criterion 3 with a time-based log query:
+     `docker compose logs --since=60m backend 2>&1 | grep -c 'aggregator_hook'`.
+     `--since` is time-bounded, not line-bounded; covers the full
+     60-min hourly cycle regardless of activity rate.
+  3. Document the design choice in the probe YAML comment so future
+     maintainers don't re-introduce the windowing mismatch.
+- **Severity**: MEDIUM. Probe gives false-negative INDETERMINATE
+  results during 1h-cadence verification cycles, but section 4's
+  row data and section 5b's record_pending_validation count remain
+  authoritative. No production risk; only verification-workflow
+  friction.
+- **Effort**: ~2 hours (rewrite both queries, smoke-test against
+  staging, document in commit message + probe comment).
+- **Tracking**: this file (FU-18). Surfaced during hotfix #171
+  verification on 2026-05-17.
+- **Status**: queued. **Not blocking** — current probes still
+  produce the authoritative answer via Section 4 row inspection;
+  the windowing mismatch is friction not breakage. Refactor before
+  the next 1h-cadence hotfix verification cycle.
+
 ---
 
 ---
