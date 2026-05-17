@@ -427,6 +427,12 @@ async def _send_telegram_signal(
             proposal.entry_price, proposal.stop_loss_price,
             proposal.take_profit_price,
         ),
+        # PR2: persist MTF state in telegram_signals.payload so the
+        # approve-time path can populate live_trades.mtf_* (§4.4 Phase 7).
+        # Gate already fired upstream; these fields just preserve state.
+        mtf_agreement=proposal.mtf_agreement,
+        mtf_dominant_tf=proposal.mtf_dominant_tf,
+        mtf_directions=proposal.mtf_directions,
     )
     payload = build_signal_payload(
         candidate, rendered_at=now, initial_leverage=leverage,
