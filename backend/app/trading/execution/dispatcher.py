@@ -629,13 +629,15 @@ async def dispatch(
     # tightened stop-loss — the rest of dispatch() must use the returned
     # value, not the original.
     #
-    # Spec §8 rollback path: MTF_MIN_AGREEMENT_1H=0 must take effect on
-    # the NEXT dispatch tick without a process restart. `get_settings()`
-    # in config.py is @lru_cache-wrapped, so a fresh-Settings() pattern
-    # is required to read the *current* env state per-call. Settings
-    # construction is fast (pydantic-settings reads env once, no I/O);
-    # the V-7 microbench shows the entire gate path adds sub-millisecond.
-    pr2_settings = Settings()  # type: ignore[call-arg]
+    # Spec §8 rollback path (`MTF_MIN_AGREEMENT_1H=0`): `get_settings()`
+    # is @lru_cache-wrapped, so the rollback requires a process restart
+    # OR an explicit `get_settings.cache_clear()` call from an
+    # operational endpoint. This matches every other env-var-driven
+    # flag in the codebase (BINANCE_USE_TESTNET, AUTONOMOUS_TRADING_*,
+    # etc.) — env mutations always require restart. Document'd in PR2
+    # rollback runbook (KNOWN_ISSUES / docs/ARCHITECTURE.md).
+    from app.config import get_settings as _get_pr2_settings
+    pr2_settings = _get_pr2_settings()
     gate_result = _apply_mtf_gate(proposal, pr2_settings)
     if gate_result is not None:
         return gate_result
