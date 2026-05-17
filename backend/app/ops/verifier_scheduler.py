@@ -227,6 +227,12 @@ async def run_audit_verifier_loop(
                 status="ok", details={"paused": True},
             )
             continue
+        # FU-1 behavioural change: pre-FU-1 a `_check_all_chains` exception
+        # propagated up and killed the task (silent — watchdog had no
+        # heartbeat to read). FU-1 swallows + heartbeats with status='error'
+        # so a transient DB hiccup doesn't take the verifier down for the
+        # next 24h until the container restarts. Matches the pattern used
+        # by every other nightly worker (news_cleanup, intermarket_cleanup).
         try:
             await _check_all_chains(session_factory)
             await record_heartbeat(

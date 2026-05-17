@@ -141,6 +141,19 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                 )
         except Exception as e:  # noqa: BLE001
             log.warning("build_prediction failed: %s", e)
+            # FU-1 follow-up: error heartbeat so a sustained build_prediction
+            # failure (model crash, layer assertion, etc.) surfaces as
+            # last_status='error' instead of letting beat_at go stale — the
+            # WS loop is still alive but it's not producing predictions.
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error",
+                details={
+                    "stage": "build_prediction",
+                    "symbol": symbol_pair, "timeframe": timeframe,
+                    "error": str(e)[:200],
+                },
+            )
             continue
 
         # SP-1: ghost candle prediction (additive, never blocks).
@@ -235,6 +248,19 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
             # DB unreachable, hash chain assertion). Validator failures are
             # absorbed inside the helper.
             log.error("persist_prediction failed; suppressing publish: %s", e)
+            # FU-1 follow-up: error heartbeat — the 2026-05-17 hotfix scenario
+            # (validator-poisoned transaction) presents here. We want the
+            # watchdog to see 'error' immediately rather than wait for
+            # max_staleness_seconds.
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error",
+                details={
+                    "stage": "persist_prediction",
+                    "symbol": symbol_pair, "timeframe": timeframe,
+                    "error": str(e)[:200],
+                },
+            )
             continue
 
         # Extend WS payload with ghost (None when no active model).

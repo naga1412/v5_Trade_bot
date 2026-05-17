@@ -423,10 +423,19 @@ async def run_telegram_poller(
                 )
                 # FU-1: heartbeat after each long-poll cycle. Watchdog uses
                 # this to detect Telegram connectivity / poller crashes.
+                # Telegram returning ``{"ok": false}`` is routine flood-control
+                # backoff, not a worker error — heartbeat as ``ok`` so we
+                # don't leave `last_status='error'` on the row during normal
+                # operation. Real failures (HTTPError, unhandled exception)
+                # fire status='error' from the except branches below.
                 await record_heartbeat(
                     session_factory, "telegram_poller_task",
-                    status="ok" if ok else "error",
-                    details={"offset": offset, "backoff_s": backoff},
+                    status="ok",
+                    details={
+                        "offset": offset,
+                        "backoff_s": backoff,
+                        "tg_ok": ok,
+                    },
                 )
                 if not ok:
                     await _sleep(backoff)

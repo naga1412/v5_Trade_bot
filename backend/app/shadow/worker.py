@@ -162,6 +162,20 @@ class ShadowWorker:
             except Exception as e:
                 log.exception("shadow worker handler failed for %s: %s",
                               candle.symbol, e)
+                # FU-1 follow-up: error heartbeat. _handle_candle's normal
+                # success path heartbeats inline; if it raises, the outer
+                # handler swallows the exception and the next ok-heartbeat
+                # might never come (per-symbol bug → no candle reaches
+                # success path for that symbol). Heartbeat with status=error
+                # so the watchdog surfaces a sustained handler crash.
+                await record_heartbeat(
+                    self.session_factory, "shadow_worker",
+                    status="error",
+                    details={
+                        "symbol": candle.symbol,
+                        "error": str(e)[:200],
+                    },
+                )
 
     # --- internals -----------------------------------------------------
 
@@ -185,9 +199,13 @@ class ShadowWorker:
         if await pause_state.is_paused():
             log.debug("shadow_worker: paused, skipping candle %s", candle.symbol)
             # Still heartbeat — the worker is alive, just gated by pause_state.
+            # Don't include candle.symbol in details: pause_state is a global
+            # gate, not per-symbol, and the operator-facing watchdog payload
+            # would otherwise show a different symbol on every tick during
+            # a sustained pause (misleading — implies per-symbol pause).
             await record_heartbeat(
                 self.session_factory, "shadow_worker",
-                status="ok", details={"paused": True, "symbol": candle.symbol},
+                status="ok", details={"paused": True},
             )
             return
         buf = self._append_bar(candle)

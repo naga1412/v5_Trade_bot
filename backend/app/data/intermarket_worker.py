@@ -26,11 +26,11 @@ from app.data.adapters.binance_futures_intermarket import (
     BinanceFuturesIntermarketAdapter,
     IntermarketSnapshot,
 )
-from app.ops.heartbeat import record_heartbeat
 from app.data.intermarket_persistence import (
     cleanup_old_intermarket,
     persist_intermarket_snapshots,
 )
+from app.ops.heartbeat import record_heartbeat
 from app.shadow.universe import load_current_universe
 
 

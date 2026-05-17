@@ -25,11 +25,11 @@ from typing import Literal
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.ops.heartbeat import record_heartbeat
 from app.exchanges.binance_live import (
     BinanceLiveClient,
     BinanceLiveError,
 )
+from app.ops.heartbeat import record_heartbeat
 from app.trading.kill_switches import (
     DEFAULTS as KILL_DEFAULTS,
     SwitchConfig,

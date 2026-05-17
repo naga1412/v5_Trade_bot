@@ -35,9 +35,9 @@ import httpx
 
 from app.config import get_settings
 from app.news.adapters._base import NewsArticle
-from app.ops.heartbeat import record_heartbeat  # noqa: E402  (placement matches other workers)
 from app.news.adapters.cryptopanic import CryptoPanicAdapter
 from app.news.adapters.yahoo_rss import YahooRssAdapter
+from app.ops.heartbeat import record_heartbeat
 
 
 log = logging.getLogger(__name__)
