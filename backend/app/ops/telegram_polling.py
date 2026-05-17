@@ -191,6 +191,18 @@ async def _place_approved_order(
     finally:
         await client.aclose()
 
+    # PR2 §4.4: read MTF state captured at send-time from
+    # telegram_signals.payload (build_signal_payload writes these). The
+    # auto-path and telegram-approve path persist matching mtf_* on
+    # live_trades — symmetric per spec §6.3 R3. mtf_directions in the
+    # JSONB is the parsed dict (or null); we forward it as-is to the
+    # builder, which canonical-serialises it back to JSON for the column.
+    _mtf_directions_raw = payload.get("mtf_directions")
+    mtf_directions_dict: dict[str, int] | None = (
+        {str(k): int(v) for k, v in _mtf_directions_raw.items()}
+        if isinstance(_mtf_directions_raw, dict) else None
+    )
+
     trade_payload = build_live_trade_payload(
         user_id=row.user_id or user_id,
         symbol=symbol,
@@ -209,6 +221,9 @@ async def _place_approved_order(
             "confidence_pct": payload.get("confidence_pct"),
         }),
         inputs_hash=payload.get("inputs_hash", ""),
+        mtf_agreement=payload.get("mtf_agreement"),
+        mtf_dominant_tf=payload.get("mtf_dominant_tf"),
+        mtf_directions=mtf_directions_dict,
     )
     await insert_with_chain(session, "live_trades", trade_payload)
     return order.binance_order_id

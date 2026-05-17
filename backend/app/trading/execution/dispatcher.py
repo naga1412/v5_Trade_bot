@@ -579,6 +579,12 @@ async def _place_live_order(
             "signal_id": sig_id,
         }),
         inputs_hash=proposal.inputs_hash,
+        # PR2 §4.4: persist MTF state on live_trades so post-trade
+        # analytics can correlate gate state to outcome. None on PR1
+        # fallback paths.
+        mtf_agreement=proposal.mtf_agreement,
+        mtf_dominant_tf=proposal.mtf_dominant_tf,
+        mtf_directions=proposal.mtf_directions,
     )
     await insert_with_chain(session, "live_trades", payload)
     return order.binance_order_id, sig_id
