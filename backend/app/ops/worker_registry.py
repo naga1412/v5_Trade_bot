@@ -182,7 +182,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         required_env=(
             "AUTONOMOUS_TRADING_ENABLED", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
         ),
-        pending_heartbeat=True,
+        # FU-1 closed for telegram_poller_task — record_heartbeat wired in
+        # run_telegram_poller per long-poll cycle (success + backoff paths).
     ),
     # 13. Daily 03:30 UTC mode auto-promote — autonomous-trading-only.
     WorkerSpec(
@@ -192,7 +193,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
-        pending_heartbeat=True,
+        # FU-1 closed for auto_promote_task — record_heartbeat wired in
+        # run_auto_promote_loop per daily evaluation cycle.
     ),
     # 14. Feature 4 — 60s multi-asset fast scanner.
     WorkerSpec(

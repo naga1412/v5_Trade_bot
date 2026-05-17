@@ -53,6 +53,7 @@ from app.exchanges.binance_live import (
     BinanceLiveError,
     OrderRejected,
 )
+from app.ops.heartbeat import record_heartbeat
 from app.ops.telegram_bot import (
     TelegramConfig as BrainConfig,
     handle_callback_query as handle_brain_callback,
@@ -420,6 +421,13 @@ async def run_telegram_poller(
                     binance_factory=binance_factory,
                     use_testnet=use_testnet, user_id=user_id,
                 )
+                # FU-1: heartbeat after each long-poll cycle. Watchdog uses
+                # this to detect Telegram connectivity / poller crashes.
+                await record_heartbeat(
+                    session_factory, "telegram_poller_task",
+                    status="ok" if ok else "error",
+                    details={"offset": offset, "backoff_s": backoff},
+                )
                 if not ok:
                     await _sleep(backoff)
                     backoff = min(backoff * 2, _BACKOFF_CAP_S)
@@ -429,10 +437,18 @@ async def run_telegram_poller(
             raise
         except httpx.HTTPError as e:
             log.warning("getUpdates HTTP error: %s; backoff %.1fs", e, backoff)
+            await record_heartbeat(
+                session_factory, "telegram_poller_task",
+                status="error", details={"error": str(e)[:200]},
+            )
             await _sleep(backoff)
             backoff = min(backoff * 2, _BACKOFF_CAP_S)
         except Exception as e:  # noqa: BLE001
             log.error("telegram-poll iteration crashed: %s", e)
+            await record_heartbeat(
+                session_factory, "telegram_poller_task",
+                status="error", details={"error": str(e)[:200]},
+            )
             await _sleep(backoff)
             backoff = min(backoff * 2, _BACKOFF_CAP_S)
 
