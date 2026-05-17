@@ -34,6 +34,7 @@ on:
           - audit-history # READ-ONLY: dump auth_violations 'audit_chain_broken' rows + worker_heartbeats for audit_verifier_task. Answers "has the verifier been running, what did it find?"
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
+          - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
 
 jobs:
   probe:
@@ -546,5 +547,34 @@ jobs:
                  echo '=== 6/6 new chain_broken entries in last 60 min (attempted_at) ===' && \
                  docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT COUNT(*) AS new_chain_broken_last_60m FROM auth_violations WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%' AND attempted_at > NOW() - INTERVAL '60 minutes';\""
+              ;;
+            live-worker-process-status)
+              # READ-ONLY: comprehensive live_worker diagnostic.
+              # Investigates the predictions=0-since-2026-05-11 silence.
+              # Covers I-1 (process), I-2 (logs), I-3 (heartbeats), I-6 (WS).
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== I-1a: ps inside tr-backend container ===' && \
+                 docker compose exec -T backend ps -eo pid,etime,pcpu,pmem,comm,args 2>&1 | grep -iE 'python|uvicorn|live_worker' | head -30 && \
+                 echo '=== I-1b: /proc/1/status (container PID 1) ===' && \
+                 docker compose exec -T backend cat /proc/1/status 2>&1 | head -12 && \
+                 echo '=== I-1c: container uptime + restart count ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '=== I-3a: worker_heartbeats rows where worker_name matches live ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT worker_name, beat_at, last_status FROM worker_heartbeats WHERE worker_name LIKE '%live%' ORDER BY beat_at DESC LIMIT 20;\" && \
+                 echo '=== I-3b: all worker heartbeats — full cross-reference ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT worker_name, max(beat_at) AS latest, count(*) AS beats FROM worker_heartbeats GROUP BY worker_name ORDER BY latest DESC;\" && \
+                 echo '=== I-2a: logs (last 5000 lines) — grep for live_worker + WS connection events ===' && \
+                 docker compose logs --tail=5000 backend 2>&1 | grep -iE 'live_worker|run_live_prediction|kline_stream|stream\\.binance|wss://|reconnect|websocket' | tail -60 && \
+                 echo '=== I-2b: predictor.py + build_prediction + persist_prediction recent activity ===' && \
+                 docker compose logs --tail=5000 backend 2>&1 | grep -iE 'build_prediction|persist_prediction|predictor\\.py|aggregator_hook' | tail -30 && \
+                 echo '=== I-2c: errors + exceptions in last 7d (live_worker-tagged hits only) ===' && \
+                 docker compose logs --since=168h backend 2>&1 | grep -iE 'error|exception|traceback|critical' | grep -iE 'live|predict|websocket|stream|kline' | tail -30 && \
+                 echo '=== I-6: WS keepalive ping/pong activity (last 500 lines) ===' && \
+                 docker compose logs --tail=500 backend 2>&1 | grep -iE 'keepalive|ping|pong|ws_keep' | tail -20 && \
+                 echo '=== I-2d: last 80 backend log lines unfiltered (most recent activity floor) ===' && \
+                 docker compose logs --tail=80 backend"
               ;;
           esac
