@@ -45,6 +45,12 @@ class WorkerSpec:
     # reported in a separate 'pending_heartbeat' bucket and don't trigger
     # alerts. Flag is removed when the heartbeat call lands in that worker.
     pending_heartbeat: bool = False
+    # FU-15: True for tasks that fire once at startup, exit clean, and never
+    # heartbeat again. The watchdog reports such tasks as
+    # `single_shot_completed` (non-alarming) instead of `no_signal`.
+    # The worker records ONE heartbeat with `status="single_shot_completed"`
+    # on clean exit. `mtf_cache_prewarm_task` is the canonical example.
+    single_shot: bool = False
 
 
 # Canonical liveness signal for workers that have one in a natural table.
