@@ -159,10 +159,31 @@ class ShadowWorker:
             )
             return
 
+        # PR3 Phase 4.3 / spec §4.3 (D1-D3): reuse PR1's MTF kline cache
+        # when it's warm. Single source of truth for (symbol, tf) klines
+        # across PR1's MTF compute and PR3's shadow seed. On cache miss,
+        # REST-fetch and best-effort populate the MTF cache so subsequent
+        # MTF compute calls hit warm. mtf_confluence._cache_get returns
+        # `list[list[Any]]` (raw Binance kline rows) or None.
+        from app.core.scoring.mtf_confluence import _cache_get, _cache_set
+        import time as _time
+
+        cache_hits = 0
+        rest_fetched = 0
         async with httpx.AsyncClient() as http:
             client = BinanceClient(http=http)
             for tf in self.timeframes:
                 for sym in self.symbols:
+                    # 1. Try the MTF cache first (raw kline rows).
+                    cached_klines = _cache_get(sym, tf)
+                    if cached_klines is not None and len(cached_klines) >= HISTORY_BARS:
+                        df = _klines_to_dataframe(cached_klines)
+                        self.bars[(sym, tf)] = df
+                        cache_hits += 1
+                        continue
+
+                    # 2. Cache miss → REST-fetch via the worker's existing
+                    #    Candle-based client. Convert + seed bars buffer.
                     try:
                         history = await client.fetch_klines(
                             sym, tf, limit=HISTORY_BARS,
@@ -191,9 +212,21 @@ class ShadowWorker:
                         ["open", "high", "low", "close", "volume"]
                     ]
                     self.bars[(sym, tf)] = df
+                    rest_fetched += 1
+
+                    # 3. Best-effort populate the MTF cache so PR1's compute
+                    #    hits warm on the next call. Failures here don't
+                    #    block worker setup — log + continue.
+                    try:
+                        raw_klines = _candles_to_raw_klines(history)
+                        _cache_set(sym, tf, raw_klines, fetched_at=_time.time())
+                    except Exception as e:  # noqa: BLE001
+                        log.debug(
+                            "MTF cache populate failed for %s/%s: %s", sym, tf, e,
+                        )
         log.info(
-            "shadow_worker: setup done (REST-seeded %d/(symbols×tfs) buffers)",
-            len(self.bars),
+            "shadow_worker: setup done (%d cache-hit, %d REST-fetched buffers)",
+            cache_hits, rest_fetched,
         )
 
     async def run(self) -> None:
@@ -603,6 +636,65 @@ def _pnl(pos: ShadowPosition, exit_price: float) -> tuple[float, float]:
     else:
         pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100.0
     return pnl_pct, pos.position_size_usdt * pnl_pct / 100.0
+
+
+def _klines_to_dataframe(klines: list[list[Any]]) -> pd.DataFrame:
+    """Convert raw Binance kline rows (the MTF cache format) to the
+    OHLCV-indexed DataFrame the shadow worker's bars buffer expects.
+
+    Binance kline schema per /api/v3/klines:
+      [0] open_time (ms), [1] open, [2] high, [3] low, [4] close,
+      [5] volume, [6] close_time, ...
+
+    Used by `setup()` when it reuses PR1's `_KLINE_CACHE` instead of
+    REST-fetching via `BinanceClient.fetch_klines` (which returns
+    `Candle` objects via `c.__dict__`).
+    """
+    if not klines:
+        return pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+        )
+    rows = [
+        {
+            "ts": pd.to_datetime(int(k[0]), unit="ms", utc=True),
+            "open": float(k[1]), "high": float(k[2]),
+            "low": float(k[3]), "close": float(k[4]),
+            "volume": float(k[5]),
+        }
+        for k in klines
+    ]
+    df = pd.DataFrame(rows)
+    return df.set_index("ts")[["open", "high", "low", "close", "volume"]]
+
+
+def _candles_to_raw_klines(
+    candles: list[Any],
+) -> list[list[Any]]:
+    """Convert the worker's `Candle` list to the raw Binance kline format
+    the MTF cache expects. Best-effort populate path — Candle objects
+    have `ts`, `open`, `high`, `low`, `close`, `volume` attributes;
+    Binance klines are positional 12-element lists.
+
+    Only positions 0-5 are used by `_vote_for_tf`; trailing fields can
+    be empty placeholders since neither the MTF compute nor the shadow
+    seed reads them.
+    """
+    out: list[list[Any]] = []
+    for c in candles:
+        try:
+            ts_dt = c.ts
+            # pd.Timestamp / datetime → ms epoch
+            ts_ms = int(ts_dt.timestamp() * 1000)
+            out.append([
+                ts_ms,
+                str(c.open), str(c.high), str(c.low), str(c.close),
+                str(c.volume),
+                ts_ms + 3_599_999,  # close_time placeholder
+                "0", 0, "0", "0", "0",  # quote_vol, trades, taker buy, ignore
+            ])
+        except Exception:  # noqa: BLE001 — best-effort; skip malformed
+            continue
+    return out
 
 
 async def _build_default_worker() -> ShadowWorker:
