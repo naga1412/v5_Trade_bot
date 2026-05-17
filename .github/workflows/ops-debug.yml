@@ -75,7 +75,7 @@ jobs:
             tables)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT 'universe_history' AS t, count(*) FROM universe_history \
                    UNION ALL SELECT 'asset_universe', count(*) FROM asset_universe \
                    UNION ALL SELECT 'predictions', count(*) FROM predictions \
@@ -85,14 +85,14 @@ jobs:
             scanner)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT user_id, timeframe, count(*), max(ts) \
                    FROM predictions GROUP BY user_id, timeframe ORDER BY 1, 2;\""
               ;;
             checkpoints)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT 'ml' AS kind, id, model_name, version, is_active, \
                     activated_at, deactivated_at, sha256 \
                     FROM ml_checkpoints ORDER BY id DESC LIMIT 10;\" -c \
@@ -104,7 +104,7 @@ jobs:
             stats)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT 'paper trades closed' AS kind, count(*) AS n FROM shadow_trades WHERE closed_at IS NOT NULL \
                    UNION ALL SELECT 'paper trades open', count(*) FROM shadow_trades WHERE closed_at IS NULL \
                    UNION ALL SELECT 'live trades open', count(*) FROM live_trades WHERE closed_at IS NULL \
@@ -140,7 +140,7 @@ jobs:
                 "cd $DIR_DEFAULTED && \
                  echo '=== row counts (REAL open count from shadow_open_positions) ===' && \
                  docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT 'shadow_open_positions' AS t, count(*) FROM shadow_open_positions \
                    UNION ALL SELECT 'shadow_trades (closed)', count(*) FROM shadow_trades \
                    UNION ALL SELECT 'shadow_cooldowns', count(*) FROM shadow_cooldowns \
@@ -150,7 +150,7 @@ jobs:
                      WHERE snapshot_at = (SELECT max(snapshot_at) FROM asset_universe);\" && \
                  echo '=== prediction score distribution (24h) — entry needs score > 0.30 LONG or < -0.50 SHORT, conf >= 0.50 ===' && \
                  docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT count(*) AS total_24h, \
                     round(min(final_score)::numeric, 3) AS min_score, \
                     round(max(final_score)::numeric, 3) AS max_score, \
@@ -237,7 +237,7 @@ jobs:
                  ERRC=\$(docker compose logs --since=1h backend 2>&1 | grep -ciE 'error|exception|traceback|500 internal' || true) && \
                  echo \"error-like log lines (last 1h): \$ERRC\" && \
                  echo '=== shadow trade activity (last 1h) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT 'open positions' AS k, count(*) FROM shadow_open_positions \
                      UNION ALL SELECT 'closed trades total', count(*) FROM shadow_trades \
                      UNION ALL SELECT 'closed trades last 1h', count(*) FROM shadow_trades WHERE closed_at > now() - interval '1 hour' \
@@ -245,7 +245,7 @@ jobs:
                        (SELECT count(*) FROM shadow_open_positions WHERE opened_at > now() - interval '1 hour') + \
                        (SELECT count(*) FROM shadow_trades WHERE opened_at > now() - interval '1 hour');\" && \
                  echo '=== predictions cadence (last 6h) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT date_trunc('hour', ts) AS hour, count(*) AS predictions, \
                        round(max(final_score)::numeric, 3) AS max_score, \
                        round(min(final_score)::numeric, 3) AS min_score \
@@ -275,14 +275,14 @@ jobs:
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && \
                  echo '=== prediction_validations — global summary ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT count(*) AS total_rows, \
                        count(*) FILTER (WHERE validated_at IS NOT NULL) AS validated, \
                        count(*) FILTER (WHERE was_correct) AS correct, \
                        round((100.0 * count(*) FILTER (WHERE was_correct) / nullif(count(*) FILTER (WHERE validated_at IS NOT NULL), 0))::numeric, 1) AS accuracy_pct \
                      FROM prediction_validations;\" && \
                  echo '=== accuracy by direction (validated rows only) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT direction, count(*) AS n, \
                        count(*) FILTER (WHERE was_correct) AS correct, \
                        round((100.0 * count(*) FILTER (WHERE was_correct) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct, \
@@ -292,7 +292,7 @@ jobs:
                      FROM prediction_validations WHERE validated_at IS NOT NULL \
                      GROUP BY direction ORDER BY direction;\" && \
                  echo '=== score-magnitude buckets per direction (would-be SHORT signal counts) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT \
                        count(*) AS total_predictions, \
                        count(*) FILTER (WHERE score > 0.30 AND direction = 'LONG') AS long_score_gt_0p30, \
@@ -301,7 +301,7 @@ jobs:
                        count(*) FILTER (WHERE score < -0.20 AND direction = 'SHORT') AS short_score_lt_neg0p20_LOOSE \
                      FROM prediction_validations;\" && \
                  echo '=== hit rate by direction over last 7 days ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT direction, count(*) AS n, \
                        round((100.0 * count(*) FILTER (WHERE was_correct) / nullif(count(*), 0))::numeric, 1) AS accuracy_pct, \
                        round(avg(pnl_pct)::numeric, 4) AS avg_pnl_pct \
@@ -309,7 +309,7 @@ jobs:
                      WHERE validated_at IS NOT NULL AND validated_at > now() - interval '7 days' \
                      GROUP BY direction ORDER BY direction;\" && \
                  echo '=== closed shadow trades — actual P&L by direction ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"SELECT direction, count(*) AS trades, \
                        count(*) FILTER (WHERE pnl_pct > 0) AS wins, \
                        round((100.0 * count(*) FILTER (WHERE pnl_pct > 0) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
@@ -393,7 +393,7 @@ jobs:
                  fi && \
                  grep '^BINANCE_USE_TESTNET=' .env && \
                  echo '--- 3/4 DB: mode=telegram-approve, size=5-10 USDT ---' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"UPDATE users SET trading_mode='telegram-approve', \
                         fixed_size_min_usdt=5, fixed_size_max_usdt=10 WHERE id=1 \
                      RETURNING id, trading_mode, fixed_size_min_usdt, fixed_size_max_usdt;\" && \
@@ -436,7 +436,7 @@ jobs:
                  fi && \
                  grep '^BINANCE_USE_TESTNET=' .env && \
                  echo '--- 2/4 DB: mode=manual, size=20-50 USDT ---' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar_staging -c \
                    \"UPDATE users SET trading_mode='manual', \
                         fixed_size_min_usdt=20, fixed_size_max_usdt=50 WHERE id=1 \
                      RETURNING id, trading_mode, fixed_size_min_usdt, fixed_size_max_usdt;\" && \
@@ -451,7 +451,7 @@ jobs:
               # READ-ONLY: dump verifier history from auth_violations + worker_heartbeats.
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
+                 psql -U postgres -d trading_radar_staging -c \
                  \"SELECT column_name, data_type FROM information_schema.columns \
                    WHERE table_name='auth_violations' ORDER BY ordinal_position;\" -c \
                  \"SELECT column_name, data_type FROM information_schema.columns \
@@ -492,17 +492,17 @@ jobs:
                  echo '=== 2/6 staging /api/v1/health (port 8001) ===' && \
                  curl -s -o /dev/null -w 'http_code=%{http_code} time=%{time_total}s\n' http://localhost:8001/api/v1/health && \
                  echo '=== 3/6 predictions count in last 60 min ===' && \
-                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar -c \
+                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT COUNT(*) AS predictions_last_60m FROM predictions WHERE ts > NOW() - INTERVAL '60 minutes';\" && \
                  echo '=== 4/6 last 10 predictions + analytics column population ===' && \
-                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar -c \
+                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT ts, symbol, timeframe, mtf_agreement, p_win, effective_score, realized_vol_20d, funding_directional_adj FROM predictions WHERE ts > NOW() - INTERVAL '2 hours' ORDER BY ts DESC LIMIT 10;\" && \
                  echo '=== 5a/6 aggregator_hook log line count (last 500 lines of backend-staging) ===' && \
                  docker compose -f docker-compose.staging.yml --env-file .env.staging logs --tail=500 backend-staging 2>&1 | grep -cE 'aggregator_hook' && \
                  echo '=== 5b/6 record_pending_validation failed count (last 500 lines) ===' && \
                  docker compose -f docker-compose.staging.yml --env-file .env.staging logs --tail=500 backend-staging 2>&1 | grep -cE 'record_pending_validation failed' && \
                  echo '=== 6/6 new chain_broken entries in last 60 min (attempted_at) ===' && \
-                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar -c \
+                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT COUNT(*) AS new_chain_broken_last_60m FROM auth_violations WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%' AND attempted_at > NOW() - INTERVAL '60 minutes';\""
               ;;
           esac
