@@ -109,23 +109,43 @@ def _parse_mtf_directions_json(raw: str | None) -> dict[str, int] | None:
 
     Rejects non-dict roots (list, scalar) — the watchdog can drill into
     the log; the gate stays unbiased.
+
+    Direction values MUST be plain ``int`` (PR1 schema: -1 / 0 / +1).
+    Floats and other numeric types are rejected — we do NOT silently
+    truncate ``int(0.7) → 0`` because that would bias the higher-TF
+    veto (a downstream rounding artifact like ``-0.4`` would neutralize
+    a real opposing-TF signal). `bool` is an int subclass and is
+    accepted for compatibility with True/False JSON inputs.
     """
     if raw is None:
         return None
     try:
         parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            log.warning(
-                "mtf_directions_json parsed to non-dict (%s); treating as None",
-                type(parsed).__name__,
-            )
-            return None
-        return {str(k): int(v) for k, v in parsed.items()}
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
         log.warning(
             "mtf_directions_json parse failed: %s (raw=%r)", exc, raw[:80],
         )
         return None
+    if not isinstance(parsed, dict):
+        log.warning(
+            "mtf_directions_json parsed to non-dict (%s); treating as None",
+            type(parsed).__name__,
+        )
+        return None
+    result: dict[str, int] = {}
+    for k, v in parsed.items():
+        # bool is a subclass of int — accept for True/False JSON inputs.
+        # Floats fail `isinstance(v, int)` so they trip this guard,
+        # which is exactly what we want (no silent int(0.7) → 0).
+        if not isinstance(v, int):
+            log.warning(
+                "mtf_directions_json value at key=%r is %s (not int); "
+                "treating dict as None to keep the gate unbiased",
+                k, type(v).__name__,
+            )
+            return None
+        result[str(k)] = int(v)
+    return result
 
 
 def proposal_from_prediction(

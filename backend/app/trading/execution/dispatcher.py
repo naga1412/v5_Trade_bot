@@ -627,11 +627,15 @@ async def dispatch(
     # (one DB read), then SL tightening (modifies proposal). After this
     # block, `proposal` may be a NEW SignalProposal instance with a
     # tightened stop-loss — the rest of dispatch() must use the returned
-    # value, not the original. `get_settings()` is the documented entry-
-    # point hook for per-request env-var overrides (e.g. rollback by
-    # setting MTF_MIN_AGREEMENT_1H=0 in a hot env reload).
-    from app.config import get_settings as _get_pr2_settings
-    pr2_settings = _get_pr2_settings()
+    # value, not the original.
+    #
+    # Spec §8 rollback path: MTF_MIN_AGREEMENT_1H=0 must take effect on
+    # the NEXT dispatch tick without a process restart. `get_settings()`
+    # in config.py is @lru_cache-wrapped, so a fresh-Settings() pattern
+    # is required to read the *current* env state per-call. Settings
+    # construction is fast (pydantic-settings reads env once, no I/O);
+    # the V-7 microbench shows the entire gate path adds sub-millisecond.
+    pr2_settings = Settings()  # type: ignore[call-arg]
     gate_result = _apply_mtf_gate(proposal, pr2_settings)
     if gate_result is not None:
         return gate_result

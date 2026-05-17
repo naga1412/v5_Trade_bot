@@ -197,11 +197,27 @@ async def _place_approved_order(
     # live_trades — symmetric per spec §6.3 R3. mtf_directions in the
     # JSONB is the parsed dict (or null); we forward it as-is to the
     # builder, which canonical-serialises it back to JSON for the column.
+    # Float values are rejected (set the whole field None) — matches the
+    # glue._parse_mtf_directions_json fail-open contract, so the live
+    # trade row mirrors the auto-path semantics exactly.
     _mtf_directions_raw = payload.get("mtf_directions")
-    mtf_directions_dict: dict[str, int] | None = (
-        {str(k): int(v) for k, v in _mtf_directions_raw.items()}
-        if isinstance(_mtf_directions_raw, dict) else None
-    )
+    mtf_directions_dict: dict[str, int] | None
+    if isinstance(_mtf_directions_raw, dict) and all(
+        isinstance(v, int) for v in _mtf_directions_raw.values()
+    ):
+        mtf_directions_dict = {
+            str(k): int(v) for k, v in _mtf_directions_raw.items()
+        }
+    else:
+        mtf_directions_dict = None
+        if _mtf_directions_raw is not None and not isinstance(
+            _mtf_directions_raw, dict,
+        ):
+            log.warning(
+                "telegram-approve: mtf_directions in payload is %s (not "
+                "dict); persisting live_trades row with mtf_directions_json=NULL",
+                type(_mtf_directions_raw).__name__,
+            )
 
     trade_payload = build_live_trade_payload(
         user_id=row.user_id or user_id,

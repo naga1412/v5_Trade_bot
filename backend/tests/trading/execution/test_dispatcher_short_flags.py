@@ -38,10 +38,18 @@ def _settings(veto: bool = False, threshold: float = 10.0) -> Settings:
     )
 
 
-def test_veto_disabled_by_default() -> None:
-    """Spec §6.1 hard bound: all SHORT flags default False."""
+def test_all_short_safety_flags_default_off() -> None:
+    """Spec §6.1 hard bound: ALL three SHORT safety flags default False.
+
+    Co-located here (rather than only in test_pr2_settings_defaults.py)
+    so the SHORT-side test module is self-contained — a future commit
+    that flips one of these defaults can't be merged without breaking
+    a test in the same file as the gate it controls.
+    """
     s = Settings(database_url="postgresql://x", redis_url="redis://x")
     assert s.SHORT_VETO_HIGH_BORROW is False
+    assert s.SHORT_FUNDING_HALVE_HOLD is False
+    assert s.SHORT_TIGHTEN_SL_LOW_MTF is False
 
 
 @pytest.mark.asyncio

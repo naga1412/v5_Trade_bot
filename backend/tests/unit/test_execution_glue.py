@@ -195,6 +195,38 @@ def test_proposal_from_prediction_mtf_directions_non_dict_fails_open(
     assert any("mtf_directions_json" in r.message for r in caplog.records)
 
 
+def test_proposal_from_prediction_float_direction_value_rejects(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Float direction value (e.g. 0.7 from a model rounding artifact)
+    MUST NOT be silently truncated to 0 — that would neutralize a
+    real opposing-TF signal at the higher-TF veto. The parser rejects
+    the whole dict and returns None, so the gate falls open."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.trading.execution.glue")
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_directions_json='{"5m": 1, "1d": -0.4, "1w": 0.7}',
+    )
+    assert p is not None
+    assert p.mtf_directions is None
+    assert any(
+        "not int" in r.message for r in caplog.records
+    )
+
+
+def test_proposal_from_prediction_bool_direction_value_accepted() -> None:
+    """bool is a subclass of int — True/False direction values flow
+    through cleanly (PR2 design ¶: accept for producer flexibility,
+    coerced to 1/0)."""
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_directions_json='{"5m": true, "1h": false, "1d": -1}',
+    )
+    assert p is not None
+    assert p.mtf_directions == {"5m": 1, "1h": 0, "1d": -1}
+
+
 # ---- build_user_context -------------------------------------------------
 
 
