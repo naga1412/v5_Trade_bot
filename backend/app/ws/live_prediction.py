@@ -16,9 +16,13 @@ from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
 from app.ml.validator import record_pending_validation
+from app.ops.heartbeat import record_heartbeat
 from app.trading.execution.glue import dispatch_if_eligible, vault_keys
 
 log = logging.getLogger(__name__)
+
+# FU-1: heartbeat name MUST match worker_registry.py's entry.
+WORKER_NAME: str = "live_worker"
 
 # SP-0.7: the singleton live-prediction worker writes rows on behalf of the
 # bootstrap admin (id=1, see migration 0005). SP-8 will fan out per user.
@@ -260,6 +264,18 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
         # candle loop.
         await _maybe_dispatch(
             session_factory, pred=pred, layer_payload=_layer_payload,
+        )
+
+        # FU-1: heartbeat after each fully-processed candle. The watchdog
+        # reads worker_heartbeats.beat_at to detect silent failures. Failure
+        # to reach this point (exception escaping any of the try blocks
+        # above, WS stream stall, etc.) means no fresh heartbeat → watchdog
+        # alarms after max_staleness_seconds. record_heartbeat is best-effort
+        # wrapped — never raises.
+        await record_heartbeat(
+            session_factory, WORKER_NAME,
+            status="ok",
+            details={"symbol": symbol_pair, "timeframe": timeframe},
         )
 
 

@@ -69,7 +69,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=15 * 60,
         stateful=True,
-        pending_heartbeat=True,
+        # FU-1 closed for live_worker — record_heartbeat wired in
+        # run_live_prediction's per-candle iteration body.
     ),
     # 2. Multi-symbol 1h shadow trading worker.
     WorkerSpec(
