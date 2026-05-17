@@ -79,7 +79,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=2 * 60 * 60,  # 2x its 1h cadence
         stateful=True,  # holds open positions in memory
-        pending_heartbeat=True,
+        # FU-1 closed for shadow_worker — record_heartbeat wired in
+        # _handle_candle per processed candle.
     ),
     # 3. Daily 00:00 UTC asset_universe refresh.
     WorkerSpec(

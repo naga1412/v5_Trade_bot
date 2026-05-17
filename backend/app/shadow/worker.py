@@ -30,6 +30,7 @@ from app.core.predictor import _atr, build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
+from app.ops.heartbeat import record_heartbeat
 from app.shadow.engine import (
     PositionGate,
     ShadowPosition,
@@ -183,14 +184,26 @@ class ShadowWorker:
         from app.ops import pause_state
         if await pause_state.is_paused():
             log.debug("shadow_worker: paused, skipping candle %s", candle.symbol)
+            # Still heartbeat — the worker is alive, just gated by pause_state.
+            await record_heartbeat(
+                self.session_factory, "shadow_worker",
+                status="ok", details={"paused": True, "symbol": candle.symbol},
+            )
             return
         buf = self._append_bar(candle)
 
         if candle.symbol in self.open_positions:
             await self._maybe_close_position(candle)
-            return
+        else:
+            await self._maybe_open_position(candle, buf)
 
-        await self._maybe_open_position(candle, buf)
+        # FU-1: heartbeat after every processed candle. Watchdog uses this
+        # to detect WS stalls / shadow_worker crashes. record_heartbeat is
+        # best-effort wrapped — never raises.
+        await record_heartbeat(
+            self.session_factory, "shadow_worker",
+            status="ok", details={"symbol": candle.symbol},
+        )
 
     async def _maybe_close_position(self, candle: MultiStreamCandle) -> None:
         pos = self.open_positions[candle.symbol]
