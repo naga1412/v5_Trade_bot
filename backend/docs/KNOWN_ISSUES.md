@@ -322,6 +322,43 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
   planned. Should land before any future PR that adds a non-trivial
   migration body.
 
+### FU-19 — Live-trade hold-timeout infrastructure missing (PR2 Phase 5 blocker)
+- **Problem**: PR2 spec §4.2 (F-1) calls for `SHORT_FUNDING_HALVE_HOLD` to
+  halve the max-hold timeout when a SHORT trade's funding rate exceeds
+  `SHORT_FUNDING_HALVE_THRESHOLD_PCT`. PR2 Phase 5 plan called for a
+  call-graph trace to find the existing hold-timeout enforcement to hook
+  into. The trace found **no such infrastructure for live trades**:
+  - `app/shadow/exit_monitor.py:7` has `TIMEOUT_BARS=24` hardcoded for
+    SHADOW trades only — not configurable, doesn't apply to live.
+  - `app/trading/execution/liquidation_monitor.py` is the only worker
+    that closes live trades autonomously, and it closes on
+    `<10% liquidation buffer`, not on a hold-time timeout.
+  - No `expires_at` / `max_hold_hours` column on `live_trades`. No
+    timer worker. The spec assumed timer infrastructure that doesn't
+    exist.
+- **PR2 disposition**: the FLAG and the THRESHOLD setting are shipped
+  (`SHORT_FUNDING_HALVE_HOLD: bool = False`,
+  `SHORT_FUNDING_HALVE_THRESHOLD_PCT: float = 0.05`). The HOOK is
+  deferred — there's nothing to hook into. The flag defaults OFF so
+  enabling it via env var has no effect today; the hook will be wired
+  by FU-19 once the underlying live-trade timeout infrastructure
+  lands.
+- **Scope (estimated 2-3 days)**:
+  1. Decide where to enforce live-trade timeouts (new worker that
+     polls open `live_trades` and closes on age, OR `expires_at`
+     column + extension of `liquidation_monitor` to check both
+     liquidation-buffer AND age).
+  2. Add a `MAX_HOLD_HOURS` setting (default e.g. 24 to match shadow).
+  3. Implement `effective_max_hold_hours(direction, base, funding_pct,
+     settings)` per the sketch in
+     `docs/superpowers/plans/2026-05-17-pr2-mtf-gate-and-short-safety.md#task-53`.
+  4. Wire the helper at the chosen enforcement site.
+  5. 4 new tests covering Flag OFF, LONG, SHORT+low-funding,
+     SHORT+high-funding cases.
+- **Tracking**: this file (FU-19). Surfaced during PR2 Phase 5 trace.
+- **Status**: queued; not blocking PR2 (default-OFF flag, no observed
+  ops gap).
+
 ### FU-18 — staging-verify probe windows mismatched 1h cadence
 - **Problem**: The `staging-verify` and analogous prod-side probes
   use criteria designed for 5m/15m continuous cadence systems:
