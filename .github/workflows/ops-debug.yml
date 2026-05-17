@@ -492,17 +492,17 @@ jobs:
                  echo '=== 2/6 staging /api/v1/health (port 8001) ===' && \
                  curl -s -o /dev/null -w 'http_code=%{http_code} time=%{time_total}s\n' http://localhost:8001/api/v1/health && \
                  echo '=== 3/6 predictions count in last 60 min ===' && \
-                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar -c \
+                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT COUNT(*) AS predictions_last_60m FROM predictions WHERE ts > NOW() - INTERVAL '60 minutes';\" && \
                  echo '=== 4/6 last 10 predictions + analytics column population ===' && \
-                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar -c \
+                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT ts, symbol, timeframe, mtf_agreement, p_win, effective_score, realized_vol_20d, funding_directional_adj FROM predictions WHERE ts > NOW() - INTERVAL '2 hours' ORDER BY ts DESC LIMIT 10;\" && \
                  echo '=== 5a/6 aggregator_hook log line count (last 500 lines of backend-staging) ===' && \
                  docker compose -f docker-compose.staging.yml --env-file .env.staging logs --tail=500 backend-staging 2>&1 | grep -cE 'aggregator_hook' && \
                  echo '=== 5b/6 record_pending_validation failed count (last 500 lines) ===' && \
                  docker compose -f docker-compose.staging.yml --env-file .env.staging logs --tail=500 backend-staging 2>&1 | grep -cE 'record_pending_validation failed' && \
                  echo '=== 6/6 new chain_broken entries in last 60 min (attempted_at) ===' && \
-                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar -c \
+                 docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT COUNT(*) AS new_chain_broken_last_60m FROM auth_violations WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%' AND attempted_at > NOW() - INTERVAL '60 minutes';\""
               ;;
           esac
