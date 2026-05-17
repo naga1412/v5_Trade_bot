@@ -44,10 +44,15 @@ def check_exit(
     (programming-error fail-loud per spec §4.6 — new TFs require an
     explicit entry here AND in HOLD_TP_SCALING_TABLE for G1).
     """
-    # Per-TF timeout. Phase 5.5.4 will layer G1 scaling on top by consulting
-    # pos.hold_timeout_bars first when not None; Phase 5 alone uses the
-    # per-TF dict baseline.
-    limit = TIMEOUT_BARS_PER_TF[pos.timeframe]  # KeyError → fail-loud
+    # Phase 5.5.4: G1 scaling override. When pos.hold_timeout_bars is set
+    # (HOLD_TP_SCALING_ENABLED=True at open-time), use the recorded
+    # per-position limit; otherwise fall back to the per-TF baseline.
+    # Pre-G1 ShadowPosition instances always have hold_timeout_bars=None,
+    # so this is bit-identical to the Phase 5 baseline for them.
+    if pos.hold_timeout_bars is not None:
+        limit = pos.hold_timeout_bars
+    else:
+        limit = TIMEOUT_BARS_PER_TF[pos.timeframe]  # KeyError → fail-loud
     if pos.bars_held >= limit:
         return ExitDecision(reason=ExitReason.TIMEOUT, exit_price=bar_close)
 

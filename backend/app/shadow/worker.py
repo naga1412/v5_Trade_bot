@@ -471,6 +471,42 @@ class ShadowWorker:
         # cache key reflect the actual lane the trade was opened on.
         position.timeframe = tf
 
+        # PR3 Phase 5.5 (G1): when HOLD_TP_SCALING_ENABLED, look up the
+        # scaled (timeout_bars, tp_multiplier) for this (tf, mtf_agreement)
+        # pair and rewrite take_profit accordingly. Stop-loss is INVARIANT.
+        # Recording fields (hold_scaling_factor + hold_timeout_bars) stay
+        # NULL when scaling is OFF — bit-identical to pre-G1 trades.
+        from app.config import get_settings as _get_pr3_settings
+        _pr3_settings = _get_pr3_settings()
+        if _pr3_settings.HOLD_TP_SCALING_ENABLED:
+            from app.shadow.scaling import effective_hold_tp
+            try:
+                # mtf_agreement may not be on pred (older predictor versions
+                # / fail-open paths) — getattr with None default.
+                _mtf_agreement = getattr(pred, "mtf_agreement", None)
+                scaled_bars, tp_mult = effective_hold_tp(
+                    timeframe=tf,
+                    mtf_agreement=_mtf_agreement,
+                    table=_pr3_settings.HOLD_TP_SCALING_TABLE,
+                )
+                # Rewrite TP at scaled distance (SL untouched).
+                from app.shadow.engine import Direction as _Dir
+                _sign = 1.0 if position.direction is _Dir.LONG else -1.0
+                _baseline_tp_distance = abs(position.take_profit - position.entry_price)
+                position.take_profit = position.entry_price + (
+                    _sign * tp_mult * _baseline_tp_distance
+                )
+                position.hold_scaling_factor = tp_mult
+                position.hold_timeout_bars = scaled_bars
+            except Exception as _g1_err:  # noqa: BLE001
+                # Fail-open per §4.6b: scaling errors must NOT block trade
+                # entry. Log + leave position at pre-scaling baseline.
+                log.warning(
+                    "G1 scaling lookup failed for %s/%s (mtf_agreement=%r): %s — "
+                    "opening at baseline",
+                    candle.symbol, tf, _mtf_agreement, _g1_err,
+                )
+
         # Build the 9-float layer_scores array (signed_strength * confidence,
         # per the aggregator's contribution formula) in deterministic L1..L9
         # order. None layers → 0.0. Used by the obs-snapshot for the brain's
