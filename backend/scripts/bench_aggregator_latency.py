@@ -1,6 +1,6 @@
-"""Aggregator hook latency benchmark — V-7 gate (PR1 Phase 7).
+"""Aggregator hook latency benchmark — V-7 gate (PR1 Phase 7 + PR2 Phase 8).
 
-Measures the overhead of ``_compute_aggregator_hook_fields`` in two modes:
+PR1 modes (predictor-side aggregator):
 
   --mtf-disabled   Baseline: MTF skipped (returns None immediately).
                    p_win, vol_normalization, funding_directional still run.
@@ -9,13 +9,35 @@ Measures the overhead of ``_compute_aggregator_hook_fields`` in two modes:
                    Cache is pre-populated so every call hits the cache.
                    No real Binance fetch.
 
-No flag: runs both modes sequentially and emits a gate verdict.
+PR2 modes (dispatcher-side gate microbench):
+
+  --mtf-gate-disabled  Baseline: proposal carries ``mtf_agreement=None`` so
+                       ``_apply_mtf_gate`` short-circuits at the first
+                       check (fail-open) — represents the PR1 fallback /
+                       MTF compute failure path AND the rollback path
+                       (MTF_MIN_AGREEMENT_1H=0).
+
+  --mtf-gate-enabled   Active gate: proposal carries
+                       ``mtf_agreement=4`` plus a full mtf_directions
+                       dict; gate evaluates min-agreement AND the
+                       higher-TF veto, then passes.
+
+The PR2 gate is 3 boolean checks + 1 dict-get-with-default + 1 sign
+comparison — the delta should be sub-millisecond. If it isn't, the
+spec §6.5 V-7 budget (≤50ms p50, ≤200ms p99) is wildly violated and
+something is fundamentally wrong.
+
+No flag: runs the PR1 modes sequentially and emits the PR1 gate verdict
+(unchanged from pre-PR2). The PR2 modes are explicit; the operator
+runs them alongside as part of the PR2 review.
 
 Usage
 -----
-  python scripts/bench_aggregator_latency.py               # both modes + gate
+  python scripts/bench_aggregator_latency.py               # PR1 both modes + gate
   python scripts/bench_aggregator_latency.py --mtf-disabled
   python scripts/bench_aggregator_latency.py --mtf-recording
+  python scripts/bench_aggregator_latency.py --mtf-gate-disabled   # PR2
+  python scripts/bench_aggregator_latency.py --mtf-gate-enabled    # PR2
   python scripts/bench_aggregator_latency.py --n 10        # custom sample count
 """
 from __future__ import annotations
@@ -191,6 +213,53 @@ def _prepopulate_mtf_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
+# PR2 dispatcher-gate microbench fixtures
+# ---------------------------------------------------------------------------
+
+
+def _make_pr2_proposal(*, with_mtf: bool) -> Any:
+    """Construct a SignalProposal for the PR2 gate microbench.
+
+    ``with_mtf=False`` → mtf_agreement=None → gate short-circuits at the
+    first guard (fail-open). Represents the PR1-fallback path AND the
+    rollback path (MTF_MIN_AGREEMENT_1H=0 yields the same fast-pass).
+
+    ``with_mtf=True`` → mtf_agreement=4, mtf_directions populated; gate
+    evaluates both the min-agreement check and the higher-TF veto (the
+    1d/1w direction lookup), then passes.
+    """
+    from app.trading.execution.dispatcher import SignalProposal
+
+    base = dict(
+        symbol="BTC/USDT", timeframe="1h",
+        direction="LONG",
+        entry_price=80_000.0, stop_loss_price=78_400.0,
+        take_profit_price=83_280.0,
+        confidence_pct=72.0,
+        layer_summary={"L1": {}, "L2": {}, "L3": {}},
+        inputs_hash="a" * 64,
+    )
+    if with_mtf:
+        return SignalProposal(
+            **base,  # type: ignore[arg-type]
+            mtf_agreement=4,
+            mtf_dominant_tf="1h",
+            mtf_directions={
+                "5m": 1, "15m": 1, "1h": 1, "4h": 1, "1d": 1, "1w": 1,
+            },
+        )
+    return SignalProposal(**base)  # type: ignore[arg-type]
+
+
+def _make_pr2_settings() -> Any:
+    from app.config import Settings
+    return Settings(
+        database_url="postgresql://x", redis_url="redis://x",
+        MTF_MIN_AGREEMENT_1H=3, MTF_HIGHER_TF_VETO=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Core measurement loop
 # ---------------------------------------------------------------------------
 
@@ -199,7 +268,7 @@ async def _run_one(
     final: Any,
     session: Any,
 ) -> float:
-    """Run one computation, return elapsed nanoseconds."""
+    """Run one PR1 aggregator-hook computation, return elapsed nanoseconds."""
     from app.core.predictor import _compute_aggregator_hook_fields
 
     t0 = time.perf_counter_ns()
@@ -210,6 +279,20 @@ async def _run_one(
         final=final,
         session=session,
     )
+    t1 = time.perf_counter_ns()
+    return float(t1 - t0)
+
+
+def _run_one_pr2_gate(proposal: Any, settings: Any) -> float:
+    """Run one PR2 _apply_mtf_gate call, return elapsed nanoseconds.
+
+    Synchronous — the gate function is sync (pure, no I/O). The bench
+    just measures the call cost.
+    """
+    from app.trading.execution.dispatcher import _apply_mtf_gate
+
+    t0 = time.perf_counter_ns()
+    _apply_mtf_gate(proposal, settings)
     t1 = time.perf_counter_ns()
     return float(t1 - t0)
 
@@ -239,6 +322,38 @@ async def _bench_mode(
                 new=_null_mtf,
             ),
         ]
+
+    elif mode == "mtf-gate-disabled":
+        # PR2 microbench: gate fast-pass (mtf_agreement=None).
+        proposal = _make_pr2_proposal(with_mtf=False)
+        settings = _make_pr2_settings()
+
+        async def _run_bench_pr2() -> list[float]:
+            samples_: list[float] = []
+            for _ in range(n_warmup):
+                _run_one_pr2_gate(proposal, settings)
+            for _ in range(n_samples):
+                samples_.append(_run_one_pr2_gate(proposal, settings))
+            return samples_
+
+        samples = await _run_bench_pr2()
+        return _summarize(mode, n_warmup, n_samples, samples)
+
+    elif mode == "mtf-gate-enabled":
+        # PR2 microbench: gate evaluates both min-agreement + higher-TF veto.
+        proposal = _make_pr2_proposal(with_mtf=True)
+        settings = _make_pr2_settings()
+
+        async def _run_bench_pr2() -> list[float]:
+            samples_: list[float] = []
+            for _ in range(n_warmup):
+                _run_one_pr2_gate(proposal, settings)
+            for _ in range(n_samples):
+                samples_.append(_run_one_pr2_gate(proposal, settings))
+            return samples_
+
+        samples = await _run_bench_pr2()
+        return _summarize(mode, n_warmup, n_samples, samples)
 
     elif mode == "mtf-recording":
         # Pre-populate cache for all 6 TFs at fresh timestamps so every _fetch_one_tf
@@ -289,9 +404,19 @@ async def _bench_mode(
     else:
         samples = await _run_bench()
 
-    # Convert ns → ms
-    samples_ms = [s / 1_000_000.0 for s in samples]
+    return _summarize(mode, n_warmup, n_samples, samples)
 
+
+def _summarize(
+    mode: str, n_warmup: int, n_samples: int, samples_ns: list[float],
+) -> dict[str, Any]:
+    """Convert ns samples to ms percentile summary dict.
+
+    Shared by both the PR1 async aggregator-hook bench and the PR2 sync
+    `_apply_mtf_gate` microbench. Single source of truth for the JSON
+    output shape so both bench modes are directly comparable.
+    """
+    samples_ms = [s / 1_000_000.0 for s in samples_ns]
     sorted_samples = sorted(samples_ms)
     n = len(sorted_samples)
 
@@ -370,6 +495,18 @@ async def _async_main(args: list[str] | None = None) -> int:
         dest="mtf_recording",
         help="Full PR1 path: MTF recording-only with warm cache",
     )
+    mode_group.add_argument(
+        "--mtf-gate-disabled",
+        action="store_true",
+        dest="mtf_gate_disabled",
+        help="PR2 microbench: gate fast-pass (proposal.mtf_agreement=None)",
+    )
+    mode_group.add_argument(
+        "--mtf-gate-enabled",
+        action="store_true",
+        dest="mtf_gate_enabled",
+        help="PR2 microbench: gate evaluates min-agreement + higher-TF veto",
+    )
     parser.add_argument(
         "--n",
         type=int,
@@ -395,6 +532,20 @@ async def _async_main(args: list[str] | None = None) -> int:
 
     if ns.mtf_recording:
         result = await _bench_mode("mtf-recording", ns.n_warmup, ns.n_samples, bars)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if ns.mtf_gate_disabled:
+        result = await _bench_mode(
+            "mtf-gate-disabled", ns.n_warmup, ns.n_samples, bars,
+        )
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if ns.mtf_gate_enabled:
+        result = await _bench_mode(
+            "mtf-gate-enabled", ns.n_warmup, ns.n_samples, bars,
+        )
         print(json.dumps(result, indent=2))
         return 0
 
