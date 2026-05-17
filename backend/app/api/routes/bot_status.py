@@ -374,7 +374,10 @@ async def open_positions(
     """
     sql = (
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
-        "position_size_usdt, bars_held, opened_at, signal_id "
+        "position_size_usdt, bars_held, opened_at, signal_id, "
+        # PR3 Phase 8: surface timeframe so the frontend deep-link
+        # routes to the correct chart TF (was hardcoded '1h').
+        "timeframe "
         "FROM shadow_open_positions "
         "WHERE user_id = :user_id "
         "ORDER BY opened_at ASC"
@@ -409,6 +412,11 @@ async def open_positions(
         out.append(OpenPositionOut(
             symbol=r.symbol,
             direction=r.direction,  # type: ignore[arg-type]
+            # PR3 Phase 8: thread per-position TF. Pre-PR3 rows that lack
+            # the column entirely would have raised AttributeError here;
+            # the alembic 0021 migration backfills '1h' so post-migration
+            # rows always have it. getattr fallback for any defensive case.
+            timeframe=getattr(r, "timeframe", None) or "1h",
             entry_price=r.entry_price,
             stop_loss=r.stop_loss,
             take_profit=r.take_profit,

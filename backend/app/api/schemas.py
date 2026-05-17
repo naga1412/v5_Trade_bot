@@ -220,6 +220,12 @@ class PromotionGateOut(BaseModel):
 class OpenPositionOut(BaseModel):
     symbol: str
     direction: Literal["LONG", "SHORT"]
+    # PR3 Phase 8: surface the per-position timeframe so the BotStatus
+    # OpenPositions card can deep-link to the correct chart TF (was
+    # hardcoded "1h" pre-PR3). Optional for forward-compat with rows
+    # that pre-date PR3's persistence threading; pre-PR3 rows default
+    # to "1h" via the DB column default added in alembic 0021.
+    timeframe: str | None = None
     entry_price: float
     stop_loss: float
     take_profit: float
