@@ -521,7 +521,6 @@ jobs:
                 "cd $DIR_DEFAULTED && echo '$SCRIPT_B64' | base64 -d | \
                  docker compose exec -T backend python -"
               ;;
-<<<<<<< HEAD
             staging-verify)
               # READ-ONLY: hotfix #171 verification against STAGING only.
               # Targets tr-staging-backend container, /opt/trading-radar-staging
@@ -548,7 +547,7 @@ jobs:
                  echo '=== 6/6 new chain_broken entries in last 60 min (attempted_at) ===' && \
                  docker compose -f docker-compose.staging.yml --env-file .env.staging exec -T postgres-staging psql -U postgres -d trading_radar_staging -c \
                    \"SELECT COUNT(*) AS new_chain_broken_last_60m FROM auth_violations WHERE attempted_email='system' AND reason LIKE 'audit_chain_broken:%' AND attempted_at > NOW() - INTERVAL '60 minutes';\""
-=======
+              ;;
             live-worker-process-status)
               # READ-ONLY: comprehensive live_worker diagnostic.
               # Investigates the predictions=0-since-2026-05-11 silence.
@@ -577,6 +576,5 @@ jobs:
                  docker compose logs --tail=500 backend 2>&1 | grep -iE 'keepalive|ping|pong|ws_keep' | tail -20 && \
                  echo '=== I-2d: last 80 backend log lines unfiltered (most recent activity floor) ===' && \
                  docker compose logs --tail=80 backend"
->>>>>>> 315821a (feat(ops-debug): live-worker-process-status probe (predictions=0 since 5/11 investigation))
               ;;
           esac
