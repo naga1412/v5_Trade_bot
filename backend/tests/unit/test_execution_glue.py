@@ -118,6 +118,115 @@ def test_proposal_invalid_prices_returns_none() -> None:
     assert p is None
 
 
+# ---- PR2: MTF threading -------------------------------------------------
+
+
+def _proposal_baseline_kwargs() -> dict:
+    """Minimal kwargs for a LONG proposal — shared by the MTF threading tests."""
+    return dict(
+        symbol="BTC/USDT", timeframe="1h",
+        pred_direction="LONG", pred_confidence=0.72,
+        layer_summary={"L1": {"score": 0.85}},
+        inputs_hash="abc",
+        entry_price=80_000, stop_loss_price=78_400, take_profit_price=83_000,
+    )
+
+
+def test_proposal_from_prediction_threads_mtf_fields() -> None:
+    """When the caller passes mtf_*, proposal_from_prediction threads
+    them through to SignalProposal. mtf_directions_json is parsed to a dict."""
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_agreement=4,
+        mtf_dominant_tf="1h",
+        mtf_directions_json='{"5m": 1, "15m": 1, "1h": 1, "4h": 1, "1d": -1, "1w": 0}',
+    )
+    assert p is not None
+    assert p.mtf_agreement == 4
+    assert p.mtf_dominant_tf == "1h"
+    assert p.mtf_directions == {
+        "5m": 1, "15m": 1, "1h": 1, "4h": 1, "1d": -1, "1w": 0,
+    }
+
+
+def test_proposal_from_prediction_no_mtf_threads_none() -> None:
+    """When the caller omits mtf_* (PR1 / legacy path), proposal MTF
+    fields are None — bit-identical to pre-PR2."""
+    p = proposal_from_prediction(**_proposal_baseline_kwargs())
+    assert p is not None
+    assert p.mtf_agreement is None
+    assert p.mtf_dominant_tf is None
+    assert p.mtf_directions is None
+
+
+def test_proposal_from_prediction_invalid_mtf_json_fails_open(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Malformed mtf_directions_json must NOT poison dispatch. The parse
+    helper returns None + logs a warning; the other mtf_* fields still
+    thread through. Fail-open per spec §4.3."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.trading.execution.glue")
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_agreement=4,
+        mtf_dominant_tf="1h",
+        mtf_directions_json="not-valid-json",
+    )
+    assert p is not None
+    assert p.mtf_agreement == 4
+    assert p.mtf_directions is None
+    assert any("mtf_directions_json" in r.message for r in caplog.records)
+
+
+def test_proposal_from_prediction_mtf_directions_non_dict_fails_open(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """JSON parses to a list, not a dict → treat as malformed (parse helper
+    returns None + warns)."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.trading.execution.glue")
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_directions_json='[1, 2, 3]',
+    )
+    assert p is not None
+    assert p.mtf_directions is None
+    assert any("mtf_directions_json" in r.message for r in caplog.records)
+
+
+def test_proposal_from_prediction_float_direction_value_rejects(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Float direction value (e.g. 0.7 from a model rounding artifact)
+    MUST NOT be silently truncated to 0 — that would neutralize a
+    real opposing-TF signal at the higher-TF veto. The parser rejects
+    the whole dict and returns None, so the gate falls open."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.trading.execution.glue")
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_directions_json='{"5m": 1, "1d": -0.4, "1w": 0.7}',
+    )
+    assert p is not None
+    assert p.mtf_directions is None
+    assert any(
+        "not int" in r.message for r in caplog.records
+    )
+
+
+def test_proposal_from_prediction_bool_direction_value_accepted() -> None:
+    """bool is a subclass of int — True/False direction values flow
+    through cleanly (PR2 design ¶: accept for producer flexibility,
+    coerced to 1/0)."""
+    p = proposal_from_prediction(
+        **_proposal_baseline_kwargs(),
+        mtf_directions_json='{"5m": true, "1h": false, "1d": -1}',
+    )
+    assert p is not None
+    assert p.mtf_directions == {"5m": 1, "1h": 0, "1d": -1}
+
+
 # ---- build_user_context -------------------------------------------------
 
 

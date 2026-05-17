@@ -13,6 +13,7 @@ in dev/test where AUTONOMOUS_TRADING_ENABLED=false).
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -97,6 +98,56 @@ def reset_vault_cache_for_tests() -> None:
 # ---- Prediction -> SignalProposal ---------------------------------------
 
 
+def _parse_mtf_directions_json(raw: str | None) -> dict[str, int] | None:
+    """Parse `LivePredictionOut.mtf_directions_json` into a `dict[str, int]`.
+
+    Fail-open: returns None on None input AND on parse failure (with a
+    WARNING log). A malformed JSON column must NEVER poison dispatch —
+    the dispatcher gate that consumes the parsed dict treats None as
+    "no MTF direction data" and passes through (matches the PR1
+    `mtf_agreement is None` fail-open contract).
+
+    Rejects non-dict roots (list, scalar) — the watchdog can drill into
+    the log; the gate stays unbiased.
+
+    Direction values MUST be plain ``int`` (PR1 schema: -1 / 0 / +1).
+    Floats and other numeric types are rejected — we do NOT silently
+    truncate ``int(0.7) → 0`` because that would bias the higher-TF
+    veto (a downstream rounding artifact like ``-0.4`` would neutralize
+    a real opposing-TF signal). `bool` is an int subclass and is
+    accepted for compatibility with True/False JSON inputs.
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        log.warning(
+            "mtf_directions_json parse failed: %s (raw=%r)", exc, raw[:80],
+        )
+        return None
+    if not isinstance(parsed, dict):
+        log.warning(
+            "mtf_directions_json parsed to non-dict (%s); treating as None",
+            type(parsed).__name__,
+        )
+        return None
+    result: dict[str, int] = {}
+    for k, v in parsed.items():
+        # bool is a subclass of int — accept for True/False JSON inputs.
+        # Floats fail `isinstance(v, int)` so they trip this guard,
+        # which is exactly what we want (no silent int(0.7) → 0).
+        if not isinstance(v, int):
+            log.warning(
+                "mtf_directions_json value at key=%r is %s (not int); "
+                "treating dict as None to keep the gate unbiased",
+                k, type(v).__name__,
+            )
+            return None
+        result[str(k)] = int(v)
+    return result
+
+
 def proposal_from_prediction(
     *,
     symbol: str,
@@ -110,6 +161,13 @@ def proposal_from_prediction(
     take_profit_price: float,
     funding_rate_daily: float = 0.0,
     chart_base_url: str = "",
+    # PR2: MTF fields threaded from LivePredictionOut. All three default
+    # None so PR1 call sites continue to construct the proposal exactly
+    # as before. The dispatcher gate (Phase 4) reads these on the
+    # constructed SignalProposal.
+    mtf_agreement: int | None = None,
+    mtf_dominant_tf: str | None = None,
+    mtf_directions_json: str | None = None,
 ) -> SignalProposal | None:
     """Build a SignalProposal from a Prediction. Returns None for
     NEUTRAL signals (nothing to dispatch)."""
@@ -129,6 +187,9 @@ def proposal_from_prediction(
         inputs_hash=inputs_hash,
         funding_rate_daily=funding_rate_daily,
         chart_base_url=chart_base_url,
+        mtf_agreement=mtf_agreement,
+        mtf_dominant_tf=mtf_dominant_tf,
+        mtf_directions=_parse_mtf_directions_json(mtf_directions_json),
     )
 
 

@@ -106,6 +106,8 @@ async def _mk_engine() -> Any:
             "binance_order_id TEXT, opened_at TEXT, mode_at_open TEXT, "
             "approved_via TEXT, reasoning TEXT, inputs_hash TEXT, "
             "closed_at TEXT, pnl_usdt REAL, "
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine
@@ -163,6 +165,133 @@ async def test_place_approved_order_writes_live_trade() -> None:
     assert row.margin_usdt == 30.0
     assert row.binance_order_id == "bin-9"
     assert row.approved_via == "telegram"
+
+
+@pytest.mark.asyncio
+async def test_place_approved_order_persists_mtf_state_from_payload() -> None:
+    """PR2 §6.3 R3 — telegram-approve path symmetric with auto path: when
+    telegram_signals.payload carries mtf_*, those fields land on
+    live_trades.mtf_*. Locks in the read-from-jsonb → coerce dict →
+    write live_trades chain. The auto-path equivalent is covered by
+    test_payload_builders.py; this is the telegram-side mirror."""
+    engine = await _mk_engine()
+    # Seed a row whose payload includes MTF state (matches what
+    # build_signal_payload writes post-Phase 6).
+    mtf_payload = {
+        "symbol": "BTC/USDT", "timeframe": "1h", "direction": "LONG",
+        "entry_price": 80_000.0, "stop_loss_price": 78_400.0,
+        "take_profit_price": 83_280.0, "confidence_pct": 72,
+        "margin_usdt": 30.0, "funding_rate_daily": -0.0002,
+        "rendered_body": "x", "inline_keyboard": [],
+        "inputs_hash": "abc",
+        "mtf_agreement": 4,
+        "mtf_dominant_tf": "1h",
+        "mtf_directions": {
+            "5m": 1, "15m": 1, "1h": 1, "4h": 1, "1d": -1, "1w": 0,
+        },
+    }
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "INSERT INTO telegram_signals "
+            "(id, user_id, symbol, direction, sent_at, payload) "
+            "VALUES (:i, 1, 'BTC/USDT', 'LONG', :ts, :p)"
+        ), {"i": "mtf-sig", "ts": _NOW.isoformat(),
+            "p": json.dumps(mtf_payload)})
+        await s.commit()
+
+    stub = _StubBinance(order_id="bin-mtf")
+    async with AsyncSession(engine) as s:
+        await _place_approved_order(
+            s, signal_id="mtf-sig", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+        await s.commit()
+
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT mtf_agreement, mtf_dominant_tf, mtf_directions_json "
+            "FROM live_trades WHERE binance_order_id = 'bin-mtf'"
+        ))).first()
+    assert row.mtf_agreement == 4
+    assert row.mtf_dominant_tf == "1h"
+    # build_live_trade_payload canonical-serialises with sort_keys=True.
+    assert row.mtf_directions_json == (
+        '{"15m":1,"1d":-1,"1h":1,"1w":0,"4h":1,"5m":1}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_place_approved_order_persists_null_mtf_when_payload_lacks_it() -> None:
+    """Legacy / PR1 telegram_signals rows (no mtf_* keys in payload) →
+    live_trades.mtf_* NULL on approve. Bit-identical to pre-PR2 state
+    on those rows."""
+    engine = await _mk_engine()
+    await _seed(engine)  # baseline payload has no MTF keys
+
+    stub = _StubBinance(order_id="bin-no-mtf")
+    async with AsyncSession(engine) as s:
+        await _place_approved_order(
+            s, signal_id="abc123", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+        await s.commit()
+
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT mtf_agreement, mtf_dominant_tf, mtf_directions_json "
+            "FROM live_trades WHERE binance_order_id = 'bin-no-mtf'"
+        ))).first()
+    assert row.mtf_agreement is None
+    assert row.mtf_dominant_tf is None
+    assert row.mtf_directions_json is None
+
+
+@pytest.mark.asyncio
+async def test_place_approved_order_rejects_float_mtf_directions() -> None:
+    """If telegram_signals.payload.mtf_directions has float values
+    (downstream rounding artifact, etc.), the approve-path coerces to
+    NULL rather than silently truncating to 0 — matches the gate's
+    fail-open semantics on the auto path."""
+    engine = await _mk_engine()
+    bad_payload = {
+        "symbol": "BTC/USDT", "timeframe": "1h", "direction": "LONG",
+        "entry_price": 80_000.0, "stop_loss_price": 78_400.0,
+        "take_profit_price": 83_280.0, "confidence_pct": 72,
+        "margin_usdt": 30.0, "funding_rate_daily": -0.0002,
+        "rendered_body": "x", "inline_keyboard": [],
+        "inputs_hash": "abc",
+        "mtf_agreement": 4,
+        "mtf_dominant_tf": "1h",
+        # Floats — must not be silently truncated to 0.
+        "mtf_directions": {"5m": 0.7, "1d": -0.4},
+    }
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "INSERT INTO telegram_signals "
+            "(id, user_id, symbol, direction, sent_at, payload) "
+            "VALUES (:i, 1, 'BTC/USDT', 'LONG', :ts, :p)"
+        ), {"i": "bad-mtf", "ts": _NOW.isoformat(),
+            "p": json.dumps(bad_payload)})
+        await s.commit()
+
+    stub = _StubBinance(order_id="bin-bad-mtf")
+    async with AsyncSession(engine) as s:
+        await _place_approved_order(
+            s, signal_id="bad-mtf", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+        await s.commit()
+
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT mtf_agreement, mtf_directions_json "
+            "FROM live_trades WHERE binance_order_id = 'bin-bad-mtf'"
+        ))).first()
+    # mtf_agreement and mtf_dominant_tf still threaded through (int + str
+    # types unaffected), but mtf_directions_json is NULL — the strict
+    # coercion in _place_approved_order rejected the float-valued dict.
+    assert row.mtf_agreement == 4
+    assert row.mtf_directions_json is None
 
 
 @pytest.mark.asyncio

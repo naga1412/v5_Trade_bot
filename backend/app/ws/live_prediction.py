@@ -339,6 +339,14 @@ async def _maybe_dispatch(
                     "entry_price": ts.entry,
                     "stop_loss_price": ts.stop_loss,
                     "take_profit_price": ts.take_profit,
+                    # PR2: thread MTF fields from the prediction so the
+                    # dispatcher gate can read them. Each is Optional —
+                    # the proposal_from_prediction parser fails open on
+                    # malformed JSON. PR1 populated these on the
+                    # LivePredictionOut record; we forward them here.
+                    "mtf_agreement": pred.mtf_agreement,
+                    "mtf_dominant_tf": pred.mtf_dominant_tf,
+                    "mtf_directions_json": pred.mtf_directions_json,
                 },
             )
             await dispatch_session.commit()

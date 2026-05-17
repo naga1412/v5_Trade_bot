@@ -1,3 +1,5 @@
+import os
+
 import freezegun
 import pytest
 
@@ -18,6 +20,19 @@ freezegun.configure(default_ignore_list=[
     "PIL",
     "tensorflow",
 ])
+
+
+# PR2: `app.config.Settings` has required fields (database_url, redis_url)
+# without defaults. CI seeds them via .github/workflows/ci.yml env blocks,
+# but bare `pytest backend/tests` from a fresh shell fails at any import
+# path that lru-caches `get_settings()`. Pre-seed in-memory defaults at
+# conftest import time so the test suite is usable without
+# `DATABASE_URL=... REDIS_URL=...` boilerplate every invocation. CI's
+# explicit env wins because `setdefault` is a no-op when the var is set.
+os.environ.setdefault(
+    "DATABASE_URL", "sqlite+aiosqlite:///:memory:",
+)
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 
 @pytest.fixture

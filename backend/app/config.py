@@ -53,6 +53,26 @@ class Settings(BaseSettings):
     # to absorb single-day variance.
     auto_promote_consecutive_days: int = 7
 
+    # --- PR2: MTF gate (active in PR2; recording-only in PR1) -------------
+    # MTF_MIN_AGREEMENT_1H=0 is the single-env-var rollback path (gate
+    # passes for all agreement values when set to 0). Default 3 = 3-of-6
+    # TF majority. Tunable post-launch via env var.
+    MTF_MIN_AGREEMENT_1H: int = 3
+    MTF_HIGHER_TF_VETO: bool = True
+
+    # --- PR2: SHORT-side safety (default OFF; per-env enable) -------------
+    # All 3 flags must default False — spec §6.1 hard bound. Env var
+    # override allowed per-environment.
+    SHORT_FUNDING_HALVE_HOLD: bool = False
+    SHORT_TIGHTEN_SL_LOW_MTF: bool = False
+    SHORT_VETO_HIGH_BORROW: bool = False
+
+    # --- PR2: SHORT-side thresholds (only consulted when flag ON) --------
+    SHORT_FUNDING_HALVE_THRESHOLD_PCT: float = 0.05   # %/8h
+    SHORT_VETO_BORROW_APR_PCT: float = 10.0           # % APR
+    SHORT_TIGHTEN_SL_MTF_CUTOFF: int = 5
+    SHORT_TIGHTEN_SL_PCT: float = 0.20
+
 
 @lru_cache
 def get_settings() -> Settings:

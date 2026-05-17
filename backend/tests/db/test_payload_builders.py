@@ -518,6 +518,10 @@ class TestBuildLiveTradePayload:
                 "signal_id": "sig-auto-1",
             }),
             "inputs_hash": "auto-hash-abc",
+            # PR2: MTF columns default None (PR1 compat — kwargs omitted).
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
         }
         assert result == expected
 
@@ -528,7 +532,7 @@ class TestBuildLiveTradePayload:
         assert result["position_value_usdt"] == 150.0
         assert result["approved_via"] == "auto"
         assert result["mode_at_open"] == "fully-auto"
-        assert len(result) == 15
+        assert len(result) == 18
 
     def test_telegram_long(self) -> None:
         kwargs = self._telegram_kwargs(direction="LONG")
@@ -553,6 +557,10 @@ class TestBuildLiveTradePayload:
                 "confidence_pct": 72,
             }),
             "inputs_hash": "tg-hash-abc",
+            # PR2: MTF columns default None (PR1 compat — kwargs omitted).
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
         }
         assert result == expected
 
@@ -562,16 +570,16 @@ class TestBuildLiveTradePayload:
         assert result["direction"] == "SHORT"
         assert result["approved_via"] == "telegram"
         assert result["mode_at_open"] == "telegram-approve"
-        assert len(result) == 15
+        assert len(result) == 18
 
     def test_auto_vs_telegram_divergent_fields(self) -> None:
         """Auto and telegram payloads differ in the 5 divergent fields."""
         auto_result = build_live_trade_payload(**self._auto_kwargs())
         tg_result = build_live_trade_payload(**self._telegram_kwargs())
 
-        # Identical structure — same 15 keys
+        # Identical structure — same 18 keys (PR1: 15; PR2: +3 MTF)
         assert set(auto_result.keys()) == set(tg_result.keys())
-        assert len(auto_result) == 15
+        assert len(auto_result) == 18
 
         # Divergent: mode_at_open
         assert auto_result["mode_at_open"] == "fully-auto"
@@ -609,12 +617,57 @@ class TestBuildLiveTradePayload:
         assert result["position_value_usdt"] == 500.0  # 50 * 10
 
     def test_15_keys_present(self) -> None:
-        """Output must have exactly 15 keys."""
+        """Output must have exactly 18 keys post-PR2 (15 PR1 + 3 MTF)."""
         result = build_live_trade_payload(**self._auto_kwargs())
-        assert len(result) == 15
+        assert len(result) == 18
 
     def test_reasoning_column_not_reasoning_json(self) -> None:
         """Column name is 'reasoning', NOT 'reasoning_json'."""
         result = build_live_trade_payload(**self._auto_kwargs())
         assert "reasoning" in result
         assert "reasoning_json" not in result
+
+    # ── PR2: MTF persistence ─────────────────────────────────────────────
+
+    def test_mtf_populated_emits_three_columns(self) -> None:
+        """When mtf_* kwargs are passed, the payload includes the 3 MTF
+        columns with mtf_directions serialised canonically."""
+        result = build_live_trade_payload(
+            **self._auto_kwargs(),
+            mtf_agreement=4,
+            mtf_dominant_tf="1h",
+            mtf_directions={
+                "5m": 1, "15m": 1, "1h": 1, "4h": 1, "1d": -1, "1w": 0,
+            },
+        )
+        assert result["mtf_agreement"] == 4
+        assert result["mtf_dominant_tf"] == "1h"
+        # Canonical JSON: sort_keys=True, separators=(",", ":") — pre-FU-2
+        # defensive habit even though mtf_directions_json is in the
+        # NON_HASHED_ALLOW_LIST (PR1).
+        assert result["mtf_directions_json"] == (
+            '{"15m":1,"1d":-1,"1h":1,"1w":0,"4h":1,"5m":1}'
+        )
+
+    def test_mtf_none_emits_three_null_columns_pr1_compat(self) -> None:
+        """When mtf_* kwargs are omitted (PR1 call sites that haven't been
+        updated yet), the 3 MTF columns are emitted as None — bit-identical
+        to PR1's NULL state on those rows."""
+        result = build_live_trade_payload(**self._auto_kwargs())
+        assert result["mtf_agreement"] is None
+        assert result["mtf_dominant_tf"] is None
+        assert result["mtf_directions_json"] is None
+
+    def test_mtf_directions_none_serialises_to_none_not_empty_dict(self) -> None:
+        """Edge case: mtf_agreement passed but mtf_directions=None →
+        mtf_directions_json must be None, NOT 'null' or '{}'. The PR1
+        replay-identity contract requires JSON NULL to be Python None
+        in the payload dict."""
+        result = build_live_trade_payload(
+            **self._auto_kwargs(),
+            mtf_agreement=4,
+            mtf_dominant_tf="1h",
+            mtf_directions=None,
+        )
+        assert result["mtf_agreement"] == 4
+        assert result["mtf_directions_json"] is None
