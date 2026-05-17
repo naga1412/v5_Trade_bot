@@ -37,8 +37,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.audit_verify import verify_chain
 from app.ops.alerts import alert_admin
+from app.ops.heartbeat import record_heartbeat
 
 log = logging.getLogger(__name__)
+
+# FU-1: heartbeat name MUST match worker_registry.py's entry.
+WORKER_NAME: str = "audit_verifier_task"
 
 DEFAULT_VERIFIER_HOUR_UTC: int = 3
 
@@ -218,8 +222,22 @@ async def run_audit_verifier_loop(
         from app.ops import pause_state
         if await pause_state.is_paused():
             log.debug("audit_verifier: paused, skipping nightly chain check")
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="ok", details={"paused": True},
+            )
             continue
-        await _check_all_chains(session_factory)
+        try:
+            await _check_all_chains(session_factory)
+            await record_heartbeat(
+                session_factory, WORKER_NAME, status="ok",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("audit_verifier tick failed: %s", e)
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error", details={"error": str(e)[:200]},
+            )
 
 
 def start_audit_verifier_task(

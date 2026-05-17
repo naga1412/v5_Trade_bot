@@ -113,7 +113,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
-        pending_heartbeat=True,
+        # FU-1 closed for audit_verifier_task — record_heartbeat wired in
+        # run_audit_verifier_loop per tick (or paused-skip).
     ),
     # 7. 5-min crypto / 30-min macro news ingest.
     WorkerSpec(
@@ -168,7 +169,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=5 * 60,  # 30s cadence — be strict
         stateful=True,  # touches exchange — never auto-restart
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
-        pending_heartbeat=True,
+        # FU-1 closed for liquidation_monitor_task — record_heartbeat wired in
+        # run_liquidation_monitor_loop per poll tick.
     ),
     # 12. Telegram poller — autonomous-trading-only + creds required.
     WorkerSpec(
