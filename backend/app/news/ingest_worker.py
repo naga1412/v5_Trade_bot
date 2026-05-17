@@ -35,6 +35,7 @@ import httpx
 
 from app.config import get_settings
 from app.news.adapters._base import NewsArticle
+from app.ops.heartbeat import record_heartbeat  # noqa: E402  (placement matches other workers)
 from app.news.adapters.cryptopanic import CryptoPanicAdapter
 from app.news.adapters.yahoo_rss import YahooRssAdapter
 
@@ -164,6 +165,10 @@ async def run_news_ingest_loop(
         try:
             if await pause_state.is_paused():
                 log.debug("news_ingest: paused, skipping tick")
+                await record_heartbeat(
+                    session_factory, "news_ingest_task",
+                    status="ok", details={"paused": True},
+                )
                 await sleep(float(CRYPTO_INTERVAL_S))
                 continue
             await _run_one_iteration(
@@ -172,11 +177,24 @@ async def run_news_ingest_loop(
             now = datetime.now(timezone.utc)
             if now - last_macro_run >= timedelta(seconds=MACRO_INTERVAL_S):
                 last_macro_run = now
+            # FU-1 N1: defense-in-depth heartbeat alongside the natural
+            # MAX(fetched_at) liveness query. Heartbeats catch the case where
+            # the worker runs successfully but adapters return 0 articles —
+            # natural query would show no advance, heartbeat shows the worker
+            # is alive.
+            await record_heartbeat(
+                session_factory, "news_ingest_task",
+                status="ok",
+            )
         except asyncio.CancelledError:
             log.info("news ingest loop cancelled")
             raise
-        except Exception:
+        except Exception as e:  # noqa: BLE001
             log.exception("news ingest loop iteration failed")
+            await record_heartbeat(
+                session_factory, "news_ingest_task",
+                status="error", details={"error": str(e)[:200]},
+            )
 
         await sleep(float(CRYPTO_INTERVAL_S))
 
@@ -232,6 +250,10 @@ async def run_news_cleanup_loop(
         from app.ops import pause_state
         if await pause_state.is_paused():
             log.debug("news_cleanup: paused, skipping nightly run")
+            await record_heartbeat(
+                session_factory, "news_cleanup_task",
+                status="ok", details={"paused": True},
+            )
             continue
         # Imported lazily so the heavy classifier import path stays out
         # of cleanup-only code paths.
@@ -246,11 +268,20 @@ async def run_news_cleanup_loop(
                     "news cleanup deleted %d rows older than %dd",
                     deleted, NEWS_RETENTION_DAYS,
                 )
+            # FU-1 H7: heartbeat after each nightly cleanup completes.
+            await record_heartbeat(
+                session_factory, "news_cleanup_task",
+                status="ok", details={"deleted": deleted},
+            )
         except asyncio.CancelledError:
             log.info("news cleanup loop cancelled")
             raise
-        except Exception:
+        except Exception as e:  # noqa: BLE001
             log.exception("news cleanup failed")
+            await record_heartbeat(
+                session_factory, "news_cleanup_task",
+                status="error", details={"error": str(e)[:200]},
+            )
 
 
 def start_news_ingest_task(session_factory: Any) -> asyncio.Task[None]:

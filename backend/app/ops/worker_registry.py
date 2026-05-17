@@ -139,7 +139,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
-        pending_heartbeat=True,
+        # FU-1 closed for news_cleanup_task — record_heartbeat wired in
+        # run_news_cleanup_loop per nightly tick.
     ),
     # 9. 5-min funding/OI snapshot.
     WorkerSpec(
@@ -159,7 +160,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
-        pending_heartbeat=True,
+        # FU-1 closed for intermarket_cleanup_task — record_heartbeat wired
+        # in run_intermarket_cleanup_loop per nightly tick.
     ),
     # 11. 30s liquidation monitor — autonomous-trading-only.
     WorkerSpec(
