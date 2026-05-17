@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.ops.heartbeat import record_heartbeat
 from app.trading.modes import (
     Mode,
     ModeChangeError,
@@ -273,10 +274,23 @@ async def run_auto_promote_loop(
                         "auto-promote user=%d skipped: %s",
                         o.user_id, o.reason,
                     )
+            # FU-1: heartbeat after each daily evaluation cycle.
+            await record_heartbeat(
+                session_factory, "auto_promote_task",
+                status="ok",
+                details={
+                    "users_evaluated": len(user_ids),
+                    "promoted": sum(1 for o in outcomes if o.promoted),
+                },
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.error("auto-promote loop iteration failed: %s", e)
+            await record_heartbeat(
+                session_factory, "auto_promote_task",
+                status="error", details={"error": str(e)[:200]},
+            )
 
 
 def start_auto_promote_task(

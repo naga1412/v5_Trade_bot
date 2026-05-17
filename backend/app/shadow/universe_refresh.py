@@ -22,11 +22,14 @@ from typing import Protocol
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.ops.heartbeat import record_heartbeat
 from app.shadow.universe import (
     AssetUniverseEntry,
     fetch_top_n_usdt_spot,
     save_universe_snapshot,
 )
+
+WORKER_NAME: str = "universe_refresh_task"
 
 log = logging.getLogger(__name__)
 
@@ -104,10 +107,20 @@ async def run_universe_refresh_loop(
                 await _persist(session_factory, entries)
                 refreshed_event.set()
                 log.info("universe refreshed: %d entries", len(entries))
+            # FU-1 N3: defense-in-depth heartbeat alongside the natural
+            # MAX(snapshot_at) FROM asset_universe liveness query.
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="ok", details={"entries": len(entries)},
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log.error("universe refresh failed: %s", e)
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error", details={"error": str(e)[:200]},
+            )
 
 
 def start_universe_refresh_task(

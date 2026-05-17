@@ -24,6 +24,9 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.data.adapters import get_adapter, list_registered
+from app.ops.heartbeat import record_heartbeat
+
+WORKER_NAME: str = "health_pinger_task"
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +112,8 @@ async def run_health_pinger_loop(
     """Forever-loop: every ``interval_sec`` ping each registered adapter."""
     while True:
         await _sleep(float(interval_sec))
+        adapters_ok = 0
+        adapters_failed = 0
         for ex in list_registered():
             try:
                 adapter = get_adapter(ex)
@@ -122,10 +127,22 @@ async def run_health_pinger_loop(
                     "adapter_health(%s): healthy=%s latency_ms=%s",
                     ex, result.is_healthy, result.latency_ms,
                 )
+                adapters_ok += 1
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 log.error("adapter_health(%s) failed: %s", ex, e)
+                adapters_failed += 1
+        # FU-1 N5: defense-in-depth heartbeat alongside the natural
+        # MAX(checked_at) FROM adapter_health liveness query.
+        await record_heartbeat(
+            session_factory, WORKER_NAME,
+            status="ok" if adapters_failed == 0 else "error",
+            details={
+                "adapters_ok": adapters_ok,
+                "adapters_failed": adapters_failed,
+            },
+        )
 
 
 def start_health_pinger_task(

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
@@ -37,6 +38,33 @@ from app.ops.worker_registry import WORKER_REGISTRY, WorkerSpec
 log = logging.getLogger(__name__)
 
 WATCHDOG_INTERVAL_SECONDS: int = 5 * 60
+
+# FU-15: single-shot worker grace period. A single_shot=True task gets this
+# long after process start to record its `single_shot_completed` heartbeat.
+# Past this grace with no heartbeat → watchdog alarms. 5 min covers worst-case
+# container ramp (~30s) + prewarm's 60s deadline + slack.
+SINGLE_SHOT_GRACE_SECONDS: float = 5 * 60
+
+# Process start timestamp — used as a proxy for container uptime. Captured at
+# module import time, which is when the backend process starts the watchdog
+# during app.main lifespan.
+_PROCESS_START: float = time.time()
+
+
+def _container_uptime_seconds() -> float:
+    """Seconds since this process started. Approximates container uptime."""
+    return time.time() - _PROCESS_START
+
+
+# States that trigger an alert. Centralized so check_all_workers and
+# _alert_if_dead stay in sync.
+BAD_STATES: frozenset[str] = frozenset({
+    "stale",
+    "never_heartbeated",
+    # FU-15: single-shot-specific alarming states
+    "single_shot_never_completed",
+    "single_shot_failed",
+})
 
 # Name the watchdog uses to record its OWN heartbeat. Without this the
 # watchdog itself is a blind spot — if it crashes silently, the workers
@@ -88,6 +116,40 @@ def _env_gates_met(spec: WorkerSpec) -> bool:
     return True
 
 
+async def _fetch_heartbeat_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    worker_name: str,
+) -> tuple[datetime | None, str | None]:
+    """Returns (beat_at, last_status) for a worker, or (None, None) if absent.
+
+    Used by single-shot classification to distinguish 'completed' from
+    'failed' status on the latest heartbeat row.
+    """
+    try:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    sa.text(
+                        "SELECT beat_at, last_status FROM worker_heartbeats "
+                        "WHERE worker_name = :n"
+                    ),
+                    {"n": worker_name},
+                )
+            ).first()
+    except Exception as e:  # noqa: BLE001
+        log.warning("watchdog: heartbeat fetch failed for %s: %s", worker_name, e)
+        return (None, None)
+    if row is None:
+        return (None, None)
+    beat_at = row[0]
+    last_status = row[1]
+    if isinstance(beat_at, str):
+        beat_at = datetime.fromisoformat(beat_at.replace("Z", "+00:00"))
+    if beat_at is not None and beat_at.tzinfo is None:
+        beat_at = beat_at.replace(tzinfo=timezone.utc)
+    return (beat_at, last_status)
+
+
 async def check_all_workers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[dict[str, object]]:
@@ -101,8 +163,38 @@ async def check_all_workers(
                 "reason": f"required_env not set: {spec.required_env}",
             })
             continue
+
+        # FU-15: single_shot workers use a distinct state machine. They
+        # record ONE heartbeat with status='single_shot_completed' on clean
+        # exit; the watchdog must distinguish "successfully completed" from
+        # "still inside startup grace" from "should have completed by now".
+        if spec.single_shot:
+            beat_at, last_status = await _fetch_heartbeat_status(
+                session_factory, spec.name,
+            )
+            entry: dict[str, object] = {
+                "name": spec.name,
+                "description": spec.description,
+                "stateful": spec.stateful,
+                "max_staleness_seconds": spec.max_staleness_seconds,
+                "single_shot": True,
+                "last_status": last_status,
+            }
+            if beat_at is None:
+                if _container_uptime_seconds() < SINGLE_SHOT_GRACE_SECONDS:
+                    entry["state"] = "starting"
+                else:
+                    entry["state"] = "single_shot_never_completed"
+            elif last_status == "single_shot_completed":
+                entry["state"] = "single_shot_completed"
+            else:
+                # Heartbeat exists but with an unexpected status — log + alarm.
+                entry["state"] = "single_shot_failed"
+            statuses.append(entry)
+            continue
+
         stale = await _staleness_seconds(session_factory, spec)
-        entry: dict[str, object] = {
+        entry = {
             "name": spec.name,
             "description": spec.description,
             "stateful": spec.stateful,
@@ -145,9 +237,10 @@ async def _attempt_restart(name: str) -> bool:
 
 
 async def _alert_if_dead(statuses: list[dict[str, object]]) -> None:
-    # pending_heartbeat is intentionally NOT in the alert set — those
-    # workers are known-pending instrumentation, not real failures.
-    dead = [s for s in statuses if s["state"] in {"stale", "never_heartbeated"}]
+    # pending_heartbeat / single_shot_completed / starting are intentionally
+    # NOT in the alert set — those workers are known-pending instrumentation
+    # or single-shot tasks within their grace window, not real failures.
+    dead = [s for s in statuses if s["state"] in BAD_STATES]
     if not dead:
         return
 
@@ -207,10 +300,7 @@ async def _watchdog_loop(
         n_dead = 0
         try:
             statuses = await check_all_workers(session_factory)
-            n_dead = sum(
-                1 for s in statuses
-                if s["state"] in {"stale", "never_heartbeated"}
-            )
+            n_dead = sum(1 for s in statuses if s["state"] in BAD_STATES)
             await _alert_if_dead(statuses)
         except asyncio.CancelledError:
             raise

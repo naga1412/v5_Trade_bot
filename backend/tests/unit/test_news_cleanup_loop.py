@@ -80,6 +80,13 @@ async def test_cleanup_loop_calls_cleanup_old_news_with_20day_retention(
     monkeypatch.setattr(
         "app.news.persistence.cleanup_old_news", _fake_cleanup,
     )
+    # FU-1 added a defense-in-depth record_heartbeat() call after each
+    # cleanup tick. This test only cares about the cleanup_old_news
+    # invocation contract; stub out the heartbeat so it doesn't open a
+    # second session on the fake factory (the fake doesn't speak SQL).
+    async def _noop_heartbeat(*_args: Any, **_kwargs: Any) -> None:
+        return None
+    monkeypatch.setattr(iw, "record_heartbeat", _noop_heartbeat)
 
     sleep_calls: list[float] = []
 
