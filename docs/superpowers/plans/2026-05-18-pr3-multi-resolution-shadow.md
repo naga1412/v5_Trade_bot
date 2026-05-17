@@ -814,6 +814,438 @@ git commit -m "feat(pr3): TIMEOUT_BARS_PER_TF dict — 1h=24, 15m=96 (Phase 5)"
 
 ---
 
+## Phase 5.5 — Hold/TP scaling by `mtf_agreement` (G1)
+
+Originally PR4 scope (smart-position v1 trio). G2/G3 stay deferred (need 30+ days of MTF shadow data); G1 has no such dependency since `mtf_agreement` is already on `predictions` from PR1. Added to PR3 per operator scope audit 2026-05-18.
+
+**Net add**: ~80 LOC + 5 tests. Spec §4.6b.
+
+### Task 5.5.1: Migration extension — add scaling columns to shadow_trades + live_trades
+
+**Files:**
+- Modify: `backend/alembic/versions/2026_05_18_0021_pr3_shadow_per_tf.py` (the existing PR3 migration from Phase 1)
+- Modify: `backend/tests/db/test_pr3_migration.py`
+- Modify: `backend/app/db/audit.py` — extend `NON_HASHED_ALLOW_LIST` for `shadow_trades` and `live_trades` with the two new columns
+
+- [ ] **Step 1: Extend migration `upgrade()` body**
+
+Append to the existing PR3 migration (do NOT create a new revision — this is in-flight scope expansion):
+
+```python
+    # --- G1: Hold/TP scaling recording-only columns ----------------------
+    # shadow_trades (PR3 populates from worker)
+    op.execute("ALTER TABLE shadow_trades ADD COLUMN hold_scaling_factor REAL NULL;")
+    op.execute("ALTER TABLE shadow_trades ADD COLUMN hold_timeout_bars   SMALLINT NULL;")
+    # live_trades (PR3 reserves the columns; future PR wires the auto path)
+    op.execute("ALTER TABLE live_trades   ADD COLUMN hold_scaling_factor REAL NULL;")
+    op.execute("ALTER TABLE live_trades   ADD COLUMN hold_timeout_bars   SMALLINT NULL;")
+```
+
+- [ ] **Step 2: Extend `downgrade()` body** (reverse order — drop these BEFORE undoing the PK/UNIQUE changes)
+
+```python
+    op.execute("ALTER TABLE live_trades   DROP COLUMN hold_timeout_bars;")
+    op.execute("ALTER TABLE live_trades   DROP COLUMN hold_scaling_factor;")
+    op.execute("ALTER TABLE shadow_trades DROP COLUMN hold_timeout_bars;")
+    op.execute("ALTER TABLE shadow_trades DROP COLUMN hold_scaling_factor;")
+    # ... then the existing PR3 downgrade body ...
+```
+
+- [ ] **Step 3: Failing migration introspection tests in `test_pr3_migration.py`**
+
+```python
+@pytest.mark.skipif(not _DSN.startswith("postgresql"), reason="Postgres only.")
+@pytest.mark.asyncio
+async def test_shadow_trades_has_hold_scaling_columns() -> None:
+    engine = create_async_engine(_DSN)
+    async with engine.connect() as conn:
+        rows = (await conn.execute(sa.text(
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_name='shadow_trades' "
+            "AND column_name IN ('hold_scaling_factor', 'hold_timeout_bars');"
+        ))).all()
+    cols = {r.column_name: (r.data_type, r.is_nullable) for r in rows}
+    assert "hold_scaling_factor" in cols
+    assert "hold_timeout_bars" in cols
+    assert cols["hold_scaling_factor"][1] == "YES"  # nullable
+    assert cols["hold_timeout_bars"][1] == "YES"
+    await engine.dispose()
+
+
+@pytest.mark.skipif(not _DSN.startswith("postgresql"), reason="Postgres only.")
+@pytest.mark.asyncio
+async def test_live_trades_has_hold_scaling_columns() -> None:
+    # ... symmetric assertion on live_trades ...
+```
+
+- [ ] **Step 4: Extend `NON_HASHED_ALLOW_LIST` in `app/db/audit.py`**
+
+The 4 new columns (2 on shadow_trades, 2 on live_trades) MUST go in the allow-list so the audit verifier doesn't flag them as missing hash inputs. They are recording-only — never in `HASH_PAYLOAD_COLUMNS`. Mirrors PR1's pattern for the analytics columns.
+
+- [ ] **Step 5: Run upgrade + downgrade round-trip — green**
+
+```
+DATABASE_URL=postgresql+asyncpg://... python -m pytest tests/db/test_pr3_migration.py tests/db/test_pr3_migration_downgrade.py -v
+```
+
+- [ ] **Step 6: Commit**
+
+```
+git commit -m "feat(pr3): G1 — alembic adds hold_scaling_factor + hold_timeout_bars (shadow + live, Phase 5.5.1)"
+```
+
+### Task 5.5.2: Settings — `HOLD_TP_SCALING_ENABLED` + `HOLD_TP_SCALING_TABLE`
+
+**Files:**
+- Modify: `backend/app/config.py`
+- Modify: `backend/tests/unit/test_pr3_settings_defaults.py`
+
+- [ ] **Step 1: Failing tests**
+
+```python
+def test_hold_tp_scaling_default_off() -> None:
+    assert _s().HOLD_TP_SCALING_ENABLED is False
+
+
+def test_hold_tp_scaling_table_default() -> None:
+    s = _s()
+    assert s.HOLD_TP_SCALING_TABLE == {
+        3: (24, 1.0),
+        4: (48, 1.25),
+        5: (96, 1.5),
+        6: (168, 2.0),
+    }
+
+
+def test_hold_tp_scaling_env_var_override(monkeypatch) -> None:
+    monkeypatch.setenv("HOLD_TP_SCALING_ENABLED", "true")
+    assert _s().HOLD_TP_SCALING_ENABLED is True
+```
+
+- [ ] **Step 2: Add fields to `Settings(BaseSettings)`**
+
+```python
+    # --- PR3 G1: Hold/TP scaling by mtf_agreement ------------------------
+    # Default OFF: scaling does NOT apply; positions use the per-TF baseline
+    # timeout (TIMEOUT_BARS_PER_TF) and the engine's computed TP. Operator
+    # flips per-env after staging confirms scaled trades behave (per-TF
+    # win-rate, hold-time distribution). G2 (IC auto-weighting) and G3
+    # (regime-conditional weights) stay deferred — need 30+ days of MTF
+    # shadow data which only starts accruing post-PR3 deploy.
+    HOLD_TP_SCALING_ENABLED: bool = False
+    # Lookup: mtf_agreement -> (timeout_bars, tp_multiplier).
+    # The timeout_bars value here is the 1h-baseline; for 15m positions
+    # the worker applies the multiplier (entry's_table_bars / 24) against
+    # the per-TF baseline (TIMEOUT_BARS_PER_TF[tf]) — see scaling.py.
+    # Stop-loss is INVARIANT under scaling.
+    HOLD_TP_SCALING_TABLE: dict[int, tuple[int, float]] = {
+        3: (24, 1.0),
+        4: (48, 1.25),
+        5: (96, 1.5),
+        6: (168, 2.0),
+    }
+```
+
+- [ ] **Step 3: Test green; commit**
+
+```
+git commit -m "feat(pr3): G1 settings — HOLD_TP_SCALING_ENABLED (default OFF) + scaling table (Phase 5.5.2)"
+```
+
+### Task 5.5.3: `app/shadow/scaling.py` — pure lookup helper
+
+**Files:**
+- New: `backend/app/shadow/scaling.py`
+- New: `backend/tests/shadow/test_hold_tp_scaling.py`
+
+- [ ] **Step 1: Failing tests**
+
+```python
+"""G1 — Hold/TP scaling lookup helper. Pure function, no I/O."""
+from __future__ import annotations
+
+import pytest
+
+from app.shadow.scaling import effective_hold_tp
+
+
+_TABLE = {3: (24, 1.0), 4: (48, 1.25), 5: (96, 1.5), 6: (168, 2.0)}
+
+
+def test_lookup_per_agreement_returns_table_entry() -> None:
+    assert effective_hold_tp(timeframe="1h", mtf_agreement=4, table=_TABLE) == (48, 1.25)
+    assert effective_hold_tp(timeframe="1h", mtf_agreement=6, table=_TABLE) == (168, 2.0)
+
+
+def test_lookup_agreement_3_returns_baseline() -> None:
+    """agreement=3 maps to (24, 1.0) — baseline for 1h."""
+    assert effective_hold_tp(timeframe="1h", mtf_agreement=3, table=_TABLE) == (24, 1.0)
+
+
+def test_lookup_15m_scales_against_per_tf_baseline() -> None:
+    """For 15m, multiplier is relative to the per-TF baseline (96 bars).
+    agreement=4 → 48/24 = 2× multiplier → 192 bars on 15m."""
+    bars, mult = effective_hold_tp(timeframe="15m", mtf_agreement=4, table=_TABLE)
+    assert bars == 192   # 96 × (48/24)
+    assert mult == 1.25  # tp multiplier unchanged across TFs
+
+
+def test_lookup_agreement_below_table_returns_baseline_and_warns(caplog) -> None:
+    """agreement=2 shouldn't reach this lookup (PR2 gate blocks), but if
+    it ever does — fail-open to baseline + WARN."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.shadow.scaling")
+    bars, mult = effective_hold_tp(timeframe="1h", mtf_agreement=2, table=_TABLE)
+    assert (bars, mult) == (24, 1.0)
+    assert any("below table" in r.message for r in caplog.records)
+
+
+def test_lookup_none_agreement_returns_baseline() -> None:
+    """mtf_agreement is None (PR1 fail-open) → baseline + no scaling."""
+    assert effective_hold_tp(timeframe="1h", mtf_agreement=None, table=_TABLE) == (24, 1.0)
+
+
+def test_lookup_unknown_tf_raises() -> None:
+    """Unknown TF in TIMEOUT_BARS_PER_TF is a programming error — fail-loud."""
+    with pytest.raises(KeyError):
+        effective_hold_tp(timeframe="5m", mtf_agreement=4, table=_TABLE)
+```
+
+- [ ] **Step 2: Implement `scaling.py`**
+
+```python
+"""G1 — Hold/TP scaling lookup. Pure, no I/O.
+
+Per spec §4.6b: at trade-open time, the worker calls effective_hold_tp(...)
+to convert (timeframe, mtf_agreement) into (timeout_bars, tp_multiplier).
+The result is recording-only when HOLD_TP_SCALING_ENABLED=False — the
+worker uses the per-TF baseline instead in that case. When ON, both the
+ShadowPosition and the persisted shadow_trades / live_trades rows reflect
+the scaled values.
+"""
+from __future__ import annotations
+
+import logging
+
+from app.shadow.exit_monitor import TIMEOUT_BARS_PER_TF
+
+log = logging.getLogger(__name__)
+
+
+def effective_hold_tp(
+    *,
+    timeframe: str,
+    mtf_agreement: int | None,
+    table: dict[int, tuple[int, float]],
+) -> tuple[int, float]:
+    """Look up `(timeout_bars, tp_multiplier)` for this signal.
+
+    Multiplier semantics: the table is indexed against the 1h baseline
+    (24 bars). For non-1h TFs, the timeout multiplier is applied against
+    that TF's baseline (TIMEOUT_BARS_PER_TF[tf]). TP multiplier is TF-
+    invariant — same multiplier whether the position is 1h or 15m.
+
+    Fail-open contract:
+      - mtf_agreement is None (PR1 cold cache / fetch fail) → baseline +
+        1.0× (no scaling). PR2 gate has already passed at this point.
+      - mtf_agreement below the lowest table key (shouldn't happen — PR2
+        MTF_MIN_AGREEMENT_1H gate blocks) → baseline + 1.0× + WARN.
+      - mtf_agreement above the highest table key → cap at the highest key.
+
+    Raises:
+      - KeyError if `timeframe` isn't in TIMEOUT_BARS_PER_TF (programming
+        error — fail-loud; new TFs require explicit TIMEOUT_BARS_PER_TF +
+        scaling-table entries).
+    """
+    tf_baseline_bars = TIMEOUT_BARS_PER_TF[timeframe]  # KeyError → fail-loud
+
+    if mtf_agreement is None:
+        return (tf_baseline_bars, 1.0)
+
+    sorted_keys = sorted(table.keys())
+    lowest, highest = sorted_keys[0], sorted_keys[-1]
+    if mtf_agreement < lowest:
+        log.warning(
+            "effective_hold_tp: mtf_agreement=%d below table (min=%d); "
+            "falling back to baseline. PR2 MTF gate should have blocked.",
+            mtf_agreement, lowest,
+        )
+        return (tf_baseline_bars, 1.0)
+    if mtf_agreement > highest:
+        agreement = highest
+    else:
+        agreement = mtf_agreement
+
+    table_bars, tp_mult = table[agreement]
+    # The table_bars is the 1h-baseline; scale by TF ratio for non-1h TFs.
+    bars_baseline_1h = table[lowest][0]  # 24 (lowest key's bars = baseline)
+    bars = int(tf_baseline_bars * (table_bars / bars_baseline_1h))
+    return (bars, tp_mult)
+```
+
+- [ ] **Step 3: Test green + commit**
+
+```
+git commit -m "feat(pr3): G1 scaling.py — effective_hold_tp pure lookup (Phase 5.5.3)"
+```
+
+### Task 5.5.4: `ShadowPosition` fields + worker open-trade hook
+
+**Files:**
+- Modify: `backend/app/shadow/engine.py`
+- Modify: `backend/app/shadow/worker.py`
+- Modify: `backend/tests/shadow/test_hold_tp_scaling.py`
+
+- [ ] **Step 1: Failing tests for the position hook**
+
+```python
+@pytest.mark.asyncio
+async def test_hold_tp_scaling_applies_on_open_when_enabled(
+    monkeypatch,
+) -> None:
+    """Flag ON + signal with mtf_agreement=5 + tf=1h → opened position has
+    hold_timeout_bars=96, hold_scaling_factor=1.5, take_profit at 1.5×
+    baseline distance from entry."""
+    monkeypatch.setenv("HOLD_TP_SCALING_ENABLED", "true")
+    # ... fixture: signal with mtf_agreement=5, baseline TP 4% above entry ...
+    # ... drive _handle_candle ...
+    # ... assert pos.hold_timeout_bars == 96, pos.hold_scaling_factor == 1.5 ...
+    # ... assert pos.take_profit_price == entry + 1.5 * 0.04 * entry ...
+
+
+@pytest.mark.asyncio
+async def test_hold_tp_scaling_off_keeps_baseline(monkeypatch) -> None:
+    """Flag OFF (default) → opened position has hold_* fields = None,
+    take_profit at engine-computed baseline (PR1/PR2 behavior)."""
+    # ... assert pos.hold_timeout_bars is None ...
+    # ... assert pos.hold_scaling_factor is None ...
+    # ... assert pos.take_profit_price == engine_baseline_tp ...
+
+
+@pytest.mark.asyncio
+async def test_hold_tp_scaling_neutral_signal_never_scales() -> None:
+    """NEUTRAL direction never opens a position, so scaling lookup never
+    fires. Lock-in test against future refactors that might call
+    effective_hold_tp on NEUTRAL signals."""
+    # ... ShadowWorker._handle_candle with NEUTRAL signal ...
+    # ... assert effective_hold_tp NOT called (mock + assert_not_called) ...
+```
+
+- [ ] **Step 2: Add fields to `ShadowPosition`**
+
+```python
+@dataclass(frozen=True)
+class ShadowPosition:
+    ...
+    # G1 (Phase 5.5): NULL when HOLD_TP_SCALING_ENABLED=False; populated
+    # with the table-lookup values when scaling is ON.
+    hold_scaling_factor: float | None = None
+    hold_timeout_bars: int | None = None
+```
+
+- [ ] **Step 3: Hook into the worker's open-trade path**
+
+In the LONG/SHORT entry branch of `_handle_candle` (post-PR3 Phase 4 refactor, the call site is TF-aware):
+
+```python
+from app.shadow.scaling import effective_hold_tp
+
+if settings.HOLD_TP_SCALING_ENABLED:
+    scaled_bars, tp_mult = effective_hold_tp(
+        timeframe=tf,
+        mtf_agreement=signal.mtf_agreement,
+        table=settings.HOLD_TP_SCALING_TABLE,
+    )
+    # Recompute TP at scaled distance, keep SL invariant.
+    baseline_tp_distance = abs(baseline_tp - entry_price)
+    sign = 1 if direction == Direction.LONG else -1
+    new_tp = entry_price + (sign * tp_mult * baseline_tp_distance)
+    pos = ShadowPosition(
+        ...,
+        take_profit=new_tp,
+        hold_scaling_factor=tp_mult,
+        hold_timeout_bars=scaled_bars,
+    )
+else:
+    # Flag OFF — bit-identical to pre-G1 behavior.
+    pos = ShadowPosition(
+        ...,
+        take_profit=baseline_tp,
+        # hold_* default None
+    )
+```
+
+- [ ] **Step 4: `exit_monitor.py` reads `position.hold_timeout_bars` when set, else falls back to `TIMEOUT_BARS_PER_TF[position.timeframe]`**
+
+```python
+def check_exit(
+    pos: ShadowPosition, *, bar_high: float, bar_low: float, bar_close: float,
+) -> ExitDecision | None:
+    # G1 (Phase 5.5): per-position override takes precedence over per-TF
+    # default. None falls back to the per-TF baseline (PR1/PR2 behavior).
+    limit = pos.hold_timeout_bars if pos.hold_timeout_bars is not None \
+        else TIMEOUT_BARS_PER_TF[pos.timeframe]
+    if pos.bars_held >= limit:
+        return ExitDecision(reason=ExitReason.TIMEOUT, exit_price=bar_close)
+    ...
+```
+
+- [ ] **Step 5: Tests green + commit**
+
+```
+git commit -m "feat(pr3): G1 worker + exit_monitor honor scaled hold/TP per ShadowPosition (Phase 5.5.4)"
+```
+
+### Task 5.5.5: Persistence — `build_shadow_trade_payload` + `build_live_trade_payload` accept scaling kwargs
+
+**Files:**
+- Modify: `backend/app/db/payload_builders.py`
+- Modify: `backend/app/shadow/persistence.py` — pass `pos.hold_scaling_factor` and `pos.hold_timeout_bars` to the builder
+- Modify: `backend/tests/db/test_payload_builders.py`
+
+- [ ] **Step 1: Failing tests**
+
+```python
+def test_shadow_payload_hold_scaling_populated() -> None:
+    result = build_shadow_trade_payload(
+        **_baseline_kwargs(),
+        hold_scaling_factor=1.5,
+        hold_timeout_bars=96,
+    )
+    assert result["hold_scaling_factor"] == 1.5
+    assert result["hold_timeout_bars"] == 96
+
+
+def test_shadow_payload_hold_scaling_default_none() -> None:
+    """Pre-G1 callers (no kwargs) get NULL on both columns — bit-identical
+    to pre-PR3 shadow_trades row contract."""
+    result = build_shadow_trade_payload(**_baseline_kwargs())
+    assert result["hold_scaling_factor"] is None
+    assert result["hold_timeout_bars"] is None
+
+
+def test_live_trade_payload_hold_scaling_columns_present() -> None:
+    """Live_trades gets the columns now (PR3 reserves; future PR wires
+    auto path). Builder accepts kwargs, default None."""
+    result = build_live_trade_payload(**_baseline_live_kwargs())
+    assert result["hold_scaling_factor"] is None
+    assert result["hold_timeout_bars"] is None
+```
+
+- [ ] **Step 2: Add `hold_scaling_factor` + `hold_timeout_bars` kwargs (default None) to both builders**
+
+Update the key count assertions in existing tests: 18 → 20 for `build_live_trade_payload`; matching update for `build_shadow_trade_payload`.
+
+- [ ] **Step 3: Wire `pos.hold_*` through `persist_closed_trade` to the builder**
+
+- [ ] **Step 4: Test green + commit**
+
+```
+git commit -m "feat(pr3): G1 persistence — payload builders + persist_closed_trade thread scaling (Phase 5.5.5)"
+```
+
+---
+
 ## Phase 6 — Heartbeat + watchdog hygiene (FU-1 partial close)
 
 Rationale: per spec §6.3 these ship together in one commit.
