@@ -30,6 +30,7 @@ from app.data.intermarket_persistence import (
     cleanup_old_intermarket,
     persist_intermarket_snapshots,
 )
+from app.ops.heartbeat import record_heartbeat
 from app.shadow.universe import load_current_universe
 
 
@@ -82,15 +83,29 @@ async def run_intermarket_snapshot_loop(
         from app.ops import pause_state
         if await pause_state.is_paused():
             log.debug("intermarket_snapshot: paused, skipping tick")
+            await record_heartbeat(
+                session_factory, "intermarket_snapshot_task",
+                status="ok", details={"paused": True},
+            )
             await _sleep(float(INTERMARKET_INTERVAL_S))
             continue
         try:
             await _snapshot_once(session_factory, adapter, loader)
+            # FU-1 N2: defense-in-depth heartbeat alongside the natural
+            # MAX(captured_at) liveness query.
+            await record_heartbeat(
+                session_factory, "intermarket_snapshot_task",
+                status="ok",
+            )
         except asyncio.CancelledError:
             log.info("intermarket snapshot loop cancelled")
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("intermarket snapshot iteration failed")
+            await record_heartbeat(
+                session_factory, "intermarket_snapshot_task",
+                status="error", details={"error": str(e)[:200]},
+            )
         await _sleep(float(INTERMARKET_INTERVAL_S))
 
 
@@ -125,6 +140,10 @@ async def run_intermarket_cleanup_loop(
         from app.ops import pause_state
         if await pause_state.is_paused():
             log.debug("intermarket_cleanup: paused, skipping nightly run")
+            await record_heartbeat(
+                session_factory, "intermarket_cleanup_task",
+                status="ok", details={"paused": True},
+            )
             continue
         try:
             async with session_factory() as session:
@@ -132,11 +151,20 @@ async def run_intermarket_cleanup_loop(
                     session, older_than_days=older_than_days,
                 )
             log.info("intermarket cleanup: deleted=%d", deleted)
+            # FU-1 H8: heartbeat after each nightly cleanup completes.
+            await record_heartbeat(
+                session_factory, "intermarket_cleanup_task",
+                status="ok", details={"deleted": deleted},
+            )
         except asyncio.CancelledError:
             log.info("intermarket cleanup loop cancelled")
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("intermarket cleanup loop iteration failed")
+            await record_heartbeat(
+                session_factory, "intermarket_cleanup_task",
+                status="error", details={"error": str(e)[:200]},
+            )
 
 
 def start_intermarket_snapshot_task(

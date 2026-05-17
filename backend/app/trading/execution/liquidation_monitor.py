@@ -29,6 +29,7 @@ from app.exchanges.binance_live import (
     BinanceLiveClient,
     BinanceLiveError,
 )
+from app.ops.heartbeat import record_heartbeat
 from app.trading.kill_switches import (
     DEFAULTS as KILL_DEFAULTS,
     SwitchConfig,
@@ -204,6 +205,11 @@ async def run_liquidation_monitor_loop(
                 # Manual mode). Capped to once per minute to keep volume
                 # reasonable.
                 log.info("liq monitor: tick (no open positions)")
+                # FU-1: record heartbeat in steady-state too.
+                await record_heartbeat(
+                    session_factory, "liquidation_monitor_task",
+                    status="ok", details={"open_positions": 0},
+                )
                 continue
 
             client = binance_factory()
@@ -220,10 +226,19 @@ async def run_liquidation_monitor_loop(
                         )
             finally:
                 await client.aclose()
+            # FU-1: heartbeat after evaluating all open positions.
+            await record_heartbeat(
+                session_factory, "liquidation_monitor_task",
+                status="ok", details={"open_positions": len(positions)},
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.error("liq monitor iteration failed: %s", e)
+            await record_heartbeat(
+                session_factory, "liquidation_monitor_task",
+                status="error", details={"error": str(e)[:200]},
+            )
 
 
 def start_liquidation_monitor(

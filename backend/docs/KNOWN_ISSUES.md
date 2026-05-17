@@ -10,7 +10,7 @@ Each entry has root cause, scope of impact, and remediation options.
 Operational fixes orthogonal to the upgrade plan. Acknowledged by
 operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
 
-### FU-1 — Wire heartbeats for all 16 registered workers
+### FU-1 — Wire heartbeats for all 16 registered workers — ✅ CLOSED 2026-05-17
 - **Problem**: 12 of 16 workers in `worker_registry.py` are flagged
   `pending_heartbeat=True` — the watchdog cannot tell whether they are
   alive or dead. Verified via `worker_heartbeats` query on 2026-05-16
@@ -21,7 +21,25 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
   wired.
 - **Effort**: ~1 day. Touches ~12 worker modules + their tests.
 - **Tracking**: this file (FU-1). See also the "Worker heartbeats" section below.
-- **Status**: queued; high-priority operational hygiene.
+- **Status**: ✅ **CLOSED** on `feat/fu-1-worker-heartbeats-impl` branch —
+  9 H-workers had `pending_heartbeat=True` flags dropped after wiring
+  in-loop `record_heartbeat()` calls (status="ok" on success, "error"
+  in the exception handler, "ok" + `details={"paused": True}` when
+  pause_state is set). 5 N-workers (universe_refresh, universe_sync,
+  health_pinger, news_ingest, intermarket_snapshot) gained
+  defense-in-depth heartbeats alongside their existing natural-table
+  liveness queries — heartbeats catch the case where the worker runs
+  fine but the natural query returns no advance (e.g. news_ingest
+  ticks return 0 articles). FU-15 (single-shot watchdog state) closed
+  alongside: `mtf_cache_prewarm_task` was getting reported as
+  `no_signal` (alarming); it now records ONE heartbeat with
+  `status="single_shot_completed"` on clean exit and the watchdog
+  classifies as `single_shot_completed` (non-alarming) per a new
+  4-state machine (starting / single_shot_completed /
+  single_shot_never_completed / single_shot_failed). CI gates:
+  `test_no_pending_heartbeat_after_fu1` hard-fails if the flag
+  re-appears; per-worker static smoke + 4 behavioural propagation
+  tests.
 
 ### FU-2 — Audit chain v2 — canonical JSONB hashing + alert routing fix + CHAINED_TABLES expansion
 - **Problem (a)**: JSONB column tampering not detectable (root cause
@@ -473,7 +491,19 @@ Tracking: queued as a separate future PR. Either:
 
 ---
 
-## Worker heartbeats — 12 of 16 registered workers never beat
+## Worker heartbeats — ✅ CLOSED 2026-05-17 (was: 12 of 16 registered workers never beat)
+
+**Status**: ✅ Closed on `feat/fu-1-worker-heartbeats-impl`. All 18
+workers in the registry now emit `record_heartbeat()` from their main
+loop or (for `mtf_cache_prewarm_task`) on clean single-shot exit. The
+`pending_heartbeat=True` flag has been removed from every entry; the
+new `test_no_pending_heartbeat_after_fu1` regression test prevents
+the flag from reappearing. See the FU-1 entry above for the closure
+summary. The historical snapshot below is preserved for context.
+
+---
+
+### Historical snapshot (pre-FU-1, 2026-05-16)
 
 `backend/app/ops/worker_registry.py` declares 16 workers. Querying
 `worker_heartbeats` table (2026-05-16 12:35 UTC) shows only **4**
