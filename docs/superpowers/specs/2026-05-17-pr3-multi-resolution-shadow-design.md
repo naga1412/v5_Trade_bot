@@ -63,14 +63,14 @@ class Settings(BaseSettings):
     # PR3: Multi-resolution shadow
     SHADOW_TIMEFRAMES: list[str] = ["1h", "15m"]
     SHADOW_PREWARM_BARS: int = 200
-    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 4.0, "15m": 1.0}
+    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 0.5, "15m": 0.5}
     SHADOW_NARROW_UNIVERSE: list[str] = []
     SHADOW_15M_ELIGIBLE_FOR_PROMOTION: bool = False
 ```
 
 **Bounds from operator:**
 - `SHADOW_TIMEFRAMES` defaults to `["1h", "15m"]` — the behavior flip from PR1/PR2's effective `["1h"]` (module constant).
-- `SHADOW_COOLDOWN_HOURS` is a dict, not a single int. **This REPLACES the existing module-level `COOLDOWN_MINUTES=30` constant** in `worker.py:56`. The current 30-minute cooldown becomes 4 hours for 1h trades and 1 hour for 15m trades. Operator confirmed in master rollout plan.
+- `SHADOW_COOLDOWN_HOURS` is a dict, not a single int. **This REPLACES the existing module-level `COOLDOWN_MINUTES=30` constant** in `worker.py:56`. **The 30-minute cooldown is preserved for both lanes** (`{"1h": 0.5, "15m": 0.5}` = 30 minutes each). The master rollout plan's "4h / 1h" dictation was reconciled to current 30-min default per operator decision 2026-05-17 (review of actual prod cooldown behavior preferred the current value over the conservative dictation). The dict shape future-proofs for asymmetric cooldowns later, even though both values are currently identical.
 - `SHADOW_NARROW_UNIVERSE=[]` (empty list) = use full top-30 universe. Non-empty list = use intersection (any symbol in the list that's also in the top-30 universe). Filtering does NOT add symbols outside the top-30.
 - `SHADOW_15M_ELIGIBLE_FOR_PROMOTION=False` = 15m shadow trades are RECORDED but excluded from the promotion-gate's 100-trade Sharpe/DD/win-rate aggregates. Per spec §3 + master plan: "recording-mixed-TF, promoting-1h-only by default" pending data validation.
 - Per-env override via env vars allowed for all 5 fields. Env vars use Pydantic v2 BaseSettings list/dict parsing (JSON-encoded for non-trivial types — document in field comments).
@@ -357,7 +357,7 @@ def downgrade():
 | D1 | One worker for both TFs, or two separate workers? | One worker, per-TF readers | Single source of state (open positions, cooldowns, cache); avoids new `pending_heartbeat=True` workers per FU-1. |
 | D2 | Reuse PR1's `_KLINE_CACHE` or duplicate? | REUSE | Same Binance SPOT REST endpoint, same `(sym, tf)` keys, 15m TTL=60s aligns naturally with bar period. |
 | D3 | KLINE_LIMIT bump (200 → 300)? | NO — shadow seeds 200, lets buffer accumulate to ~300 over candle flow | Bumping cap is out-of-scope churn; 200 is sufficient for EMA20/50 + ADX (MTF compute's own need). |
-| D4 | Per-TF cooldown vs shared cooldown? | Per-TF | Master plan defaults `SHADOW_COOLDOWN_HOURS = {"1h": 4, "15m": 1}` are TF-specific; per-TF is the natural implementation. |
+| D4 | Per-TF cooldown vs shared cooldown? | Per-TF (dict shape preserved; both values 30 min) | The dict-shape future-proofs for asymmetric cooldowns. Operator reconciled values to `{"1h": 0.5, "15m": 0.5}` (= 30 min each) on 2026-05-17 — preferred current prod cooldown over master plan's "4h / 1h" dictation. |
 | D5 | Per-TF open positions vs shared? | Per-TF | The motivation of PR3 is "4× signal rate"; shared open-positions defeats this. |
 | D6 | 15m exit timeout | 96 bars (~24h wall-clock match with 1h's 24-bar window) | Symmetric wall-clock policy; tunable post-launch. |
 | D7 | 15m signals eligible for live promotion | NO by default (`SHADOW_15M_ELIGIBLE_FOR_PROMOTION=False`) | Per master plan: record 15m to gather data, but don't gamble promotion criterion on noisier TF until win-rate proven. |
