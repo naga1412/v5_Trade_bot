@@ -32,6 +32,7 @@ from app.api.schemas import (
     RecentTradeOut,
     SymbolSearchHit,
     SymbolSearchOut,
+    TimeframeGateStatsOut,
     WindowStatsOut,
 )
 from app.auth.deps import current_user_or_impersonated
@@ -119,12 +120,21 @@ def _build_window_stats(
 async def _select_trades_since(
     session: AsyncSession, *, user_id: int, since: datetime,
     direction: str | None = None,
+    timeframe: str | None = None,
+    exclude_timeframes: list[str] | None = None,
 ) -> list[Any]:
-    """Return shadow_trades rows closed at/after `since`. Optional direction filter.
+    """Return shadow_trades rows closed at/after `since`. Optional filters.
 
     Spec §7 — every per-user table query MUST filter by user_id. The runtime
     query guard (app.auth.query_guard) enforces this at the SQLAlchemy event
     level so any future helper that forgets the predicate raises in dev.
+
+    PR3 Phase 7:
+      - ``timeframe``: optional positive filter for the per-TF breakdown
+        in /promotion-gate.
+      - ``exclude_timeframes``: optional list of TFs to exclude. Used by
+        the combined block when ``SHADOW_15M_ELIGIBLE_FOR_PROMOTION=False``
+        so 15m trades don't count toward the promotion criterion.
     """
     sql = (
         "SELECT direction, entry_price, stop_loss, take_profit, "
@@ -137,6 +147,18 @@ async def _select_trades_since(
     if direction is not None:
         sql += "AND direction = :direction "
         params["direction"] = direction
+    if timeframe is not None:
+        sql += "AND timeframe = :timeframe "
+        params["timeframe"] = timeframe
+    if exclude_timeframes:
+        # Parametrize each excluded TF so any value flows through asyncpg
+        # parameter-binding cleanly (don't string-interpolate).
+        placeholders = []
+        for i, tf in enumerate(exclude_timeframes):
+            key = f"excl_tf_{i}"
+            placeholders.append(f":{key}")
+            params[key] = tf
+        sql += f"AND timeframe NOT IN ({', '.join(placeholders)}) "
     sql += "ORDER BY closed_at ASC"
     result = await session.execute(sa.text(sql), params)
     return list(result.all())
@@ -214,11 +236,26 @@ async def promotion_gate(
     current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> PromotionGateOut:
-    """Return rolling-30-day promotion-gate state for telegram-approve mode."""
+    """Return rolling-30-day promotion-gate state for telegram-approve mode.
+
+    PR3 Phase 7: response also carries `per_timeframe` (informational) with
+    the same metric shape per TF. The combined dataset excludes 15m when
+    `SHADOW_15M_ELIGIBLE_FOR_PROMOTION=False` so promotion criterion is
+    not gambled on the noisier TF until staging validates 15m win-rate.
+    """
+    from app.config import get_settings as _get_pr3_settings
+    _settings = _get_pr3_settings()
+
     now = datetime.now(UTC)
     since = now - timedelta(days=30)
+
+    # Combined dataset: excludes 15m unless explicitly eligible.
+    excluded_tfs: list[str] = []
+    if not _settings.SHADOW_15M_ELIGIBLE_FOR_PROMOTION:
+        excluded_tfs = ["15m"]
     rows = await _select_trades_since(
         session, user_id=current_user.id, since=since,
+        exclude_timeframes=excluded_tfs,
     )
     trades = [_row_to_trade(r) for r in rows]
 
@@ -290,11 +327,35 @@ async def promotion_gate(
         trades_short=max(0, _GATE_TRADES_REQUIRED - n_trades),
         all_passing=all_passing,
     )
+
+    # PR3 Phase 7: per-TF breakdown. One block per configured TF. Empty
+    # blocks (no trades on that TF yet) still surface — operator can see
+    # the 15m lane accruing toward future-eligibility data.
+    per_timeframe: dict[str, TimeframeGateStatsOut] = {}
+    for tf in _settings.SHADOW_TIMEFRAMES:
+        tf_rows = await _select_trades_since(
+            session, user_id=current_user.id, since=since, timeframe=tf,
+        )
+        tf_trades = [_row_to_trade(r) for r in tf_rows]
+        tf_pf: float | None = (
+            compute_profit_factor(tf_trades) if tf_trades else None
+        )
+        if tf_pf is not None and math.isinf(tf_pf):
+            tf_pf = _PROFIT_FACTOR_INF_CAP
+        per_timeframe[tf] = TimeframeGateStatsOut(
+            trades_total=len(tf_trades),
+            sharpe=compute_sharpe_annualized(tf_trades, 30) if tf_trades else None,
+            max_drawdown=compute_max_drawdown(tf_trades) if tf_trades else None,
+            win_rate=compute_win_rate(tf_trades) if tf_trades else None,
+            profit_factor=tf_pf,
+        )
+
     return PromotionGateOut(
         target_mode="telegram-approve",
         metrics=metrics,
         all_passing=all_passing,
         distance_summary=distance_summary,
+        per_timeframe=per_timeframe,
     )
 
 
