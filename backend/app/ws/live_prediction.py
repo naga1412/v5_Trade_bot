@@ -16,9 +16,13 @@ from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
 from app.ml.validator import record_pending_validation
+from app.ops.heartbeat import record_heartbeat
 from app.trading.execution.glue import dispatch_if_eligible, vault_keys
 
 log = logging.getLogger(__name__)
+
+# FU-1: heartbeat name MUST match worker_registry.py's entry.
+WORKER_NAME: str = "live_worker"
 
 # SP-0.7: the singleton live-prediction worker writes rows on behalf of the
 # bootstrap admin (id=1, see migration 0005). SP-8 will fan out per user.
@@ -137,6 +141,19 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                 )
         except Exception as e:  # noqa: BLE001
             log.warning("build_prediction failed: %s", e)
+            # FU-1 follow-up: error heartbeat so a sustained build_prediction
+            # failure (model crash, layer assertion, etc.) surfaces as
+            # last_status='error' instead of letting beat_at go stale — the
+            # WS loop is still alive but it's not producing predictions.
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error",
+                details={
+                    "stage": "build_prediction",
+                    "symbol": symbol_pair, "timeframe": timeframe,
+                    "error": str(e)[:200],
+                },
+            )
             continue
 
         # SP-1: ghost candle prediction (additive, never blocks).
@@ -231,6 +248,19 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
             # DB unreachable, hash chain assertion). Validator failures are
             # absorbed inside the helper.
             log.error("persist_prediction failed; suppressing publish: %s", e)
+            # FU-1 follow-up: error heartbeat — the 2026-05-17 hotfix scenario
+            # (validator-poisoned transaction) presents here. We want the
+            # watchdog to see 'error' immediately rather than wait for
+            # max_staleness_seconds.
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error",
+                details={
+                    "stage": "persist_prediction",
+                    "symbol": symbol_pair, "timeframe": timeframe,
+                    "error": str(e)[:200],
+                },
+            )
             continue
 
         # Extend WS payload with ghost (None when no active model).
@@ -260,6 +290,18 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
         # candle loop.
         await _maybe_dispatch(
             session_factory, pred=pred, layer_payload=_layer_payload,
+        )
+
+        # FU-1: heartbeat after each fully-processed candle. The watchdog
+        # reads worker_heartbeats.beat_at to detect silent failures. Failure
+        # to reach this point (exception escaping any of the try blocks
+        # above, WS stream stall, etc.) means no fresh heartbeat → watchdog
+        # alarms after max_staleness_seconds. record_heartbeat is best-effort
+        # wrapped — never raises.
+        await record_heartbeat(
+            session_factory, WORKER_NAME,
+            status="ok",
+            details={"symbol": symbol_pair, "timeframe": timeframe},
         )
 
 

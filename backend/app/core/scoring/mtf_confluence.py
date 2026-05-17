@@ -479,21 +479,50 @@ def start_mtf_cache_prewarm_task(session_factory: Any) -> "asyncio.Task[None]":
     Loads the current universe (top-30 by volume), runs prewarm_cache
     with a 60s hard deadline, then completes naturally.
 
-    Watchdog flag: pending_heartbeat=True — single-shot by design; no
-    heartbeat is expected; staleness check is skipped.
+    FU-1 H9 + FU-15: on clean exit the runner records ONE heartbeat with
+    status="single_shot_completed". The watchdog (see
+    app.ops.worker_watchdog) classifies the worker as
+    `single_shot_completed` (non-alarming) instead of `no_signal`.
+
+    The registry entry sets ``single_shot=True`` + ``liveness_query=HEARTBEAT``
+    so the watchdog reads beat_at + last_status from worker_heartbeats.
     """
 
     async def _runner() -> None:
+        from app.ops.heartbeat import record_heartbeat
         from app.shadow.universe import load_current_universe
 
         log.info("mtf_cache_prewarm_task: spawned")
+        start_ts = time.time()
+        cached_count = 0
         try:
             async with session_factory() as session:
                 entries = await load_current_universe(session)
             symbols = [e.symbol for e in entries[:30]]
-            await prewarm_cache(symbols, deadline_seconds=60.0)
+            cached_count = await prewarm_cache(symbols, deadline_seconds=60.0)
+            duration = time.time() - start_ts
+            # FU-1 H9: single heartbeat with the FU-15 marker status.
+            await record_heartbeat(
+                session_factory, WORKER_NAME_PREWARM,
+                status="single_shot_completed",
+                details={
+                    "prewarmed_count": cached_count,
+                    "duration_s": round(duration, 2),
+                    "symbols_attempted": len(symbols),
+                },
+            )
         except Exception as exc:  # noqa: BLE001 — fail-open per spec
             log.warning("mtf_cache_prewarm_task: failed: %s", exc)
+            # Record an error heartbeat so the watchdog reports
+            # `single_shot_failed` instead of `single_shot_never_completed`.
+            try:
+                await record_heartbeat(
+                    session_factory, WORKER_NAME_PREWARM,
+                    status="error",
+                    details={"error": str(exc)[:200]},
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
 
     return asyncio.create_task(_runner(), name=WORKER_NAME_PREWARM)
 

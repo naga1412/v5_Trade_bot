@@ -45,6 +45,12 @@ class WorkerSpec:
     # reported in a separate 'pending_heartbeat' bucket and don't trigger
     # alerts. Flag is removed when the heartbeat call lands in that worker.
     pending_heartbeat: bool = False
+    # FU-15: True for tasks that fire once at startup, exit clean, and never
+    # heartbeat again. The watchdog reports such tasks as
+    # `single_shot_completed` (non-alarming) instead of `no_signal`.
+    # The worker records ONE heartbeat with `status="single_shot_completed"`
+    # on clean exit. `mtf_cache_prewarm_task` is the canonical example.
+    single_shot: bool = False
 
 
 # Canonical liveness signal for workers that have one in a natural table.
@@ -63,7 +69,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=15 * 60,
         stateful=True,
-        pending_heartbeat=True,
+        # FU-1 closed for live_worker — record_heartbeat wired in
+        # run_live_prediction's per-candle iteration body.
     ),
     # 2. Multi-symbol 1h shadow trading worker.
     WorkerSpec(
@@ -72,7 +79,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=2 * 60 * 60,  # 2x its 1h cadence
         stateful=True,  # holds open positions in memory
-        pending_heartbeat=True,
+        # FU-1 closed for shadow_worker — record_heartbeat wired in
+        # _handle_candle per processed candle.
     ),
     # 3. Daily 00:00 UTC asset_universe refresh.
     WorkerSpec(
@@ -105,7 +113,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
-        pending_heartbeat=True,
+        # FU-1 closed for audit_verifier_task — record_heartbeat wired in
+        # run_audit_verifier_loop per tick (or paused-skip).
     ),
     # 7. 5-min crypto / 30-min macro news ingest.
     WorkerSpec(
@@ -130,7 +139,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
-        pending_heartbeat=True,
+        # FU-1 closed for news_cleanup_task — record_heartbeat wired in
+        # run_news_cleanup_loop per nightly tick.
     ),
     # 9. 5-min funding/OI snapshot.
     WorkerSpec(
@@ -150,7 +160,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         liveness_query=HEARTBEAT,
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
-        pending_heartbeat=True,
+        # FU-1 closed for intermarket_cleanup_task — record_heartbeat wired
+        # in run_intermarket_cleanup_loop per nightly tick.
     ),
     # 11. 30s liquidation monitor — autonomous-trading-only.
     WorkerSpec(
@@ -160,7 +171,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=5 * 60,  # 30s cadence — be strict
         stateful=True,  # touches exchange — never auto-restart
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
-        pending_heartbeat=True,
+        # FU-1 closed for liquidation_monitor_task — record_heartbeat wired in
+        # run_liquidation_monitor_loop per poll tick.
     ),
     # 12. Telegram poller — autonomous-trading-only + creds required.
     WorkerSpec(
@@ -172,7 +184,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         required_env=(
             "AUTONOMOUS_TRADING_ENABLED", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
         ),
-        pending_heartbeat=True,
+        # FU-1 closed for telegram_poller_task — record_heartbeat wired in
+        # run_telegram_poller per long-poll cycle (success + backoff paths).
     ),
     # 13. Daily 03:30 UTC mode auto-promote — autonomous-trading-only.
     WorkerSpec(
@@ -182,7 +195,8 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
-        pending_heartbeat=True,
+        # FU-1 closed for auto_promote_task — record_heartbeat wired in
+        # run_auto_promote_loop per daily evaluation cycle.
     ),
     # 14. Feature 4 — 60s multi-asset fast scanner.
     WorkerSpec(
@@ -215,15 +229,16 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
     ),
     # 17. MTF cache pre-warm — single-shot at startup; loads the top-30
     #     universe and calls prewarm_cache (60s hard deadline, fail-open).
-    #     pending_heartbeat=True: single-shot by design; no heartbeat
-    #     expected; watchdog staleness check is skipped for this entry.
+    #     FU-1 H9 + FU-15: emits ONE heartbeat with
+    #     status='single_shot_completed' on clean exit; watchdog classifies
+    #     as 'single_shot_completed' (non-alarming) per FU-15 state machine.
     WorkerSpec(
         name="mtf_cache_prewarm_task",
         description="Single-shot MTF kline cache pre-warm over the top-30 universe",
-        liveness_query=None,  # single-shot — no DB liveness signal
-        max_staleness_seconds=5 * 60,  # not used (liveness_query=None)
+        liveness_query=HEARTBEAT,  # FU-15: watchdog reads single-shot heartbeat
+        max_staleness_seconds=10 * 60,  # bypassed by single_shot branch
         stateful=False,
-        pending_heartbeat=True,
+        single_shot=True,
     ),
     # 18. MTF cache TTL-refresh loop — long-running; every 30s scans for
     #     cache entries within 20% of expiry and refreshes them proactively.
