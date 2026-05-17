@@ -82,6 +82,8 @@ async def _mk_session() -> Any:
             "binance_order_id TEXT UNIQUE, opened_at TEXT, "
             "mode_at_open TEXT, approved_via TEXT, "
             "reasoning TEXT, inputs_hash TEXT, "
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine

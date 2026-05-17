@@ -32,6 +32,12 @@ class _FakePrediction:
     inputs_hash: str
     trade_setup: _FakeTradeSetup | None
     final: _FakeFinal
+    # PR2: live_prediction now forwards these to proposal_from_prediction
+    # so the dispatcher gate can read MTF state. Default None preserves
+    # pre-PR2 fixture behaviour (gate fail-open).
+    mtf_agreement: int | None = None
+    mtf_dominant_tf: str | None = None
+    mtf_directions_json: str | None = None
 
 
 class _FakeSession:

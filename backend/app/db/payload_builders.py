@@ -146,6 +146,15 @@ def build_live_trade_payload(
     approved_via: Literal["auto", "telegram"],
     reasoning_json: str,
     inputs_hash: str,
+    # PR2: MTF persistence. PR1 added the columns to live_trades; PR2
+    # populates them from the proposal (auto path) or from
+    # telegram_signals.payload (telegram-approve path). All three default
+    # None so PR1 call sites that haven't been threaded through yet still
+    # produce a valid payload with NULL values for the MTF columns —
+    # bit-identical to the pre-PR2 live_trades row contract.
+    mtf_agreement: int | None = None,
+    mtf_dominant_tf: str | None = None,
+    mtf_directions: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the live_trades table.
 
@@ -154,10 +163,18 @@ def build_live_trade_payload(
     (each call site serializes its own dict via ``json.dumps`` before calling
     this builder — do NOT call ``json.dumps`` again here).
 
+    ``mtf_directions`` (the parsed dict) is serialised canonically
+    (``json.dumps(sort_keys=True, separators=(",", ":"))``) into the
+    output's ``mtf_directions_json`` key. None → None (not "null"). This
+    matches the canonical form FU-2 will rely on once it's safe to
+    chain-hash JSONB columns. Today ``mtf_directions_json`` sits in
+    NON_HASHED_ALLOW_LIST (PR1) so this is defensive-habit only.
+
     Key order matches the original inline dicts exactly:
     user_id, symbol, direction, margin_usdt, leverage, position_value_usdt,
     entry_price, stop_loss, take_profit, binance_order_id, opened_at,
-    mode_at_open, approved_via, reasoning, inputs_hash.
+    mode_at_open, approved_via, reasoning, inputs_hash. The 3 PR2 MTF
+    columns are appended at the end.
 
     Bit-identical reference:
       backend/app/trading/execution/dispatcher.py:353-373 (auto path)
@@ -179,4 +196,10 @@ def build_live_trade_payload(
         "approved_via": approved_via,
         "reasoning": reasoning_json,
         "inputs_hash": inputs_hash,
+        "mtf_agreement": mtf_agreement,
+        "mtf_dominant_tf": mtf_dominant_tf,
+        "mtf_directions_json": (
+            json.dumps(mtf_directions, sort_keys=True, separators=(",", ":"))
+            if mtf_directions is not None else None
+        ),
     }

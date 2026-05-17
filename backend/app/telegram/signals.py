@@ -53,6 +53,13 @@ class SignalCandidate:
     chart_url: str
     sl_distance_pct: float           # 0.02 = 2%; precomputed by caller
     rr_ratio: float                  # take_profit/stop_loss distance ratio
+    # PR2: MTF state at the moment the signal cleared the gate. Persisted
+    # in telegram_signals.payload so the approve-time path can populate
+    # live_trades.mtf_* (Phase 7) without re-deriving from the prediction
+    # row. None for legacy callers / pre-PR2 fixtures.
+    mtf_agreement: int | None = None
+    mtf_dominant_tf: str | None = None
+    mtf_directions: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -262,7 +269,14 @@ def build_signal_payload(
     rendered_at: datetime,
     initial_leverage: int,
 ) -> dict:
-    """Serialise a SignalCandidate for the telegram_signals.payload column."""
+    """Serialise a SignalCandidate for the telegram_signals.payload column.
+
+    PR2: includes the 3 MTF state fields. The approve-time path reads
+    them from this JSONB so live_trades.mtf_* gets populated when the
+    user later approves the trade (matches the auto path's PR2 §4.4
+    persistence contract). Pre-PR2 candidates carry None; the JSONB
+    keys are still emitted so payload golden tests are stable.
+    """
     return {
         "signal_id": candidate.signal_id,
         "symbol": candidate.symbol,
@@ -280,6 +294,9 @@ def build_signal_payload(
         "rr_ratio": candidate.rr_ratio,
         "rendered_at": rendered_at.isoformat(),
         "initial_leverage": initial_leverage,
+        "mtf_agreement": candidate.mtf_agreement,
+        "mtf_dominant_tf": candidate.mtf_dominant_tf,
+        "mtf_directions": candidate.mtf_directions,
     }
 
 

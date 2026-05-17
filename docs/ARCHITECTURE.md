@@ -243,6 +243,68 @@ aggressive than spec to avoid Binance forced-liq fees).
 
 ---
 
+## 9b. MTF gate + SHORT safety (PR2)
+
+**Files**: `app/trading/execution/dispatcher.py` (3 new helpers + 3 new
+DispatchOutcome literals), `app/config.py` (5 flags + 4 thresholds),
+`app/trading/execution/glue.py` (MTF threading + fail-open JSON parser),
+`app/telegram/signals.py` (MTF fields on SignalCandidate + payload),
+`app/db/payload_builders.py` (MTF columns on live_trades rows) —
+added 2026-05-17 (PR #pr2).
+
+The PR2 dispatcher gate sits between the funding-rate guard and the
+max-concurrent check inside `dispatch()`. Three helpers, called in order:
+
+1. **`_apply_mtf_gate(proposal, settings)`** — pure, no I/O. Blocks
+   when `proposal.mtf_agreement < settings.MTF_MIN_AGREEMENT_1H` OR
+   when the higher-TF veto fires (1d AND 1w both opposite to
+   `proposal.direction` AND `MTF_HIGHER_TF_VETO=True`). Fail-open:
+   `mtf_agreement=None` (PR1 compute failure) passes;
+   `MTF_MIN_AGREEMENT_1H=0` is the env-var rollback path.
+
+2. **`_apply_short_safety_gates(proposal, settings, session)`** —
+   one DB-read when `SHORT_VETO_HIGH_BORROW=True` AND
+   `direction=="SHORT"`. Reads `intermarket_snapshots.borrow_rate_pct`
+   with a 6h staleness budget; fail-open when data is missing or
+   stale. LONG signals exit immediately. Default OFF.
+
+3. **`_maybe_tighten_short_sl(proposal, settings)`** — modifies the
+   proposal (not a block). When SHORT + `mtf_agreement < cutoff` +
+   `SHORT_TIGHTEN_SL_LOW_MTF=True`, reduces the SL distance by
+   `SHORT_TIGHTEN_SL_PCT` (default 20%). Returns same object identity
+   when conditions aren't met. Default OFF.
+
+**Telegram-approve uniformity (R3)**: by construction, both
+`fully-auto` and `telegram-approve` user modes flow through
+`dispatch()` at signal-emission time — the mode switch at the top of
+`dispatch()` only short-circuits `manual` mode. The gate is therefore
+symmetric across the two paths. `SignalCandidate` carries MTF state
+into `telegram_signals.payload` so the approve-time path can populate
+`live_trades.mtf_*` symmetrically with the auto path.
+
+**MTF persistence on live_trades**: PR1 added the 3 `mtf_*` columns
+but left them NULL on every row. PR2 populates them from
+`SignalProposal.mtf_*` (auto path) and from
+`telegram_signals.payload` MTF fields (telegram-approve path).
+`mtf_directions_json` is canonical-serialised
+(`json.dumps(sort_keys=True, separators=(",",":")))`) defensive
+against FU-2 (JSONB canonicalization hole).
+
+**SHORT_FUNDING_HALVE_HOLD deferred**: the flag + threshold ship in
+PR2 (defaults OFF), but the hook is deferred to FU-19. The required
+live-trade hold-timeout infrastructure does not yet exist (the
+shadow `TIMEOUT_BARS=24` is hardcoded, shadow-only; live trades have
+no `expires_at` column and no timer worker). See
+`backend/docs/KNOWN_ISSUES.md` for the closure plan.
+
+**V-7 budget**: spec §6.5 ≤50ms p50 / ≤200ms p99 delta. Measured at
+delta_p50 = 0.0002ms, delta_p99 = 0.0007ms via the
+`bench_aggregator_latency.py --mtf-gate-disabled` vs
+`--mtf-gate-enabled` microbench (PASS by 5 orders of magnitude — the
+gate is 3 dict-gets + 2 sign comparisons in the hot path).
+
+---
+
 ## 10. Binance filters module
 
 **File**: `app/exchanges/binance_filters.py` — added 2026-05-16 (PR #164)

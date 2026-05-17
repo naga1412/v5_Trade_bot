@@ -50,6 +50,8 @@ async def _mk_engine() -> Any:
             "binance_order_id TEXT, opened_at TEXT, mode_at_open TEXT, "
             "approved_via TEXT, reasoning TEXT, inputs_hash TEXT, "
             "closed_at TEXT, pnl_usdt REAL, "
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine
