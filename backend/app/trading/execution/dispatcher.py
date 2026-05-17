@@ -95,6 +95,14 @@ class SignalProposal:
     inputs_hash: str
     funding_rate_daily: float = 0.0
     chart_base_url: str = ""
+    # PR2: MTF fields threaded from LivePredictionOut. None when PR1 MTF
+    # compute returned None (cold cache, fetch failure) or when the caller
+    # pre-dates the threading (recording-only fallback / older test fixture).
+    # `mtf_directions` is the PARSED dict; the JSON string form lives only
+    # at the DB layer (live_trades.mtf_directions_json).
+    mtf_agreement: int | None = None
+    mtf_dominant_tf: str | None = None
+    mtf_directions: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
