@@ -114,3 +114,22 @@ def test_every_heartbeat_query_uses_the_HEARTBEAT_constant() -> None:
                 f"but doesn't equal the HEARTBEAT constant. Use HEARTBEAT "
                 f"to keep the binding name (:n) consistent."
             )
+
+
+def test_no_pending_heartbeat_after_fu1() -> None:
+    """FU-1 closes every worker's heartbeat gap — no spec may still flag pending.
+
+    PR #97 introduced ``pending_heartbeat=True`` as a temporary placeholder
+    for workers that had a HEARTBEAT liveness_query but no in-loop
+    ``record_heartbeat(...)`` call yet. The watchdog reported those in a
+    non-alarming ``pending_heartbeat`` bucket. FU-1 ships the
+    in-loop calls; once it lands no spec should still carry that flag, and
+    leaving one would silently suppress a real never-heartbeated alert.
+    """
+    pending = [s.name for s in WORKER_REGISTRY if s.pending_heartbeat]
+    assert not pending, (
+        f"WORKER_REGISTRY still has pending_heartbeat=True entries: "
+        f"{pending}. FU-1 wired in-loop record_heartbeat for every worker — "
+        f"drop the flag (or, if a new worker is being added before its "
+        f"heartbeat is wired, complete the wiring first)."
+    )
