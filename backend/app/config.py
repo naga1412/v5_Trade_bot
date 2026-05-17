@@ -73,6 +73,42 @@ class Settings(BaseSettings):
     SHORT_TIGHTEN_SL_MTF_CUTOFF: int = 5
     SHORT_TIGHTEN_SL_PCT: float = 0.20
 
+    # --- PR3: Multi-resolution shadow ------------------------------------
+    # SHADOW_TIMEFRAMES default ["1h", "15m"] — the one explicit behavior
+    # flip from PR2's effective ["1h"]. Rollback: set ["1h"] in env (spec §8).
+    SHADOW_TIMEFRAMES: list[str] = ["1h", "15m"]
+    SHADOW_PREWARM_BARS: int = 200  # matches MTF cache cap; setup() reuses cache
+    # Per-TF cooldown in hours. Both default 0.5h (30 min) — matches the
+    # pre-PR3 COOLDOWN_MINUTES=30 module constant. Dict shape future-proofs
+    # asymmetric values without API churn.
+    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 0.5, "15m": 0.5}
+    # Non-empty list = intersect with top-30 universe. Empty = full top-30.
+    # Empty intersection logs WARN and falls back to full (fail-loud-then-open).
+    SHADOW_NARROW_UNIVERSE: list[str] = []
+    # Excludes 15m from /promotion-gate combined aggregate when False.
+    # Records 15m trades regardless; just doesn't gamble promotion on them
+    # until staging win-rate validates. Operator flips per-env after.
+    SHADOW_15M_ELIGIBLE_FOR_PROMOTION: bool = False
+
+    # --- PR3 G1: Hold/TP scaling by mtf_agreement (spec §4.6b) -----------
+    # Default OFF — scaling does NOT apply; positions use the per-TF
+    # baseline timeout (TIMEOUT_BARS_PER_TF) and engine-computed TP.
+    # G2 (IC auto-weighting) and G3 (regime-conditional weights) stay
+    # deferred — need 30+ days of MTF shadow data which only starts
+    # accruing post-PR3 deploy.
+    HOLD_TP_SCALING_ENABLED: bool = False
+    # Lookup: mtf_agreement -> (timeout_bars, tp_multiplier).
+    # timeout_bars values are the 1h-baseline; for non-1h TFs the worker
+    # applies the multiplier (table_bars / 24) against the per-TF baseline
+    # (TIMEOUT_BARS_PER_TF[tf]) — see app/shadow/scaling.py.
+    # Stop-loss is INVARIANT under scaling.
+    HOLD_TP_SCALING_TABLE: dict[int, tuple[int, float]] = {
+        3: (24, 1.0),
+        4: (48, 1.25),
+        5: (96, 1.5),
+        6: (168, 2.0),
+    }
+
 
 @lru_cache
 def get_settings() -> Settings:

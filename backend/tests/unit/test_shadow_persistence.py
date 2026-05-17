@@ -33,13 +33,17 @@ _OPEN_POS_DDL = (
     "CREATE TABLE shadow_open_positions ("
     "id INTEGER PRIMARY KEY AUTOINCREMENT, "
     "user_id INTEGER NOT NULL, "
-    "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
+    "symbol TEXT NOT NULL, "
+    # PR3 (alembic 0021): timeframe column + (symbol, timeframe) UNIQUE
+    "timeframe TEXT NOT NULL DEFAULT '1h', "
+    "direction TEXT NOT NULL, "
     "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
     "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
     "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
     "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
     "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
-    "signal_id TEXT NOT NULL UNIQUE)"
+    "signal_id TEXT NOT NULL UNIQUE, "
+    "UNIQUE (symbol, timeframe))"
 )
 
 _TRADES_DDL = (
@@ -56,6 +60,8 @@ _TRADES_DDL = (
     "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
     "inputs_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
     "signal_id TEXT NOT NULL UNIQUE, "
+    # PR3 G1: recording-only scaling columns (NULL when scaling OFF)
+    "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
     "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
 )
 
@@ -63,8 +69,10 @@ _COOLDOWNS_DDL = (
     "CREATE TABLE shadow_cooldowns ("
     "user_id INTEGER NOT NULL, "
     "symbol TEXT NOT NULL, "
+    # PR3 (alembic 0021): timeframe in PK
+    "timeframe TEXT NOT NULL DEFAULT '1h', "
     "cooldown_until TEXT NOT NULL, "
-    "PRIMARY KEY (user_id, symbol))"
+    "PRIMARY KEY (user_id, symbol, timeframe))"
 )
 
 
@@ -148,14 +156,16 @@ async def test_delete_open_position_filters_by_user() -> None:
             "CREATE TABLE shadow_open_positions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "user_id INTEGER NOT NULL, "
-            "symbol TEXT NOT NULL, direction TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL DEFAULT '1h', "  # PR3 alembic 0021
+            "direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
             "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
             "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
             "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
             "signal_id TEXT NOT NULL, "
-            "UNIQUE (user_id, symbol))"
+            "UNIQUE (user_id, symbol, timeframe))"
         ))
 
     sig = make_signal()
@@ -255,5 +265,8 @@ async def test_cooldowns_isolated_per_user() -> None:
 
         u1 = await load_cooldowns(session, user_id=1)
         u2 = await load_cooldowns(session, user_id=2)
+    # `load_cooldowns` keeps the legacy {symbol: datetime} shape filtered
+    # to timeframe='1h' for backward-compat with the existing shadow_worker.
+    # New per-tf code uses `load_cooldowns_per_tf` instead (PR3 Phase 4).
     assert u1 == {"BTCUSDT": until1}
     assert u2 == {"BTCUSDT": until2}

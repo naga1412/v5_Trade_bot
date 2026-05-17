@@ -38,17 +38,24 @@ def _to_dt(value: Any) -> datetime:
 async def persist_open_position(
     session: AsyncSession, pos: ShadowPosition, *, user_id: int,
 ) -> None:
+    """Insert a (user_id, symbol, timeframe)-unique open position row.
+
+    PR3: writes pos.timeframe into the row. Pre-PR3 callers that pass
+    a position with default timeframe='1h' produce a bit-identical
+    `'1h'` row, so the schema change is invisible to them.
+    """
     await session.execute(
         sa.text(
             "INSERT INTO shadow_open_positions "
-            "(user_id, symbol, direction, entry_price, stop_loss, take_profit, "
-            "position_size_usdt, entry_score, entry_confidence, entry_atr, "
-            "bars_held, opened_at, last_check_at, signal_id) "
-            "VALUES (:uid, :s, :d, :ep, :sl, :tp, :ps, :es, :ec, :ea, :bh, :oa, :lc, :sig)"
+            "(user_id, symbol, timeframe, direction, entry_price, stop_loss, "
+            "take_profit, position_size_usdt, entry_score, entry_confidence, "
+            "entry_atr, bars_held, opened_at, last_check_at, signal_id) "
+            "VALUES (:uid, :s, :tf, :d, :ep, :sl, :tp, :ps, :es, :ec, :ea, "
+            ":bh, :oa, :lc, :sig)"
         ),
         {
             "uid": user_id,
-            "s": pos.symbol, "d": pos.direction.value,
+            "s": pos.symbol, "tf": pos.timeframe, "d": pos.direction.value,
             "ep": pos.entry_price, "sl": pos.stop_loss, "tp": pos.take_profit,
             "ps": pos.position_size_usdt, "es": pos.entry_score,
             "ec": pos.entry_confidence, "ea": pos.entry_atr,
@@ -64,6 +71,7 @@ async def persist_open_position(
 async def list_open_positions(
     session: AsyncSession, *, user_id: int,
 ) -> list[ShadowPosition]:
+    """Load all open positions for a user. Each result carries its TF."""
     result = await session.execute(
         sa.text(
             "SELECT * FROM shadow_open_positions "
@@ -73,6 +81,10 @@ async def list_open_positions(
     )
     out: list[ShadowPosition] = []
     for r in result:
+        # Pre-PR3 rows backfilled to '1h' in alembic 0021. Future rows
+        # carry their actual TF. getattr() with '1h' fallback covers
+        # both cases without an extra schema check.
+        tf = getattr(r, "timeframe", None) or "1h"
         out.append(ShadowPosition(
             symbol=r.symbol, direction=Direction(r.direction),
             entry_price=r.entry_price, stop_loss=r.stop_loss, take_profit=r.take_profit,
@@ -83,19 +95,28 @@ async def list_open_positions(
             opened_at=_to_dt(r.opened_at),
             last_check_at=_to_dt(r.last_check_at),
             signal_id=r.signal_id,
+            timeframe=tf,
         ))
     return out
 
 
 async def delete_open_position(
     session: AsyncSession, *, user_id: int, symbol: str,
+    timeframe: str = "1h",
 ) -> None:
+    """Delete a single (user_id, symbol, timeframe) open position.
+
+    PR3: timeframe is required to target the right TF row — a 1h close
+    must NOT delete a co-existing 15m open position. Default '1h' keeps
+    pre-PR3 callers working until they're migrated to pass the TF
+    explicitly (Phase 4 worker call sites do this).
+    """
     await session.execute(
         sa.text(
             "DELETE FROM shadow_open_positions "
-            "WHERE user_id = :uid AND symbol = :s"
+            "WHERE user_id = :uid AND symbol = :s AND timeframe = :tf"
         ),
-        {"uid": user_id, "s": symbol},
+        {"uid": user_id, "s": symbol, "tf": timeframe},
     )
 
 
@@ -128,33 +149,68 @@ async def persist_closed_trade(
 
 
 async def set_cooldown(
-    session: AsyncSession, *, user_id: int, symbol: str, until: datetime,
+    session: AsyncSession, *, user_id: int, symbol: str,
+    timeframe: str = "1h", until: datetime,
 ) -> None:
-    """Upsert cooldown for an asset, scoped to (user_id, symbol).
+    """Upsert cooldown for an asset, scoped to (user_id, symbol, timeframe).
 
-    PK is (user_id, symbol) — see migration 0005. ON CONFLICT targets that
-    composite so two users can hold independent cooldowns on the same
-    symbol without colliding.
+    PR3: PK is now (user_id, symbol, timeframe) — see migration
+    0021_pr3_shadow_per_tf. ON CONFLICT targets that composite so two
+    users can hold independent cooldowns on the same symbol AND a single
+    user can hold independent cooldowns on the same symbol per TF. Default
+    `timeframe='1h'` preserves PR1/PR2 call-site contracts until those
+    call sites are migrated (Phase 4 worker call sites pass TF explicitly).
     """
     await session.execute(
         sa.text(
-            "INSERT INTO shadow_cooldowns (user_id, symbol, cooldown_until) "
-            "VALUES (:uid, :s, :u) "
-            "ON CONFLICT(user_id, symbol) DO UPDATE SET "
+            "INSERT INTO shadow_cooldowns (user_id, symbol, timeframe, cooldown_until) "
+            "VALUES (:uid, :s, :tf, :u) "
+            "ON CONFLICT(user_id, symbol, timeframe) DO UPDATE SET "
             "cooldown_until = excluded.cooldown_until"
         ),
-        {"uid": user_id, "s": symbol, "u": until},
+        {"uid": user_id, "s": symbol, "tf": timeframe, "u": until},
     )
 
 
 async def load_cooldowns(
     session: AsyncSession, *, user_id: int,
 ) -> dict[str, datetime]:
+    """Return 1h-only cooldowns keyed by symbol.
+
+    Phase 3 keeps the legacy shape (`dict[str, datetime]`) so the
+    existing shadow_worker continues to work. The worker is currently
+    1h-only — filtering to `timeframe='1h'` matches existing semantics
+    exactly. Phase 4 (TF-aware ShadowWorker refactor) switches the
+    worker to consume `load_cooldowns_per_tf` instead.
+    """
     result = await session.execute(
         sa.text(
             "SELECT symbol, cooldown_until FROM shadow_cooldowns "
-            "WHERE user_id = :uid"
+            "WHERE user_id = :uid AND timeframe = '1h'"
         ),
         {"uid": user_id},
     )
     return {r.symbol: _to_dt(r.cooldown_until) for r in result}
+
+
+async def load_cooldowns_per_tf(
+    session: AsyncSession, *, user_id: int,
+) -> dict[tuple[str, str], datetime]:
+    """Return cooldowns keyed by (symbol, timeframe).
+
+    PR3 Phase 3 ships this alongside the legacy `load_cooldowns` so the
+    Phase 4 ShadowWorker refactor can switch over without a flag day.
+    Use this in new code; treat `load_cooldowns` as the 1h-only legacy
+    shim until the worker is migrated.
+    """
+    result = await session.execute(
+        sa.text(
+            "SELECT symbol, timeframe, cooldown_until FROM shadow_cooldowns "
+            "WHERE user_id = :uid"
+        ),
+        {"uid": user_id},
+    )
+    return {
+        (r.symbol, getattr(r, "timeframe", None) or "1h"): _to_dt(r.cooldown_until)
+        for r in result
+    }

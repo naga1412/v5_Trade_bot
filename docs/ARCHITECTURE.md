@@ -322,6 +322,128 @@ silent in the codebase — `send_trade_signal_message` had zero callers
 
 ---
 
+## 11b. Multi-resolution shadow + G1 Hold/TP scaling (PR3)
+
+**Files**: `app/shadow/worker.py` (TF-aware refactor),
+`app/shadow/exit_monitor.py` (per-TF + G1 override),
+`app/shadow/scaling.py` (G1 lookup — new),
+`app/shadow/persistence.py` (set_cooldown/load_cooldowns_per_tf/
+delete_open_position/persist_closed_trade thread TF + G1),
+`app/shadow/universe.py` (load_shadow_universe with narrow filter),
+`app/db/payload_builders.py` (build_shadow_trade_payload threads TF + G1),
+`app/api/routes/bot_status.py` (`/promotion-gate per_timeframe`,
+`/open-positions timeframe`), `app/config.py` (7 new settings),
+`app/ops/worker_registry.py` (max_staleness 30 min), alembic
+`2026_05_18_0021_pr3_shadow_per_tf.py` — added 2026-05-18 (PR3).
+
+### Multi-TF shadow worker
+
+`ShadowWorker` runs N timeframes concurrently. The dataclass holds
+`timeframes: list[str]` (default `["1h"]` — pre-PR3 callers unchanged)
+and a `readers: dict[str, _StreamReader]` mapping each TF to its own
+`MultiStreamReader`. `run()` spawns one `_consume_one_tf` task per TF
+via `asyncio.gather`; per-TF errors heartbeat + log without killing
+other lanes.
+
+In-memory state is keyed by `(symbol, timeframe)` tuples — `bars`,
+`open_positions`, `cooldowns`. A 1h BTC position no longer blocks a
+15m BTC entry (the PR3 motivation). `PositionGate.is_blocked` filters
+state to the active TF before deciding.
+
+Default config flip: `SHADOW_TIMEFRAMES=["1h", "15m"]` → 4× signal
+rate. Rollback path: `SHADOW_TIMEFRAMES=["1h"]` in env + restart.
+
+### Persistence (alembic 0021)
+
+`shadow_cooldowns` PK extended from `(user_id, symbol)` to
+`(user_id, symbol, timeframe)`. `shadow_open_positions` UNIQUE moved
+from `(symbol)` to `(symbol, timeframe)`. All pre-PR3 rows backfilled
+to `timeframe='1h'`. `set_cooldown` + `delete_open_position` take a
+`timeframe` arg (default `'1h'` for legacy compat).
+`load_cooldowns_per_tf` returns `dict[(sym, tf), datetime]`; the
+legacy `load_cooldowns` is preserved as a 1h-only filter shim for
+backward-compat (worker now uses the per-TF variant).
+
+### Per-TF exit timeout
+
+`TIMEOUT_BARS_PER_TF = {"1h": 24, "15m": 96}` — equal ~24h wall-clock
+across TFs. `check_exit` reads per-TF; unknown TF raises KeyError
+(programming-error fail-loud).
+
+### G1 — Hold/TP scaling by `mtf_agreement`
+
+`HOLD_TP_SCALING_ENABLED: bool = False` (default OFF — bit-identical
+to pre-G1). When ON, at trade-open the worker calls
+`effective_hold_tp(timeframe, mtf_agreement, table)` (pure helper in
+`app/shadow/scaling.py`) and rewrites the position's `take_profit`
+at the scaled distance from entry. **Stop-loss is INVARIANT under
+scaling** — per-trade risk constant; only TP widens + timeout extends
+with multi-TF conviction.
+
+The fixed table per spec §4.6b:
+
+| mtf_agreement | timeout_bars (1h baseline) | tp_multiplier |
+|---|---|---|
+| 3 | 24 | 1.0× |
+| 4 | 48 | 1.25× |
+| 5 | 96 | 1.5× |
+| 6 | 168 | 2.0× |
+
+For 15m positions the multiplier is applied against the per-TF
+baseline (`TIMEOUT_BARS_PER_TF["15m"]=96`). `mtf_agreement=4` on 15m
+→ 192 bars (48h wall-clock).
+
+Recording: `shadow_trades.hold_scaling_factor` + `.hold_timeout_bars`
+columns (alembic 0021). `live_trades` gets the same columns reserved
+for a future PR that wires the auto path. Both NULL when scaling OFF
+or pos lacks the attrs. NON_HASHED_ALLOW_LIST entries — never in the
+hash chain.
+
+PR4's G2 (IC auto-weights) and G3 (regime-conditional weights) stay
+deferred to v2 evaluation queue — they need 30+ days of MTF shadow
+data which only starts accruing post-PR3.
+
+### Operator observability
+
+`/promotion-gate` response gains `per_timeframe: dict[str, TimeframeGateStatsOut]`
+keyed by `SHADOW_TIMEFRAMES`. Each block carries trades_total +
+sharpe + max_drawdown + win_rate + profit_factor for that TF.
+Informational only — does NOT affect `all_passing`. The combined
+metrics exclude 15m when `SHADOW_15M_ELIGIBLE_FOR_PROMOTION=False`
+(default — operator flips per-env after staging validates 15m
+win-rate).
+
+`/open-positions` now surfaces `timeframe` per row; the BotStatus
+OpenPositions card deep-links to the correct chart TF via
+`pos.timeframe ?? "1h"`.
+
+### Heartbeat + watchdog hygiene
+
+`shadow_worker` heartbeats from every `_handle_candle` invocation
+(FU-1 closure preserved) regardless of which TF the candle came
+from. `max_staleness_seconds` tightened from 2h (sized for 1h
+cadence) to 30 min (2× the 15m cadence — same safety factor against
+the new fastest stream).
+
+### V-7 latency
+
+`scripts/bench_shadow_handle_candle.py --mode={baseline,multi-tf}`
+microbench. Spec §6.5 budgets: `Δp50 ≤ 50ms`, `Δp99 ≤ 200ms`.
+Measured at `Δp50 = -0.0068ms`, `Δp99 = -0.0593ms` (multi-tf is
+marginally faster due to alternating-TF cache effects). PASS by 5+
+orders of magnitude.
+
+### Rollback
+
+Single env var: `SHADOW_TIMEFRAMES=["1h"]` reverts to single-TF lane
+(only the 1h reader spawns; 15m state stops accruing). Requires
+process restart (lru_cache on `get_settings`). Stage-2 rollback:
+alembic downgrade -1 drops the per-TF columns + restores old
+PK/UNIQUE constraints (round-trip tested in
+`tests/db/test_pr3_migration_downgrade.py`).
+
+---
+
 ## 11. Self-healing supervisor
 
 **File**: `app/ops/worker_supervisor.py` — added 2026-05-15 (PR #133)

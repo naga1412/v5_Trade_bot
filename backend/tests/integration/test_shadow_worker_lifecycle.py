@@ -172,13 +172,17 @@ async def _create_shadow_tables(engine: Any) -> None:
             "CREATE TABLE shadow_open_positions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "user_id INTEGER NOT NULL DEFAULT 1, "
-            "symbol TEXT NOT NULL UNIQUE, direction TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            # PR3 alembic 0021: timeframe + (symbol, timeframe) UNIQUE
+            "timeframe TEXT NOT NULL DEFAULT '1h', "
+            "direction TEXT NOT NULL, "
             "entry_price REAL NOT NULL, stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, position_size_usdt REAL NOT NULL, "
             "entry_score REAL NOT NULL, entry_confidence REAL NOT NULL, "
             "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
             "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
-            "signal_id TEXT NOT NULL UNIQUE)"
+            "signal_id TEXT NOT NULL UNIQUE, "
+            "UNIQUE (symbol, timeframe))"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_trades ("
@@ -194,13 +198,16 @@ async def _create_shadow_tables(engine: Any) -> None:
             "bars_held INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, "
             "inputs_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
             "signal_id TEXT NOT NULL UNIQUE, "
+            "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "  # PR3 G1
             "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_cooldowns ("
             "user_id INTEGER NOT NULL DEFAULT 1, "
-            "symbol TEXT NOT NULL, cooldown_until TEXT NOT NULL, "
-            "PRIMARY KEY (user_id, symbol))"
+            "symbol TEXT NOT NULL, "
+            "timeframe TEXT NOT NULL DEFAULT '1h', "  # PR3 alembic 0021
+            "cooldown_until TEXT NOT NULL, "
+            "PRIMARY KEY (user_id, symbol, timeframe))"
         ))
 
 

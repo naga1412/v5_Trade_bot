@@ -83,6 +83,12 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         "mtf_agreement", "mtf_dominant_tf", "mtf_directions_json",
         "p_win", "effective_score", "realized_vol_20d",
         "funding_directional_adj",
+        # PR3 G1 (alembic 2026_05_18_0021_pr3_shadow_per_tf): recording-only
+        # scaling fields. Populated by shadow_worker when
+        # HOLD_TP_SCALING_ENABLED=True; NULL otherwise. Never hashed —
+        # they describe POST-decision execution metadata, not the signal
+        # inputs whose integrity the chain protects.
+        "hold_scaling_factor", "hold_timeout_bars",
     }),
     "live_trades": frozenset({
         "id", "prev_hash", "row_hash",
@@ -90,6 +96,11 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         "mtf_agreement", "mtf_dominant_tf", "mtf_directions_json",
         "p_win", "effective_score", "realized_vol_20d",
         "funding_directional_adj",
+        # PR3 G1: reserved columns. PR3 itself does NOT populate these on
+        # live_trades; a future PR wires the auto-path + telegram-approve
+        # path. Classifying as NOT hashed keeps them out of the chain
+        # whether or not a future PR ever fills them.
+        "hold_scaling_factor", "hold_timeout_bars",
         # Trade-closure columns. These are written by close-trade UPDATEs,
         # never present at insert_with_chain time. Classifying as hashed
         # would hash NULLs at open (false tamper-detection on every close).

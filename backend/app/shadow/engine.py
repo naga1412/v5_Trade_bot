@@ -75,6 +75,17 @@ class ShadowPosition:
     opened_at: datetime
     last_check_at: datetime
     signal_id: str
+    # PR3 Phase 2.2: per-position timeframe. Defaults to "1h" so PR1/PR2
+    # callers that don't pass it get the legacy behavior bit-identically.
+    # Persisted on `shadow_trades.timeframe` (PR1 added the column; PR3
+    # makes it reflect actual entry TF rather than always '1h').
+    timeframe: str = "1h"
+    # PR3 Phase 5.5: G1 scaling fields. NULL when HOLD_TP_SCALING_ENABLED
+    # is False (bit-identical to pre-G1). Populated by shadow_worker
+    # open-trade hook when scaling is ON. Recording-only — out of
+    # HASH_PAYLOAD_COLUMNS per policy (see app/db/audit.py).
+    hold_scaling_factor: float | None = None
+    hold_timeout_bars: int | None = None
 
     @classmethod
     def from_signal(cls, sig: ShadowSignal, *, position_size_usdt: float) -> "ShadowPosition":

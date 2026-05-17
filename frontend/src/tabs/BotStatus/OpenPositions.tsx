@@ -33,9 +33,13 @@ function PositionCard({ pos }: { pos: OpenPosition }) {
   const arrow = pos.direction === "LONG" ? "↗" : "↘";
   const dirClass = pos.direction === "LONG" ? "text-green" : "text-red";
   const open = (): void => {
-    // Bot Status has no explicit timeframe context — shadow worker runs 1h,
-    // and 1h matches the chart's default tf, so hard-code it here.
-    window.location.hash = buildLivePredictionHash(pos.symbol, "1h");
+    // PR3 Phase 8: read per-position timeframe so 15m positions deep-link
+    // to the 15m chart and 1h positions to the 1h chart. Fallback "1h"
+    // covers pre-PR3 positions that haven't been migrated to carry the
+    // field yet (API field is Optional for forward-compat).
+    window.location.hash = buildLivePredictionHash(
+      pos.symbol, pos.timeframe ?? "1h",
+    );
   };
   return (
     <div
