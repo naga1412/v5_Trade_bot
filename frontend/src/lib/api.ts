@@ -160,6 +160,12 @@ export interface PromotionGate {
 export interface OpenPosition {
   symbol: string;
   direction: "LONG" | "SHORT";
+  // PR3 Phase 8: API surfaces the per-position timeframe so the deep
+  // link in OpenPositions.tsx routes to the correct chart TF (was
+  // hardcoded "1h" pre-PR3). Optional for forward-compat with rows
+  // that pre-date PR3's persistence threading; the consumer falls
+  // back to "1h" via `?? "1h"`.
+  timeframe?: string;
   entry_price: number;
   stop_loss: number;
   take_profit: number;

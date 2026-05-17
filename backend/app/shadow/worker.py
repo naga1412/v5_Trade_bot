@@ -42,12 +42,11 @@ from app.shadow.observation import build_obs_components, persist_observation
 from app.shadow.persistence import (
     delete_open_position,
     list_open_positions,
-    load_cooldowns,
     persist_closed_trade,
     persist_open_position,
     set_cooldown,
 )
-from app.shadow.universe import load_current_universe
+from app.shadow.universe import load_shadow_universe
 from app.ws import shadow_updates
 
 log = logging.getLogger(__name__)
@@ -73,158 +72,308 @@ class _StreamReader(Protocol):
 
 @dataclass
 class ShadowWorker:
-    """Async orchestrator for the shadow trading subsystem."""
+    """Async orchestrator for the shadow trading subsystem.
+
+    PR3 made this TF-aware. The internal `bars`, `open_positions`, and
+    `cooldowns` dicts are keyed by `(symbol, timeframe)` tuples so a
+    single worker instance can run multiple TF lanes concurrently. Pre-PR3
+    callers (no `timeframes` kwarg) get a single-element ["1h"] list and
+    behave bit-identically to the old single-TF worker.
+    """
 
     symbols: list[str]
     session_factory: async_sessionmaker[AsyncSession]
     reader: _StreamReader
-    # In-memory bar buffers keyed by Binance symbol (uppercase, no slash).
-    bars: dict[str, pd.DataFrame] = field(default_factory=dict)
-    # In-memory caches reloaded on startup.
-    open_positions: dict[str, ShadowPosition] = field(default_factory=dict)
-    cooldowns: dict[str, datetime] = field(default_factory=dict)
+    # PR3: when the worker drives ONE TF (legacy single-reader path), the
+    # `reader` field is the stream; when it drives MULTIPLE TFs (Phase 4.2
+    # wiring), the field on each TF lives in `readers` and the top-level
+    # `reader` is the 1h reader for backward-compat with existing tests
+    # that pass it directly. `readers` is constructed in __post_init__
+    # when more than one TF is requested.
+    timeframes: list[str] = field(default_factory=lambda: ["1h"])
+    readers: dict[str, _StreamReader] = field(default_factory=dict)
+    # PR3: bar buffers keyed by (symbol, timeframe) — was: symbol only.
+    bars: dict[tuple[str, str], pd.DataFrame] = field(default_factory=dict)
+    # PR3: open positions keyed by (symbol, timeframe) — the PR3 motivation.
+    # A 1h BTC position no longer blocks a 15m BTC open on the same symbol.
+    open_positions: dict[tuple[str, str], ShadowPosition] = field(default_factory=dict)
+    # PR3: cooldowns keyed by (symbol, timeframe).
+    cooldowns: dict[tuple[str, str], datetime] = field(default_factory=dict)
     # Optional pre-seeded history (test injection point). When supplied,
-    # ``setup()`` skips the REST fetch.
-    seed_history: dict[str, pd.DataFrame] | None = None
+    # ``setup()`` skips the REST fetch. Keys are tuples post-PR3, but for
+    # backwards-compat with pre-PR3 fixtures, plain-string symbol keys are
+    # auto-coerced to (symbol, '1h') tuples in setup().
+    seed_history: dict[Any, pd.DataFrame] | None = None
     evaluator: SignalEvaluator = field(default_factory=SignalEvaluator)
     # SP-0.7 single-worker default; SP-8 will populate per spawned user.
     user_id: int = BOOTSTRAP_ADMIN_USER_ID
 
+    def __post_init__(self) -> None:
+        # Default-init: when only one TF and no explicit readers, register
+        # the passed reader under that TF so the multi-TF run() path works
+        # uniformly. Tests that pass a single `reader=` continue to work.
+        if not self.readers and self.timeframes:
+            self.readers = {self.timeframes[0]: self.reader}
+
     async def setup(self) -> None:
-        """Load open positions + cooldowns + seed REST history."""
+        """Load open positions + cooldowns + seed REST history.
+
+        PR3: per-(symbol, timeframe) state. Each TF's bar buffer is
+        seeded independently. The MTF cache reuse from spec §4.3 lands
+        in Phase 4.3 (this method's REST-fetch path is preserved here
+        as the fallback).
+        """
         log.info(
-            "shadow_worker: setup begin (symbols=%d timeframe=%s)",
-            len(self.symbols), SHADOW_TIMEFRAME,
+            "shadow_worker: setup begin (symbols=%d timeframes=%s)",
+            len(self.symbols), self.timeframes,
         )
         async with self.session_factory() as session:
+            # PR3: list_open_positions returns positions with .timeframe set;
+            # key by (symbol, tf) in the in-memory cache.
             for pos in await list_open_positions(session, user_id=self.user_id):
-                self.open_positions[pos.symbol] = pos
-            self.cooldowns = await load_cooldowns(session, user_id=self.user_id)
+                self.open_positions[(pos.symbol, pos.timeframe)] = pos
+            # PR3: load_cooldowns_per_tf returns dict[(sym, tf), datetime].
+            from app.shadow.persistence import load_cooldowns_per_tf
+            self.cooldowns = await load_cooldowns_per_tf(
+                session, user_id=self.user_id,
+            )
         log.info(
             "shadow_worker: loaded %d open positions, %d cooldowns from db",
             len(self.open_positions), len(self.cooldowns),
         )
 
         if self.seed_history is not None:
-            for sym, df in self.seed_history.items():
-                self.bars[sym] = df.copy()
+            # Accept legacy dict[str, DataFrame] (pre-PR3 test fixtures) by
+            # coercing string keys to (symbol, '1h') tuples. PR3-aware
+            # fixtures can pass dict[tuple[str, str], DataFrame] directly.
+            for key, df in self.seed_history.items():
+                tuple_key: tuple[str, str]
+                if isinstance(key, tuple):
+                    tuple_key = (str(key[0]), str(key[1]))
+                else:
+                    tuple_key = (str(key), self.timeframes[0])
+                self.bars[tuple_key] = df.copy()
             log.info(
-                "shadow_worker: setup done (seeded from injection: %d symbols)",
+                "shadow_worker: setup done (seeded from injection: %d buffers)",
                 len(self.bars),
             )
             return
 
+        # PR3 Phase 4.3 / spec §4.3 (D1-D3): reuse PR1's MTF kline cache
+        # when it's warm. Single source of truth for (symbol, tf) klines
+        # across PR1's MTF compute and PR3's shadow seed. On cache miss,
+        # REST-fetch and best-effort populate the MTF cache so subsequent
+        # MTF compute calls hit warm. mtf_confluence._cache_get returns
+        # `list[list[Any]]` (raw Binance kline rows) or None.
+        from app.config import get_settings as _get_settings_for_setup
+        from app.core.scoring.mtf_confluence import _cache_get, _cache_set
+        import time as _time
+
+        # Spec §4.3 D1: cache-hit threshold is SHADOW_PREWARM_BARS, NOT
+        # HISTORY_BARS. PR1's prewarm caches 200 klines (MTF compute's
+        # need); HISTORY_BARS=300 was the legacy REST-fetch target. Using
+        # SHADOW_PREWARM_BARS here ensures any cache entry from PR1
+        # prewarm is reusable. The rolling buffer accumulates to ~300
+        # as live candles flow in (spec §4.3 D2).
+        _prewarm_bars = _get_settings_for_setup().SHADOW_PREWARM_BARS
+
+        cache_hits = 0
+        rest_fetched = 0
         async with httpx.AsyncClient() as http:
             client = BinanceClient(http=http)
-            for sym in self.symbols:
-                try:
-                    history = await client.fetch_klines(
-                        sym, SHADOW_TIMEFRAME, limit=HISTORY_BARS,
-                    )
-                except httpx.HTTPStatusError as e:
-                    # Expected: futures-only tokens (COLLECTUSDT, SIRENUSDT,
-                    # etc.) return 400 from the SPOT klines endpoint because
-                    # the symbol doesn't exist there. The asset_universe
-                    # comes from FUTURES via /fapi/v1/ticker/24hr. Log at
-                    # DEBUG so the warning channel stays clean — the worker
-                    # gracefully continues with the symbols that did seed.
-                    if e.response.status_code in (400, 404):
-                        log.debug(
-                            "seed skip %s (not on Binance Spot): %s",
-                            sym, e.response.status_code,
+            for tf in self.timeframes:
+                for sym in self.symbols:
+                    # 1. Try the MTF cache first (raw kline rows).
+                    cached_klines = _cache_get(sym, tf)
+                    if cached_klines is not None and len(cached_klines) >= _prewarm_bars:
+                        df = _klines_to_dataframe(cached_klines)
+                        self.bars[(sym, tf)] = df
+                        cache_hits += 1
+                        continue
+
+                    # 2. Cache miss → REST-fetch via the worker's existing
+                    #    Candle-based client. Convert + seed bars buffer.
+                    try:
+                        history = await client.fetch_klines(
+                            sym, tf, limit=HISTORY_BARS,
                         )
-                    else:
-                        log.warning("seed history failed for %s: %s", sym, e)
-                    continue
-                except Exception as e:  # noqa: BLE001
-                    log.warning("seed history failed for %s: %s", sym, e)
-                    continue
-                if not history:
-                    continue
-                df = pd.DataFrame([c.__dict__ for c in history])
-                df["ts"] = pd.to_datetime(df["ts"], utc=True)
-                df = df.set_index("ts")[["open", "high", "low", "close", "volume"]]
-                self.bars[sym] = df
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code in (400, 404):
+                            log.debug(
+                                "seed skip %s/%s (not on Binance Spot): %s",
+                                sym, tf, e.response.status_code,
+                            )
+                        else:
+                            log.warning(
+                                "seed history failed for %s/%s: %s", sym, tf, e,
+                            )
+                        continue
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "seed history failed for %s/%s: %s", sym, tf, e,
+                        )
+                        continue
+                    if not history:
+                        continue
+                    df = pd.DataFrame([c.__dict__ for c in history])
+                    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+                    df = df.set_index("ts")[
+                        ["open", "high", "low", "close", "volume"]
+                    ]
+                    self.bars[(sym, tf)] = df
+                    rest_fetched += 1
+
+                    # 3. Best-effort populate the MTF cache so PR1's compute
+                    #    hits warm on the next call. Failures here don't
+                    #    block worker setup — log + continue.
+                    try:
+                        raw_klines = _candles_to_raw_klines(history)
+                        _cache_set(sym, tf, raw_klines, fetched_at=_time.time())
+                    except Exception as e:  # noqa: BLE001
+                        log.debug(
+                            "MTF cache populate failed for %s/%s: %s", sym, tf, e,
+                        )
         log.info(
-            "shadow_worker: setup done (REST-seeded %d/%d symbols)",
-            len(self.bars), len(self.symbols),
+            "shadow_worker: setup done (%d cache-hit, %d REST-fetched buffers)",
+            cache_hits, rest_fetched,
         )
 
     async def run(self) -> None:
-        """Setup + consume the multi-stream until it ends or is cancelled."""
+        """Setup + consume one or more streams until they end or are cancelled.
+
+        PR3: when ``timeframes`` has multiple entries, spawns one consumer
+        task per TF via ``asyncio.gather``. Single-TF (legacy) path is
+        preserved: one TF → one reader → one consumer.
+        """
         await self.setup()
-        log.info("shadow_worker: entering stream loop")
-        async for candle in self.reader.stream():
+        log.info(
+            "shadow_worker: entering stream loop (%d TF(s): %s)",
+            len(self.timeframes), self.timeframes,
+        )
+        tasks = [
+            asyncio.create_task(
+                self._consume_one_tf(tf, self.readers.get(tf, self.reader)),
+            )
+            for tf in self.timeframes
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for t in tasks:
+                t.cancel()
+
+    async def _consume_one_tf(
+        self, tf: str, reader: _StreamReader,
+    ) -> None:
+        """Consume candles from one TF's reader; route each to _handle_candle.
+
+        Per-TF error handling: a crash here only affects this TF's stream;
+        other TFs continue consuming. Cancellation propagates up to the
+        gather() in run().
+
+        The error-path heartbeat is itself wrapped so a heartbeat failure
+        (DB blip, session_factory hiccup, anything) can't propagate up
+        and tear down this consumer — which `run()`'s gather() would
+        then cascade into cancelling the other TF tasks. Per-TF
+        isolation is the contract the docstring promises.
+        """
+        async for candle in reader.stream():
             try:
-                await self._handle_candle(candle)
+                await self._handle_candle(candle, tf=tf)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.exception("shadow worker handler failed for %s: %s",
-                              candle.symbol, e)
-                # FU-1 follow-up: error heartbeat. _handle_candle's normal
-                # success path heartbeats inline; if it raises, the outer
-                # handler swallows the exception and the next ok-heartbeat
-                # might never come (per-symbol bug → no candle reaches
-                # success path for that symbol). Heartbeat with status=error
-                # so the watchdog surfaces a sustained handler crash.
-                await record_heartbeat(
-                    self.session_factory, "shadow_worker",
-                    status="error",
-                    details={
-                        "symbol": candle.symbol,
-                        "error": str(e)[:200],
-                    },
+                log.exception(
+                    "shadow worker handler failed for %s/%s: %s",
+                    candle.symbol, tf, e,
                 )
+                # FU-1 follow-up: error heartbeat. record_heartbeat is
+                # already best-effort wrapped at the helper level, but
+                # belt-and-braces a second try/except here so even an
+                # unexpected propagation (e.g. session_factory misbehaving
+                # before record_heartbeat's own try-block engages) can't
+                # cancel sibling TF consumers via gather().
+                try:
+                    await record_heartbeat(
+                        self.session_factory, "shadow_worker",
+                        status="error",
+                        details={
+                            "symbol": candle.symbol, "tf": tf,
+                            "error": str(e)[:200],
+                        },
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as hb_err:  # noqa: BLE001
+                    log.warning(
+                        "shadow_worker error-heartbeat itself failed for "
+                        "%s/%s; suppressing to preserve per-TF isolation: %s",
+                        candle.symbol, tf, hb_err,
+                    )
 
     # --- internals -----------------------------------------------------
 
-    def _append_bar(self, candle: MultiStreamCandle) -> pd.DataFrame:
-        """Append the closed candle to the in-memory buffer (last N kept)."""
+    def _append_bar(
+        self, candle: MultiStreamCandle, tf: str,
+    ) -> pd.DataFrame:
+        """Append the closed candle to the (symbol, tf) buffer (last N kept)."""
         new_row = pd.DataFrame(
             [[candle.open, candle.high, candle.low, candle.close, candle.volume]],
             columns=["open", "high", "low", "close", "volume"],
             index=pd.DatetimeIndex([candle.ts], name="ts"),
         )
-        existing = self.bars.get(candle.symbol)
+        key = (candle.symbol, tf)
+        existing = self.bars.get(key)
         if existing is None or existing.empty:
             buf = new_row
         else:
             buf = pd.concat([existing, new_row]).iloc[-MAX_BUFFERED_BARS:]
-        self.bars[candle.symbol] = buf
+        self.bars[key] = buf
         return buf
 
-    async def _handle_candle(self, candle: MultiStreamCandle) -> None:
+    async def _handle_candle(
+        self, candle: MultiStreamCandle, tf: str | None = None,
+    ) -> None:
+        """Process one closed candle for one TF.
+
+        ``tf`` defaults to ``self.timeframes[0]`` so pre-PR3 callers that
+        invoke _handle_candle(candle) without the kwarg continue to work
+        with the legacy 1h path. Phase 4.2's run() always passes tf
+        explicitly per consumer.
+        """
+        if tf is None:
+            tf = self.timeframes[0]
         from app.ops import pause_state
         if await pause_state.is_paused():
-            log.debug("shadow_worker: paused, skipping candle %s", candle.symbol)
-            # Still heartbeat — the worker is alive, just gated by pause_state.
-            # Don't include candle.symbol in details: pause_state is a global
-            # gate, not per-symbol, and the operator-facing watchdog payload
-            # would otherwise show a different symbol on every tick during
-            # a sustained pause (misleading — implies per-symbol pause).
+            log.debug(
+                "shadow_worker: paused, skipping candle %s/%s",
+                candle.symbol, tf,
+            )
             await record_heartbeat(
                 self.session_factory, "shadow_worker",
                 status="ok", details={"paused": True},
             )
             return
-        buf = self._append_bar(candle)
+        buf = self._append_bar(candle, tf)
 
-        if candle.symbol in self.open_positions:
-            await self._maybe_close_position(candle)
+        key = (candle.symbol, tf)
+        if key in self.open_positions:
+            await self._maybe_close_position(candle, tf)
         else:
-            await self._maybe_open_position(candle, buf)
+            await self._maybe_open_position(candle, buf, tf)
 
         # FU-1: heartbeat after every processed candle. Watchdog uses this
-        # to detect WS stalls / shadow_worker crashes. record_heartbeat is
-        # best-effort wrapped — never raises.
+        # to detect WS stalls / shadow_worker crashes.
         await record_heartbeat(
             self.session_factory, "shadow_worker",
-            status="ok", details={"symbol": candle.symbol},
+            status="ok", details={"symbol": candle.symbol, "tf": tf},
         )
 
-    async def _maybe_close_position(self, candle: MultiStreamCandle) -> None:
-        pos = self.open_positions[candle.symbol]
+    async def _maybe_close_position(
+        self, candle: MultiStreamCandle, tf: str,
+    ) -> None:
+        key = (candle.symbol, tf)
+        pos = self.open_positions[key]
         pos.bars_held += 1
         pos.last_check_at = candle.ts
 
@@ -238,7 +387,14 @@ class ShadowWorker:
             return
 
         inputs_hash = _inputs_hash(candle)
-        cooldown_until = candle.ts + timedelta(minutes=COOLDOWN_MINUTES)
+        # PR3: per-TF cooldown from settings. Falls back to the legacy
+        # COOLDOWN_MINUTES (30) for any TF not in the dict — preserves
+        # pre-PR3 behavior + signals "operator forgot to wire this TF"
+        # in the env config.
+        from app.config import get_settings as _get_settings_for_cooldown
+        _cooldown_table = _get_settings_for_cooldown().SHADOW_COOLDOWN_HOURS
+        _cooldown_hours = _cooldown_table.get(tf, COOLDOWN_MINUTES / 60.0)
+        cooldown_until = candle.ts + timedelta(hours=_cooldown_hours)
 
         try:
             async with self.session_factory() as session:
@@ -252,21 +408,25 @@ class ShadowWorker:
                     inputs_hash=inputs_hash,
                 )
                 await delete_open_position(
-                    session, user_id=self.user_id, symbol=candle.symbol,
+                    session, user_id=self.user_id,
+                    symbol=candle.symbol, timeframe=tf,
                 )
                 await set_cooldown(
                     session, user_id=self.user_id,
-                    symbol=candle.symbol, until=cooldown_until,
+                    symbol=candle.symbol, timeframe=tf,
+                    until=cooldown_until,
                 )
                 await session.commit()
         except Exception as e:
-            log.error("persist close failed for %s; suppressing publish: %s",
-                      candle.symbol, e)
+            log.error(
+                "persist close failed for %s/%s; suppressing publish: %s",
+                candle.symbol, tf, e,
+            )
             return
 
         # Update in-memory caches only after the DB commit succeeds.
-        self.open_positions.pop(candle.symbol, None)
-        self.cooldowns[candle.symbol] = cooldown_until
+        self.open_positions.pop(key, None)
+        self.cooldowns[key] = cooldown_until
 
         pnl_pct, pnl_usdt = _pnl(pos, decision.exit_price)
         await shadow_updates.publish_position_closed(
@@ -284,11 +444,16 @@ class ShadowWorker:
         )
 
     async def _maybe_open_position(
-        self, candle: MultiStreamCandle, buf: pd.DataFrame,
+        self, candle: MultiStreamCandle, buf: pd.DataFrame, tf: str,
     ) -> None:
+        # PR3: PositionGate consumes the per-TF state. open_symbols and
+        # cooldowns are filtered to entries matching THIS tf so a 1h BTC
+        # cooldown does not block a 15m BTC entry (and vice versa).
         gate = PositionGate(
-            open_symbols=set(self.open_positions.keys()),
-            cooldowns=dict(self.cooldowns),
+            open_symbols={s for (s, t) in self.open_positions.keys() if t == tf},
+            cooldowns={
+                s: until for (s, t), until in self.cooldowns.items() if t == tf
+            },
         )
         if gate.is_blocked(candle.symbol, now=candle.ts):
             return
@@ -301,12 +466,12 @@ class ShadowWorker:
                 stats_lookup = await pattern_stats_cache.get_or_load(
                     stats_session,
                     symbol=candle.symbol,
-                    timeframe=SHADOW_TIMEFRAME,
+                    timeframe=tf,
                 )
         except Exception as e:  # noqa: BLE001
             log.warning(
-                "pattern_stats lookup failed for %s; running without L2: %s",
-                candle.symbol, e,
+                "pattern_stats lookup failed for %s/%s; running without L2: %s",
+                candle.symbol, tf, e,
             )
             stats_lookup = None
 
@@ -316,13 +481,15 @@ class ShadowWorker:
             async with self.session_factory() as l9_session:
                 pred = await build_prediction(
                     symbol=candle.symbol,
-                    timeframe=SHADOW_TIMEFRAME,
+                    timeframe=tf,
                     bars=buf,
                     pattern_stats_lookup=stats_lookup,
                     session=l9_session,
                 )
         except Exception as e:
-            log.warning("build_prediction failed for %s: %s", candle.symbol, e)
+            log.warning(
+                "build_prediction failed for %s/%s: %s", candle.symbol, tf, e,
+            )
             return
 
         atr_value = _atr(buf)
@@ -364,6 +531,50 @@ class ShadowWorker:
         position = ShadowPosition.from_signal(
             signal, position_size_usdt=SHADOW_POSITION_SIZE_USDT,
         )
+        # PR3: stamp the TF on the position so persistence + the in-memory
+        # cache key reflect the actual lane the trade was opened on.
+        position.timeframe = tf
+
+        # PR3 Phase 5.5 (G1): when HOLD_TP_SCALING_ENABLED, look up the
+        # scaled (timeout_bars, tp_multiplier) for this (tf, mtf_agreement)
+        # pair and rewrite take_profit accordingly. Stop-loss is INVARIANT.
+        # Recording fields (hold_scaling_factor + hold_timeout_bars) stay
+        # NULL when scaling is OFF — bit-identical to pre-G1 trades.
+        from app.config import get_settings as _get_pr3_settings
+        _pr3_settings = _get_pr3_settings()
+        # Pre-bind so the fail-open log call below can reference it even
+        # if the getattr() itself raises (theoretical — pred could be a
+        # misbehaving proxy). Avoids UnboundLocalError defeating the
+        # fail-open contract.
+        _mtf_agreement: int | None = None
+        if _pr3_settings.HOLD_TP_SCALING_ENABLED:
+            from app.shadow.scaling import effective_hold_tp
+            try:
+                # mtf_agreement may not be on pred (older predictor versions
+                # / fail-open paths) — getattr with None default.
+                _mtf_agreement = getattr(pred, "mtf_agreement", None)
+                scaled_bars, tp_mult = effective_hold_tp(
+                    timeframe=tf,
+                    mtf_agreement=_mtf_agreement,
+                    table=_pr3_settings.HOLD_TP_SCALING_TABLE,
+                )
+                # Rewrite TP at scaled distance (SL untouched).
+                from app.shadow.engine import Direction as _Dir
+                _sign = 1.0 if position.direction is _Dir.LONG else -1.0
+                _baseline_tp_distance = abs(position.take_profit - position.entry_price)
+                position.take_profit = position.entry_price + (
+                    _sign * tp_mult * _baseline_tp_distance
+                )
+                position.hold_scaling_factor = tp_mult
+                position.hold_timeout_bars = scaled_bars
+            except Exception as _g1_err:  # noqa: BLE001
+                # Fail-open per §4.6b: scaling errors must NOT block trade
+                # entry. Log + leave position at pre-scaling baseline.
+                log.warning(
+                    "G1 scaling lookup failed for %s/%s (mtf_agreement=%r): %s — "
+                    "opening at baseline",
+                    candle.symbol, tf, _mtf_agreement, _g1_err,
+                )
 
         # Build the 9-float layer_scores array (signed_strength * confidence,
         # per the aggregator's contribution formula) in deterministic L1..L9
@@ -426,7 +637,7 @@ class ShadowWorker:
                       candle.symbol, e)
             return
 
-        self.open_positions[candle.symbol] = position
+        self.open_positions[(candle.symbol, tf)] = position
 
         await shadow_updates.publish_position_opened(
             manager,
@@ -463,18 +674,99 @@ def _pnl(pos: ShadowPosition, exit_price: float) -> tuple[float, float]:
     return pnl_pct, pos.position_size_usdt * pnl_pct / 100.0
 
 
+def _klines_to_dataframe(klines: list[list[Any]]) -> pd.DataFrame:
+    """Convert raw Binance kline rows (the MTF cache format) to the
+    OHLCV-indexed DataFrame the shadow worker's bars buffer expects.
+
+    Binance kline schema per /api/v3/klines:
+      [0] open_time (ms), [1] open, [2] high, [3] low, [4] close,
+      [5] volume, [6] close_time, ...
+
+    Used by `setup()` when it reuses PR1's `_KLINE_CACHE` instead of
+    REST-fetching via `BinanceClient.fetch_klines` (which returns
+    `Candle` objects via `c.__dict__`).
+    """
+    if not klines:
+        return pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+        )
+    rows = [
+        {
+            "ts": pd.to_datetime(int(k[0]), unit="ms", utc=True),
+            "open": float(k[1]), "high": float(k[2]),
+            "low": float(k[3]), "close": float(k[4]),
+            "volume": float(k[5]),
+        }
+        for k in klines
+    ]
+    df = pd.DataFrame(rows)
+    return df.set_index("ts")[["open", "high", "low", "close", "volume"]]
+
+
+def _candles_to_raw_klines(
+    candles: list[Any],
+) -> list[list[Any]]:
+    """Convert the worker's `Candle` list to the raw Binance kline format
+    the MTF cache expects. Best-effort populate path — Candle objects
+    have `ts`, `open`, `high`, `low`, `close`, `volume` attributes;
+    Binance klines are positional 12-element lists.
+
+    Only positions 0-5 are used by `_vote_for_tf`; trailing fields can
+    be empty placeholders since neither the MTF compute nor the shadow
+    seed reads them.
+    """
+    out: list[list[Any]] = []
+    for c in candles:
+        try:
+            ts_dt = c.ts
+            # pd.Timestamp / datetime → ms epoch
+            ts_ms = int(ts_dt.timestamp() * 1000)
+            out.append([
+                ts_ms,
+                str(c.open), str(c.high), str(c.low), str(c.close),
+                str(c.volume),
+                ts_ms + 3_599_999,  # close_time placeholder
+                "0", 0, "0", "0", "0",  # quote_vol, trades, taker buy, ignore
+            ])
+        except Exception:  # noqa: BLE001 — best-effort; skip malformed
+            continue
+    return out
+
+
 async def _build_default_worker() -> ShadowWorker:
-    """Build a worker using the production session factory and current universe."""
+    """Build a worker using the production session factory + settings.
+
+    PR3: reads ``SHADOW_TIMEFRAMES`` and ``SHADOW_NARROW_UNIVERSE`` from
+    Settings. Spawns one ``MultiStreamReader`` per TF and registers them
+    via the worker's ``readers`` dict. Pre-PR3 callers that imported the
+    legacy single-reader build path can continue to construct the worker
+    directly with ``reader=...`` — this helper is the production wiring
+    only.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+    timeframes: list[str] = list(settings.SHADOW_TIMEFRAMES) or [SHADOW_TIMEFRAME]
+    narrow: list[str] = list(settings.SHADOW_NARROW_UNIVERSE)
+
     factory = get_session_factory()
     async with factory() as session:
-        universe = await load_current_universe(session)
-    symbols = [e.symbol for e in universe]
-    if not symbols:
-        log.warning("shadow worker: empty universe — using BTCUSDT fallback")
-        symbols = ["BTCUSDT"]
-    reader = MultiStreamReader(symbols=symbols, timeframe=SHADOW_TIMEFRAME)
+        symbols = await load_shadow_universe(session, narrow=narrow)
+
+    readers: dict[str, _StreamReader] = {
+        tf: MultiStreamReader(symbols=symbols, timeframe=tf) for tf in timeframes
+    }
+    log.info(
+        "shadow_worker: build_default → %d symbols × %d TF(s) %s",
+        len(symbols), len(timeframes), timeframes,
+    )
     return ShadowWorker(
-        symbols=symbols, session_factory=factory, reader=reader,
+        symbols=symbols,
+        session_factory=factory,
+        # `reader` is the primary (first TF) — backward-compat with the
+        # legacy single-reader code path. `readers` carries the full set.
+        reader=readers[timeframes[0]],
+        timeframes=timeframes,
+        readers=readers,
     )
 
 

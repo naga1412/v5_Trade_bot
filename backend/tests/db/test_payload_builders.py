@@ -348,6 +348,10 @@ class TestBuildShadowTradePayload:
             "inputs_hash": "hash-long",
             "model_version": "sp-0.5",
             "signal_id": "sig-abc-1",
+            # PR3 G1: recording-only scaling fields. NULL when the position
+            # didn't carry hold_* attrs (this fixture predates G1).
+            "hold_scaling_factor": None,
+            "hold_timeout_bars": None,
         }
         assert result == expected
         assert result["pnl_pct"] > 0
@@ -410,6 +414,10 @@ class TestBuildShadowTradePayload:
             "inputs_hash": "hash-short",
             "model_version": "sp-0.5",
             "signal_id": "sig-abc-1",
+            # PR3 G1: recording-only scaling fields. NULL when the position
+            # didn't carry hold_* attrs (this fixture predates G1).
+            "hold_scaling_factor": None,
+            "hold_timeout_bars": None,
         }
         assert result == expected
         assert result["pnl_pct"] > 0
@@ -433,7 +441,7 @@ class TestBuildShadowTradePayload:
         assert result["pnl_pct"] < 0
 
     def test_22_keys_present(self) -> None:
-        """Output must have exactly 22 keys (matches schema)."""
+        """Output must have exactly 24 keys (22 PR1 + 2 PR3 G1)."""
         pos = _make_pos(direction=Direction.LONG)
         result = build_shadow_trade_payload(
             pos,
@@ -444,7 +452,43 @@ class TestBuildShadowTradePayload:
             bars_held=4,
             inputs_hash="hash-22",
         )
-        assert len(result) == 22
+        assert len(result) == 24
+
+
+    # --- PR3: timeframe + G1 scaling fields -------------------------------
+
+    def test_shadow_payload_threads_position_timeframe(self) -> None:
+        """When pos.timeframe='15m', payload['timeframe']='15m' (not hardcoded '1h')."""
+        pos = _make_pos(direction=Direction.LONG)
+        pos.timeframe = "15m"
+        result = build_shadow_trade_payload(
+            pos,
+            user_id=1,
+            exit_price=82_400.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=4,
+            inputs_hash="hash-15m",
+        )
+        assert result["timeframe"] == "15m"
+
+    def test_shadow_payload_threads_g1_scaling_fields(self) -> None:
+        """G1 ON + pos has hold_scaling_factor=1.5, hold_timeout_bars=96 →
+        payload reflects those values."""
+        pos = _make_pos(direction=Direction.LONG)
+        pos.hold_scaling_factor = 1.5
+        pos.hold_timeout_bars = 96
+        result = build_shadow_trade_payload(
+            pos,
+            user_id=1,
+            exit_price=82_400.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=4,
+            inputs_hash="hash-g1",
+        )
+        assert result["hold_scaling_factor"] == 1.5
+        assert result["hold_timeout_bars"] == 96
 
 
 # ── build_live_trade_payload ─────────────────────────────────────────────────
