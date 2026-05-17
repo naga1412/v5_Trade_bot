@@ -184,7 +184,7 @@ async def test_full_ghost_pipeline_persists_row_with_audit_chain(
             "model_checkpoint_id": loaded_ck.id,
         }
         async with AsyncSession(engine) as session:
-            row_hash = await persist_prediction(session, payload)
+            _pred_id, row_hash = await persist_prediction(session, payload)
             await session.commit()
 
         # --- 6) Read back + verify ----------------------------------------

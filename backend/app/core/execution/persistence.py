@@ -1,4 +1,5 @@
 import json
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.execution.types import Trade
@@ -28,13 +29,42 @@ async def persist_trade(session: AsyncSession, trade: Trade) -> str:
     return await insert_with_chain(session, "paper_trades", payload)
 
 
-async def persist_prediction(session: AsyncSession, payload: dict) -> str:
-    """Caller is responsible for shaping `payload` to match the predictions schema.
+async def persist_prediction(
+    session: AsyncSession, payload: dict
+) -> tuple[int, str]:
+    """Persist a prediction via the audit hash chain. Returns ``(id, row_hash)``.
+
+    The ``id`` is required by callers who need to write a foreign-keyed row
+    (e.g. ``prediction_validations.prediction_id``) in a SEPARATE transaction
+    — see backend/app/ws/live_prediction.py:_persist_prediction_and_schedule_validation
+    for the canonical caller and the 2026-05-17 hotfix that motivated this
+    tuple return.
 
     SP-0.7 §7.3: predictions is a per-user table. The payload MUST include a
-    `user_id` key — we raise eagerly so callers crash in tests rather than
+    ``user_id`` key — we raise eagerly so callers crash in tests rather than
     relying on the SQLAlchemy NOT NULL constraint surfacing the bug late.
+
+    Returns
+    -------
+    tuple[int, str]
+        ``(prediction_id, row_hash)`` — the autoincrement id of the newly
+        inserted row, and the canonical row hash for audit chain replay.
+        Both reads happen inside the caller's transaction (read-your-own-writes).
     """
     if "user_id" not in payload:
         raise ValueError("persist_prediction payload missing user_id")
-    return await insert_with_chain(session, "predictions", payload)
+    row_hash = await insert_with_chain(session, "predictions", payload)
+    # Read the autoincrement id back. The hash chain guarantees row_hash
+    # uniqueness (SHA-256 of prev_hash + canonical payload), so this picks
+    # the just-inserted row. ORDER BY id DESC + LIMIT 1 is defensive against
+    # any pathological hash collision (probability ~2^-256).
+    pred_id = (
+        await session.execute(
+            sa.text(
+                "SELECT id FROM predictions WHERE row_hash = :h "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"h": row_hash},
+        )
+    ).scalar_one()
+    return int(pred_id), row_hash

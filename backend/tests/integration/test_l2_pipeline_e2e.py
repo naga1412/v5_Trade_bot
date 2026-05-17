@@ -195,7 +195,7 @@ async def test_l2_pipeline_e2e_persists_and_audit_chain_includes_l2() -> None:
         }
 
         async with AsyncSession(engine) as session:
-            row_hash = await persist_prediction(session, payload)
+            _pred_id, row_hash = await persist_prediction(session, payload)
             await session.commit()
 
         # --- Read back + assert L2 round-tripped --------------------------
