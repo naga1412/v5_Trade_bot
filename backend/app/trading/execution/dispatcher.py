@@ -32,16 +32,18 @@ Side effects:
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings
 from app.db.audit import insert_with_chain
 from app.db.payload_builders import build_live_trade_payload
 from app.exchanges.binance_filters import (
@@ -132,6 +134,10 @@ DispatchOutcome = Literal[
     "blocked_max_positions",
     "blocked_funding",
     "error",
+    # PR2 additions — MTF gate + SHORT safety branches
+    "blocked_mtf_low_agreement",
+    "blocked_mtf_higher_tf_veto",
+    "blocked_short_high_borrow",
 ]
 
 
@@ -152,6 +158,195 @@ def _compute_sl_distance_pct(
     if direction == "LONG":
         return max(0.0, (entry - sl) / entry)
     return max(0.0, (sl - entry) / entry)
+
+
+# ---------------------------------------------------------------------------
+# PR2 — MTF gate + higher-TF veto
+# ---------------------------------------------------------------------------
+
+
+def _apply_mtf_gate(
+    proposal: SignalProposal,
+    settings: Settings,
+) -> DispatchResult | None:
+    """Decide whether MTF state should short-circuit dispatch.
+
+    Returns a `DispatchResult(outcome="blocked_mtf_*")` to abort dispatch
+    or `None` to fall through.
+
+    Fail-open contract (spec §4.2 + R6):
+      - `mtf_agreement is None` → PASS. PR1 MTF compute returns None on
+        cold cache / fetch failure; we must never poison dispatch on
+        missing signal data.
+      - `MTF_MIN_AGREEMENT_1H=0` → PASS for every agreement value. This is
+        the single-env-var rollback path (spec §8).
+      - `mtf_directions is None` → veto cannot evaluate → PASS.
+
+    The function is pure: no mutation of `proposal`, no DB I/O, no module-
+    level state reads. `settings` MUST be passed in (not read via
+    `get_settings()`) so env-var overrides take effect at request time.
+    """
+    if (
+        proposal.mtf_agreement is not None
+        and proposal.mtf_agreement < settings.MTF_MIN_AGREEMENT_1H
+    ):
+        return DispatchResult(
+            outcome="blocked_mtf_low_agreement",
+            detail=(
+                f"mtf_agreement={proposal.mtf_agreement} < "
+                f"MTF_MIN_AGREEMENT_1H={settings.MTF_MIN_AGREEMENT_1H}"
+            ),
+        )
+
+    if settings.MTF_HIGHER_TF_VETO and proposal.mtf_directions is not None:
+        d_1d = proposal.mtf_directions.get("1d", 0)
+        d_1w = proposal.mtf_directions.get("1w", 0)
+        if proposal.direction == "LONG" and d_1d < 0 and d_1w < 0:
+            return DispatchResult(
+                outcome="blocked_mtf_higher_tf_veto",
+                detail="1d and 1w both opposite LONG (negative)",
+            )
+        if proposal.direction == "SHORT" and d_1d > 0 and d_1w > 0:
+            return DispatchResult(
+                outcome="blocked_mtf_higher_tf_veto",
+                detail="1d and 1w both opposite SHORT (positive)",
+            )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# PR2 — SHORT-side safety: high-borrow veto
+# ---------------------------------------------------------------------------
+
+
+# Spec §R7: treat borrow data older than this as missing → fail-open.
+_BORROW_STALENESS_BUDGET = timedelta(hours=6)
+
+
+async def _lookup_borrow_apr(
+    symbol: str, session: AsyncSession,
+) -> float | None:
+    """Latest borrow APR % for ``symbol`` from intermarket_snapshots.
+
+    Returns None when:
+      - No `intermarket_snapshots.borrow_rate_pct` row exists for the
+        symbol (current prod state — the column isn't wired yet; the
+        BinanceFuturesIntermarketAdapter doesn't populate it).
+      - The latest row is older than the spec §R7 staleness budget.
+      - The query itself raises (defensive: never let dispatch fail
+        because the borrow lookup blew up — the flag defaults OFF so
+        production behavior is unchanged).
+
+    Fail-open contract: callers treat None as "no veto".
+
+    NOTE: as of PR2 the intermarket_snapshots schema lacks `borrow_rate_pct`
+    (migration 0014 added funding_rate + open_interest only). This helper
+    consequently returns None in prod. The SHORT_VETO_HIGH_BORROW flag
+    therefore stays dormant by construction until a future PR wires the
+    real borrow-rate source. Tests inject borrow values via patch.
+    """
+    try:
+        row = (await session.execute(
+            sa.text(
+                "SELECT borrow_rate_pct, captured_at "
+                "FROM intermarket_snapshots "
+                "WHERE symbol = :sym "
+                "ORDER BY captured_at DESC LIMIT 1"
+            ),
+            {"sym": symbol},
+        )).fetchone()
+    except Exception as exc:  # noqa: BLE001 — fail-open per §R7
+        log.warning(
+            "_lookup_borrow_apr(%s) raised — failing open: %s", symbol, exc,
+        )
+        return None
+    if row is None or row.borrow_rate_pct is None:
+        return None
+    captured_at = row.captured_at
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - captured_at
+    if age > _BORROW_STALENESS_BUDGET:
+        log.info(
+            "borrow data stale for %s (age=%.1fh) — failing open",
+            symbol, age.total_seconds() / 3600,
+        )
+        return None
+    return float(row.borrow_rate_pct)
+
+
+async def _apply_short_safety_gates(
+    proposal: SignalProposal,
+    settings: Settings,
+    *,
+    session: AsyncSession,
+) -> DispatchResult | None:
+    """SHORT-side blocking gates. Returns a DispatchResult to short-circuit
+    or None to fall through.
+
+    Spec §4.2: only runs when proposal.direction == "SHORT". LONG signals
+    return immediately — borrow lookup is not performed.
+
+    Current gate: SHORT_VETO_HIGH_BORROW. SL tightening lives in
+    `_maybe_tighten_short_sl` (modification, not a block). Hold-time
+    halving lives in the exit-timeout path (Phase 5).
+    """
+    if proposal.direction != "SHORT":
+        return None
+
+    if settings.SHORT_VETO_HIGH_BORROW:
+        borrow_apr = await _lookup_borrow_apr(proposal.symbol, session)
+        if (
+            borrow_apr is not None
+            and borrow_apr > settings.SHORT_VETO_BORROW_APR_PCT
+        ):
+            return DispatchResult(
+                outcome="blocked_short_high_borrow",
+                detail=(
+                    f"borrow_apr={borrow_apr:.2f}% > threshold "
+                    f"{settings.SHORT_VETO_BORROW_APR_PCT:.2f}%"
+                ),
+            )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# PR2 — SHORT-side safety: SL tightening (modifies proposal, never blocks)
+# ---------------------------------------------------------------------------
+
+
+def _maybe_tighten_short_sl(
+    proposal: SignalProposal,
+    settings: Settings,
+) -> SignalProposal:
+    """Tighten a SHORT proposal's stop-loss when MTF agreement is low.
+
+    Spec §4.2: when SHORT_TIGHTEN_SL_LOW_MTF is ON, the proposal is SHORT,
+    and mtf_agreement < cutoff, reduce the distance between entry and SL
+    by SHORT_TIGHTEN_SL_PCT. Otherwise returns the input proposal unchanged
+    (same object identity — caller relies on `is` for the no-op branch in
+    micro-perf benchmarks).
+
+    No DispatchOutcome change — this is a modification, not a block.
+
+    SHORT trade geometry: SL sits ABOVE entry. "Tighten" means reduce the
+    upward distance so the stop fires earlier. e.g. entry=100, SL=110
+    (distance 10), 20% tightening → new distance 8 → new SL=108.
+    """
+    if (
+        proposal.direction != "SHORT"
+        or not settings.SHORT_TIGHTEN_SL_LOW_MTF
+        or proposal.mtf_agreement is None
+        or proposal.mtf_agreement >= settings.SHORT_TIGHTEN_SL_MTF_CUTOFF
+    ):
+        return proposal
+
+    sl_distance = proposal.stop_loss_price - proposal.entry_price
+    new_distance = sl_distance * (1.0 - settings.SHORT_TIGHTEN_SL_PCT)
+    new_sl = proposal.entry_price + new_distance
+    return dataclasses.replace(proposal, stop_loss_price=new_sl)
 
 
 def _compute_rr_ratio(entry: float, sl: float, tp: float) -> float:
@@ -414,6 +609,27 @@ async def dispatch(
             outcome="blocked_funding",
             detail=reason or "funding-rate guard tripped",
         )
+
+    # ---- PR2 gates (MTF + SHORT safety) ---------------------------------
+    # Order: MTF gate first (cheapest — no DB I/O), then SHORT safety
+    # (one DB read), then SL tightening (modifies proposal). After this
+    # block, `proposal` may be a NEW SignalProposal instance with a
+    # tightened stop-loss — the rest of dispatch() must use the returned
+    # value, not the original. `get_settings()` is the documented entry-
+    # point hook for per-request env-var overrides (e.g. rollback by
+    # setting MTF_MIN_AGREEMENT_1H=0 in a hot env reload).
+    from app.config import get_settings as _get_pr2_settings
+    pr2_settings = _get_pr2_settings()
+    gate_result = _apply_mtf_gate(proposal, pr2_settings)
+    if gate_result is not None:
+        return gate_result
+    gate_result = await _apply_short_safety_gates(
+        proposal, pr2_settings, session=session,
+    )
+    if gate_result is not None:
+        return gate_result
+    proposal = _maybe_tighten_short_sl(proposal, pr2_settings)
+    # ---- end PR2 gates --------------------------------------------------
 
     # Max concurrent
     if user.open_positions_count >= user.max_concurrent_positions:
