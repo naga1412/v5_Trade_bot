@@ -229,15 +229,16 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
     ),
     # 17. MTF cache pre-warm — single-shot at startup; loads the top-30
     #     universe and calls prewarm_cache (60s hard deadline, fail-open).
-    #     pending_heartbeat=True: single-shot by design; no heartbeat
-    #     expected; watchdog staleness check is skipped for this entry.
+    #     FU-1 H9 + FU-15: emits ONE heartbeat with
+    #     status='single_shot_completed' on clean exit; watchdog classifies
+    #     as 'single_shot_completed' (non-alarming) per FU-15 state machine.
     WorkerSpec(
         name="mtf_cache_prewarm_task",
         description="Single-shot MTF kline cache pre-warm over the top-30 universe",
-        liveness_query=None,  # single-shot — no DB liveness signal
-        max_staleness_seconds=5 * 60,  # not used (liveness_query=None)
+        liveness_query=HEARTBEAT,  # FU-15: watchdog reads single-shot heartbeat
+        max_staleness_seconds=10 * 60,  # bypassed by single_shot branch
         stateful=False,
-        pending_heartbeat=True,
+        single_shot=True,
     ),
     # 18. MTF cache TTL-refresh loop — long-running; every 30s scans for
     #     cache entries within 20% of expiry and refreshes them proactively.
