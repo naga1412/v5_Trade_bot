@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - audit-chain-break-investigate # READ-ONLY: SELECTs predictions rows 93-100 (id, ts, symbol, prev_hash, row_hash, created_at) for diagnosing the preflight audit_chain_intact break at row index 96. Pure SELECT, no writes. Operator-authorized 2026-05-19 to investigate launch-blocking preflight failure.
 
 jobs:
   probe:
@@ -506,6 +507,31 @@ jobs:
                    ORDER BY id DESC LIMIT 10;\" -c \
                  \"SELECT worker_name, max(beat_at) AS latest, count(*) AS n FROM worker_heartbeats \
                    GROUP BY worker_name ORDER BY worker_name;\""
+              ;;
+            audit-chain-break-investigate)
+              # READ-ONLY. SELECTs predictions rows around the
+              # preflight-reported break at row index 96. Shows id,
+              # ts, symbol, prev_hash[:16], row_hash[:16], created_at,
+              # model_version for rows at array indices 93-100 (rows
+              # 94-101 1-indexed). Diagnoses single-row corruption vs
+              # PR1-transition structural mismatch.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"WITH ord AS ( \
+                     SELECT id, ts, symbol, timeframe, \
+                            LEFT(prev_hash, 16) AS prev_hash_16, \
+                            LEFT(row_hash, 16)  AS row_hash_16, \
+                            created_at, model_version, \
+                            ROW_NUMBER() OVER (ORDER BY id) - 1 AS arr_idx \
+                       FROM predictions \
+                   ) \
+                   SELECT arr_idx, id, ts, symbol, timeframe, \
+                          prev_hash_16, row_hash_16, created_at, \
+                          model_version \
+                     FROM ord \
+                    WHERE arr_idx BETWEEN 93 AND 100 \
+                    ORDER BY arr_idx;\""
               ;;
             audit-replay-verify)
               # READ-ONLY: replay-identity verification across all 7
