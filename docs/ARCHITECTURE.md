@@ -531,6 +531,143 @@ can see throughput, not just liveness.
 
 ---
 
+## 11d. Dynamic sizing + Telegram alert routing (PR9)
+
+**Files**: `app/trading/dynamic_sizing.py` (Kelly + tier + split — new),
+`app/trading/multi_entry.py` (sequential tranche placement — new),
+`app/ops/alert_routing.py` (Telegram > SMTP > log precedence — new),
+`app/trading/execution/dispatcher.py` (routes through compute_dynamic_size),
+`app/api/routes/bot_status.py` (`/sizing` endpoint),
+`app/config.py` (8 new settings), alembic
+`2026_05_18_0023_pr9_users_balance_tier.py` — added 2026-05-18 (PR9).
+
+### Scope-trim from master rollout
+
+Master rollout described PR9 as *"Kelly + multi-entry + self-healing
+supervisor + FU-1+FU-2+FU-3 absorption"*. Surface scan revealed:
+- `p_win` doesn't exist yet (PR5 stub returns None async-function). PR9
+  uses `confidence_pct/100` as proxy; PR5 owns the async refactor that
+  wires real p_win.
+- Multi-entry split is greenfield (no existing DCA logic).
+- Balance tiers are greenfield (no user-tier column).
+- Stateful-worker auto-restart needs in-memory state migration design.
+  Carved out as **FU-21** in `backend/docs/KNOWN_ISSUES.md`. PR9 closes
+  the cheaper half: Telegram alert routing so stateful-worker critical
+  alerts reach the operator's phone (replacing SMTP-fallback-to-logs).
+- FU-2 (audit chain v2) and FU-3 (verifier stability) stay independent
+  in `KNOWN_ISSUES.md` — not load-bearing on sizing/alerts.
+
+### Sizing pipeline
+
+```
+SignalProposal arrives → dispatcher.dispatch()
+                              ↓
+              ... pre-conditions (funding/cooldown/MTF/SHORT) ...
+                              ↓
+              ... leverage compute ...
+                              ↓
+┌──────────────────────────────────────────────────────────────┐
+│  compute_dynamic_size(balance, confidence_pct, settings)      │
+│    DYNAMIC_SIZING_ENABLED=False → returns None (fall through) │
+│    Else:                                                      │
+│      p_win  = _resolve_p_win(confidence_pct)                 │
+│      tier   = classify_balance_tier(balance)                  │
+│      kelly  = (2*p_win-1) × SIZING_FRACTIONAL_KELLY            │
+│             = clamped to [0, TIER_MAX_FRACTION[tier]]         │
+│      margin = balance × kelly                                 │
+│    On exception: log + return None (fail-open)                │
+└──────────────────────────────────────────────────────────────┘
+                              ↓
+              dynamic_margin is not None → use it (PR9 path)
+              dynamic_margin is None    → fall through to fixed/percent
+                              ↓
+┌──────────────────────────────────────────────────────────────┐
+│  split_entries(total, confidence_pct, settings)               │
+│    confidence/100 >= SIZING_MULTI_ENTRY_THRESHOLD → [total]   │
+│    Else: split per SIZING_MULTI_ENTRY_RATIOS                  │
+└──────────────────────────────────────────────────────────────┘
+                              ↓
+              place_multi_entry_orders(tranche_qtys, ...)
+                  tranche 1: MARKET at signal entry
+                  tranche 2..N: LIMIT at entry ± DCA band%
+                  failure isolation: tranche 1 raises propagate;
+                                     tranche 2..N failures log + continue
+```
+
+### Balance tiers + caps
+
+| Tier   | Balance (USDT) | Max fraction of bankroll |
+|--------|----------------|--------------------------|
+| small  | < $1k          | 1%                       |
+| medium | $1k – $10k     | 2%                       |
+| large  | $10k – $100k   | 5%                       |
+| whale  | ≥ $100k        | 10%                      |
+
+These are STRUCTURAL FLOORS — Kelly compute clamps regardless of
+confidence. Defensive on purpose: even at 100% confidence the small-
+tier user gets capped to 1% of bankroll per trade. Operator can shift
+boundaries + caps via env (`SIZING_TIER_BOUNDARIES`,
+`SIZING_TIER_MAX_FRACTION`).
+
+### Quarter-Kelly default
+
+`SIZING_FRACTIONAL_KELLY=0.25` is industry-standard defensive. Half-Kelly
+(0.5) is 2x more aggressive; eighth-Kelly (0.125) is 2x more
+conservative. Operator-tunable per env.
+
+### Multi-entry contract
+
+When `confidence_pct/100 < SIZING_MULTI_ENTRY_THRESHOLD` (default 0.75):
+- Tranche 1: MARKET at signal entry_price.
+- Tranche 2..N: LIMIT at progressively-shifted DCA prices (`entry_price
+  ± SIZING_MULTI_ENTRY_DCA_BAND_PCT × idx`). Binance fills when price
+  moves to the LIMIT.
+- SL+TP managed at position level by `liquidation_monitor` +
+  `live_exit_monitor` — not set per-order.
+- Tranche 1 failure propagates (caller reports `blocked_error`).
+- Tranche 2..N failure logs + continues. Position is smaller than
+  designed but earlier tranches stay on Binance — not a safety issue.
+
+### Alert routing precedence
+
+`app/ops/alert_routing.alert_admin(message, level=...)`:
+1. Always log first (can't-fail audit trail).
+2. If `level="critical"` AND `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+   set: POST sendMessage. On 200 → done. On error → fall through.
+3. SMTP via `app.ops.alerts.alert_admin`. On success → done. On failure
+   → fall through.
+4. Log line at step 1 is the operator's last-resort signal.
+
+`level` opt-in: only "critical" attempts Telegram. "warning"
+(stateless-worker silences) skips Telegram to avoid spam. "info" logs
+only.
+
+Stateful-worker watchdog wire-up to this path lands as part of FU-21
+(stateful-worker auto-restart) — PR9 ships the infrastructure; the
+call sites flip when FU-21 lands.
+
+### Fail-open contract
+
+`compute_dynamic_size` returns None on any compute exception. Dispatcher
+falls through to legacy fixed/percent path. A buggy Kelly compute MUST
+NOT silently DOS trading.
+
+### Operator carve-out
+
+PR9 is the ONLY PR in the rollout where dev→main requires explicit
+operator "ship it" approval. Default-OFF via `DYNAMIC_SIZING_ENABLED=
+False` makes the prod deploy bit-identical to pre-PR9. Soak (7-day
+staging) precedes the prod flag flip.
+
+### Rollback
+
+Single env var: `DYNAMIC_SIZING_ENABLED=False` reverts to pre-PR9
+sizing. Process restart needed (lru_cache on `get_settings`). Stage-2
+rollback: alembic downgrade -1 drops `users.balance_tier`; round-trip
+tested in `tests/db/test_pr9_migration_downgrade.py`.
+
+---
+
 ## 11. Self-healing supervisor
 
 **File**: `app/ops/worker_supervisor.py` — added 2026-05-15 (PR #133)

@@ -135,6 +135,40 @@ class Settings(BaseSettings):
     # regime detector exists today, so this is a no-op until that lands.
     LIVE_COOLDOWN_REGIME_AWARE: bool = False
 
+    # --- PR9: Dynamic sizing (Kelly-fractional × balance tier) -----------
+    # Default OFF for prod safety + operator carve-out: PR9 is the ONLY
+    # PR in the rollout where dev→main requires explicit "ship it".
+    DYNAMIC_SIZING_ENABLED: bool = False
+    # Forward-compat for PR5: when predict_p_win() returns non-None,
+    # sizing uses that probability instead of confidence_pct/100. False
+    # forces the confidence proxy regardless.
+    SIZING_USE_P_WIN_WHEN_AVAILABLE: bool = True
+    # Quarter-Kelly is industry-standard defensive. Half-Kelly (0.5) is
+    # 2x more aggressive; eighth-Kelly (0.125) is 2x more conservative.
+    SIZING_FRACTIONAL_KELLY: float = 0.25
+    # Per-tier hard caps as fraction of bankroll. Structural floor —
+    # Kelly result is clamped to <= these regardless of confidence.
+    SIZING_TIER_MAX_FRACTION: dict[str, float] = {
+        "small": 0.01,
+        "medium": 0.02,
+        "large": 0.05,
+        "whale": 0.10,
+    }
+    # Tier bucket boundaries (USDT). Inclusive on the upper side:
+    #   balance < small_max          → "small"
+    #   small_max <= balance < ...   → "medium"
+    SIZING_TIER_BOUNDARIES: dict[str, float] = {
+        "small_max": 1_000.0,
+        "medium_max": 10_000.0,
+        "large_max": 100_000.0,
+    }
+    # Multi-entry split kicks in when confidence_pct/100 < this threshold.
+    SIZING_MULTI_ENTRY_THRESHOLD: float = 0.75
+    # Tranche ratios — must sum to 1.0. Validated at sizing time.
+    SIZING_MULTI_ENTRY_RATIOS: list[float] = [0.6, 0.4]
+    # DCA band — tranche 2 placed when price moves this pct against signal.
+    SIZING_MULTI_ENTRY_DCA_BAND_PCT: float = 0.5
+
 
 @lru_cache
 def get_settings() -> Settings:

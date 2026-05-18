@@ -686,7 +686,23 @@ async def dispatch(
         hard_cap=user.max_leverage_cap,
     )
 
-    if user.sizing_mode == "fixed":
+    # ---- PR9 dynamic sizing (default-OFF; falls back to legacy on None) -
+    # When DYNAMIC_SIZING_ENABLED=True, compute_dynamic_size returns the
+    # Kelly-fractional × balance-tier × hard-cap margin. Returns None on
+    # disabled OR on any compute error (fail-open contract) — caller
+    # falls through to the legacy fixed/percent path below.
+    from app.config import get_settings as _get_pr9_settings
+    from app.trading.dynamic_sizing import compute_dynamic_size
+    pr9_settings = _get_pr9_settings()
+    dynamic_margin = compute_dynamic_size(
+        balance_usdt=user.portfolio_value_usdt,
+        confidence_pct=proposal.confidence_pct,
+        settings=pr9_settings,
+    )
+
+    if dynamic_margin is not None:
+        margin = dynamic_margin
+    elif user.sizing_mode == "fixed":
         if user.fixed_size_usdt is None:
             return DispatchResult(
                 outcome="error",

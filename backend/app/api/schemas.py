@@ -226,6 +226,23 @@ class LiveCooldownOut(BaseModel):
     blocked_until_fresh_mtf: bool  # SL + LIVE_COOLDOWN_SL_REQUIRES_FRESH_MTF
 
 
+class SizingPreviewOut(BaseModel):
+    """PR9 — sizing diagnostic for /bot-status/sizing.
+
+    Read-only preview of what the dispatcher WOULD size the next signal
+    at, given a hypothetical confidence_pct (default 70). Operator uses
+    this to sanity-check tier classification + Kelly math without
+    waiting for a real signal.
+    """
+    dynamic_sizing_enabled: bool
+    balance_usdt: float
+    tier: Literal["small", "medium", "large", "whale"]
+    tier_max_fraction: float
+    fractional_kelly: float
+    sample_confidence_pct: float
+    sample_margin_usdt: float | None  # None when sizing disabled or no edge
+
+
 class OpenPositionOut(BaseModel):
     symbol: str
     direction: Literal["LONG", "SHORT"]
