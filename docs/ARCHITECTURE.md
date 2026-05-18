@@ -444,6 +444,87 @@ PK/UNIQUE constraints (round-trip tested in
 
 ---
 
+## 11c. Outcome-adaptive cooldown for live trades (PR8)
+
+**Files**: `app/trading/cooldown_compute.py` (pure-function decision
+logic — new), `app/trading/execution/cooldown_gate.py` (dispatcher
+pre-condition — new), `app/trading/execution/live_exit_monitor.py`
+(30s polling worker classifying TP/SL/timeout/external — new),
+`app/trading/execution/liquidation_monitor.py` (auto-close path now
+writes `exit_reason="liquidation_buffer_breach"` + cooldown),
+`app/db/live_cooldowns.py` (persistence — new),
+`app/db/live_exit_reasons.py` (LiveExitReason StrEnum — new),
+`app/api/routes/bot_status.py` (`/cooldowns` endpoint),
+`app/config.py` (4 new settings), alembic
+`2026_05_18_0022_pr8_live_cooldowns.py` — added 2026-05-18 (PR8).
+
+### Surface scan finding
+
+The master rollout doc described PR8 as *"replace fixed 4h cooldown
+with outcome-aware"* — but a surface scan revealed there IS no live
+cooldown today. `DispatchOutcome.blocked_cooldown` exists in the
+enum but the actual check was never wired; `live_trades.exit_reason`
+is a NULL-by-default column never populated by any write path.
+
+PR8 therefore ships three intertwined deliverables, not a tweak:
+
+1. **Wire `live_trades.exit_reason` at close time** — `live_exit_monitor`
+   polls every 30s, classifies TP / SL / TIMEOUT / EXTERNAL_CLOSE on
+   bracket cross. `liquidation_monitor` writes `liquidation_buffer_breach`
+   on auto-close. MANUAL_CLOSE remains NULL (Telegram-approve flow is
+   out of scope; 0h cooldown default means missing writes don't affect
+   gate behavior).
+2. **`live_cooldowns` table + dispatcher gate** — PK
+   `(user_id, symbol)`, columns `cooldown_until`, `last_exit_reason`,
+   `last_mtf_agreement`, `updated_at`. Partial active-only index
+   accelerates `/cooldowns` scans (Postgres).
+   `_apply_cooldown_gate` slots into dispatcher pre-conditions between
+   funding and MTF gates (cheapest check first — single PK SELECT).
+3. **Outcome-adaptive duration logic** —
+   `LIVE_COOLDOWN_HOURS_BY_OUTCOME` defaults (operator-tunable):
+   SL=8h, TP=1h, TIMEOUT=4h, MANUAL/EXTERNAL=0h, LIQ_BUFFER=24h.
+
+### SL → require-fresh-MTF override
+
+When the last exit was SL AND `LIVE_COOLDOWN_SL_REQUIRES_FRESH_MTF=True`
+(default), the cooldown clears ONLY when:
+- Calendar time has elapsed (`cooldown_until < now`), AND
+- The new signal's `mtf_agreement > last_mtf_agreement`.
+
+Same-or-lower agreement remains blocked. Defends against the
+"same losing setup keeps firing every 8h" failure mode. The
+`/bot-status/cooldowns` endpoint surfaces a `blocked_until_fresh_mtf`
+flag per row so the dashboard can show which cooldowns need conviction
+to clear.
+
+### Fail-open contract
+
+The dispatcher cooldown gate fails open: any DB error from
+`load_cooldown` returns None (let the trade proceed), with a warn log.
+Same philosophy as PR2's MTF gate — a stuck gate that errored
+to-blocked could shut down trading on a single DB blip. Tested in
+`tests/trading/test_cooldown_gate.py::test_gate_fails_open_on_db_error`.
+
+### Rollback
+
+Single env var: `LIVE_COOLDOWN_ENABLED=False` reverts to pre-PR8
+dispatch behavior (gate short-circuits without a DB read). Default
+is False; operator flips per env after soak. Stage-2 rollback: alembic
+downgrade -1 drops `live_cooldowns` (round-trip tested in
+`tests/db/test_pr8_migration_downgrade.py`). `live_trades.exit_reason`
+writes are idempotent — re-running `live_exit_monitor` on an already-
+closed row is harmless (UPDATE WHERE closed_at IS NULL).
+
+### Worker registry entry
+
+`live_exit_monitor` — `max_staleness_seconds=5*60`, `stateful=True`
+(touches Binance — never auto-restart), `required_env=
+("AUTONOMOUS_TRADING_ENABLED",)`. Heartbeats per poll with
+`{"open_positions": N, "closed_this_tick": N}` details so the watchdog
+can see throughput, not just liveness.
+
+---
+
 ## 11. Self-healing supervisor
 
 **File**: `app/ops/worker_supervisor.py` — added 2026-05-15 (PR #133)
