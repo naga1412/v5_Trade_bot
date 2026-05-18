@@ -107,7 +107,10 @@ def build_shadow_trade_payload(
     return {
         "user_id": user_id,
         "symbol": pos.symbol,
-        "timeframe": "1h",
+        # PR3 Phase 3: read TF from the position (was hardcoded '1h').
+        # Falls back to '1h' via getattr() so pre-PR3 ShadowPosition
+        # duck-types without the field still produce bit-identical rows.
+        "timeframe": getattr(pos, "timeframe", "1h") or "1h",
         "direction": pos.direction.value,
         "entry_price": pos.entry_price,
         "stop_loss": pos.stop_loss,
@@ -127,6 +130,11 @@ def build_shadow_trade_payload(
         "inputs_hash": inputs_hash,
         "model_version": "sp-0.5",
         "signal_id": pos.signal_id,
+        # PR3 Phase 5.5: G1 recording-only scaling fields. NULL when
+        # scaling is OFF or pos lacks the attrs (pre-PR3 duck-type).
+        # NON_HASHED_ALLOW_LIST per app/db/audit.py — out of the chain.
+        "hold_scaling_factor": getattr(pos, "hold_scaling_factor", None),
+        "hold_timeout_bars": getattr(pos, "hold_timeout_bars", None),
     }
 
 

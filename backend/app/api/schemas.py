@@ -189,16 +189,43 @@ class GateMetricOut(BaseModel):
     passing: bool
 
 
+class TimeframeGateStatsOut(BaseModel):
+    """PR3 Phase 7: per-TF aggregate stats for /promotion-gate.
+
+    Same metric shape as the combined block, but computed against rows
+    filtered to a single timeframe. Informational only — `all_passing`
+    on the parent payload continues to be computed on the combined-
+    filtered dataset (which excludes 15m when
+    SHADOW_15M_ELIGIBLE_FOR_PROMOTION=False).
+    """
+    trades_total: int
+    sharpe: float | None
+    max_drawdown: float | None
+    win_rate: float | None
+    profit_factor: float | None
+
+
 class PromotionGateOut(BaseModel):
     target_mode: Literal["telegram-approve", "fully-auto"]
     metrics: list[GateMetricOut]
     all_passing: bool
     distance_summary: str
+    # PR3 Phase 7: per-TF breakdown. Informational — does NOT affect
+    # all_passing. Keys are the timeframes the worker is configured to
+    # run (SHADOW_TIMEFRAMES setting). Default empty dict so legacy
+    # tests that don't inspect it still pass.
+    per_timeframe: dict[str, TimeframeGateStatsOut] = {}
 
 
 class OpenPositionOut(BaseModel):
     symbol: str
     direction: Literal["LONG", "SHORT"]
+    # PR3 Phase 8: surface the per-position timeframe so the BotStatus
+    # OpenPositions card can deep-link to the correct chart TF (was
+    # hardcoded "1h" pre-PR3). Optional for forward-compat with rows
+    # that pre-date PR3's persistence threading; pre-PR3 rows default
+    # to "1h" via the DB column default added in alembic 0021.
+    timeframe: str | None = None
     entry_price: float
     stop_loss: float
     take_profit: float

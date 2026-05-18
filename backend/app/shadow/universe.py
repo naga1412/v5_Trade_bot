@@ -1,9 +1,13 @@
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,3 +110,40 @@ async def load_current_universe(
                            rank=row.rank)
         for row in result
     ]
+
+
+async def load_shadow_universe(
+    session: AsyncSession, narrow: list[str],
+) -> list[str]:
+    """Load the active universe, intersected with SHADOW_NARROW_UNIVERSE if non-empty.
+
+    Per PR3 spec §4.4:
+      - Empty list → use full top-30 universe (PR1 behavior preserved).
+      - Non-empty + has overlap → return intersection ordered by universe rank.
+      - Non-empty + zero overlap → log WARNING and fall back to full universe
+        (fail-loud-then-fail-open). A typo'd ``SHADOW_NARROW_UNIVERSE=["BTCUSD"]``
+        (wrong suffix) should NOT silently produce an empty worker.
+
+    Empty top-30 (no snapshot yet) falls back to a single-symbol BTCUSDT list
+    so the worker doesn't bail on cold-start; matches PR1 behavior.
+    """
+    rows = await load_current_universe(session)
+    full = [e.symbol for e in rows]
+    if not full:
+        log.warning("shadow universe empty; using BTCUSDT fallback")
+        return ["BTCUSDT"]
+
+    if not narrow:
+        return full
+
+    narrow_set = set(narrow)
+    intersection = [s for s in full if s in narrow_set]
+    if not intersection:
+        log.warning(
+            "SHADOW_NARROW_UNIVERSE=%r has no overlap with current universe "
+            "(first 5 of %d: %r); falling back to full universe to avoid "
+            "an empty worker",
+            narrow, len(full), full[:5],
+        )
+        return full
+    return intersection

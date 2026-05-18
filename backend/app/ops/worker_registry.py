@@ -75,12 +75,16 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
     # 2. Multi-symbol 1h shadow trading worker.
     WorkerSpec(
         name="shadow_worker",
-        description="1h shadow paper-trade engine across the asset universe",
+        description="Multi-TF (1h + 15m) shadow paper-trade engine across the asset universe",
         liveness_query=HEARTBEAT,
-        max_staleness_seconds=2 * 60 * 60,  # 2x its 1h cadence
+        # PR3 B7 (spec §4.7): tightened from 2h (sized for 1h cadence) to
+        # 30min (2× the 15m cadence). Same safety factor as the old budget
+        # vs the old cadence. PR3 also wires the heartbeat at every
+        # _handle_candle invocation (already FU-1-closed). Running the
+        # 15m lane with the old 2h budget would have hidden a stalled
+        # 15m stream for 2h — operationally unacceptable per §6.3.
+        max_staleness_seconds=30 * 60,
         stateful=True,  # holds open positions in memory
-        # FU-1 closed for shadow_worker — record_heartbeat wired in
-        # _handle_candle per processed candle.
     ),
     # 3. Daily 00:00 UTC asset_universe refresh.
     WorkerSpec(
