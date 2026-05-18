@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - testnet-creds-check # READ-ONLY: check whether BINANCE_API_KEY_TESTNET + BINANCE_API_SECRET_TESTNET are present in prod .env. Prints PRESENT/MISSING only — never echoes the actual key. Gates the PR9 testnet verification path.
 
 jobs:
   probe:
@@ -257,6 +258,25 @@ jobs:
                  echo '=== alembic version ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT version_num FROM alembic_version;\""
+              ;;
+            testnet-creds-check)
+              # READ-ONLY. Check whether testnet API key/secret env vars
+              # are present in prod /opt/trading-radar/.env. NEVER echoes
+              # the actual value — only PRESENT/MISSING per key. Gates
+              # the PR9 testnet verification path; operator decides
+              # next step from the output.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd /opt/trading-radar && \
+                 echo '=== testnet credentials check (READ-ONLY) ===' && \
+                 (grep -q '^BINANCE_API_KEY_TESTNET=' .env && \
+                    echo 'BINANCE_API_KEY_TESTNET: PRESENT') || \
+                    echo 'BINANCE_API_KEY_TESTNET: MISSING' ; \
+                 (grep -q '^BINANCE_API_SECRET_TESTNET=' .env && \
+                    echo 'BINANCE_API_SECRET_TESTNET: PRESENT') || \
+                    echo 'BINANCE_API_SECRET_TESTNET: MISSING' ; \
+                 (grep -q '^BINANCE_USE_TESTNET=' .env && \
+                    echo 'BINANCE_USE_TESTNET line present (value not echoed)') || \
+                    echo 'BINANCE_USE_TESTNET: MISSING (defaults to false)'"
               ;;
             health-summary)
               # One-page production health check: container status,
