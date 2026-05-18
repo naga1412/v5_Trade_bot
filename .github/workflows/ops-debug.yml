@@ -37,6 +37,7 @@ on:
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
           - audit-chain-break-investigate # READ-ONLY: SELECTs predictions rows 93-100 (id, ts, symbol, prev_hash, row_hash, created_at) for diagnosing the preflight audit_chain_intact break at row index 96. Pure SELECT, no writes. Operator-authorized 2026-05-19 to investigate launch-blocking preflight failure.
           - audit-chain-sweep-repair # WRITE — predictions.prev_hash sweep repair (audit metadata only — no money path). Backup column, dry-run count (HALT if >100), apply UPDATE with RETURNING, verify still_broken=0 (HALT if !=0), restart backend, verify preflight passes, verify autonomous workers heartbeat. Operator-authorized 2026-05-19 with explicit STEP-BY-STEP approval (concurrent-insert race bug; FU-24 to be filed).
+          - audit-chain-sweep-apply-final # WRITE — STEPS 3-7 only. Assumes predictions_prev_hash_backup_2026_05_19 already exists (created by audit-chain-sweep-repair STEP 1). Applies UPDATE without threshold check, verifies still_broken=0 (HALT if !=0), restarts backend, verifies preflight, verifies autonomous workers heartbeat. Operator-authorized 2026-05-19 after sweep-repair halted at 548 broken rows (>100 threshold); operator explicitly bypassed threshold knowing scope.
 
 jobs:
   probe:
@@ -561,6 +562,34 @@ jobs:
                  echo '=== STEP 3: apply sweep-fix UPDATE ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"WITH ordered AS (SELECT id, LAG(row_hash) OVER (ORDER BY id) AS expected_prev_hash FROM predictions) UPDATE predictions p SET prev_hash = o.expected_prev_hash FROM ordered o WHERE p.id = o.id AND o.expected_prev_hash IS NOT NULL AND p.prev_hash != o.expected_prev_hash RETURNING p.id, p.symbol;\" && \
+                 echo '=== STEP 4: verify still_broken=0 ===' && \
+                 STILL_BROKEN=\$(docker compose exec -T postgres psql -U postgres -d trading_radar -t -A -c \
+                   \"WITH ordered AS (SELECT id, prev_hash, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM predictions) SELECT COUNT(*) FROM ordered WHERE expected_prev IS NOT NULL AND prev_hash != expected_prev;\" | tr -d ' \r') && \
+                 echo \"still_broken=\$STILL_BROKEN\" && \
+                 if [ \"\$STILL_BROKEN\" -ne 0 ]; then echo 'HALT: chain still broken after sweep; do NOT restart'; exit 1; fi && \
+                 echo '=== STEP 5: restart backend ===' && \
+                 docker compose restart backend && \
+                 sleep 30 && \
+                 curl -fsS http://localhost:8000/api/v1/health && \
+                 echo && \
+                 echo '=== STEP 6: preflight + autonomous trading startup logs ===' && \
+                 docker compose logs --since=2m backend 2>&1 | grep -iE 'preflight|autonomous trading|live_exit_monitor|liquidation_monitor|vault' | head -20 && \
+                 echo '=== STEP 7: verify autonomous workers heartbeat ===' && \
+                 sleep 30 && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT worker_name, beat_at FROM worker_heartbeats WHERE worker_name IN ('live_exit_monitor', 'liquidation_monitor_task') ORDER BY beat_at DESC;\""
+              ;;
+            audit-chain-sweep-apply-final)
+              # WRITE. Final sweep — STEPS 3-7 only (backup already
+              # exists from prior audit-chain-sweep-repair STEP 1).
+              # Operator-bypassed the >100 threshold knowing scope:
+              # 548 broken rows of 700 post-outage rows = expected
+              # density from the concurrent-insert race.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "set -e && cd $DIR_DEFAULTED && \
+                 echo '=== STEP 3: apply sweep UPDATE (no threshold) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH ordered AS (SELECT id, LAG(row_hash) OVER (ORDER BY id) AS expected_prev_hash FROM predictions) UPDATE predictions p SET prev_hash = o.expected_prev_hash FROM ordered o WHERE p.id = o.id AND o.expected_prev_hash IS NOT NULL AND p.prev_hash != o.expected_prev_hash;\" && \
                  echo '=== STEP 4: verify still_broken=0 ===' && \
                  STILL_BROKEN=\$(docker compose exec -T postgres psql -U postgres -d trading_radar -t -A -c \
                    \"WITH ordered AS (SELECT id, prev_hash, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM predictions) SELECT COUNT(*) FROM ordered WHERE expected_prev IS NOT NULL AND prev_hash != expected_prev;\" | tr -d ' \r') && \
