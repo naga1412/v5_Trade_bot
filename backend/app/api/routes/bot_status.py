@@ -31,6 +31,7 @@ from app.api.schemas import (
     PerAssetStatOut,
     PromotionGateOut,
     RecentTradeOut,
+    SizingPreviewOut,
     SymbolSearchHit,
     SymbolSearchOut,
     TimeframeGateStatsOut,
@@ -476,6 +477,59 @@ async def cooldowns(
             ),
         ))
     return out
+
+
+@router.get("/sizing", response_model=SizingPreviewOut)
+async def sizing_preview(
+    confidence_pct: float = Query(default=70.0, ge=0.0, le=100.0),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> SizingPreviewOut:
+    """PR9 — preview what the dispatcher would size the next signal at.
+
+    Read-only diagnostic; computes the same `compute_dynamic_size` the
+    dispatcher uses against the current user's portfolio_value_usdt.
+    Defaults to confidence_pct=70 (operator's typical signal strength);
+    pass ?confidence_pct=N to probe other values.
+    """
+    from app.config import get_settings as _get_pr9_settings
+    from app.trading.dynamic_sizing import (
+        classify_balance_tier,
+        compute_dynamic_size,
+    )
+
+    pr9_settings = _get_pr9_settings()
+
+    # Best-effort read of current portfolio value. Use the user's
+    # current row (fixed_size_min_usdt * 5 lower bound matches
+    # build_user_context's conservative placeholder until the real
+    # Binance wallet API is wired).
+    row = (await session.execute(sa.text(
+        "SELECT fixed_size_min_usdt FROM users WHERE id = :uid"
+    ), {"uid": current_user.id})).first()
+    fixed_min = (
+        float(row.fixed_size_min_usdt)
+        if row is not None and row.fixed_size_min_usdt is not None
+        else 20.0
+    )
+    balance = max(fixed_min * 5.0, 100.0)
+
+    tier = classify_balance_tier(balance, pr9_settings)
+    margin = compute_dynamic_size(
+        balance_usdt=balance,
+        confidence_pct=confidence_pct,
+        settings=pr9_settings,
+    )
+
+    return SizingPreviewOut(
+        dynamic_sizing_enabled=pr9_settings.DYNAMIC_SIZING_ENABLED,
+        balance_usdt=balance,
+        tier=tier,
+        tier_max_fraction=pr9_settings.SIZING_TIER_MAX_FRACTION.get(tier, 0.01),
+        fractional_kelly=pr9_settings.SIZING_FRACTIONAL_KELLY,
+        sample_confidence_pct=confidence_pct,
+        sample_margin_usdt=margin,
+    )
 
 
 @router.get("/per-asset", response_model=list[PerAssetStatOut])

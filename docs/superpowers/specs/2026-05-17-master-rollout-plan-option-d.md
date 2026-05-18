@@ -184,12 +184,23 @@ reverts to PR1 recording-only behavior. No DB rollback needed
  behavior; detector defers to a future PR. Default-OFF in prod via
  `LIVE_COOLDOWN_ENABLED=False`.)
 
-## PR9 — Dynamic sizing + true self-healing
-(Spec to be drafted after PR8. High-level: Kelly-fractional
- sizing tied to p_win + balance tier; multi-entry split for
- sub-100% confidence; self-healing supervisor handles all
- FU-1 + FU-2 + FU-3 concerns plus auto-restart workers without
- operator paging.)
+## PR9 — Dynamic sizing + Telegram alert routing (scope-trimmed self-healing)
+(Scope/details: spec `2026-05-18-pr9-dynamic-sizing-self-healing-design.md`;
+ plan `2026-05-18-pr9-dynamic-sizing-self-healing.md`.
+ Scope corrected on draft: surface scan revealed (a) `p_win` is async
+ and doesn't return yet — PR9 uses `confidence_pct/100` proxy with no-op
+ forward hook for PR5; (b) multi-entry split + balance tiers are
+ greenfield; (c) stateful-worker auto-restart needs in-memory state
+ migration design, carved out as **FU-21** in KNOWN_ISSUES.md; (d) FU-2
+ + FU-3 are independent investigations, not load-bearing.
+ PR9 ships:
+ (1) Kelly-fractional sizing × balance tier × hard caps (small=1%,
+     medium=2%, large=5%, whale=10% of bankroll).
+ (2) Multi-entry split (DCA-style) for sub-threshold confidence.
+ (3) Telegram alert routing for stateful-worker critical alerts.
+ Live-money exposure — **operator carve-out**: 7-day staging soak +
+ explicit operator "ship it" before dev→main. Default-OFF in prod via
+ `DYNAMIC_SIZING_ENABLED=False`.)
 
 ## Quality gates (apply to every PR)
 - TDD: failing tests first
