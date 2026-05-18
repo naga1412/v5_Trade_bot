@@ -585,3 +585,51 @@ Tracking: queued as a future PR. Not blocking for PR1 because PR1
 adds new workers explicitly marked `pending_heartbeat=True` to
 match existing pattern (single-shot prewarm) or wires heartbeat
 inline (TTL-refresh).
+
+---
+
+### FU-21 — Stateful-worker auto-restart with state migration
+- **Filed**: 2026-05-18 (carved out of PR9 scope per operator decision)
+- **Severity**: MEDIUM
+- **Depends on**: FU-1 heartbeats (✅ DONE), PR9 self-healing supervisor foundation (in flight)
+- **When to schedule**: After Phase 1 ops hygiene sprint completes (~late 2026-05-29). Can ship before or after PR5.
+
+#### Problem
+PR9 ships Telegram alert routing for stateful-worker critical alerts,
+but does NOT auto-restart stateful workers (`live_exit_monitor`,
+`liquidation_monitor`, `telegram_poller`, `ws_keepalive` children).
+These workers hold in-flight state — open positions being monitored,
+telegram update cursor, child task statuses — that would be lost on
+a naive restart.
+
+Current behavior (post-PR9): watchdog detects stateful-worker silence
+→ Telegram alert → operator manually restarts. This works but requires
+human availability for stateful-worker failures. Auto-restart would
+close the last gap in the self-healing story.
+
+#### Scope
+Design a state-migration protocol:
+- **(a) Pre-shutdown**: snapshot worker state to a
+  `stateful_worker_snapshots` table (`worker_name`, `snapshot_at`,
+  `state_json`, `schema_version`).
+- **(b) Restart**: worker loads snapshot, validates schema_version,
+  resumes from snapshot point (e.g., telegram_poller picks up the
+  cursor; live_exit_monitor re-loads open trades; ws_keepalive
+  re-subscribes its child symbols).
+- **(c) Watchdog**: after detecting stateful-worker silence, trigger
+  snapshot (from the LAST known good heartbeat's accompanying state)
+  + restart instead of alerting only. Telegram alert still fires for
+  audit but the action is automated.
+- **(d) Tests**: per-worker snapshot/restore round-trip; watchdog
+  integration test that simulates a crash and asserts auto-restart
+  resumes the loop.
+
+#### Effort
+~3-4 days (design + per-worker snapshot serializers + watchdog
+integration + tests).
+
+#### Why MEDIUM not HIGH
+Current alert + manual-restart path is functional. Operator availability
+risk is what FU-21 mitigates, not data loss — the live_trades table
+itself doesn't depend on the monitor's in-memory state to stay
+consistent (it's reconciled from Binance position queries each tick).
