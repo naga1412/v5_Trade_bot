@@ -37,6 +37,8 @@ class _SettingsProto(Protocol):
     SIZING_FRACTIONAL_KELLY: float
     SIZING_USE_P_WIN_WHEN_AVAILABLE: bool
     DYNAMIC_SIZING_ENABLED: bool
+    SIZING_MULTI_ENTRY_THRESHOLD: float
+    SIZING_MULTI_ENTRY_RATIOS: list[float]
 
 
 def classify_balance_tier(
@@ -144,3 +146,42 @@ def compute_dynamic_size(
             balance_usdt, confidence_pct, e,
         )
         return None
+
+
+def split_entries(
+    total_margin_usdt: float,
+    confidence_pct: float,
+    settings: _SettingsProto,
+) -> list[float]:
+    """Return tranche sizes for multi-entry placement.
+
+    When `confidence_pct/100 >= SIZING_MULTI_ENTRY_THRESHOLD` (default
+    0.75): returns `[total_margin_usdt]` — no split.
+
+    Below the threshold: splits into N tranches per
+    `SIZING_MULTI_ENTRY_RATIOS` (default [0.6, 0.4]). Rounding loss
+    accumulates in the LAST tranche so `sum(tranches) == total` exactly.
+
+    Invariant: ratios must sum to 1.0. Validated at call time — raises
+    ValueError on bad config rather than silently producing a different
+    total than the caller asked for.
+
+    total_margin_usdt < 0 raises (defensive — caller passed bad data).
+    """
+    if total_margin_usdt < 0.0:
+        raise ValueError(f"total_margin_usdt must be >= 0; got {total_margin_usdt}")
+    confidence = confidence_pct / 100.0
+    if confidence >= settings.SIZING_MULTI_ENTRY_THRESHOLD:
+        return [total_margin_usdt]
+
+    ratios = settings.SIZING_MULTI_ENTRY_RATIOS
+    if abs(sum(ratios) - 1.0) > 1e-6:
+        raise ValueError(
+            f"SIZING_MULTI_ENTRY_RATIOS must sum to 1.0; got {sum(ratios)}"
+        )
+
+    # Compute all-but-last tranche from ratios; last tranche absorbs
+    # rounding so the sum is exact.
+    tranches = [total_margin_usdt * r for r in ratios[:-1]]
+    tranches.append(total_margin_usdt - sum(tranches))
+    return tranches
