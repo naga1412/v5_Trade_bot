@@ -265,16 +265,15 @@ jobs:
               # the actual value — only PRESENT/MISSING per key. Gates
               # the PR9 testnet verification path; operator decides
               # next step from the output.
-              ssh -i ~/.ssh/hetzner -o StrictHostKeyChecking=no \
-                ${HETZNER_USER}@${HETZNER_HOST} \
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd /opt/trading-radar && \
                  echo '=== testnet credentials check (READ-ONLY) ===' && \
                  (grep -q '^BINANCE_API_KEY_TESTNET=' .env && \
                     echo 'BINANCE_API_KEY_TESTNET: PRESENT') || \
-                    echo 'BINANCE_API_KEY_TESTNET: MISSING' && \
+                    echo 'BINANCE_API_KEY_TESTNET: MISSING' ; \
                  (grep -q '^BINANCE_API_SECRET_TESTNET=' .env && \
                     echo 'BINANCE_API_SECRET_TESTNET: PRESENT') || \
-                    echo 'BINANCE_API_SECRET_TESTNET: MISSING' && \
+                    echo 'BINANCE_API_SECRET_TESTNET: MISSING' ; \
                  (grep -q '^BINANCE_USE_TESTNET=' .env && \
                     echo 'BINANCE_USE_TESTNET line present (value not echoed)') || \
                     echo 'BINANCE_USE_TESTNET: MISSING (defaults to false)'"
