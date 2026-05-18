@@ -702,3 +702,74 @@ in .env.
   runbook missed reusing this pattern)
 - [[pr9-prod-verified]] (PR9 deploy was independent; this runbook gap is
   not a code regression, just a documentation/runbook gap)
+
+---
+
+### FU-24 — `insert_with_chain` race condition — concurrent multi-row INSERTs create broken prev_hash linkage
+- **Filed**: 2026-05-19 (discovered during fully-auto launch preflight investigation)
+- **Severity**: HIGH — blocks autonomous trading launches without manual repair sweep. Even with repair, next hourly close re-breaks the chain.
+- **Discovered**: 2026-05-19. Preflight `audit_chain_intact` check failed at predictions row 96 during launch attempt at 19:30 UTC. Investigation revealed ~30-40 chain breaks accumulated since live_worker resumed firing on 2026-05-17.
+
+#### Problem
+`backend/app/db/audit.py::insert_with_chain` reads "latest row_hash"
+from the target table, computes the new row's hash and prev_hash, then
+INSERTs — all without serialization. When multiple workers write to
+the same hash-chained table at the same time (e.g., 30 symbols writing
+predictions at hourly close), they race on the read step and end up
+with the same `prev_hash` value. Result: chain breaks on every
+concurrent batch.
+
+Verbatim evidence from the 2026-05-17 09:00 batch (audit-chain-break-
+investigate probe output):
+```
+id  | symbol     | prev_hash_16     | row_hash_16
+969 | TON/USDT   | 061dfb70aefa1907 | 64d366e85fc76133  ← correctly chains
+970 | FDUSD/USDT | 061dfb70aefa1907 | d29b280cd59180a0  ← raced from id 95
+971 | USD1/USDT  | 061dfb70aefa1907 | 674a45f5b08e4599  ← raced
+972 | TAO/USDT   | 64d366e85fc76133 | 3e92dd7438a1fee1  ← raced from id 969
+973 | ADA/USDT   | 061dfb70aefa1907 | d6fc759ebe7c6826  ← raced from id 95
+974 | SUI/USDT   | 64d366e85fc76133 | ec2cdc49aaaeeb27  ← raced from id 969
+```
+All 6 rows have `ts=2026-05-17 09:00:00` (same closed candle). Workers
+each read the "current latest" before any of them INSERTed, so multiple
+ended up linking back to id 95 (the row before the 5/11→5/17 outage gap).
+
+The audit chain was designed assuming serialized inserts. The predictor
+fans out across 30 symbols and writes them in parallel — the design
+assumption is violated.
+
+#### Scope
+- **Option A (recommended)**: Advisory lock around `insert_with_chain`
+  (`pg_advisory_xact_lock` keyed on table name hash) + read-and-insert
+  in same transaction. Serializes inserts per table. ~10ms overhead
+  per insert on contended path; uncontended cost negligible.
+- **Option B**: Add a SERIAL `chain_position` column + dispatcher writes
+  to that, asynchronous chain-verifier reconciles. More complex; no
+  insert-time locking. Tradeoffs around when chain integrity is
+  guaranteed.
+- **Recommend Option A** — simpler, contained to one helper.
+
+#### Effort
+~1-2 days (advisory lock + concurrent-write test + ship via PR + cherry-
+pick prod-promotion).
+
+#### Workaround (deployed 2026-05-19)
+Manual sweep-repair via `audit-chain-sweep-repair` ops-debug probe.
+Backs up `predictions.prev_hash` to `predictions_prev_hash_backup_
+2026_05_19` (reversibility), recomputes correct `prev_hash` via
+`LAG(row_hash) OVER (ORDER BY id)`, UPDATEs only the broken rows.
+Idempotent. Restart backend triggers preflight to re-check; passes
+post-sweep.
+
+Caveat: this is a one-shot repair. Until FU-24's advisory lock ships,
+**every hourly close after backend restart will create new chain
+breaks** that re-trigger the preflight failure on the NEXT restart.
+For autonomous trading sessions, this means the bot runs fine as long
+as the backend stays up; future restarts will require either another
+sweep OR shipping the advisory-lock fix.
+
+#### Related
+- [[fu-2]] (audit chain v2 — JSONB canonical hashing). FU-2 covers the
+  separate "stored row_hash unreproducible by current code" problem
+  (replay-verify reported 100/100 BAD on predictions last 100 rows).
+  FU-24 is independent: chain LINKAGE integrity, not hash reproducibility.
