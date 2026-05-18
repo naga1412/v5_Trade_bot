@@ -217,6 +217,15 @@ class PromotionGateOut(BaseModel):
     per_timeframe: dict[str, TimeframeGateStatsOut] = {}
 
 
+class LiveCooldownOut(BaseModel):
+    """PR8 — single active cooldown row for /bot-status/cooldowns."""
+    symbol: str
+    cooldown_until: datetime
+    last_exit_reason: str
+    last_mtf_agreement: int | None
+    blocked_until_fresh_mtf: bool  # SL + LIVE_COOLDOWN_SL_REQUIRES_FRESH_MTF
+
+
 class OpenPositionOut(BaseModel):
     symbol: str
     direction: Literal["LONG", "SHORT"]
