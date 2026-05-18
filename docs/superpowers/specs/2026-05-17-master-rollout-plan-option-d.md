@@ -165,9 +165,24 @@ reverts to PR1 recording-only behavior. No DB rollback needed
  4× signal rate accelerates promotion gate fills.)
 
 ## PR8 — Outcome-adaptive cooldown
-(Spec to be drafted after PR3. High-level: replace fixed 4h
- cooldown with outcome-aware: SL → require fresh MTF agreement,
- TP → faster re-entry, regime-aware in wave regime.)
+(Scope/details: spec `2026-05-18-pr8-outcome-adaptive-cooldown-design.md`;
+ plan `2026-05-18-pr8-outcome-adaptive-cooldown.md`.
+ Scope corrected on draft: surface scan revealed there is NO live
+ cooldown today (`DispatchOutcome.blocked_cooldown` exists but is
+ never wired; `live_trades.exit_reason` is never populated). PR8
+ therefore lands three intertwined deliverables:
+ (1) `live_exit_monitor` worker that classifies TP/SL/TIMEOUT/
+ EXTERNAL_CLOSE + writes `live_trades.exit_reason` + upserts
+ `live_cooldowns`; liquidation_monitor writes the
+ `liquidation_buffer_breach` path.
+ (2) `live_cooldowns` table + `_apply_cooldown_gate` in dispatcher
+ pre-conditions (between funding and MTF).
+ (3) Outcome-adaptive durations: SL=8h+fresh-MTF-required, TP=1h,
+ TIMEOUT=4h, MANUAL/EXTERNAL=0h, LIQ_BUFFER=24h.
+ Wave-regime detection doesn't exist in live code paths — PR8 adds
+ `LIVE_COOLDOWN_REGIME_AWARE` flag as forward-compat hook but no
+ behavior; detector defers to a future PR. Default-OFF in prod via
+ `LIVE_COOLDOWN_ENABLED=False`.)
 
 ## PR9 — Dynamic sizing + true self-healing
 (Spec to be drafted after PR8. High-level: Kelly-fractional
