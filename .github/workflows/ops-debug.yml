@@ -522,13 +522,12 @@ jobs:
                      SELECT id, ts, symbol, timeframe, \
                             LEFT(prev_hash, 16) AS prev_hash_16, \
                             LEFT(row_hash, 16)  AS row_hash_16, \
-                            created_at, model_version, \
+                            model_version, \
                             ROW_NUMBER() OVER (ORDER BY id) - 1 AS arr_idx \
                        FROM predictions \
                    ) \
                    SELECT arr_idx, id, ts, symbol, timeframe, \
-                          prev_hash_16, row_hash_16, created_at, \
-                          model_version \
+                          prev_hash_16, row_hash_16, model_version \
                      FROM ord \
                     WHERE arr_idx BETWEEN 93 AND 100 \
                     ORDER BY arr_idx;\""
