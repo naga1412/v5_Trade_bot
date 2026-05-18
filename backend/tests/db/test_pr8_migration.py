@@ -88,14 +88,19 @@ async def test_live_cooldowns_columns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_cooldowns_active_partial_index_exists() -> None:
-    """Partial index accelerates the /cooldowns endpoint (active-only scan)."""
+async def test_live_cooldowns_pk_index_exists() -> None:
+    """PRIMARY KEY auto-creates a covering index — the dispatcher hot
+    path (load_cooldown by uid+symbol) hits it. NO partial active-only
+    index: Postgres rejects NOW() in an index predicate."""
     engine = create_async_engine(_DSN)
     async with engine.connect() as conn:
         rows = (await conn.execute(sa.text(
             "SELECT indexname FROM pg_indexes "
-            "WHERE tablename = 'live_cooldowns' "
-            "  AND indexname = 'ix_live_cooldowns_active'"
+            "WHERE tablename = 'live_cooldowns'"
         ))).all()
-    assert len(rows) == 1
+    idx_names = {r.indexname for r in rows}
+    # PK index name is auto-generated as '<table>_pkey'
+    assert "live_cooldowns_pkey" in idx_names
+    # No partial active-only index — see migration comment
+    assert "ix_live_cooldowns_active" not in idx_names
     await engine.dispose()

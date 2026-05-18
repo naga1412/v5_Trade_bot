@@ -63,19 +63,16 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("user_id", "symbol", name="live_cooldowns_pkey"),
     )
 
-    # Partial active-only index (Postgres only — SQLite uses different
-    # syntax and the test suite doesn't rely on this index existing).
-    bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        op.execute(
-            "CREATE INDEX ix_live_cooldowns_active "
-            "ON live_cooldowns (cooldown_until) "
-            "WHERE cooldown_until > NOW()"
-        )
+    # NOTE: a partial active-only index (CREATE INDEX ... WHERE
+    # cooldown_until > NOW()) was attempted in the initial spec but
+    # Postgres rejects NOW() inside an index predicate ("functions in
+    # index predicate must be marked IMMUTABLE"). We rely on the PK
+    # index for the dispatcher hot path (load_cooldown by uid+symbol);
+    # the /cooldowns endpoint sequential-scans, which is fine at the
+    # expected scale (one row per (uid, symbol) cooldown; few hundred
+    # max). If the table grows, add a plain index on cooldown_until
+    # later — no partial predicate.
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        op.execute("DROP INDEX IF EXISTS ix_live_cooldowns_active")
     op.drop_table("live_cooldowns")

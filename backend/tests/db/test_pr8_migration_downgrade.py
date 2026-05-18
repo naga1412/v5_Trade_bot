@@ -62,8 +62,8 @@ def test_pr8_migration_round_trip() -> None:
     )
 
 
-def test_pr8_downgrade_drops_live_cooldowns_table_and_index() -> None:
-    """Spot-check: downgrade removes the table + partial index.
+def test_pr8_downgrade_drops_live_cooldowns_table() -> None:
+    """Spot-check: downgrade removes the table.
 
     Runs the downgrade once, asserts the table is gone, then re-upgrades
     so the test leaves the DB in the canonical PR8 state for follow-on tests.
@@ -86,12 +86,6 @@ def test_pr8_downgrade_drops_live_cooldowns_table_and_index() -> None:
                     "WHERE table_name = 'live_cooldowns'"
                 ))).all()
                 assert tbl_rows == [], "live_cooldowns survived downgrade"
-
-                idx_rows = (await conn.execute(sa.text(
-                    "SELECT 1 FROM pg_indexes "
-                    "WHERE indexname = 'ix_live_cooldowns_active'"
-                ))).all()
-                assert idx_rows == [], "partial index survived downgrade"
         finally:
             await engine.dispose()
 

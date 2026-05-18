@@ -476,8 +476,14 @@ PR8 therefore ships three intertwined deliverables, not a tweak:
    gate behavior).
 2. **`live_cooldowns` table + dispatcher gate** — PK
    `(user_id, symbol)`, columns `cooldown_until`, `last_exit_reason`,
-   `last_mtf_agreement`, `updated_at`. Partial active-only index
-   accelerates `/cooldowns` scans (Postgres).
+   `last_mtf_agreement`, `updated_at`. PK auto-creates the covering
+   index that the dispatcher hot path uses (`load_cooldown` by
+   uid+symbol). The `/cooldowns` endpoint sequential-scans the small
+   table — at expected scale (one row per (uid, symbol)) this is
+   fine. NOTE: an initial spec called for a partial active-only index
+   on `cooldown_until WHERE > NOW()`, but Postgres rejects `NOW()` in
+   an index predicate (must be IMMUTABLE). A plain index on
+   `cooldown_until` can be added later if the table grows.
    `_apply_cooldown_gate` slots into dispatcher pre-conditions between
    funding and MTF gates (cheapest check first — single PK SELECT).
 3. **Outcome-adaptive duration logic** —
