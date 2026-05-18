@@ -633,3 +633,72 @@ Current alert + manual-restart path is functional. Operator availability
 risk is what FU-21 mitigates, not data loss — the live_trades table
 itself doesn't depend on the monitor's in-memory state to stay
 consistent (it's reconciled from Binance position queries each tick).
+
+---
+
+### FU-23 — Production launch runbook missing AUTONOMOUS_TRADING_ENABLED flag
+- **Filed**: 2026-05-19 (post-mortem from the 2026-05-18T18:08:37Z launch attempt)
+- **Severity**: HIGH — caused launched-but-not-trading state; only caught by
+  agent's post-launch health probe noticing `liquidation_monitor_task` and
+  `live_exit_monitor` were still `never_heartbeated` ~25min after restart.
+- **Effort**: ~30 min documentation update.
+
+#### Problem
+The production launch runbook directed the operator to:
+1. UPDATE `users.trading_mode='fully-auto'`
+2. Flip env: `BINANCE_USE_TESTNET=false`, `LIVE_COOLDOWN_ENABLED=True`,
+   `HOLD_TP_SCALING_ENABLED=True`
+3. `docker compose restart backend`
+
+But it missed `AUTONOMOUS_TRADING_ENABLED=True`. This env var gates
+whether the autonomous-trading subsystem (vault load + binance_factory +
+liquidation_monitor + live_exit_monitor + telegram_poller spawn) starts
+at all in `app/main.py`. Without it, `users.trading_mode='fully-auto'` in
+the DB is honored by `get_mode()` but the dispatcher's downstream path
+short-circuits at the manual-mode early return because the autonomous
+subsystem never initialized → no real-money trade attempts occur.
+
+State after the 2026-05-18 launch (verified via health-summary probe):
+- Container restarted cleanly at 18:08:37Z ✓
+- `trading_mode='fully-auto'` in DB ✓
+- `LIVE_COOLDOWN_ENABLED=True`, `HOLD_TP_SCALING_ENABLED=True`,
+  `BINANCE_USE_TESTNET=false` in .env ✓
+- `liquidation_monitor_task: never_heartbeated` ✗ (subsystem didn't spawn)
+- `live_exit_monitor: never_heartbeated` ✗ (PR8 worker didn't spawn)
+- Zero new live_trades rows ✗ (no autonomous trading attempted)
+
+Operator rolled back without applying the missing flag fix. Net effect:
+~25min of "launched but inert" state; no real-money exposure.
+
+#### Remediation
+1. Create `backend/docs/RUNBOOK.md` (does not exist today) with a single
+   canonical "production launch fully-auto" runbook. The env-flip block
+   MUST include `AUTONOMOUS_TRADING_ENABLED=True` (the gate) alongside
+   the per-feature flags (`LIVE_COOLDOWN_ENABLED`, etc.).
+2. Add cross-reference from the master rollout plan
+   (`docs/superpowers/specs/2026-05-17-master-rollout-plan-option-d.md`)
+   to the new RUNBOOK.md.
+3. Document the flag hierarchy:
+   - `AUTONOMOUS_TRADING_ENABLED` — gates the whole autonomous subsystem
+   - `users.trading_mode` — per-user routing within the autonomous
+     subsystem (manual / telegram-approve / fully-auto)
+   - Per-feature flags (LIVE_COOLDOWN_ENABLED, etc.) — gate specific
+     behaviors when autonomous subsystem is running
+
+#### How to verify a launch DID activate autonomous trading
+Post-restart health-summary should show:
+- `liquidation_monitor_task`: `ok` (not `never_heartbeated`)
+- `live_exit_monitor`: `ok` (not `never_heartbeated`)
+- If `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` set: `telegram_poller_task`: `ok`
+
+If any of these stay `never_heartbeated` for >5min after restart, the
+autonomous subsystem did not spawn — check `AUTONOMOUS_TRADING_ENABLED`
+in .env.
+
+#### Related
+- [[autonomous-trade-path-validated]] (the 5/16 validation session DID
+  set `AUTONOMOUS_TRADING_ENABLED` correctly — see `enable-live-telegram-
+  approve` probe at .github/workflows/ops-debug.yml — but the post-PR9
+  runbook missed reusing this pattern)
+- [[pr9-prod-verified]] (PR9 deploy was independent; this runbook gap is
+  not a code regression, just a documentation/runbook gap)
