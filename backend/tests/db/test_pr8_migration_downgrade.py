@@ -47,7 +47,11 @@ def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_pr8_migration_round_trip() -> None:
-    """upgrade → downgrade → upgrade. Each step exits 0."""
+    """upgrade → downgrade → upgrade. Each step exits 0.
+
+    Always leaves DB at alembic head so follow-on test files don't see a
+    pinned revision (would break the moment PR_N+1 adds a migration).
+    """
     r = _alembic("upgrade", _REV)
     assert r.returncode == 0, f"upgrade-to-PR8 failed: stderr={r.stderr}"
 
@@ -56,10 +60,8 @@ def test_pr8_migration_round_trip() -> None:
         f"downgrade from {_REV} to {_PRIOR} failed: stderr={r.stderr}"
     )
 
-    r = _alembic("upgrade", _REV)
-    assert r.returncode == 0, (
-        f"re-upgrade to {_REV} after downgrade failed: stderr={r.stderr}"
-    )
+    r = _alembic("upgrade", "head")
+    assert r.returncode == 0, f"final upgrade to head failed: stderr={r.stderr}"
 
 
 def test_pr8_downgrade_drops_live_cooldowns_table() -> None:
@@ -89,8 +91,8 @@ def test_pr8_downgrade_drops_live_cooldowns_table() -> None:
         finally:
             await engine.dispose()
 
-        # Re-upgrade so the test leaves DB at PR8 head
-        r = _alembic("upgrade", _REV)
+        # Re-upgrade so the test leaves DB at alembic head
+        r = _alembic("upgrade", "head")
         assert r.returncode == 0, f"re-upgrade failed: {r.stderr}"
 
     asyncio.run(_check())
