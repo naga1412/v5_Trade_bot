@@ -242,6 +242,18 @@ async def _create_shadow_tables(engine: Any) -> None:
             "source TEXT NOT NULL "
             "  CHECK (source IN ('binance_futures', 'bybit')))"
         ))
+        # PR8: live_cooldowns SQLite mirror so /bot-status/cooldowns
+        # integration tests work without alembic. Mirror of migration 0022.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS live_cooldowns ("
+            "user_id INTEGER NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "cooldown_until TEXT NOT NULL, "
+            "last_exit_reason TEXT NOT NULL, "
+            "last_mtf_agreement INTEGER, "
+            "updated_at TEXT NOT NULL, "
+            "PRIMARY KEY (user_id, symbol))"
+        ))
 
 
 @pytest_asyncio.fixture

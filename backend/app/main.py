@@ -68,6 +68,9 @@ from app.trading.execution.glue import (
     initialize_vault_cache,
     vault_keys,
 )
+from app.trading.execution.live_exit_monitor import (
+    start_live_exit_monitor,
+)
 from app.trading.execution.liquidation_monitor import (
     start_liquidation_monitor,
 )
@@ -122,6 +125,7 @@ async def lifespan(_app: FastAPI):
     universe_refreshed_event: asyncio.Event | None = None
     auto_promote_task = None
     liquidation_monitor_task = None
+    live_exit_monitor_task = None  # PR8 — TP/SL/timeout/external classification
     telegram_poller_task = None
     worker_watchdog_task = None
     scanner_batch_task = None
@@ -296,6 +300,23 @@ async def lifespan(_app: FastAPI):
                             settings.binance_use_testnet,
                         )
 
+                        # PR8 — start the live_exit_monitor alongside the
+                        # liquidation monitor. Same binance_factory, same
+                        # session_factory. The settings_factory closure
+                        # lets the loop re-read get_settings() each tick
+                        # (operator can flip LIVE_COOLDOWN_HOURS_BY_OUTCOME
+                        # via env + restart; the loop picks it up).
+                        from app.config import get_settings as _get_pr8_settings_for_loop
+                        live_exit_monitor_task = start_live_exit_monitor(
+                            session_factory, _binance_factory,
+                            _get_pr8_settings_for_loop,
+                        )
+                        log.warning(
+                            "autonomous trading: live_exit_monitor running "
+                            "(LIVE_COOLDOWN_ENABLED=%s)",
+                            _get_pr8_settings_for_loop().LIVE_COOLDOWN_ENABLED,
+                        )
+
                         # SP-8 Phase J: Telegram polling worker. Routes
                         # both sig:* (trade approvals) and rl_* (brain
                         # checkpoint approvals) callbacks. Without bot
@@ -397,6 +418,8 @@ async def lifespan(_app: FastAPI):
             auto_promote_task.cancel()
         if liquidation_monitor_task is not None:
             liquidation_monitor_task.cancel()
+        if live_exit_monitor_task is not None:
+            live_exit_monitor_task.cancel()
         if telegram_poller_task is not None:
             telegram_poller_task.cancel()
         if worker_watchdog_task is not None:

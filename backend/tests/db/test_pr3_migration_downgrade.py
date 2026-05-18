@@ -66,6 +66,15 @@ def test_pr3_migration_round_trip() -> None:
         f"re-upgrade to {_REV} after downgrade failed: stderr={r.stderr}"
     )
 
+    # 4. ALWAYS leave the DB at alembic head so follow-on test files
+    #    (test_pr8_migration etc.) see the canonical fully-upgraded state.
+    #    Without this, PR8's introspection tests run against a DB pinned at
+    #    0021 and report "table doesn't exist" for the 0022 schema. The
+    #    pinning is a PR3-era artifact that's fine while PR3 is head but
+    #    breaks the moment any later PR adds a migration.
+    r = _alembic("upgrade", "head")
+    assert r.returncode == 0, f"final upgrade to head failed: stderr={r.stderr}"
+
 
 def test_pr3_downgrade_drops_g1_columns_and_restores_old_pk() -> None:
     """Spot-check the downgrade did what the migration body says.
@@ -109,6 +118,9 @@ def test_pr3_downgrade_drops_g1_columns_and_restores_old_pk() -> None:
     # Inspect
     asyncio.run(_check())
 
-    # Re-upgrade so the DB ends in PR3 state for follow-on tests
-    r = _alembic("upgrade", _REV)
+    # Re-upgrade so the DB ends at alembic head for follow-on tests
+    # (PR3-era pinning at _REV is fine while PR3 is head but breaks the
+    # moment any later PR adds a migration — see note in test_pr3_migration
+    # _round_trip step 4).
+    r = _alembic("upgrade", "head")
     assert r.returncode == 0, f"re-upgrade failed: {r.stderr}"
