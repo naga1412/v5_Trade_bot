@@ -20,6 +20,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import sqlalchemy as sa
@@ -35,6 +36,10 @@ from app.trading.kill_switches import (
     SwitchConfig,
     evaluate_liquidation_near,
 )
+# PR8 — write liquidation-buffer cooldown on auto-close
+from app.db.live_cooldowns import upsert_cooldown
+from app.db.live_exit_reasons import LiveExitReason
+from app.trading.cooldown_compute import compute_cooldown_duration
 
 
 log = logging.getLogger(__name__)
@@ -54,6 +59,10 @@ class OpenPosition:
     direction: Literal["LONG", "SHORT"]
     entry_price: float
     stop_loss_price: float
+    # PR8 — carried along so the auto-close path can stamp the cooldown
+    # row with the trade's mtf_agreement (consulted later when the next
+    # signal on this symbol fires; see app/trading/cooldown_compute.py).
+    mtf_agreement: int | None = None
 
 
 @dataclass(frozen=True)
@@ -67,7 +76,8 @@ class MonitorOutcome:
 async def _list_open_positions(session: AsyncSession) -> list[OpenPosition]:
     rows = (await session.execute(
         sa.text(
-            "SELECT id, user_id, symbol, direction, entry_price, stop_loss "
+            "SELECT id, user_id, symbol, direction, entry_price, stop_loss, "
+            "       mtf_agreement "
             "FROM live_trades WHERE closed_at IS NULL"
         )
     )).all()
@@ -76,9 +86,54 @@ async def _list_open_positions(session: AsyncSession) -> list[OpenPosition]:
             trade_id=r.id, user_id=r.user_id, symbol=r.symbol,
             direction=r.direction, entry_price=float(r.entry_price),
             stop_loss_price=float(r.stop_loss),
+            mtf_agreement=getattr(r, "mtf_agreement", None),
         )
         for r in rows
     ]
+
+
+async def _write_liquidation_buffer_close(
+    session: AsyncSession,
+    *,
+    pos: OpenPosition,
+    settings,
+    now: datetime,
+) -> None:
+    """PR8: stamp live_trades.exit_reason + upsert live_cooldowns.
+
+    Called by run_liquidation_monitor_loop after evaluate_position
+    reports action='auto_closed'. Keeps evaluate_position DB-agnostic
+    so its unit tests can mock Binance only.
+
+    The cooldown duration is whatever the operator configures for
+    LIQUIDATION_BUFFER_BREACH (default 24h). Fail-open: if either write
+    raises, the caller logs and the loop continues.
+    """
+    await session.execute(
+        sa.text(
+            "UPDATE live_trades SET "
+            "  exit_reason = :reason, "
+            "  closed_at = COALESCE(closed_at, :ts) "
+            "WHERE id = :id"
+        ),
+        {
+            "reason": LiveExitReason.LIQUIDATION_BUFFER_BREACH.value,
+            "ts": now,
+            "id": pos.trade_id,
+        },
+    )
+    duration = compute_cooldown_duration(
+        LiveExitReason.LIQUIDATION_BUFFER_BREACH.value, settings,
+    )
+    if duration > timedelta(0):
+        await upsert_cooldown(
+            session,
+            user_id=pos.user_id,
+            symbol=pos.symbol,
+            cooldown_until=now + duration,
+            last_exit_reason=LiveExitReason.LIQUIDATION_BUFFER_BREACH.value,
+            last_mtf_agreement=pos.mtf_agreement,
+        )
 
 
 def _binance_native(symbol: str) -> str:
@@ -214,11 +269,38 @@ async def run_liquidation_monitor_loop(
 
             client = binance_factory()
             try:
+                # PR8: settings consulted only on auto-close path; lazy
+                # import keeps the dispatcher → settings → import graph
+                # tidy.
+                from app.config import get_settings as _get_pr8_settings
+                pr8_settings = _get_pr8_settings()
                 for pos in positions:
                     try:
-                        await evaluate_position(
+                        outcome = await evaluate_position(
                             pos=pos, binance=client, notify=notify,
                         )
+                        # PR8: when auto-close fires, stamp the cooldown
+                        # state. We open a fresh session for the writes
+                        # because `session` above was closed; reusing it
+                        # would raise InvalidStateError. Failure here
+                        # logs + continues — the position IS closed on
+                        # Binance regardless.
+                        if outcome.action == "auto_closed":
+                            try:
+                                async with session_factory() as wsession:
+                                    await _write_liquidation_buffer_close(
+                                        wsession, pos=pos,
+                                        settings=pr8_settings,
+                                        now=datetime.now(tz=timezone.utc),
+                                    )
+                                    await wsession.commit()
+                            except Exception as e:  # noqa: BLE001
+                                log.error(
+                                    "liq monitor: liquidation-buffer "
+                                    "exit_reason/cooldown write failed "
+                                    "for trade_id=%d: %s",
+                                    pos.trade_id, e,
+                                )
                     except Exception as e:  # noqa: BLE001
                         log.error(
                             "liq monitor: trade_id=%d failed: %s",

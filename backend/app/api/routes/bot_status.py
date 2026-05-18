@@ -25,6 +25,7 @@ from app.api.schemas import (
     EquityCurveOut,
     EquityCurvePoint,
     GateMetricOut,
+    LiveCooldownOut,
     LongShortBreakdownOut,
     OpenPositionOut,
     PerAssetStatOut,
@@ -427,6 +428,52 @@ async def open_positions(
             current_price=current_price,
             unrealized_pnl_pct=pnl_pct,
             unrealized_pnl_usdt=pnl_usdt,
+        ))
+    return out
+
+
+@router.get("/cooldowns", response_model=list[LiveCooldownOut])
+async def cooldowns(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[LiveCooldownOut]:
+    """PR8 — active live-trade cooldowns for the current user.
+
+    Returns rows where `cooldown_until > now()`. Each row carries the
+    last_exit_reason that triggered the cooldown and the
+    last_mtf_agreement that was on the trade at close; the
+    `blocked_until_fresh_mtf` flag computes whether the next signal on
+    this symbol needs strictly-higher MTF to clear the cooldown.
+    """
+    from app.config import get_settings as _get_pr8_settings
+    settings = _get_pr8_settings()
+    require_fresh = settings.LIVE_COOLDOWN_SL_REQUIRES_FRESH_MTF
+
+    rows = (await session.execute(
+        sa.text(
+            "SELECT symbol, cooldown_until, last_exit_reason, "
+            "       last_mtf_agreement "
+            "FROM live_cooldowns "
+            "WHERE user_id = :uid "
+            "  AND cooldown_until > :now "
+            "ORDER BY cooldown_until ASC"
+        ),
+        {"uid": current_user.id, "now": datetime.now(UTC)},
+    )).all()
+
+    out: list[LiveCooldownOut] = []
+    for r in rows:
+        cu = r.cooldown_until
+        if isinstance(cu, str):
+            cu = datetime.fromisoformat(cu)
+        out.append(LiveCooldownOut(
+            symbol=r.symbol,
+            cooldown_until=cu,
+            last_exit_reason=r.last_exit_reason,
+            last_mtf_agreement=r.last_mtf_agreement,
+            blocked_until_fresh_mtf=(
+                require_fresh and r.last_exit_reason == "stop_loss"
+            ),
         ))
     return out
 

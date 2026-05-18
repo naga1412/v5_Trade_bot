@@ -178,6 +178,22 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # FU-1 closed for liquidation_monitor_task — record_heartbeat wired in
         # run_liquidation_monitor_loop per poll tick.
     ),
+    # 11b. PR8 — 30s live-exit monitor (TP/SL/TIMEOUT/EXTERNAL_CLOSE).
+    # Mirrors liquidation_monitor's cadence + staleness budget. Different
+    # responsibility: liq monitor watches the buffer-to-liquidation;
+    # this monitor watches the TP/SL/timeout bracket. Both run when
+    # AUTONOMOUS_TRADING_ENABLED.
+    WorkerSpec(
+        name="live_exit_monitor",
+        description=(
+            "30s poll of open live_trades; writes exit_reason + cooldown "
+            "on TP/SL/TIMEOUT/EXTERNAL_CLOSE (PR8)"
+        ),
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=5 * 60,
+        stateful=True,
+        required_env=("AUTONOMOUS_TRADING_ENABLED",),
+    ),
     # 12. Telegram poller — autonomous-trading-only + creds required.
     WorkerSpec(
         name="telegram_poller_task",

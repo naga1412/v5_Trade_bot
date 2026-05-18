@@ -622,6 +622,22 @@ async def dispatch(
             detail=reason or "funding-rate guard tripped",
         )
 
+    # ---- PR8 cooldown gate (cheapest DB check, run early) ---------------
+    # Reads live_cooldowns for (user_id, symbol). Default-OFF in prod via
+    # LIVE_COOLDOWN_ENABLED=False — when disabled, _apply_cooldown_gate
+    # short-circuits to None without touching the DB.
+    from app.config import get_settings as _get_pr8_settings
+    from app.trading.execution.cooldown_gate import _apply_cooldown_gate
+    pr8_settings = _get_pr8_settings()
+    cooldown_result = await _apply_cooldown_gate(
+        proposal=proposal, user_id=user.user_id,
+        session=session, settings=pr8_settings,
+        now_fn=lambda: n,
+    )
+    if cooldown_result is not None:
+        return cooldown_result
+    # ---- end PR8 cooldown gate ------------------------------------------
+
     # ---- PR2 gates (MTF + SHORT safety) ---------------------------------
     # Order: MTF gate first (cheapest — no DB I/O), then SHORT safety
     # (one DB read), then SL tightening (modifies proposal). After this

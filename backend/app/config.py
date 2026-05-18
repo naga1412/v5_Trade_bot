@@ -109,6 +109,32 @@ class Settings(BaseSettings):
         6: (168, 2.0),
     }
 
+    # --- PR8: Outcome-adaptive cooldown (live trades) --------------------
+    # Default OFF for prod safety. Operator flips per env once soak verifies.
+    LIVE_COOLDOWN_ENABLED: bool = False
+    # Per-outcome cooldown duration (hours). Pulled from spec §5:
+    #   stop_loss     8.0  — long enough to let next-bar conditions develop
+    #   take_profit   1.0  — short, fast re-entry on a winning setup
+    #   timeout       4.0  — baseline middle ground
+    #   manual_close  0.0  — operator override, operator decides re-entry
+    #   external_close 0.0 — Binance closed without our consent (rare)
+    #   liquidation_buffer_breach 24.0 — sizing/leverage was off
+    LIVE_COOLDOWN_HOURS_BY_OUTCOME: dict[str, float] = {
+        "stop_loss": 8.0,
+        "take_profit": 1.0,
+        "timeout": 4.0,
+        "manual_close": 0.0,
+        "external_close": 0.0,
+        "liquidation_buffer_breach": 24.0,
+    }
+    # After SL: require strictly-greater mtf_agreement on the new signal
+    # to clear the cooldown even after calendar time elapses. Defends
+    # against "same losing setup keeps firing every 8h".
+    LIVE_COOLDOWN_SL_REQUIRES_FRESH_MTF: bool = True
+    # Forward-compat hook for a future regime-aware classifier. No live
+    # regime detector exists today, so this is a no-op until that lands.
+    LIVE_COOLDOWN_REGIME_AWARE: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
