@@ -21,7 +21,11 @@ glue lives in dispatcher.py + multi_entry.py.
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal, Protocol
+
+
+log = logging.getLogger(__name__)
 
 
 BalanceTier = Literal["small", "medium", "large", "whale"]
@@ -29,6 +33,10 @@ BalanceTier = Literal["small", "medium", "large", "whale"]
 
 class _SettingsProto(Protocol):
     SIZING_TIER_BOUNDARIES: dict[str, float]
+    SIZING_TIER_MAX_FRACTION: dict[str, float]
+    SIZING_FRACTIONAL_KELLY: float
+    SIZING_USE_P_WIN_WHEN_AVAILABLE: bool
+    DYNAMIC_SIZING_ENABLED: bool
 
 
 def classify_balance_tier(
@@ -57,3 +65,82 @@ def classify_balance_tier(
     if balance_usdt < large_max:
         return "large"
     return "whale"
+
+
+def _resolve_p_win(
+    confidence_pct: float, settings: _SettingsProto,
+) -> float:
+    """Return the probability of a win to feed into Kelly compute.
+
+    PR9 era: always uses `confidence_pct / 100.0` as the proxy.
+
+    PR5 will land an `async predict_p_win(...)` model that returns a
+    calibrated probability. Wiring it through requires making this
+    function (and its caller `compute_dynamic_size`) async, which
+    cascades up to the dispatcher's pre-conditions block. We defer
+    that refactoring to PR5 itself.
+
+    `SIZING_USE_P_WIN_WHEN_AVAILABLE` is documented but currently a no-op
+    — PR5 flips it on as part of its integration work. Operator can
+    inspect the flag in /bot-status/sizing to confirm which path is
+    active per env.
+
+    confidence_pct is the 0-100 confidence from the SignalProposal.
+    Clamped to [0.0, 1.0] before return.
+    """
+    # PR5 hook lands here. For now: proxy only.
+    _ = settings.SIZING_USE_P_WIN_WHEN_AVAILABLE  # acknowledge the flag exists
+    return max(0.0, min(1.0, confidence_pct / 100.0))
+
+
+def compute_kelly_fraction(
+    p_win: float, tier: BalanceTier, settings: _SettingsProto,
+) -> float:
+    """Quarter-Kelly fraction of bankroll for a 1:1 binary outcome.
+
+    Formula (simplified for 1:1 risk:reward, the assumed risk envelope):
+      edge       = 2 * p_win - 1
+      kelly_pct  = edge          # for 1:1 odds_ratio
+      fraction   = kelly_pct × SIZING_FRACTIONAL_KELLY (default 0.25)
+      fraction   = clamp(fraction, 0.0, TIER_MAX_FRACTION[tier])
+
+    p_win <= 0.5 → fraction = 0 (no positive edge, no bet).
+
+    Returns a fraction ∈ [0.0, tier_cap]. Caller multiplies by balance
+    to get margin_usdt.
+    """
+    edge = 2.0 * p_win - 1.0
+    if edge <= 0.0:
+        return 0.0
+    raw_kelly = edge * settings.SIZING_FRACTIONAL_KELLY
+    tier_cap = settings.SIZING_TIER_MAX_FRACTION.get(tier, 0.01)
+    return max(0.0, min(raw_kelly, tier_cap))
+
+
+def compute_dynamic_size(
+    *,
+    balance_usdt: float,
+    confidence_pct: float,
+    settings: _SettingsProto,
+) -> float | None:
+    """Total margin in USDT for the position. Returns None on disabled
+    or on any compute error (caller falls back to legacy fixed sizing).
+
+    Fail-open contract: a buggy Kelly compute MUST NOT silently shut
+    down trading. Returning None signals the dispatcher to use the
+    pre-PR9 path (compute_position_margin).
+    """
+    if not settings.DYNAMIC_SIZING_ENABLED:
+        return None
+    try:
+        p_win = _resolve_p_win(confidence_pct, settings)
+        tier = classify_balance_tier(balance_usdt, settings)
+        fraction = compute_kelly_fraction(p_win, tier, settings)
+        return balance_usdt * fraction
+    except Exception as e:  # noqa: BLE001
+        log.error(
+            "compute_dynamic_size failed (balance=%s confidence=%s); "
+            "falling open to legacy sizing: %s",
+            balance_usdt, confidence_pct, e,
+        )
+        return None
