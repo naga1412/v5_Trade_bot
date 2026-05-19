@@ -384,6 +384,28 @@ class ShadowWorker:
             bar_close=candle.close,
         )
         if decision is None:
+            # T-UI.1: position stays open this candle — emit pnl_tick so
+            # the Open Positions card stays fresh between open/close events.
+            # Best-effort: failures swallowed, candle processing continues.
+            try:
+                from app.data.binance_ticker import compute_unrealized_pnl_pct
+                pnl_pct = compute_unrealized_pnl_pct(
+                    direction=pos.direction.value,
+                    entry_price=pos.entry_price,
+                    current_price=candle.close,
+                )
+                if pnl_pct is not None:
+                    await shadow_updates.publish_pnl_tick(
+                        manager,
+                        symbol=candle.symbol,
+                        current_price=candle.close,
+                        unrealized_pnl_pct=pnl_pct,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "shadow_worker: pnl_tick emit failed for %s/%s: %s",
+                    candle.symbol, tf, e,
+                )
             return
 
         inputs_hash = _inputs_hash(candle)
