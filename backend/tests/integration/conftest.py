@@ -254,6 +254,23 @@ async def _create_shadow_tables(engine: Any) -> None:
             "updated_at TEXT NOT NULL, "
             "PRIMARY KEY (user_id, symbol))"
         ))
+        # PR10: symbol_performance_snapshots SQLite mirror so the
+        # /bot-status/symbol-allowlist endpoint's integration tests can
+        # seed snapshot rows. Mirror of the PR10 Phase 5 migration.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS symbol_performance_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "window_start TEXT NOT NULL, "
+            "window_end TEXT NOT NULL, "
+            "trades_count INTEGER NOT NULL, "
+            "win_rate REAL, sharpe REAL, "
+            "allowed INTEGER NOT NULL, "
+            "computed_at TEXT NOT NULL, "
+            "prev_hash TEXT NOT NULL, "
+            "row_hash TEXT NOT NULL UNIQUE, "
+            "inputs_hash TEXT)"
+        ))
 
 
 @pytest_asyncio.fixture

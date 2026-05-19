@@ -228,3 +228,25 @@ See backend/docs/KNOWN_ISSUES.md for the authoritative list:
 - FU-8: CLOSED by PR #169
 - FU-9: Project-wide httpx.AsyncClient hygiene (~20 modules)
 - FU-10: Migration downgrade path untested
+
+---
+
+## Strategic replan addendum (2026-05-19)
+
+After Option D rollout completion, operator's reassessment of shadow
+stats surfaced bimodal symbol performance + missing real-money gates.
+Defer real-money trading until shadow Sharpe > 0.5 (2-week window).
+New PR sequence:
+
+| PR | Title | Status |
+|----|-------|--------|
+| 10 | Symbol allowlist + stablecoin filter | spec 2026-05-19; impl in progress |
+| 11 | Exit improvements (timeout scaled, TP ≥ 2× SL) | queued |
+| 12 | Spread + liquidity filter | queued |
+| 13 | Bug bundle: FU-26 + FU-27 | queued |
+| 14 | Trailing stops + partial profit | queued |
+| 15 | FU-24 audit chain advisory lock | queued |
+| 16+ | Tier 2 batches | queued |
+
+Real-money fully-auto re-attempt: NOT before PR13 ships AND operator
+fixes Binance Futures-Trade permission (separate operator-side work).

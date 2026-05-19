@@ -32,6 +32,7 @@ from app.api.schemas import (
     PromotionGateOut,
     RecentTradeOut,
     SizingPreviewOut,
+    SymbolAllowlistOut,
     SymbolSearchHit,
     SymbolSearchOut,
     TimeframeGateStatsOut,
@@ -530,6 +531,42 @@ async def sizing_preview(
         sample_confidence_pct=confidence_pct,
         sample_margin_usdt=margin,
     )
+
+
+@router.get("/symbol-allowlist", response_model=list[SymbolAllowlistOut])
+async def symbol_allowlist(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[SymbolAllowlistOut]:
+    """PR10 — current per-symbol allowlist snapshot. Latest row per symbol,
+    sorted by sharpe descending (winners on top, losers at bottom)."""
+    rows = (await session.execute(sa.text(
+        "SELECT symbol, trades_count, win_rate, sharpe, allowed, computed_at "
+        "  FROM symbol_performance_snapshots t1 "
+        " WHERE computed_at = ( "
+        "       SELECT MAX(computed_at) FROM symbol_performance_snapshots t2 "
+        "        WHERE t2.symbol = t1.symbol "
+        "     )"
+    ))).all()
+
+    out: list[SymbolAllowlistOut] = []
+    for r in rows:
+        ca = r.computed_at
+        if isinstance(ca, str):
+            ca = datetime.fromisoformat(ca)
+        out.append(SymbolAllowlistOut(
+            symbol=r.symbol,
+            trades_count=int(r.trades_count),
+            win_rate=float(r.win_rate) if r.win_rate is not None else None,
+            sharpe=float(r.sharpe) if r.sharpe is not None else None,
+            allowed=bool(r.allowed),
+            computed_at=ca,
+        ))
+    # Sort: positive sharpe first (winners), then by sharpe desc; None last.
+    out.sort(
+        key=lambda e: (e.sharpe is None, -(e.sharpe or 0)),
+    )
+    return out
 
 
 @router.get("/per-asset", response_model=list[PerAssetStatOut])

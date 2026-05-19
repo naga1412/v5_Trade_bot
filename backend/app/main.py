@@ -133,6 +133,7 @@ async def lifespan(_app: FastAPI):
     ws_keepalive_task = None
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
+    symbol_allowlist_task = None
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -246,6 +247,18 @@ async def lifespan(_app: FastAPI):
         )
         mtf_cache_ttl_refresh_task = start_mtf_cache_ttl_refresh_task(
             get_session_factory(),
+        )
+
+        # PR10: daily symbol allowlist refresh worker. NOT gated on
+        # AUTONOMOUS_TRADING_ENABLED — snapshots are useful in all modes
+        # (manual / telegram-approve / fully-auto). The dispatcher gate
+        # consumes these snapshots only when SYMBOL_ALLOWLIST_ENABLED=True.
+        from app.workers.symbol_allowlist_refresh import (
+            start_symbol_allowlist_refresh,
+        )
+        from app.config import get_settings as _get_pr10_for_loop
+        symbol_allowlist_task = start_symbol_allowlist_refresh(
+            get_session_factory(), _get_pr10_for_loop,
         )
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
@@ -434,6 +447,8 @@ async def lifespan(_app: FastAPI):
             mtf_cache_prewarm_task.cancel()
         if mtf_cache_ttl_refresh_task is not None:
             mtf_cache_ttl_refresh_task.cancel()
+        if symbol_allowlist_task is not None:
+            symbol_allowlist_task.cancel()
         await _aclose_adapters()
 
 
