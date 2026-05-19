@@ -134,6 +134,7 @@ async def lifespan(_app: FastAPI):
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
+    ui_freshness_monitor_task = None  # PR10.5 / FU-28
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -259,6 +260,16 @@ async def lifespan(_app: FastAPI):
         from app.config import get_settings as _get_pr10_for_loop
         symbol_allowlist_task = start_symbol_allowlist_refresh(
             get_session_factory(), _get_pr10_for_loop,
+        )
+
+        # PR10.5 / FU-28 — UI data-pipeline freshness monitor. NOT gated
+        # on AUTONOMOUS_TRADING; observability is useful in all modes.
+        from app.workers.ui_freshness_monitor import (
+            start_ui_freshness_monitor,
+        )
+        from app.config import get_settings as _get_fu28_settings
+        ui_freshness_monitor_task = start_ui_freshness_monitor(
+            get_session_factory(), _get_fu28_settings,
         )
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
@@ -449,6 +460,8 @@ async def lifespan(_app: FastAPI):
             mtf_cache_ttl_refresh_task.cancel()
         if symbol_allowlist_task is not None:
             symbol_allowlist_task.cancel()
+        if ui_freshness_monitor_task is not None:
+            ui_freshness_monitor_task.cancel()
         await _aclose_adapters()
 
 
