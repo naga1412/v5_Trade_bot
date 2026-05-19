@@ -30,9 +30,9 @@ PR10 also does **NOT** change:
 | A3 | `is_symbol_allowed` helper | Pure-function rule: given a snapshot, return `True` if (a) `trades_count < 50` (grace window) OR (b) `sharpe > 0`. Otherwise `False`. |
 | A4 | `is_stablecoin_pair` helper | Returns True if base asset of `symbol` is in `SHADOW_STABLECOIN_EXCLUDE_LIST`. Handles symbol forms `"BTCUSDT"` (no slash) AND `"BTC/USDT"` (with slash) AND TF-prefixed forms. |
 | A5 | `symbol_allowlist_refresh` worker | Daily background task. Runs `compute_per_symbol_stats` over current shadow data, writes one snapshot row per symbol (via audit-chained insert), logs summary. Registered in `worker_registry.py` with `max_staleness_seconds=2 * 86400` (2-day budget — allows one missed day before alarming). Heartbeats per run. `pending_heartbeat=False`. |
-| A6 | `_apply_symbol_allowlist_gate` dispatcher pre-condition | New gate. Inserts FIRST in pre-conditions block (cheapest check — single in-memory dict lookup after cache fill). Returns `None` (no-op) when `SYMBOL_ALLOWLIST_ENABLED=False` — stablecoin check is ALSO inside this branch (no behavior change at deploy; see §3.5). When flag is True: emits `DispatchResult(outcome="blocked_symbol_excluded")` with `detail="stablecoin_excluded"` for stablecoin pairs OR `detail="low_sharpe"` for sharpe-rejected symbols (single outcome literal, detail string distinguishes — see §8 #9). |
+| A6 | `_apply_symbol_allowlist_gate` dispatcher pre-condition | New gate. Inserts FIRST in pre-conditions block (cheapest check — single in-memory dict lookup after cache fill). Returns `None` (no-op) when `SYMBOL_ALLOWLIST_ENABLED=False` — stablecoin check is ALSO inside this branch (no behavior change at deploy; see §3.5). When flag is True: emits `DispatchResult(outcome="blocked_stablecoin")` for stablecoin pairs OR `DispatchResult(outcome="blocked_low_sharpe")` for sharpe-rejected symbols — two distinct outcome literals matching PR2's `blocked_mtf_*` pattern (operator approved 2026-05-19). |
 | A7 | In-memory allowlist cache | Process-local; TTL 1h. Keyed on `user_id`. Single shared dict; rebuilt on first dispatch after expiry. Cache miss costs one query over `symbol_performance_snapshots`. Fail-open on query error. |
-| A8 | `DispatchOutcome` enum entry | New literal `"blocked_symbol_excluded"` added to dispatcher's `DispatchOutcome` type. |
+| A8 | `DispatchOutcome` enum entries | Two new literals added to dispatcher's `DispatchOutcome` type: `"blocked_stablecoin"` + `"blocked_low_sharpe"`. Matches PR2's `blocked_mtf_low_agreement` / `blocked_mtf_higher_tf_veto` pattern. |
 | A9 | `SHADOW_STABLECOIN_EXCLUDE_LIST` config | `list[str]` in `app/config.py`. Default: `["USDC", "FDUSD", "USD1", "BUSD", "TUSD", "DAI"]`. Base-asset names (no quote suffix). Env-overridable. |
 | A10 | `SYMBOL_ALLOWLIST_ENABLED` config | `bool` in `app/config.py`. Default `False`. When `False`, the dispatcher gate function returns `None` immediately — zero behavior change at deploy. Stablecoin filter is part of the same gate function; flag-OFF also skips the stablecoin check. (Rationale below in §3.5.) |
 | A11 | `/api/v1/bot-status/symbol-allowlist` endpoint | Read-only GET. Returns list of latest-per-symbol snapshots with `symbol`, `trades_count`, `sharpe`, `win_rate`, `allowed`, `computed_at`. Sorted by `sharpe DESC`. Auth via existing `current_user_or_impersonated`. Default-OFF doesn't gate the endpoint itself — operator can inspect the allowlist before flipping the flag. |
@@ -58,8 +58,8 @@ DAILY (symbol_allowlist_refresh worker)           ▼
        │                                    pre-conditions:
        ▼                                      ┌─ symbol_allowlist_gate  ← NEW (cheapest, first)
 SELECT closed shadow_trades per symbol         │    if not enabled: None
-SELECT min(100 most-recent, last 30d)          │    if stablecoin:   blocked_symbol_excluded
-COMPUTE win_rate, sharpe per symbol            │    if not allowed:  blocked_symbol_excluded
+SELECT min(100 most-recent, last 30d)          │    if stablecoin:   blocked_stablecoin / blocked_low_sharpe
+COMPUTE win_rate, sharpe per symbol            │    if not allowed:  blocked_stablecoin / blocked_low_sharpe
 INSERT symbol_performance_snapshots row        ├─ funding-rate guard
        │  (hash-chained)                       ├─ cooldown gate (PR8)
        ▼                                       ├─ MTF gate (PR2)
@@ -144,8 +144,10 @@ async def _apply_symbol_allowlist_gate(*, proposal, user_id, session, settings, 
         return None
     # Stablecoin check ALSO inside this branch — operator opts into the whole filter.
     if is_stablecoin_pair(proposal.symbol, settings):
-        return DispatchResult(outcome="blocked_symbol_excluded", detail="stablecoin_excluded")
-    # ... allowlist check
+        return DispatchResult(outcome="blocked_stablecoin", detail=f"{proposal.symbol} base in stablecoin list")
+    # Allowlist check (covered below)
+    if not is_symbol_allowed(snapshot):
+        return DispatchResult(outcome="blocked_low_sharpe", detail=f"...sharpe={snapshot.sharpe}...")
 ```
 
 When the operator flips ON: BOTH the allowlist gate AND the stablecoin filter activate together. This is a single behavior switch. Operator who wants to keep trading stablecoins (unlikely) keeps the flag off.
@@ -176,7 +178,7 @@ Test: `test_apply_symbol_allowlist_gate_fails_open_on_db_error`. The error is lo
 | `backend/tests/unit/test_compute_per_symbol_stats.py` | Aggregation logic: per-symbol grouping, Sharpe per symbol, grace-window, rolling-window edge cases. |
 | `backend/tests/db/test_symbol_performance_snapshots_persistence.py` | Round-trip insert + load. |
 | `backend/tests/trading/test_symbol_allowlist_gate.py` | Dispatcher integration: enabled/disabled/stablecoin/excluded/included/fail-open. |
-| `backend/tests/integration/test_pr10_dispatcher_e2e.py` | E2E: signal on excluded symbol → blocked_symbol_excluded; signal on allowed → proceeds. |
+| `backend/tests/integration/test_pr10_dispatcher_e2e.py` | E2E: signal on excluded symbol → blocked_stablecoin / blocked_low_sharpe; signal on allowed → proceeds. |
 | `backend/tests/integration/test_pr10_allowlist_endpoint.py` | `/symbol-allowlist` response shape + auth + empty-DB fallback. |
 | `backend/tests/workers/test_symbol_allowlist_refresh.py` | Worker writes one snapshot row per symbol; idempotent on re-run within same UTC day; heartbeat fires. |
 | `backend/scripts/bench_dispatcher_allowlist.py` | V-7 microbench (gate disabled / cache hit / cache miss). Same shape as PR8's bench. |
@@ -186,7 +188,7 @@ Test: `test_apply_symbol_allowlist_gate_fails_open_on_db_error`. The error is lo
 | Path | Reason |
 |---|---|
 | `backend/app/config.py` | Add `SYMBOL_ALLOWLIST_ENABLED=False`, `SHADOW_STABLECOIN_EXCLUDE_LIST=[...]`, `SYMBOL_ALLOWLIST_GRACE_TRADES=50`, `SYMBOL_ALLOWLIST_WINDOW_TRADES=100`, `SYMBOL_ALLOWLIST_WINDOW_DAYS=30`, `SYMBOL_ALLOWLIST_CACHE_TTL_SECONDS=3600`. |
-| `backend/app/trading/execution/dispatcher.py` | Wire `_apply_symbol_allowlist_gate` FIRST in pre-conditions block. Add `"blocked_symbol_excluded"` literal to `DispatchOutcome` Union. |
+| `backend/app/trading/execution/dispatcher.py` | Wire `_apply_symbol_allowlist_gate` FIRST in pre-conditions block. Add `"blocked_stablecoin / blocked_low_sharpe"` literal to `DispatchOutcome` Union. |
 | `backend/app/db/audit.py` | Add `"symbol_performance_snapshots": frozenset({...})` entry to `HASH_PAYLOAD_COLUMNS`. |
 | `backend/app/api/routes/bot_status.py` | New `/symbol-allowlist` endpoint. |
 | `backend/app/api/schemas.py` | `SymbolAllowlistOut` + `SymbolAllowlistResponseOut` schemas. |
@@ -300,7 +302,7 @@ Items below are choices I made unilaterally; operator can redirect each before p
 6. **Manual override deferred to PR10.5.** Operator's Part H listed this as IN scope; deferring keeps PR10 tight. If operator wants it in PR10, easy to add as A13 (TOTP endpoint that writes a `manual_allowlist_overrides` table; cache layer consults this before snapshot data). Defaulted to defer; flag.
 7. **Worker spawns unconditionally** (not gated by `AUTONOMOUS_TRADING_ENABLED`). Snapshot data is useful regardless of dispatcher state — `/symbol-allowlist` endpoint surfaces the allowlist for inspection even in manual mode.
 8. **Symbol form normalization** in `_parse_base_asset` handles `BTC/USDT`, `BTCUSDT`, `BTC-USDT`. Quote-suffix priority is longest-first (FDUSD before USDC before USDT before USD).
-9. **`blocked_symbol_excluded` outcome** (single literal for both stablecoin + Sharpe rejection). Distinguishable in logs via the `detail` field. Operator may prefer split literals (`blocked_stablecoin` + `blocked_low_sharpe`); flag.
+9. **Split outcome literals: `blocked_stablecoin` + `blocked_low_sharpe`** (operator approved 2026-05-19). Matches PR2's distinct-literal pattern (`blocked_mtf_low_agreement` / `blocked_mtf_higher_tf_veto`). Better log readability + simpler downstream analytics (count by outcome).
 
 ---
 
@@ -339,7 +341,7 @@ PR10 ships when **all** of these hold:
 - [ ] V-7 bench passes (Δp50 ≤ 2ms cache-hit, Δp99 ≤ 10ms cache-miss).
 - [ ] Migration applies cleanly on staging Postgres + reversible downgrade tested.
 - [ ] Default-OFF in prod (`SYMBOL_ALLOWLIST_ENABLED=False`) — no change to existing trade flow at deploy time. Bit-identical dispatcher hot path.
-- [ ] After flipping ON in staging: `/symbol-allowlist` endpoint returns sane data; one trading day of dispatch logs show `blocked_symbol_excluded` for FDUSD/USD1/TRX (stablecoins + losing symbols).
+- [ ] After flipping ON in staging: `/symbol-allowlist` endpoint returns sane data; one trading day of dispatch logs show `blocked_stablecoin / blocked_low_sharpe` for FDUSD/USD1/TRX (stablecoins + losing symbols).
 - [ ] Audit chain replay-identity verifies for the new `symbol_performance_snapshots` table.
 - [ ] ARCHITECTURE.md §12 published; master rollout doc updated.
 
