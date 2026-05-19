@@ -54,6 +54,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "mtf_cache_prewarm_task": "app/core/scoring/mtf_confluence.py",
     "mtf_cache_ttl_refresh_task": "app/core/scoring/mtf_confluence.py",
     "symbol_allowlist_refresh": "app/workers/symbol_allowlist_refresh.py",
+    "ui_freshness_monitor": "app/workers/ui_freshness_monitor.py",
 }
 
 

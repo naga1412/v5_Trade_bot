@@ -134,6 +134,7 @@ describe("api.openPositions", () => {
         current_price: 105,
         unrealized_pnl_pct: 5,
         unrealized_pnl_usdt: 50,
+        as_of: "2026-05-01T12:00:00Z",
       },
     ];
     fetchMock.mockResolvedValueOnce(jsonResponse(sample));
@@ -147,7 +148,7 @@ describe("api.openPositions", () => {
 describe("api.perAssetStats", () => {
   test("uses default days=30 when not specified", async () => {
     const sample: PerAssetStat[] = [
-      { symbol: "BTC/USDT", trades: 5, win_rate: 0.6, avg_rr: 2.0, pnl_usdt: 10, sharpe_annualized: 1.0 },
+      { symbol: "BTC/USDT", trades: 5, win_rate: 0.6, avg_rr: 2.0, pnl_usdt: 10, sharpe_annualized: 1.0, computed_at: "2026-05-01T12:00:00Z", last_trade_closed_at: "2026-05-01T11:30:00Z" },
     ];
     fetchMock.mockResolvedValueOnce(jsonResponse(sample));
     const result = await api.perAssetStats();

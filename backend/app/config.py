@@ -190,6 +190,15 @@ class Settings(BaseSettings):
     # so cache rebuilds read fresh snapshot data.
     SYMBOL_ALLOWLIST_CACHE_TTL_SECONDS: int = 3600
 
+    # --- PR10.5 / FU-28 UI freshness monitor ----------------------------
+    # The monitor itself is observation-on by default. Only auto-recycle
+    # is gated: shadow_worker is currently stateful=True in worker_registry,
+    # so calling worker_supervisor.restart on it is unsafe without further
+    # design work. The flag exists for forward-compat.
+    FU28_POLL_INTERVAL_SECONDS: int = 300
+    FU28_STALE_PNL_TICK_THRESHOLD_SECONDS: int = 1800
+    FU28_AUTO_RECYCLE_ENABLED: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

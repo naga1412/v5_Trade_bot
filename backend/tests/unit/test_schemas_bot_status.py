@@ -110,6 +110,8 @@ def test_open_position_minimal() -> None:
         bars_held=2,
         opened_at=datetime(2026, 5, 1, tzinfo=UTC),
         signal_id="sig-abc",
+        # PR10.5 T-UI.3: server clock stamp is always populated by the route
+        as_of=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
     )
     assert pos.current_price is None
     assert pos.unrealized_pnl_pct is None
@@ -169,8 +171,12 @@ def test_per_asset_stat_optional_sharpe() -> None:
         avg_rr=2.0,
         pnl_usdt=12.5,
         sharpe_annualized=None,
+        # PR10.5 T-UI.3: server clock + last-trade timestamps always populated
+        computed_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        last_trade_closed_at=None,
     )
     assert s.sharpe_annualized is None
+    assert s.last_trade_closed_at is None
 
 
 def test_asset_universe_out_round_trip() -> None:

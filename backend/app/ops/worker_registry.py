@@ -285,6 +285,21 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=2 * 86400,  # 2-day budget (1 missed run allowed)
         stateful=False,  # safe to auto-restart
     ),
+    # 20. PR10.5 / FU-28 — UI data-pipeline freshness monitor.
+    #     Observes pnl_tick emission rate vs open positions; alerts on
+    #     staleness; optional auto-recycle (default OFF — shadow_worker
+    #     is stateful).
+    WorkerSpec(
+        name="ui_freshness_monitor",
+        description=(
+            "5-min poll of pnl_tick emission freshness (FU-28). "
+            "Logs WARN + heartbeat 'degraded' when open positions have "
+            "no recent ticks; optional auto-recycle when enabled."
+        ),
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=15 * 60,
+        stateful=False,
+    ),
 )
 
 

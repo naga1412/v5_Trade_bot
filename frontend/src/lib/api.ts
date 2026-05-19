@@ -176,6 +176,10 @@ export interface OpenPosition {
   current_price: number | null;
   unrealized_pnl_pct: number | null;
   unrealized_pnl_usdt: number | null;
+  // T-UI.3 / PR10.5: server clock at endpoint response time, rendered
+  // as the "as of HH:MM:SS" footer on the Open Positions card. Always
+  // present on responses from PR10.5 onward.
+  as_of: string;                 // ISO datetime
 }
 
 export interface PerAssetStat {
@@ -185,6 +189,11 @@ export interface PerAssetStat {
   avg_rr: number;
   pnl_usdt: number;
   sharpe_annualized: number | null;
+  // T-UI.3 / PR10.5: timestamps for the "computed / last trade" footer
+  // on the per-asset stats card. last_trade_closed_at is null when the
+  // window has no closed trades for the symbol.
+  computed_at: string;           // ISO datetime
+  last_trade_closed_at: string | null;
 }
 
 export interface RecentTrade {
