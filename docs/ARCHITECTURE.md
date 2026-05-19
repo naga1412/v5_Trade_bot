@@ -668,6 +668,65 @@ tested in `tests/db/test_pr9_migration_downgrade.py`.
 
 ---
 
+## 11e. Symbol allowlist + stablecoin filter (PR10)
+
+**Files**: `app/trading/symbol_allowlist.py` (pure helpers — new),
+`app/trading/execution/symbol_allowlist_gate.py` (dispatcher pre-condition — new),
+`app/db/symbol_performance_snapshots.py` (persistence — new),
+`app/workers/symbol_allowlist_refresh.py` (daily worker — new),
+`app/trading/execution/dispatcher.py` (wire as first pre-condition),
+`app/api/routes/bot_status.py` (`/symbol-allowlist` endpoint),
+`app/config.py` (6 new settings), alembic
+`2026_05_19_0024_pr10_symbol_performance_snapshots.py` — added 2026-05-19.
+
+### Strategic motivation
+
+Shadow stats show bimodal performance: winners (TON, EDEN, XRP, SUI —
+positive Sharpe) vs systematic losers (FDUSD, TRX, BNB — negative Sharpe)
+plus stablecoin pairs that don't move. Aggregate stats hide the skill
+split. Excluding losers + stablecoins should flip overall P&L positive.
+
+### Allowlist rule
+
+A symbol is allowed if **either**:
+1. `trades_count < SYMBOL_ALLOWLIST_GRACE_TRADES` (default 50) — new
+   symbols are unconditionally allowed until they accumulate evidence
+2. `sharpe > 0` over the rolling window (default min(100 trades, 30 days))
+
+Negative or zero or None Sharpe past grace → excluded.
+
+### Daily snapshot worker
+
+`symbol_allowlist_refresh` runs every 86400s. Reads closed shadow_trades,
+computes per-symbol stats, writes one snapshot row per symbol. Single-
+writer → FU-24's concurrent-insert race doesn't fire.
+
+### Dispatcher gate
+
+Slots **FIRST** in pre-conditions (cheapest after cache fill). Returns
+`None` immediately when `SYMBOL_ALLOWLIST_ENABLED=False` — no DB read,
+no behavior change at deploy. When flag is True:
+- Stablecoin base → `blocked_stablecoin`
+- Snapshot absent → defensive allow
+- Sharpe rule fails → `blocked_low_sharpe`
+
+Fail-open contract on DB error.
+
+### Hot-path cache
+
+Process-local cache keyed on user_id; TTL 1h. Per-user asyncio.Lock
+prevents thundering herd on rebuild. First dispatch after restart or
+TTL expiry pays one DB read; subsequent dispatches hit the dict.
+
+### Rollback
+
+Single env var: `SYMBOL_ALLOWLIST_ENABLED=False` reverts to pre-PR10
+dispatch behavior. Process restart needed (lru_cache on get_settings).
+Stage-2 rollback: alembic downgrade -1 drops the table; round-trip
+tested.
+
+---
+
 ## 11. Self-healing supervisor
 
 **File**: `app/ops/worker_supervisor.py` — added 2026-05-15 (PR #133)
