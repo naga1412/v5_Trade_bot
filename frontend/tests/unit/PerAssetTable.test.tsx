@@ -9,10 +9,13 @@ vi.mock("@/lib/api", () => ({
 import { api } from "@/lib/api";
 import { PerAssetTable } from "@/tabs/BotStatus/PerAssetTable";
 
+const COMPUTED_AT = "2026-05-03T12:00:00Z";
+const LAST_TRADE = "2026-05-03T11:30:00Z";
+
 const sample: PerAssetStat[] = [
-  { symbol: "BTC/USDT", trades: 10, win_rate: 0.6, avg_rr: 2.0, pnl_usdt: 25.5, sharpe_annualized: 1.2 },
-  { symbol: "ETH/USDT", trades: 8, win_rate: 0.50, avg_rr: 1.8, pnl_usdt: -3.5, sharpe_annualized: -0.2 },
-  { symbol: "SOL/USDT", trades: 5, win_rate: 0.40, avg_rr: 1.5, pnl_usdt: 12.0, sharpe_annualized: 0.8 },
+  { symbol: "BTC/USDT", trades: 10, win_rate: 0.6, avg_rr: 2.0, pnl_usdt: 25.5, sharpe_annualized: 1.2, computed_at: COMPUTED_AT, last_trade_closed_at: LAST_TRADE },
+  { symbol: "ETH/USDT", trades: 8, win_rate: 0.50, avg_rr: 1.8, pnl_usdt: -3.5, sharpe_annualized: -0.2, computed_at: COMPUTED_AT, last_trade_closed_at: LAST_TRADE },
+  { symbol: "SOL/USDT", trades: 5, win_rate: 0.40, avg_rr: 1.5, pnl_usdt: 12.0, sharpe_annualized: 0.8, computed_at: COMPUTED_AT, last_trade_closed_at: LAST_TRADE },
 ];
 
 beforeEach(() => {
