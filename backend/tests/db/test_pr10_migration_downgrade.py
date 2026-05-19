@@ -10,7 +10,7 @@ import pytest
 _DSN = os.environ.get("DATABASE_URL", "")
 _IS_PG = _DSN.startswith("postgresql")
 
-_REV = "0024_pr10_symbol_performance_snapshots"
+_REV = "0024_pr10_symbol_perf_snapshots"
 _PRIOR = "0023_pr9_users_balance_tier"
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]

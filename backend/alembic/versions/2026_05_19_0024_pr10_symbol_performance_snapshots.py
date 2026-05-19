@@ -3,7 +3,7 @@
 8th hash-chained audit table. Append-only. Single writer (daily worker)
 means FU-24's concurrent-insert race doesn't fire here.
 
-Revision ID: 0024_pr10_symbol_performance_snapshots
+Revision ID: 0024_pr10_symbol_perf_snapshots
 Revises: 0023_pr9_users_balance_tier
 Create Date: 2026-05-19
 """
@@ -12,7 +12,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0024_pr10_symbol_performance_snapshots"
+revision: str = "0024_pr10_symbol_perf_snapshots"
 down_revision: str | None = "0023_pr9_users_balance_tier"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

@@ -1,4 +1,4 @@
-"""Migration tests for 0024_pr10_symbol_performance_snapshots."""
+"""Migration tests for 0024_pr10_symbol_perf_snapshots."""
 from __future__ import annotations
 
 import os
