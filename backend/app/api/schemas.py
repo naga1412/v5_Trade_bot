@@ -243,6 +243,16 @@ class SizingPreviewOut(BaseModel):
     sample_margin_usdt: float | None  # None when sizing disabled or no edge
 
 
+class SymbolAllowlistOut(BaseModel):
+    """PR10 — one latest snapshot per symbol for /bot-status/symbol-allowlist."""
+    symbol: str
+    trades_count: int
+    win_rate: float | None
+    sharpe: float | None
+    allowed: bool
+    computed_at: datetime
+
+
 class OpenPositionOut(BaseModel):
     symbol: str
     direction: Literal["LONG", "SHORT"]
