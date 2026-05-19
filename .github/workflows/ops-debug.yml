@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - ui-data-pipeline-check # READ-ONLY: PR10.5 diagnostic — mark_price / live_price / pnl_calc log activity, /per-asset endpoint payload, stats/refresh/cache worker heartbeats. Answers "why is Open Positions Now/P&L not updating, why don't per-asset stats refresh."
 
 jobs:
   probe:
@@ -576,5 +577,37 @@ jobs:
                  docker compose logs --tail=500 backend 2>&1 | grep -iE 'keepalive|ping|pong|ws_keep' | tail -20 && \
                  echo '=== I-2d: last 80 backend log lines unfiltered (most recent activity floor) ===' && \
                  docker compose logs --tail=80 backend"
+              ;;
+            ui-data-pipeline-check)
+              # READ-ONLY: PR10.5 diagnostic for UI data freshness.
+              # Investigates: (a) why Open Positions card Now/P&L is stale,
+              # (b) why per-asset stats don't auto-refresh, (c) which workers
+              # touch the read-side data pipeline.
+              # Sections: mark_price/live_price log activity, pnl_calc activity,
+              # per-asset endpoint payload (first 100 lines), worker heartbeats
+              # for any worker matching stats/refresh/cache/snapshot/aggregator.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== U-1: backend logs (last 30m) — mark_price / live_price / WS disconnect ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'mark_price|live_price|websocket.*disconnect|pnl_calc|pnl_calculator|update_open_position' | tail -40 && \
+                 echo '=== U-2: backend logs (last 30m) — open position / position update activity ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'open_position|position.*update|unrealized|notional|pos_id' | tail -30 && \
+                 echo '=== U-3a: /api/v1/bot-status/open-positions response ===' && \
+                 docker compose exec -T backend curl -s -m 10 -H 'cf-access-authenticated-user-email: nagarajan1998.yuva@gmail.com' http://localhost:8000/api/v1/bot-status/open-positions | head -200 && \
+                 echo '=== U-3b: /api/v1/bot-status/per-asset response (first 200 lines) ===' && \
+                 docker compose exec -T backend curl -s -m 10 -H 'cf-access-authenticated-user-email: nagarajan1998.yuva@gmail.com' http://localhost:8000/api/v1/bot-status/per-asset | head -200 && \
+                 echo '=== U-4: worker heartbeats matching stats/refresh/cache/snapshot/aggregator ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT worker_name, beat_at, last_status, EXTRACT(EPOCH FROM (NOW() - beat_at))::int AS age_s FROM worker_heartbeats WHERE worker_name ~* 'stats|refresh|cache|snapshot|aggregator|valid' ORDER BY beat_at DESC;\" && \
+                 echo '=== U-5: shadow_open_positions vs live_trades open count (sanity) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'shadow_open_positions total' AS k, count(*)::text AS v FROM shadow_open_positions \
+                     UNION ALL SELECT 'shadow_open_positions opened_at MAX', max(opened_at)::text FROM shadow_open_positions \
+                     UNION ALL SELECT 'shadow_open_positions notional_now MAX age', \
+                       EXTRACT(EPOCH FROM (NOW() - max(updated_at)))::int::text || 's' FROM shadow_open_positions;\" && \
+                 echo '=== U-6: predictions cadence (last 2h) — read-pipeline upstream sanity ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT date_trunc('hour', ts) AS hour, count(*) FROM predictions WHERE ts > now() - interval '2 hours' GROUP BY 1 ORDER BY 1 DESC;\" && \
+                 echo '(end)'"
               ;;
           esac
