@@ -272,6 +272,9 @@ class OpenPositionOut(BaseModel):
     current_price: float | None = None
     unrealized_pnl_pct: float | None = None
     unrealized_pnl_usdt: float | None = None
+    # T-UI.3 / PR10.5: server clock at endpoint response time, surfaced
+    # to the UI as the "as of" footer on the Open Positions card.
+    as_of: datetime
 
 
 class PerAssetStatOut(BaseModel):
@@ -281,6 +284,11 @@ class PerAssetStatOut(BaseModel):
     avg_rr: float
     pnl_usdt: float
     sharpe_annualized: float | None
+    # T-UI.3 / PR10.5: timestamps for the "computed at / last trade" footer
+    # on the per-asset stats card. last_trade_closed_at is None when the
+    # window has no closed trades for this symbol.
+    computed_at: datetime
+    last_trade_closed_at: datetime | None
 
 
 class RecentTradeOut(BaseModel):
