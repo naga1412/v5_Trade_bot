@@ -81,9 +81,11 @@ def test_hash_payload_columns_covers_expected_tables():
     # Core chained tables from plan (predictions, shadow_trades, live_trades,
     # paper_trades) plus the 3 additional hash-chained tables discovered at
     # call-site audit (brain_decisions, tax_events, mode_change_log).
+    # PR10 adds symbol_performance_snapshots.
     expected = {
         "predictions", "shadow_trades", "live_trades", "paper_trades",
         "brain_decisions", "tax_events", "mode_change_log",
+        "symbol_performance_snapshots",
     }
     assert set(HASH_PAYLOAD_COLUMNS.keys()) == expected
 
