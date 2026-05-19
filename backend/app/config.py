@@ -169,6 +169,36 @@ class Settings(BaseSettings):
     # DCA band — tranche 2 placed when price moves this pct against signal.
     SIZING_MULTI_ENTRY_DCA_BAND_PCT: float = 0.5
 
+    # --- PR10 symbol allowlist + stablecoin filter -----------------------
+    # Default-OFF for safe deploy. Operator flips after observing the
+    # `/api/v1/bot-status/symbol-allowlist` endpoint for ~24h.
+    SYMBOL_ALLOWLIST_ENABLED: bool = False
+    # Quote-stripped base asset names excluded from real-money dispatch.
+    # Shadow trading on these symbols continues (controlled by
+    # SHADOW_NARROW_UNIVERSE) so per-symbol stats keep accruing.
+    SHADOW_STABLECOIN_EXCLUDE_LIST: list[str] = [
+        "USDC", "FDUSD", "USD1", "BUSD", "TUSD", "DAI",
+    ]
+    # New-symbol grace: < this many closed trades → allowlisted regardless
+    # of Sharpe. Prevents excluding new symbols before meaningful data.
+    SYMBOL_ALLOWLIST_GRACE_TRADES: int = 50
+    # Rolling window: Sharpe over min(WINDOW_TRADES most-recent closed,
+    # trades in last WINDOW_DAYS days) — whichever set is smaller.
+    SYMBOL_ALLOWLIST_WINDOW_TRADES: int = 100
+    SYMBOL_ALLOWLIST_WINDOW_DAYS: int = 30
+    # In-memory allowlist cache TTL. Comfortably faster than daily refresh
+    # so cache rebuilds read fresh snapshot data.
+    SYMBOL_ALLOWLIST_CACHE_TTL_SECONDS: int = 3600
+
+    # --- PR10.5 / FU-28 UI freshness monitor ----------------------------
+    # The monitor itself is observation-on by default. Only auto-recycle
+    # is gated: shadow_worker is currently stateful=True in worker_registry,
+    # so calling worker_supervisor.restart on it is unsafe without further
+    # design work. The flag exists for forward-compat.
+    FU28_POLL_INTERVAL_SECONDS: int = 300
+    FU28_STALE_PNL_TICK_THRESHOLD_SECONDS: int = 1800
+    FU28_AUTO_RECYCLE_ENABLED: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

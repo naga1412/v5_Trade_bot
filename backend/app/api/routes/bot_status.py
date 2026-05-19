@@ -32,6 +32,7 @@ from app.api.schemas import (
     PromotionGateOut,
     RecentTradeOut,
     SizingPreviewOut,
+    SymbolAllowlistOut,
     SymbolSearchHit,
     SymbolSearchOut,
     TimeframeGateStatsOut,
@@ -374,6 +375,9 @@ async def open_positions(
     each candle close. Any Binance-side failure here is logged and we
     fall back to None for the price/pnl fields (UI shows "—" as before).
     """
+    # T-UI.3 / PR10.5: server clock captured once per response, attached
+    # to every row so the UI renders a single "As of" footer.
+    as_of = datetime.now(UTC)
     sql = (
         "SELECT symbol, direction, entry_price, stop_loss, take_profit, "
         "position_size_usdt, bars_held, opened_at, signal_id, "
@@ -429,6 +433,7 @@ async def open_positions(
             current_price=current_price,
             unrealized_pnl_pct=pnl_pct,
             unrealized_pnl_usdt=pnl_usdt,
+            as_of=as_of,
         ))
     return out
 
@@ -532,6 +537,42 @@ async def sizing_preview(
     )
 
 
+@router.get("/symbol-allowlist", response_model=list[SymbolAllowlistOut])
+async def symbol_allowlist(
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[SymbolAllowlistOut]:
+    """PR10 — current per-symbol allowlist snapshot. Latest row per symbol,
+    sorted by sharpe descending (winners on top, losers at bottom)."""
+    rows = (await session.execute(sa.text(
+        "SELECT symbol, trades_count, win_rate, sharpe, allowed, computed_at "
+        "  FROM symbol_performance_snapshots t1 "
+        " WHERE computed_at = ( "
+        "       SELECT MAX(computed_at) FROM symbol_performance_snapshots t2 "
+        "        WHERE t2.symbol = t1.symbol "
+        "     )"
+    ))).all()
+
+    out: list[SymbolAllowlistOut] = []
+    for r in rows:
+        ca = r.computed_at
+        if isinstance(ca, str):
+            ca = datetime.fromisoformat(ca)
+        out.append(SymbolAllowlistOut(
+            symbol=r.symbol,
+            trades_count=int(r.trades_count),
+            win_rate=float(r.win_rate) if r.win_rate is not None else None,
+            sharpe=float(r.sharpe) if r.sharpe is not None else None,
+            allowed=bool(r.allowed),
+            computed_at=ca,
+        ))
+    # Sort: positive sharpe first (winners), then by sharpe desc; None last.
+    out.sort(
+        key=lambda e: (e.sharpe is None, -(e.sharpe or 0)),
+    )
+    return out
+
+
 @router.get("/per-asset", response_model=list[PerAssetStatOut])
 async def per_asset(
     days: int = Query(default=30, ge=1, le=365),
@@ -559,6 +600,13 @@ async def per_asset(
     for symbol, sym_rows in by_symbol.items():
         trades = [_row_to_trade(r) for r in sym_rows]
         sharpe = compute_sharpe_annualized(trades, days)
+        # T-UI.3 / PR10.5: surface the latest closed_at across this symbol's
+        # window. `_row_to_trade` already normalizes string->datetime (SQLite
+        # returns ISO strings, Postgres returns native datetimes), so reuse
+        # the trade.closed_at values here. The WHERE clause guarantees
+        # `closed_at IS NOT NULL`, but defensively filter Nones.
+        valid_closed = [t.closed_at for t in trades if t.closed_at is not None]
+        last_trade_closed_at = max(valid_closed) if valid_closed else None
         out.append(PerAssetStatOut(
             symbol=symbol,
             trades=len(trades),
@@ -566,6 +614,8 @@ async def per_asset(
             avg_rr=compute_avg_rr(trades),
             pnl_usdt=float(sum(t.pnl_usdt for t in trades)),
             sharpe_annualized=sharpe,
+            computed_at=now,
+            last_trade_closed_at=last_trade_closed_at,
         ))
     out.sort(key=lambda e: e.pnl_usdt, reverse=True)
     return out

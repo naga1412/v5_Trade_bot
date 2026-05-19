@@ -15,12 +15,23 @@ receives the message regardless of their symbol filter.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from app.ws.manager import ConnectionManager
 
 CHANNEL = "shadow_updates"
+
+# T-UI.1 / FU-28: module-level snapshot of when the most-recent
+# pnl_tick was emitted per symbol. Consumed by ui_freshness_monitor
+# (Phase 5) to detect "open positions but no ticks" staleness.
+# Process-local; not persisted. Cleared on worker restart by design.
+_last_pnl_tick_at: dict[str, datetime] = {}
+
+
+def get_last_pnl_tick_at() -> dict[str, datetime]:
+    """FU-28 accessor — snapshot of {symbol: last_pnl_tick_ts}."""
+    return dict(_last_pnl_tick_at)
 
 EventType = Literal[
     "shadow_position_opened",
@@ -130,6 +141,8 @@ async def publish_pnl_tick(
             "unrealized_pnl_pct": unrealized_pnl_pct,
         },
     )
+    # T-UI.1: record for FU-28 staleness monitor
+    _last_pnl_tick_at[symbol] = datetime.now(tz=timezone.utc)
 
 
 async def publish_universe_refreshed(
@@ -155,6 +168,7 @@ async def publish_universe_refreshed(
 __all__ = [
     "CHANNEL",
     "EventType",
+    "get_last_pnl_tick_at",
     "publish_pnl_tick",
     "publish_position_closed",
     "publish_position_opened",

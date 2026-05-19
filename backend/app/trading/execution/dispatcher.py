@@ -138,6 +138,9 @@ DispatchOutcome = Literal[
     "blocked_mtf_low_agreement",
     "blocked_mtf_higher_tf_veto",
     "blocked_short_high_borrow",
+    # PR10 additions — symbol allowlist
+    "blocked_stablecoin",
+    "blocked_low_sharpe",
 ]
 
 
@@ -613,6 +616,22 @@ async def dispatch(
         )
 
     # ---- Pre-conditions ----
+
+    # ---- PR10 symbol allowlist gate (cheapest check, run first) --------
+    # Default-OFF in prod via SYMBOL_ALLOWLIST_ENABLED=False — when
+    # disabled, _apply_symbol_allowlist_gate short-circuits to None
+    # without touching the DB.
+    from app.config import get_settings as _get_pr10_settings
+    from app.trading.execution.symbol_allowlist_gate import _apply_symbol_allowlist_gate
+    pr10_settings = _get_pr10_settings()
+    allowlist_block = await _apply_symbol_allowlist_gate(
+        proposal=proposal, user_id=user.user_id,
+        session=session, settings=pr10_settings,
+        now_fn=lambda: n,
+    )
+    if allowlist_block is not None:
+        return allowlist_block
+    # ---- end PR10 ------------------------------------------------------
 
     # Funding-rate guard
     blocked, reason = await _check_funding_block(proposal)

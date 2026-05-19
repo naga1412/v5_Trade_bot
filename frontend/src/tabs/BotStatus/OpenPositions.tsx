@@ -114,6 +114,15 @@ export function OpenPositions() {
           <PositionCard key={p.signal_id} pos={p} />
         ))}
       </div>
+      {/* T-UI.3 / PR10.5: surface server clock so operators can spot a
+          stalled poll/WS feed. Guarded on `as_of` presence so we don't
+          crash during the backend rollout window (older responses
+          might lack the field). */}
+      {data[0]?.as_of && (
+        <div className="mt-1 text-[8px] text-text-tertiary text-right">
+          as of {new Date(data[0].as_of).toLocaleTimeString()}
+        </div>
+      )}
     </Panel>
   );
 }

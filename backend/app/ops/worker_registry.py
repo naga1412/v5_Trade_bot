@@ -270,6 +270,36 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=5 * 60,  # 30s cadence + ~4.5min slack
         stateful=False,
     ),
+    # 19. PR10 — daily symbol allowlist refresh (NOT autonomous-trading-gated;
+    #     snapshots are useful in all modes — manual, telegram-approve, and
+    #     fully-auto. The dispatcher gate only *consumes* them when
+    #     SYMBOL_ALLOWLIST_ENABLED=True). Single-writer worker, so FU-24's
+    #     concurrent-insert race on insert_with_chain doesn't apply.
+    WorkerSpec(
+        name="symbol_allowlist_refresh",
+        description=(
+            "Daily compute of per-symbol Sharpe + allowlist snapshot (PR10). "
+            "Writes one symbol_performance_snapshots row per symbol."
+        ),
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=2 * 86400,  # 2-day budget (1 missed run allowed)
+        stateful=False,  # safe to auto-restart
+    ),
+    # 20. PR10.5 / FU-28 — UI data-pipeline freshness monitor.
+    #     Observes pnl_tick emission rate vs open positions; alerts on
+    #     staleness; optional auto-recycle (default OFF — shadow_worker
+    #     is stateful).
+    WorkerSpec(
+        name="ui_freshness_monitor",
+        description=(
+            "5-min poll of pnl_tick emission freshness (FU-28). "
+            "Logs WARN + heartbeat 'degraded' when open positions have "
+            "no recent ticks; optional auto-recycle when enabled."
+        ),
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=15 * 60,
+        stateful=False,
+    ),
 )
 
 

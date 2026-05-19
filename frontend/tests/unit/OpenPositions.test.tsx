@@ -35,6 +35,7 @@ const samplePos: OpenPosition[] = [
     current_price: 105,
     unrealized_pnl_pct: 5,
     unrealized_pnl_usdt: 50,
+    as_of: "2026-05-03T12:00:00Z",
   },
   {
     symbol: "ETH/USDT",
@@ -49,6 +50,7 @@ const samplePos: OpenPosition[] = [
     current_price: 195,
     unrealized_pnl_pct: 2.5,
     unrealized_pnl_usdt: 12.5,
+    as_of: "2026-05-03T12:00:00Z",
   },
 ];
 

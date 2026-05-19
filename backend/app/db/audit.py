@@ -62,6 +62,11 @@ HASH_PAYLOAD_COLUMNS: dict[str, frozenset[str]] = {
         "user_id", "old_mode", "new_mode", "triggered_by",
         "reason", "gate_snapshot", "changed_at",
     }),
+    "symbol_performance_snapshots": frozenset({
+        "symbol", "window_start", "window_end",
+        "trades_count", "win_rate", "sharpe", "allowed",
+        "computed_at",
+    }),
 }
 
 # Per-table allowlist of columns that exist on the table but are NOT
@@ -125,6 +130,9 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
     }),
     "mode_change_log": frozenset({
         "id", "prev_hash", "row_hash",
+    }),
+    "symbol_performance_snapshots": frozenset({
+        "id", "prev_hash", "row_hash", "inputs_hash",
     }),
 }
 

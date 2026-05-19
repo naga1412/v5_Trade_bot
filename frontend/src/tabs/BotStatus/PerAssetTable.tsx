@@ -131,6 +131,21 @@ export function PerAssetTable() {
           ))}
         </tbody>
       </table>
+      {/* T-UI.3 / PR10.5: footer surfaces the server "computed" clock and
+          the most-recent closed trade so operators can tell a stale
+          window from a quiet one. Guarded on `computed_at` so we don't
+          crash mid-rollout against an older backend. */}
+      {sorted[0]?.computed_at && (
+        <div className="mt-1 text-[8px] text-text-tertiary text-right">
+          computed {new Date(sorted[0].computed_at).toLocaleTimeString()}
+          {sorted[0].last_trade_closed_at && (
+            <>
+              {" · last trade "}
+              {new Date(sorted[0].last_trade_closed_at).toLocaleTimeString()}
+            </>
+          )}
+        </div>
+      )}
     </Panel>
   );
 }
