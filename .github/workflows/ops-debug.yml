@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - pr10.7-diagnose # READ-ONLY: PR10.7 hotfix diagnostic — Now/P&L empty, last_trade_closed_at suspect, ui_freshness_monitor silent. Runs D1-D9 from operator's spec: shadow_pnl_tick log scan, WS broadcast scan, WS client connections, shadow_open_positions row dump + schema introspection, TON-specific shadow_trades, per-symbol last-close roll-up, ui_freshness_monitor activity + heartbeat row, deployed _key_matches function (verifies PR10.6 landed).
 
 jobs:
   probe:
@@ -576,5 +577,66 @@ jobs:
                  docker compose logs --tail=500 backend 2>&1 | grep -iE 'keepalive|ping|pong|ws_keep' | tail -20 && \
                  echo '=== I-2d: last 80 backend log lines unfiltered (most recent activity floor) ===' && \
                  docker compose logs --tail=80 backend"
+              ;;
+            pr10.7-diagnose)
+              # READ-ONLY: PR10.7 diagnostic. Covers operator's D1-D9 spec for
+              # the three defects caught after PR10.6 visual check:
+              #  D1-D3: WS pnl_tick log activity + broadcast + client connections
+              #  D4:    shadow_open_positions truth (full columns + schema)
+              #  D5:    TONUSDT shadow_trades + per-symbol last-close roll-up
+              #  D6:    endpoint payload via SQL truth (endpoint auth blocks curl)
+              #  D9:    ui_freshness_monitor activity + heartbeat row
+              #  meta:  deployed _key_matches function (verifies PR10.6 landed)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== meta-0: deployed git SHA + main HEAD ===' && \
+                 git rev-parse HEAD && \
+                 echo '=== meta-1: tr-backend container restart count + uptime ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '=== D1a: shadow_pnl_tick / publish_pnl_tick log lines (30m) ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'shadow_pnl_tick|publish_pnl_tick|pnl_tick' | tail -40 && \
+                 echo '=== D1b: count of pnl_tick / publish_pnl_tick / publish_position* in 30m ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -ciE 'publish_pnl_tick' || true && \
+                 docker compose logs --since=30m backend 2>&1 | grep -ciE 'publish_position_opened' || true && \
+                 docker compose logs --since=30m backend 2>&1 | grep -ciE 'publish_position_closed' || true && \
+                 echo '=== D1c: mark_price / unrealized lines (any source) (30m) ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'mark_price|unrealized|fetch_spot_prices' | tail -20 && \
+                 echo '=== D2: any ws / send_json / manager.publish activity (30m) ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'send_json|connectionmanager|manager\\.publish|subscribed|sub_count' | tail -30 && \
+                 echo '=== D3: WS client connection / disconnect events (30m) ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'websocketdisconnect|ws.*connect|websocket.*accept|sock.*open|sock.*close|connectionclosed|/ws/shadow|/ws/' | tail -40 && \
+                 echo '=== D4a: shadow_open_positions full columns + counts ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) AS open_count FROM shadow_open_positions;\" && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, user_id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usdt, bars_held, opened_at, last_check_at, signal_id, timeframe, hold_timeout_bars FROM shadow_open_positions ORDER BY opened_at DESC LIMIT 10;\" && \
+                 echo '=== D4b: schema introspection of shadow_open_positions ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name='shadow_open_positions' ORDER BY ordinal_position;\" && \
+                 echo '=== D5a: TONUSDT (and TON-prefix) recent shadow_trades (5 rows) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, user_id, symbol, direction, opened_at, closed_at, pnl_usdt, exit_reason FROM shadow_trades WHERE symbol ILIKE 'TON%' ORDER BY closed_at DESC NULLS LAST LIMIT 5;\" && \
+                 echo '=== D5b: per-symbol last_close across last 30d (the same shape PerAssetTable consumes) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, MAX(closed_at) AS last_close, COUNT(*) AS trades_30d, EXTRACT(EPOCH FROM (NOW() - MAX(closed_at)))::int AS age_s FROM shadow_trades WHERE closed_at > now() - interval '30 days' AND closed_at IS NOT NULL GROUP BY symbol ORDER BY last_close DESC;\" && \
+                 echo '=== D6: /api/v1/bot-status/per-asset endpoint via curl (will likely 401; truth above) ===' && \
+                 (docker compose exec -T backend curl -s -o - -w '\\nHTTP=%{http_code}\\n' -m 10 http://localhost:8000/api/v1/bot-status/per-asset?days=30 | head -c 4000) || true && \
+                 echo '' && \
+                 echo '=== D6b: /api/v1/bot-status/open-positions endpoint via curl ===' && \
+                 (docker compose exec -T backend curl -s -o - -w '\\nHTTP=%{http_code}\\n' -m 10 http://localhost:8000/api/v1/bot-status/open-positions | head -c 4000) || true && \
+                 echo '' && \
+                 echo '=== D9a: ui_freshness_monitor + FU-28 log lines (last 12h) ===' && \
+                 docker compose logs --since=12h backend 2>&1 | grep -iE 'ui_freshness|FU-28|fu28' | tail -30 && \
+                 echo '=== D9b: ui_freshness_monitor heartbeat row ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT worker_name, beat_at, last_status, details, EXTRACT(EPOCH FROM (NOW() - beat_at))::int AS age_s FROM worker_heartbeats WHERE worker_name = 'ui_freshness_monitor';\" && \
+                 echo '=== meta-2: deployed _key_matches body (verifies PR10.6 landed in container) ===' && \
+                 docker compose exec -T backend grep -A 14 'def _key_matches' /app/app/ws/manager.py && \
+                 echo '=== meta-3: deployed shadow_worker _maybe_close_position pnl_tick block (verifies PR10.5 Phase 1) ===' && \
+                 docker compose exec -T backend grep -B 1 -A 18 'if decision is None:' /app/app/shadow/worker.py | head -40 && \
+                 echo '=== D5c: most-recent 5 shadow_trades regardless of symbol ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, opened_at, closed_at, pnl_usdt, exit_reason FROM shadow_trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 5;\" && \
+                 echo '(end)'"
               ;;
           esac
