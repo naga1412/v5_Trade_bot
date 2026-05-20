@@ -39,6 +39,7 @@ on:
           - investigate-four-issues # READ-ONLY: 4-question investigation per operator request — (1) SHADOW_SPOT_BLACKLIST contents + per-position price-fetch status, (2) /per-asset endpoint code + paper_trades vs shadow_trades coverage, (3) TONUSDT 7d trade history, (4) win-rate sanity check vs dashboard counter "34/150 (23%)". Raw output only, no interpretation.
           - pr10.8-investigate # READ-ONLY: PR10.8 UX investigation — (Inv1) shadow_trades grouped by user_id (test per-asset truncation hypothesis), (Inv2) UUSDT activity in shadow_worker / pnl_tick / kline streams (test blacklist-bypass-via-WS hypothesis), (Inv3) GET /open-positions hit count in last 30m + deployed binance_ticker.py code (test fetch_spot_prices silence hypothesis).
           - pr-diag-1-strategy # READ-ONLY: PR-DIAG-1 strategy diagnostic — 7 queries on shadow_trades (Q1 WR by symbol, Q2 WR by direction, Q3 WR by exit_reason, Q4 WR by effective_score decile, Q5 WR by UTC hour, Q6 TP/SL avg per symbol, Q7 WR by mtf_agreement). Operator-input for next strategy PR scope.
+          - pr-diag-1.5-followup # READ-ONLY: PR-DIAG-1.5 follow-up — Q1 score-decile × direction crosstab, Q2 FIDA anomaly investigation, Q3 decile-9 paradox (high WR but negative avg pnl).
 
 jobs:
   probe:
@@ -769,6 +770,24 @@ jobs:
                  echo '=== Q7.NULL: count of shadow_trades with mtf_agreement IS NULL in last 30d (PR1 column population) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT 'total_30d' AS k, COUNT(*) AS n FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL UNION ALL SELECT 'mtf_agreement_NULL', COUNT(*) FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND mtf_agreement IS NULL;\" && \
+                 echo '(end)'"
+              ;;
+            pr-diag-1.5-followup)
+              # READ-ONLY: PR-DIAG-1.5 follow-up — 3 queries.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== Q1: score decile × direction crosstab (do top-decile SHORTs work?) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH deciled AS (SELECT *, NTILE(10) OVER (ORDER BY entry_score) AS decile FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL) SELECT decile, direction, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM deciled GROUP BY decile, direction ORDER BY decile, direction;\" && \
+                 echo '=== Q2: FIDAUSDT anomaly investigation (last 30d) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, opened_at, closed_at, direction, entry_price, stop_loss, take_profit, pnl_pct, exit_reason, ROUND((EXTRACT(EPOCH FROM (closed_at - opened_at))/60)::numeric, 1) AS held_minutes FROM shadow_trades WHERE symbol = 'FIDAUSDT' AND closed_at >= NOW() - INTERVAL '30 days' ORDER BY opened_at;\" && \
+                 echo '=== Q3: decile-9 paradox (high WR but negative avg pnl) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH deciled AS (SELECT *, NTILE(10) OVER (ORDER BY entry_score) AS decile FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL) SELECT exit_reason, COUNT(*), ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(MIN(pnl_pct)::numeric, 3) AS worst, ROUND(MAX(pnl_pct)::numeric, 3) AS best FROM deciled WHERE decile = 9 GROUP BY exit_reason ORDER BY exit_reason;\" && \
+                 echo '=== Q3b: full decile-9 row dump for inspection ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH deciled AS (SELECT *, NTILE(10) OVER (ORDER BY entry_score) AS decile FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL) SELECT symbol, direction, entry_score, exit_reason, ROUND(pnl_pct::numeric, 3) AS pnl_pct, opened_at FROM deciled WHERE decile = 9 ORDER BY pnl_pct;\" && \
                  echo '(end)'"
               ;;
           esac
