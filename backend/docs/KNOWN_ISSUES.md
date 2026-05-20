@@ -703,3 +703,65 @@ batch 400) and the WS-tick path correctly fills Now/P&L for the
 listed symbols when they trade. Operator confusion was the only
 downside; the PR10.8 tooltip + ⓘ icon already mitigate the user-facing
 ambiguity.
+
+---
+
+### FU-33 — Slippage circuit-breaker (FIDAUSDT-class outliers)
+
+**Status**: open · **Discovered**: 2026-05-20 (PR-DIAG-1.5 Q2)
+**Severity**: MEDIUM (single-symbol tail-risk; observable in shadow today, real-money risk if flipped to fully-auto without guardrail)
+
+#### Symptom
+PR-DIAG-1.5 Q2 surfaced a FIDAUSDT trade on 2026-05-18 05:00:00 UTC that
+hit its stop-loss with a realized pnl_pct of **-14.50%** vs the
+expected SL distance of roughly -1.45% (10x slippage past SL). Cause:
+the candle that triggered the SL had a low far below the SL price —
+crypto thin-liquidity gap. The strategy's expected-loss math
+(`SL_ATR_MULT=1.5`) assumes the close-on-touch model holds; for
+thin-book symbols at unfortunate moments, it doesn't.
+
+Concrete row from Q2:
+```
+FIDAUSDT  LONG  entry=0.02492  SL=0.02131  TP=0.03215
+  closed 18h after open
+  pnl_pct = -14.502  (expected at touch: ~ -1.45)
+```
+
+This single outlier was 10x worse than the next-worst SL in the same
+window. Two of the three FIDAUSDT STOP_LOSS exits in the 30d window
+showed the same pattern (-14.5%, -6.9%, -4.8% vs an expected baseline
+of ~-1.5%).
+
+#### Scope
+Add a runtime "slippage circuit-breaker" gate that fires when a closed
+trade's realized SL pnl_pct exceeds expected by a factor of N (default
+3x). Behavior on trip:
+- Mark the symbol as cooldown'd in `shadow_cooldowns` for a configurable
+  duration (default 24h).
+- Log WARNING + record_heartbeat on a new `slippage_circuit_breaker`
+  worker name so the watchdog picks up repeated trips.
+- Operator gets visibility in the Per-Asset Stats card (potential FU
+  for the UI side).
+
+For real-money trading the breaker should be more aggressive (the
+realized 10x slippage on a single LONG is unacceptable on a leveraged
+fully-auto position).
+
+#### Effort
+~1-2 days. New module under `app/core/gates/` mirroring the PR-strategy-1
+`entry_quality` pattern. Wires into `shadow_worker._maybe_close_position`
+on the SL exit branch. Plus a new Settings field for the multiplier +
+cooldown duration. No DB migration (uses existing `shadow_cooldowns`
+table).
+
+#### Why MEDIUM not HIGH
+Today the bot is in `mode=manual`, so the only impact is shadow-data
+quality (one outlier biases the symbol's WR + avg_pnl_pct stats badly
+— FIDA's avg SL is -8.74% vs the rest of the universe at -0.5% to
+-2%). When real-money trading flips on, this becomes HIGH — recommend
+shipping FU-33 before `AUTONOMOUS_TRADING_ENABLED=True`.
+
+#### Out of scope for PR-strategy-1
+PR-strategy-1's entry-quality gate is preventive (don't open low-score
+LONGs / any SHORTs). FU-33 is reactive (cooldown the symbol after
+demonstrated bad slippage). Different category — separate PR.

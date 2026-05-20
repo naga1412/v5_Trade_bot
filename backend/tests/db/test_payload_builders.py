@@ -352,6 +352,15 @@ class TestBuildShadowTradePayload:
             # didn't carry hold_* attrs (this fixture predates G1).
             "hold_scaling_factor": None,
             "hold_timeout_bars": None,
+            # PR-strategy-1: PR1 analytics columns. None when caller does
+            # not pass them (this fixture predates the plumbing fix).
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
+            "p_win": None,
+            "effective_score": None,
+            "realized_vol_20d": None,
+            "funding_directional_adj": None,
         }
         assert result == expected
         assert result["pnl_pct"] > 0
@@ -418,6 +427,14 @@ class TestBuildShadowTradePayload:
             # didn't carry hold_* attrs (this fixture predates G1).
             "hold_scaling_factor": None,
             "hold_timeout_bars": None,
+            # PR-strategy-1: PR1 analytics columns.
+            "mtf_agreement": None,
+            "mtf_dominant_tf": None,
+            "mtf_directions_json": None,
+            "p_win": None,
+            "effective_score": None,
+            "realized_vol_20d": None,
+            "funding_directional_adj": None,
         }
         assert result == expected
         assert result["pnl_pct"] > 0
@@ -441,7 +458,8 @@ class TestBuildShadowTradePayload:
         assert result["pnl_pct"] < 0
 
     def test_22_keys_present(self) -> None:
-        """Output must have exactly 24 keys (22 PR1 + 2 PR3 G1)."""
+        """Output must have exactly 31 keys (22 PR1 + 2 PR3 G1 + 7 PR-strategy-1
+        analytics fields populated to None when not supplied)."""
         pos = _make_pos(direction=Direction.LONG)
         result = build_shadow_trade_payload(
             pos,
@@ -452,7 +470,56 @@ class TestBuildShadowTradePayload:
             bars_held=4,
             inputs_hash="hash-22",
         )
-        assert len(result) == 24
+        assert len(result) == 31
+
+    # --- PR-strategy-1: PR1 analytics column population ----------------------
+
+    def test_build_shadow_trade_payload_includes_all_7_pr1_cols(self) -> None:
+        """All 7 PR1 analytics fields passed in are present in the output dict."""
+        pos = _make_pos(direction=Direction.LONG)
+        result = build_shadow_trade_payload(
+            pos,
+            user_id=1,
+            exit_price=82_400.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=5,
+            inputs_hash="x",
+            mtf_agreement=4,
+            mtf_dominant_tf="1h",
+            mtf_directions_json='{"5m":1,"1h":1}',
+            p_win=0.65,
+            effective_score=0.42,
+            realized_vol_20d=0.018,
+            funding_directional_adj=0.003,
+        )
+        assert result["mtf_agreement"] == 4
+        assert result["mtf_dominant_tf"] == "1h"
+        assert result["mtf_directions_json"] == '{"5m":1,"1h":1}'
+        assert result["p_win"] == 0.65
+        assert result["effective_score"] == 0.42
+        assert result["realized_vol_20d"] == 0.018
+        assert result["funding_directional_adj"] == 0.003
+
+    def test_build_shadow_trade_payload_defaults_pr1_cols_to_none(self) -> None:
+        """When no PR1 kwargs are passed, all 7 keys present with None."""
+        pos = _make_pos(direction=Direction.LONG)
+        result = build_shadow_trade_payload(
+            pos,
+            user_id=1,
+            exit_price=82_400.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=4,
+            inputs_hash="x",
+        )
+        assert result["mtf_agreement"] is None
+        assert result["mtf_dominant_tf"] is None
+        assert result["mtf_directions_json"] is None
+        assert result["p_win"] is None
+        assert result["effective_score"] is None
+        assert result["realized_vol_20d"] is None
+        assert result["funding_directional_adj"] is None
 
 
     # --- PR3: timeframe + G1 scaling fields -------------------------------
