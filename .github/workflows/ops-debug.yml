@@ -36,6 +36,7 @@ on:
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
           - pr10.7-diagnose # READ-ONLY: PR10.7 hotfix diagnostic — Now/P&L empty, last_trade_closed_at suspect, ui_freshness_monitor silent. Runs D1-D9 from operator's spec: shadow_pnl_tick log scan, WS broadcast scan, WS client connections, shadow_open_positions row dump + schema introspection, TON-specific shadow_trades, per-symbol last-close roll-up, ui_freshness_monitor activity + heartbeat row, deployed _key_matches function (verifies PR10.6 landed).
+          - investigate-four-issues # READ-ONLY: 4-question investigation per operator request — (1) SHADOW_SPOT_BLACKLIST contents + per-position price-fetch status, (2) /per-asset endpoint code + paper_trades vs shadow_trades coverage, (3) TONUSDT 7d trade history, (4) win-rate sanity check vs dashboard counter "34/150 (23%)". Raw output only, no interpretation.
 
 jobs:
   probe:
@@ -637,6 +638,47 @@ jobs:
                  echo '=== D5c: most-recent 5 shadow_trades regardless of symbol ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT symbol, opened_at, closed_at, pnl_usdt, exit_reason FROM shadow_trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 5;\" && \
+                 echo '(end)'"
+              ;;
+            investigate-four-issues)
+              # READ-ONLY: 4-question investigation per operator request.
+              # Outputs raw data — no interpretation.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== meta: deployed git SHA ===' && \
+                 git rev-parse HEAD && \
+                 echo '=== Q1a: SHADOW_SPOT_BLACKLIST contents (from deployed config.py inside container) ===' && \
+                 docker compose exec -T backend grep -A 3 'SHADOW_SPOT_BLACKLIST' /app/app/config.py | head -10 && \
+                 echo '=== Q1b: current open positions + per-symbol price-fetch outcome (logs last 30m) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, COUNT(*) AS open_count, MAX(opened_at) AS most_recent FROM shadow_open_positions GROUP BY symbol ORDER BY symbol;\" && \
+                 echo '=== Q1c: fetch_spot_prices fallback skip log lines (last 30m) — symbols failing per-symbol ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'fetch_spot_prices fallback: skip|fetch_spot_prices batch rejected|fetch_spot_prices failed' | tail -50 && \
+                 echo '=== Q1d: all fetch_spot_prices log activity (last 30m) — happy-path + failures ===' && \
+                 docker compose logs --since=30m backend 2>&1 | grep -iE 'fetch_spot_prices' | tail -30 && \
+                 echo '=== Q2a: deployed /api/v1/bot-status/per-asset endpoint code ===' && \
+                 docker compose exec -T backend sed -n '576,625p' /app/app/api/routes/bot_status.py && \
+                 echo '=== Q2b: paper_trades table existence + row count ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT table_name FROM information_schema.tables WHERE table_name IN ('paper_trades','shadow_trades') ORDER BY table_name;\" && \
+                 echo '=== Q2c: operator query verbatim against paper_trades ===' && \
+                 (docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins FROM paper_trades WHERE closed_at IS NOT NULL GROUP BY symbol ORDER BY trades DESC;\") || echo '(paper_trades query failed — likely table empty or missing)' && \
+                 echo '=== Q2d: equivalent query against shadow_trades (for comparison) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins FROM shadow_trades WHERE closed_at IS NOT NULL GROUP BY symbol ORDER BY trades DESC;\" && \
+                 echo '=== Q3: TONUSDT trade history last 7 days (paper_trades) ===' && \
+                 (docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, opened_at, closed_at, pnl_pct, exit_reason FROM paper_trades WHERE symbol='TONUSDT' AND closed_at > NOW() - INTERVAL '7 days' ORDER BY closed_at DESC;\") || echo '(paper_trades query failed)' && \
+                 echo '=== Q3b: TONUSDT trade history last 7 days (shadow_trades) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, opened_at, closed_at, pnl_pct, exit_reason FROM shadow_trades WHERE symbol='TONUSDT' AND closed_at > NOW() - INTERVAL '7 days' ORDER BY closed_at DESC;\" && \
+                 echo '=== Q4: win-rate sanity check verbatim (paper_trades) ===' && \
+                 (docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS total_closed, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 2) AS win_rate_pct FROM paper_trades WHERE closed_at IS NOT NULL AND closed_at > NOW() - INTERVAL '30 days';\") || echo '(paper_trades query failed)' && \
+                 echo '=== Q4b: same query against shadow_trades ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS total_closed, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 2) AS win_rate_pct FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at > NOW() - INTERVAL '30 days';\" && \
                  echo '(end)'"
               ;;
           esac
