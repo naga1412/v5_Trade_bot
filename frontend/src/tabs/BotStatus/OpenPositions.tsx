@@ -67,9 +67,25 @@ function PositionCard({ pos }: { pos: OpenPosition }) {
         <span className="text-text-tertiary">TP</span>
         <span className="text-right text-green">{fmtNum(pos.take_profit)}</span>
         <span className="text-text-tertiary">Now</span>
-        <span className="text-right">{fmtNum(pos.current_price)}</span>
+        <span
+          className="text-right"
+          title={
+            pos.current_price == null
+              ? `Spot price unavailable for ${pos.symbol}`
+              : undefined
+          }
+        >
+          {fmtNum(pos.current_price)}
+        </span>
         <span className="text-text-tertiary">P&L</span>
-        <span className={`text-right ${pnlClass(pos.unrealized_pnl_pct)}`}>
+        <span
+          className={`text-right ${pnlClass(pos.unrealized_pnl_pct)}`}
+          title={
+            pos.unrealized_pnl_pct == null
+              ? `P&L unavailable — spot price missing for ${pos.symbol}`
+              : undefined
+          }
+        >
           {fmtPct(pos.unrealized_pnl_pct)}
         </span>
       </div>
