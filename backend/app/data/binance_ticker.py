@@ -39,30 +39,28 @@ _REQUEST_TIMEOUT_SECONDS: float = 5.0
 
 
 # PR10.7: in-memory metrics. Surfaced via inspection (grep + log scans) only;
-# no Prometheus exposure today. Reset on process restart.
-_metrics: dict[str, object] = {
-    "spot_price_fetch_batch_rejected_total": 0,
-    "spot_price_fetch_per_symbol_fallback_total": 0,
-    "spot_price_fetch_per_symbol_failed": {},  # type: ignore[dict-item]
-}
+# no Prometheus exposure today. Reset on process restart. Module-level
+# typed vars sidestep the `dict[str, object]` access-typing churn that
+# mypy flagged on the snapshot dict approach.
+_batch_rejected_total: int = 0
+_per_symbol_fallback_total: int = 0
+_per_symbol_failed: dict[str, int] = {}
 
 
 def get_metrics_snapshot() -> dict[str, object]:
-    """Return a copy of the in-memory metrics dict. For tests + probes."""
+    """Return a copy of the in-memory metrics. For tests + probes."""
     return {
-        "spot_price_fetch_batch_rejected_total":
-            _metrics["spot_price_fetch_batch_rejected_total"],
-        "spot_price_fetch_per_symbol_fallback_total":
-            _metrics["spot_price_fetch_per_symbol_fallback_total"],
-        "spot_price_fetch_per_symbol_failed":
-            dict(_metrics["spot_price_fetch_per_symbol_failed"]),  # type: ignore[arg-type]
+        "spot_price_fetch_batch_rejected_total": _batch_rejected_total,
+        "spot_price_fetch_per_symbol_fallback_total": _per_symbol_fallback_total,
+        "spot_price_fetch_per_symbol_failed": dict(_per_symbol_failed),
     }
 
 
 def _reset_metrics_for_tests() -> None:
-    _metrics["spot_price_fetch_batch_rejected_total"] = 0
-    _metrics["spot_price_fetch_per_symbol_fallback_total"] = 0
-    _metrics["spot_price_fetch_per_symbol_failed"] = {}
+    global _batch_rejected_total, _per_symbol_fallback_total
+    _batch_rejected_total = 0
+    _per_symbol_fallback_total = 0
+    _per_symbol_failed.clear()
 
 
 async def _fetch_one_symbol(
@@ -77,9 +75,7 @@ async def _fetch_one_symbol(
         body = resp.json()
         return float(body["price"])
     except (httpx.HTTPError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-        failed = _metrics["spot_price_fetch_per_symbol_failed"]
-        if isinstance(failed, dict):
-            failed[symbol] = failed.get(symbol, 0) + 1
+        _per_symbol_failed[symbol] = _per_symbol_failed.get(symbol, 0) + 1
         log.warning(
             "fetch_spot_prices fallback: skip %s: %s", symbol, e,
         )
@@ -141,9 +137,8 @@ async def fetch_spot_prices(
             # SPOT. Fall back to per-symbol fetches. Slower (N HTTP calls
             # vs 1) but resilient — one bad symbol doesn't blank the whole
             # Open Positions card.
-            _metrics["spot_price_fetch_batch_rejected_total"] = (
-                int(_metrics["spot_price_fetch_batch_rejected_total"]) + 1  # type: ignore[arg-type]
-            )
+            global _batch_rejected_total
+            _batch_rejected_total += 1
             log.warning(
                 "fetch_spot_prices batch rejected (%d symbols): %s — "
                 "falling back to per-symbol fetch",
@@ -174,9 +169,8 @@ async def _fetch_per_symbol(
     http: httpx.AsyncClient, base_url: str, symbols: list[str],
 ) -> dict[str, float]:
     """PR10.7: batch-failure fallback path."""
-    _metrics["spot_price_fetch_per_symbol_fallback_total"] = (
-        int(_metrics["spot_price_fetch_per_symbol_fallback_total"]) + 1  # type: ignore[arg-type]
-    )
+    global _per_symbol_fallback_total
+    _per_symbol_fallback_total += 1
     out: dict[str, float] = {}
     for sym in symbols:
         price = await _fetch_one_symbol(http, base_url, sym)
