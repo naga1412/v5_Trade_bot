@@ -134,7 +134,8 @@ describe("OpenPositions", () => {
     window.location.hash = "";
   });
 
-  test("PR10.7: renders '—' + tooltip when current_price is null", async () => {
+  test("PR10.8: blacklisted symbol + null price → specific tooltip + ⓘ icon", async () => {
+    // EDENUSDT is in the hardcoded SHADOW_SPOT_BLACKLIST.
     const nullPricePos: OpenPosition[] = [
       {
         ...(samplePos[0] as OpenPosition),
@@ -149,19 +150,49 @@ describe("OpenPositions", () => {
     await waitFor(() => {
       expect(screen.getByText("EDENUSDT")).toBeInTheDocument();
     });
-    // Two cells render "—": Now and P&L.
-    const dashCells = screen.getAllByText("—");
-    expect(dashCells.length).toBeGreaterThanOrEqual(2);
-    // Tooltip surfaced via title attr on the Now cell.
-    const nowCell = dashCells.find(
-      (el) => el.getAttribute("title")?.includes("Spot price unavailable for EDENUSDT"),
+    // Specific blacklist tooltip on Now cell.
+    const allTitleEls = document.querySelectorAll("[title]");
+    const nowTitle = Array.from(allTitleEls).find((el) =>
+      el.getAttribute("title")?.includes("Not priceable on Binance SPOT"),
     );
-    expect(nowCell).toBeDefined();
-    // Tooltip surfaced on the P&L cell.
-    const pnlCell = dashCells.find(
-      (el) => el.getAttribute("title")?.includes("P&L unavailable"),
+    expect(nowTitle).toBeDefined();
+    expect(nowTitle?.getAttribute("title")).toContain("EDENUSDT");
+    // P&L tooltip — specific blacklist variant.
+    const pnlTitle = Array.from(allTitleEls).find((el) =>
+      el.getAttribute("title")?.includes(
+        "P&L unavailable — EDENUSDT is not priceable on Binance SPOT",
+      ),
     );
-    expect(pnlCell).toBeDefined();
+    expect(pnlTitle).toBeDefined();
+    // ⓘ icon present.
+    expect(screen.getByLabelText("blacklisted-info")).toBeInTheDocument();
+  });
+
+  test("PR10.7: non-blacklisted symbol + null price → generic tooltip, no ⓘ", async () => {
+    // RAREUSDT is NOT in the hardcoded SHADOW_SPOT_BLACKLIST.
+    const nullPricePos: OpenPosition[] = [
+      {
+        ...(samplePos[0] as OpenPosition),
+        symbol: "RAREUSDT",
+        current_price: null,
+        unrealized_pnl_pct: null,
+        unrealized_pnl_usdt: null,
+      },
+    ];
+    vi.mocked(api.openPositions).mockResolvedValue(nullPricePos);
+    render(<OpenPositions />);
+    await waitFor(() => {
+      expect(screen.getByText("RAREUSDT")).toBeInTheDocument();
+    });
+    const allTitleEls = document.querySelectorAll("[title]");
+    // Generic tooltip — not the blacklist-specific text.
+    const nowTitle = Array.from(allTitleEls).find((el) =>
+      el.getAttribute("title")?.includes("Spot price unavailable for RAREUSDT"),
+    );
+    expect(nowTitle).toBeDefined();
+    expect(nowTitle?.getAttribute("title")).not.toContain("Not priceable on Binance SPOT");
+    // ⓘ icon absent.
+    expect(screen.queryByLabelText("blacklisted-info")).toBeNull();
   });
 
   test("PR10.7: WS tick after null cold-load populates the row", async () => {

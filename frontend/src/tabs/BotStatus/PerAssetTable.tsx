@@ -122,7 +122,16 @@ export function PerAssetTable() {
   }
 
   return (
-    <Panel title="Per-Asset Stats" rightSlot={<RefreshButton onClick={refetch} />}>
+    <Panel
+      title="Per-Asset Stats"
+      rightSlot={<RefreshButton onClick={refetch} />}
+      // PR10.8 Inv1: Per-Asset table can carry 30+ rows. Without an explicit
+      // overflow rule the panel section grows past the viewport and earlier
+      // rows clipped silently (operator saw only ~17 of 34). 60vh keeps the
+      // panel within a reasonable above-the-fold band while preserving full
+      // scrollable access to all rows.
+      className="overflow-y-auto max-h-[60vh]"
+    >
       <table role="table" className="w-full text-left">
         <thead>
           <tr role="row">
