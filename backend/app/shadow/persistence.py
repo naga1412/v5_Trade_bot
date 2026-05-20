@@ -144,6 +144,19 @@ async def persist_closed_trade(
         closed_at=closed_at,
         bars_held=bars_held,
         inputs_hash=inputs_hash,
+        # PR-strategy-1: thread the 7 PR1 analytics columns from `pos`
+        # into the payload builder. Each field defaults to None on
+        # ShadowPosition; restart-survivor positions (loaded from
+        # `shadow_open_positions` which doesn't carry these cols) stay
+        # None — same as today's behavior. Same-session opens populate
+        # via shadow_worker.
+        mtf_agreement=getattr(pos, "mtf_agreement", None),
+        mtf_dominant_tf=getattr(pos, "mtf_dominant_tf", None),
+        mtf_directions_json=getattr(pos, "mtf_directions_json", None),
+        p_win=getattr(pos, "p_win", None),
+        effective_score=getattr(pos, "effective_score", None),
+        realized_vol_20d=getattr(pos, "realized_vol_20d", None),
+        funding_directional_adj=getattr(pos, "funding_directional_adj", None),
     )
     return await insert_with_chain(session, "shadow_trades", payload)
 

@@ -145,6 +145,11 @@ async def _create_shadow_tables(engine: Any) -> None:
             "signal_id TEXT NOT NULL UNIQUE, "
             # PR3 G1: recording-only scaling columns
             "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
+            # PR-strategy-1: PR1 analytics columns now populated by
+            # persist_closed_trade (was 100% NULL pre-PR-strategy-1).
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
+            "realized_vol_20d REAL, funding_directional_adj REAL, "
             "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
         ))
         await conn.execute(sa.text(

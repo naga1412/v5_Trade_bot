@@ -347,6 +347,10 @@ async def _maybe_dispatch(
                     "mtf_agreement": pred.mtf_agreement,
                     "mtf_dominant_tf": pred.mtf_dominant_tf,
                     "mtf_directions_json": pred.mtf_directions_json,
+                    # PR-strategy-1: thread the aggregator's signed final
+                    # score so the dispatcher's entry-quality gate can
+                    # apply the LONG threshold.
+                    "pred_score": pred.final.score,
                 },
             )
             await dispatch_session.commit()

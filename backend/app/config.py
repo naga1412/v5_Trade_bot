@@ -215,6 +215,20 @@ class Settings(BaseSettings):
         "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT",
     ]
 
+    # --- PR-strategy-1: entry-quality gate -------------------------------
+    # Both flags default OFF so this deploy is a zero-behavior-change ship.
+    # Operator flips per env after staging soak.
+    #
+    # MIN_ENTRY_SCORE_LONG: when not None, the shadow worker + dispatcher
+    # reject LONG entries with `entry_score < threshold`. Closes the
+    # decile-9 hole found in the PR-DIAG-1.5 ledger (decile-9 was WR 31%
+    # / avg -1.96% PnL; decile-10 was WR 50% / avg +1.24%).
+    # DISABLE_SHORT_SIGNALS: when True, rejects all SHORT entries.
+    # Validated against 89 SHORT trades / WR 19.1% vs 74 LONG / WR 27.0% —
+    # the model's score distribution lacks a high-conviction SHORT tail.
+    MIN_ENTRY_SCORE_LONG: float | None = None
+    DISABLE_SHORT_SIGNALS: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
