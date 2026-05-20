@@ -105,4 +105,19 @@ describe("PerAssetTable", () => {
 
     vi.useRealTimers();
   });
+
+  test("PR10.8 Inv1: Panel container has overflow-y-auto + max-h cap", async () => {
+    vi.mocked(api.perAssetStats).mockResolvedValue(sample);
+    const { container } = render(<PerAssetTable />);
+    await waitFor(() => {
+      expect(screen.getByText("BTC/USDT")).toBeInTheDocument();
+    });
+    // The Panel renders a <section>. Operator's screenshot showed only ~17
+    // of 34 rows because Panel had no overflow rule. PR10.8 fixes that —
+    // assert the rule is present so it can't silently regress.
+    const section = container.querySelector("section");
+    expect(section).not.toBeNull();
+    expect(section?.className).toContain("overflow-y-auto");
+    expect(section?.className).toContain("max-h-[60vh]");
+  });
 });
