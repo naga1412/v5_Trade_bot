@@ -134,6 +134,74 @@ describe("OpenPositions", () => {
     window.location.hash = "";
   });
 
+  test("PR10.7: renders '—' + tooltip when current_price is null", async () => {
+    const nullPricePos: OpenPosition[] = [
+      {
+        ...(samplePos[0] as OpenPosition),
+        symbol: "EDENUSDT",
+        current_price: null,
+        unrealized_pnl_pct: null,
+        unrealized_pnl_usdt: null,
+      },
+    ];
+    vi.mocked(api.openPositions).mockResolvedValue(nullPricePos);
+    render(<OpenPositions />);
+    await waitFor(() => {
+      expect(screen.getByText("EDENUSDT")).toBeInTheDocument();
+    });
+    // Two cells render "—": Now and P&L.
+    const dashCells = screen.getAllByText("—");
+    expect(dashCells.length).toBeGreaterThanOrEqual(2);
+    // Tooltip surfaced via title attr on the Now cell.
+    const nowCell = dashCells.find(
+      (el) => el.getAttribute("title")?.includes("Spot price unavailable for EDENUSDT"),
+    );
+    expect(nowCell).toBeDefined();
+    // Tooltip surfaced on the P&L cell.
+    const pnlCell = dashCells.find(
+      (el) => el.getAttribute("title")?.includes("P&L unavailable"),
+    );
+    expect(pnlCell).toBeDefined();
+  });
+
+  test("PR10.7: WS tick after null cold-load populates the row", async () => {
+    const nullPricePos: OpenPosition[] = [
+      {
+        ...(samplePos[0] as OpenPosition),
+        symbol: "EDENUSDT",
+        current_price: null,
+        unrealized_pnl_pct: null,
+        unrealized_pnl_usdt: null,
+      },
+    ];
+    vi.mocked(api.openPositions).mockResolvedValue(nullPricePos);
+    const { rerender } = render(<OpenPositions />);
+    await waitFor(() => {
+      expect(screen.getByText("EDENUSDT")).toBeInTheDocument();
+    });
+    // Verify initial "—" state.
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    // Tick arrives for EDENUSDT with real values.
+    act(() => {
+      shadowState = {
+        ...shadowState,
+        lastPnlTick: {
+          "EDENUSDT": {
+            type: "shadow_pnl_tick",
+            symbol: "EDENUSDT",
+            current_price: 7.42,
+            unrealized_pnl_pct: 1.2,
+          },
+        },
+      };
+    });
+    rerender(<OpenPositions />);
+    await waitFor(() => {
+      expect(screen.getByText("7.42")).toBeInTheDocument();
+    });
+    expect(screen.getByText("+1.20%")).toBeInTheDocument();
+  });
+
   test("opened event triggers refetch", async () => {
     vi.mocked(api.openPositions).mockResolvedValue(samplePos);
     const { rerender } = render(<OpenPositions />);
