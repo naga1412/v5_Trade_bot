@@ -40,6 +40,7 @@ on:
           - pr10.8-investigate # READ-ONLY: PR10.8 UX investigation — (Inv1) shadow_trades grouped by user_id (test per-asset truncation hypothesis), (Inv2) UUSDT activity in shadow_worker / pnl_tick / kline streams (test blacklist-bypass-via-WS hypothesis), (Inv3) GET /open-positions hit count in last 30m + deployed binance_ticker.py code (test fetch_spot_prices silence hypothesis).
           - pr-diag-1-strategy # READ-ONLY: PR-DIAG-1 strategy diagnostic — 7 queries on shadow_trades (Q1 WR by symbol, Q2 WR by direction, Q3 WR by exit_reason, Q4 WR by effective_score decile, Q5 WR by UTC hour, Q6 TP/SL avg per symbol, Q7 WR by mtf_agreement). Operator-input for next strategy PR scope.
           - pr-diag-1.5-followup # READ-ONLY: PR-DIAG-1.5 follow-up — Q1 score-decile × direction crosstab, Q2 FIDA anomaly investigation, Q3 decile-9 paradox (high WR but negative avg pnl).
+          - pr-strategy-1-baseline-and-perasset # READ-ONLY: PR-strategy-1 flip-day baseline (7d direction WR, opens-per-day, current opens, opens-last-6h, PR1 column population, entry_score percentiles, daily closes 14d) + Per-Asset Stats data-freshness investigation (TONUSDT 7d history, top-20 by trades with MAX(closed_at), 24h close volume, dashboard sanity 25% WR). Pure SELECTs; no writes.
 
 jobs:
   probe:
@@ -788,6 +789,50 @@ jobs:
                  echo '=== Q3b: full decile-9 row dump for inspection ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"WITH deciled AS (SELECT *, NTILE(10) OVER (ORDER BY entry_score) AS decile FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL) SELECT symbol, direction, entry_score, exit_reason, ROUND(pnl_pct::numeric, 3) AS pnl_pct, opened_at FROM deciled WHERE decile = 9 ORDER BY pnl_pct;\" && \
+                 echo '(end)'"
+              ;;
+            pr-strategy-1-baseline-and-perasset)
+              # READ-ONLY: PR-strategy-1 flip-day baseline (Section 1, A-G)
+              # + Per-Asset Stats data-freshness investigation (Section 2,
+              # H-M; J + K are local code reads done by the controller).
+              # All pure SELECTs; no writes, no restarts, no config changes.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== UTC NOW (reference timestamp for all queries below) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -tAc \"SELECT NOW();\" && \
+                 echo '=== A: last 7 days by direction ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, COUNT(*) AS trades_7d, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins_7d, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL GROUP BY direction ORDER BY direction;\" && \
+                 echo '=== B: opens-per-day-by-direction (last 7 days) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT DATE(opened_at) AS day, direction, COUNT(*) AS opens FROM shadow_trades WHERE opened_at >= NOW() - INTERVAL '7 days' GROUP BY DATE(opened_at), direction ORDER BY day, direction;\" && \
+                 echo '=== C: current open positions snapshot ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS open_positions_now, SUM(CASE WHEN direction='LONG' THEN 1 ELSE 0 END) AS long_open, SUM(CASE WHEN direction='SHORT' THEN 1 ELSE 0 END) AS short_open FROM shadow_open_positions;\" && \
+                 echo '=== D: opens rate last 6 hours ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS opens_last_6h FROM shadow_trades WHERE opened_at >= NOW() - INTERVAL '6 hours';\" && \
+                 echo '=== E: PR1 column-population state (last 30 days closed) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS total_30d_closed, COUNT(*) FILTER (WHERE mtf_agreement IS NOT NULL) AS pr1_populated, COUNT(*) FILTER (WHERE mtf_agreement IS NULL) AS pr1_null FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL;\" && \
+                 echo '=== F: entry_score distribution last 7 days ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY entry_score)::numeric, 4) AS p50, ROUND(percentile_cont(0.70) WITHIN GROUP (ORDER BY entry_score)::numeric, 4) AS p70, ROUND(percentile_cont(0.80) WITHIN GROUP (ORDER BY entry_score)::numeric, 4) AS p80, ROUND(percentile_cont(0.90) WITHIN GROUP (ORDER BY entry_score)::numeric, 4) AS p90, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY entry_score)::numeric, 4) AS p95, COUNT(*) AS n FROM shadow_trades WHERE opened_at >= NOW() - INTERVAL '7 days' AND entry_score IS NOT NULL;\" && \
+                 echo '=== G: daily closed-trade count last 14 days ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT DATE(closed_at) AS day, COUNT(*) AS closes FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '14 days' AND closed_at IS NOT NULL GROUP BY DATE(closed_at) ORDER BY day;\" && \
+                 echo '=== H: full TONUSDT history last 7 days ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT opened_at, closed_at, direction, entry_price, ROUND(pnl_pct::numeric, 3) AS pnl_pct, exit_reason, ROUND((EXTRACT(EPOCH FROM (NOW() - closed_at))/3600)::numeric, 2) AS hours_since_close, ROUND((EXTRACT(EPOCH FROM (NOW() - opened_at))/3600)::numeric, 2) AS hours_since_open FROM shadow_trades WHERE symbol = 'TONUSDT' AND opened_at >= NOW() - INTERVAL '7 days' ORDER BY opened_at DESC;\" && \
+                 echo '=== I: Per-Asset top-20 by trade count with newest timestamps (30d) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, COUNT(*) AS trades, MAX(closed_at) AS newest_close, MAX(opened_at) AS newest_open, ROUND((EXTRACT(EPOCH FROM (NOW() - MAX(closed_at)))/3600)::numeric, 2) AS hours_since_newest_close FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL GROUP BY symbol ORDER BY trades DESC LIMIT 20;\" && \
+                 echo '=== L: closed-trade volume last 24h ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS closes_last_24h, COUNT(DISTINCT symbol) AS symbols_with_close FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '24 hours' AND closed_at IS NOT NULL;\" && \
+                 echo '=== M: overall dashboard sanity (last 30d) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS total_30d, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins_30d, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL;\" && \
                  echo '(end)'"
               ;;
           esac
