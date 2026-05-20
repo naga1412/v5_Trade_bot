@@ -50,9 +50,19 @@ async def fetch_top_n_usdt_spot(
     response.raise_for_status()
 
     tickers = response.json()
+    # PR10.7: defense in depth — filter SHADOW_SPOT_BLACKLIST upfront.
+    # The SPOT 24h endpoint may still list symbols whose /ticker/price
+    # endpoint rejects them (region restrictions, status anomalies). The
+    # blacklist names these explicitly so they never enter the universe.
+    try:
+        from app.config import get_settings as _get_pr10_7_settings
+        blacklist = set(_get_pr10_7_settings().SHADOW_SPOT_BLACKLIST)
+    except Exception:  # noqa: BLE001 — never block universe refresh on settings issues
+        blacklist = set()
     usdt_only = [
         t for t in tickers
         if t.get("symbol", "").endswith("USDT")
+        and t.get("symbol", "") not in blacklist
     ]
     usdt_only.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
     top_n = usdt_only[:n]
