@@ -3,6 +3,17 @@ import { useOpenPositionsLive } from "./hooks/useOpenPositionsLive";
 import { buildLivePredictionHash } from "@/tabs/Tab3Scanner/applyFilter";
 import type { OpenPosition } from "@/lib/api";
 
+// PR10.8: mirror of backend Settings.SHADOW_SPOT_BLACKLIST. These symbols
+// fail Binance SPOT /api/v3/ticker/price (futures-only, delisted, restricted),
+// so the cold-load `current_price` is null for them by design. WS-tick
+// updates may still arrive if SPOT klines + websocket work for the symbol
+// (e.g. UUSDT). The hardcoded list is a UX hint — kept short + reviewed
+// alongside the backend Setting; drift is acceptable since this only
+// affects tooltip wording, not behavior.
+const SHADOW_SPOT_BLACKLIST: ReadonlySet<string> = new Set([
+  "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT",
+]);
+
 function fmtNum(v: number | null | undefined, dp = 2): string {
   if (v == null) return "—";
   return v.toFixed(dp);
@@ -32,6 +43,23 @@ function pnlClass(v: number | null | undefined): string {
 function PositionCard({ pos }: { pos: OpenPosition }) {
   const arrow = pos.direction === "LONG" ? "↗" : "↘";
   const dirClass = pos.direction === "LONG" ? "text-green" : "text-red";
+  // PR10.8: when symbol is in SHADOW_SPOT_BLACKLIST AND current_price is null,
+  // surface a more specific tooltip than the generic "Spot price unavailable".
+  const isBlacklisted = SHADOW_SPOT_BLACKLIST.has(pos.symbol);
+  const blacklistedAndEmpty =
+    isBlacklisted && pos.current_price == null;
+  const nowTooltip =
+    pos.current_price == null
+      ? blacklistedAndEmpty
+        ? `Not priceable on Binance SPOT (futures-only / delisted / restricted) — ${pos.symbol}`
+        : `Spot price unavailable for ${pos.symbol}`
+      : undefined;
+  const pnlTooltip =
+    pos.unrealized_pnl_pct == null
+      ? blacklistedAndEmpty
+        ? `P&L unavailable — ${pos.symbol} is not priceable on Binance SPOT`
+        : `P&L unavailable — spot price missing for ${pos.symbol}`
+      : undefined;
   const open = (): void => {
     // PR3 Phase 8: read per-position timeframe so 15m positions deep-link
     // to the 15m chart and 1h positions to the 1h chart. Fallback "1h"
@@ -67,24 +95,21 @@ function PositionCard({ pos }: { pos: OpenPosition }) {
         <span className="text-text-tertiary">TP</span>
         <span className="text-right text-green">{fmtNum(pos.take_profit)}</span>
         <span className="text-text-tertiary">Now</span>
-        <span
-          className="text-right"
-          title={
-            pos.current_price == null
-              ? `Spot price unavailable for ${pos.symbol}`
-              : undefined
-          }
-        >
+        <span className="text-right" title={nowTooltip}>
           {fmtNum(pos.current_price)}
+          {blacklistedAndEmpty && (
+            <span
+              className="ml-0.5 text-[8px] text-text-tertiary"
+              aria-label="blacklisted-info"
+            >
+              ⓘ
+            </span>
+          )}
         </span>
         <span className="text-text-tertiary">P&L</span>
         <span
           className={`text-right ${pnlClass(pos.unrealized_pnl_pct)}`}
-          title={
-            pos.unrealized_pnl_pct == null
-              ? `P&L unavailable — spot price missing for ${pos.symbol}`
-              : undefined
-          }
+          title={pnlTooltip}
         >
           {fmtPct(pos.unrealized_pnl_pct)}
         </span>
