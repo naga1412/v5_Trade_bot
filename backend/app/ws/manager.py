@@ -16,6 +16,16 @@ class Subscription:
 
 
 def _key_matches(sub_params: dict[str, Any], publish_key: dict[str, Any]) -> bool:
+    # PR10.6 hotfix: empty sub_params = "subscribe to the whole channel".
+    # The pre-fix all(sub_params.get(k) == v ...) iterates publish_key, so
+    # when the publisher emits with a non-empty key (e.g. {"symbol": "BTC..."})
+    # but the subscriber filtered nothing, the comparison evaluates
+    # `None == "BTC..."` → False — silently dropping every symbol-scoped event.
+    # Frontend `useShadowUpdates` subscribes with params={} so this filtered
+    # out shadow_position_opened / shadow_position_closed / shadow_pnl_tick
+    # (the PR10.5 wiring) ever since SP-0.5 launched the WS layer.
+    if not sub_params:
+        return True
     return all(sub_params.get(k) == v for k, v in publish_key.items())
 
 
