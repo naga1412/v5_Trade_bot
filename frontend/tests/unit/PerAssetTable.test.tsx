@@ -67,4 +67,42 @@ describe("PerAssetTable", () => {
     expect(screen.getByText("+$25.50")).toBeInTheDocument();
     expect(screen.getByText("-$3.50")).toBeInTheDocument();
   });
+
+  test("PR10.6: renders per-row 'Last trade' relative-time stamps", async () => {
+    // 3 rows with DIFFERENT last_trade_closed_at values so we can prove
+    // each row shows its own per-symbol timestamp (not just sorted[0]'s).
+    const now = new Date("2026-05-03T12:00:00Z").getTime();
+    vi.setSystemTime(now);
+    const mixed: PerAssetStat[] = [
+      // 3 minutes ago
+      { symbol: "BTC/USDT", trades: 10, win_rate: 0.6, avg_rr: 2.0, pnl_usdt: 25.5,
+        sharpe_annualized: 1.2, computed_at: "2026-05-03T12:00:00Z",
+        last_trade_closed_at: "2026-05-03T11:57:00Z" },
+      // 2 hours ago
+      { symbol: "ETH/USDT", trades: 8, win_rate: 0.50, avg_rr: 1.8, pnl_usdt: -3.5,
+        sharpe_annualized: -0.2, computed_at: "2026-05-03T12:00:00Z",
+        last_trade_closed_at: "2026-05-03T10:00:00Z" },
+      // never traded → "—"
+      { symbol: "SOL/USDT", trades: 0, win_rate: 0, avg_rr: 0, pnl_usdt: 0,
+        sharpe_annualized: null, computed_at: "2026-05-03T12:00:00Z",
+        last_trade_closed_at: null },
+    ];
+    vi.mocked(api.perAssetStats).mockResolvedValue(mixed);
+    render(<PerAssetTable />);
+    await waitFor(() => {
+      expect(screen.getByText("BTC/USDT")).toBeInTheDocument();
+    });
+
+    // Each row shows ITS OWN per-symbol relative-time stamp.
+    // Default sort is P&L desc → BTC (25.5), SOL (0), ETH (-3.5)
+    const rows = screen.getAllByRole("row");
+    expect(rows[1]?.textContent).toContain("BTC/USDT");
+    expect(rows[1]?.textContent).toContain("3m ago");
+    expect(rows[2]?.textContent).toContain("SOL/USDT");
+    expect(rows[2]?.textContent).toContain("—");
+    expect(rows[3]?.textContent).toContain("ETH/USDT");
+    expect(rows[3]?.textContent).toContain("2h ago");
+
+    vi.useRealTimers();
+  });
 });
