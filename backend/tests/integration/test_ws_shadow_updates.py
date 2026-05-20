@@ -263,3 +263,51 @@ async def test_publish_does_not_reach_other_channel_subscribers() -> None:
     )
 
     assert sock.sent == []
+
+
+@pytest.mark.asyncio
+async def test_empty_params_subscriber_receives_symbol_scoped_pnl_tick() -> None:
+    """PR10.6 regression test: a subscriber that subscribed with params={}
+    must receive symbol-scoped events.
+
+    Pre-PR10.6 the manager's _key_matches iterated publish_key.items(), so
+    {"symbol": "BTCUSDT"} keys never matched an empty sub_params filter.
+    The frontend useShadowUpdates hook subscribes with params={} (whole-channel),
+    so this silently dropped every shadow_position_opened / _closed / _pnl_tick
+    event reaching the browser. PR10.6 makes empty sub_params match-all.
+    """
+    mgr = ConnectionManager()
+    sock = FakeSocket()
+    mgr.attach(
+        Subscription(client_id="c1", channel="shadow_updates", params={}),
+        sock,
+    )
+
+    await shadow_updates.publish_pnl_tick(
+        mgr, symbol="BTCUSDT", current_price=101.5, unrealized_pnl_pct=1.5,
+    )
+    await shadow_updates.publish_position_opened(
+        mgr,
+        symbol="ETHUSDT",
+        direction="LONG",
+        entry_price=2000.0,
+        stop_loss=1950.0,
+        take_profit=2100.0,
+        signal_id="sig-empty-params",
+        score=0.7,
+        confidence=0.8,
+        opened_at=datetime(2026, 5, 20, 12, 0, tzinfo=UTC),
+    )
+
+    assert len(sock.sent) == 2, (
+        "Empty-params subscriber must receive symbol-scoped events; got "
+        f"{len(sock.sent)} of expected 2"
+    )
+    types = [m["payload"]["type"] for m in sock.sent]
+    assert "shadow_pnl_tick" in types
+    assert "shadow_position_opened" in types
+    # Verify the BTCUSDT pnl_tick payload carries the right fields
+    tick = next(m for m in sock.sent if m["payload"]["type"] == "shadow_pnl_tick")
+    assert tick["key"] == {"symbol": "BTCUSDT"}
+    assert tick["payload"]["current_price"] == 101.5
+    assert tick["payload"]["unrealized_pnl_pct"] == 1.5
