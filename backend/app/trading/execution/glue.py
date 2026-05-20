@@ -168,6 +168,12 @@ def proposal_from_prediction(
     mtf_agreement: int | None = None,
     mtf_dominant_tf: str | None = None,
     mtf_directions_json: str | None = None,
+    # PR-strategy-1: aggregator's final signed score (`pred.final.score`)
+    # — the same metric the shadow worker passes through the entry-quality
+    # gate. None when the caller didn't wire it (admin_test_trade /
+    # manual operator path). Defaults preserve the pre-PR-strategy-1
+    # call-site contract.
+    pred_score: float | None = None,
 ) -> SignalProposal | None:
     """Build a SignalProposal from a Prediction. Returns None for
     NEUTRAL signals (nothing to dispatch)."""
@@ -190,6 +196,7 @@ def proposal_from_prediction(
         mtf_agreement=mtf_agreement,
         mtf_dominant_tf=mtf_dominant_tf,
         mtf_directions=_parse_mtf_directions_json(mtf_directions_json),
+        entry_score=pred_score,
     )
 
 

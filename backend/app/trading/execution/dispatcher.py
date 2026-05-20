@@ -105,6 +105,14 @@ class SignalProposal:
     mtf_agreement: int | None = None
     mtf_dominant_tf: str | None = None
     mtf_directions: dict[str, int] | None = None
+    # PR-strategy-1: aggregator's final signed score (`pred.final.score`)
+    # threaded through `proposal_from_prediction`. The dispatcher's
+    # entry-quality gate reads this directly. None when the caller
+    # constructs a SignalProposal without a pred (`admin_test_trade.py`
+    # manual entry, ad-hoc operator test). The gate treats None as "no
+    # score available" → allow (operator-driven manual entry should not
+    # be blocked by a flag the operator hasn't opted into).
+    entry_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +149,8 @@ DispatchOutcome = Literal[
     # PR10 additions — symbol allowlist
     "blocked_stablecoin",
     "blocked_low_sharpe",
+    # PR-strategy-1 — entry-quality gate
+    "blocked_entry_quality",
 ]
 
 
@@ -632,6 +642,23 @@ async def dispatch(
     if allowlist_block is not None:
         return allowlist_block
     # ---- end PR10 ------------------------------------------------------
+
+    # ---- PR-strategy-1 entry-quality gate ------------------------------
+    # Both flags default OFF (MIN_ENTRY_SCORE_LONG=None, DISABLE_SHORT_
+    # SIGNALS=False) — when off, `open_position_gate` short-circuits to
+    # allow without touching the DB. The gate reads `proposal.entry_score`
+    # (threaded from `pred.final.score` via `proposal_from_prediction`).
+    from app.config import get_settings as _get_entry_quality_settings
+    from app.core.gates.entry_quality import open_position_gate
+    _eq_decision = open_position_gate(
+        proposal, _get_entry_quality_settings(),
+    )
+    if not _eq_decision.allow:
+        return DispatchResult(
+            outcome="blocked_entry_quality",
+            detail=f"entry_quality_gate: {_eq_decision.reason}",
+        )
+    # ---- end PR-strategy-1 entry-quality gate --------------------------
 
     # Funding-rate guard
     blocked, reason = await _check_funding_block(proposal)

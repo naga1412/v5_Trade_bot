@@ -86,6 +86,26 @@ class ShadowPosition:
     # HASH_PAYLOAD_COLUMNS per policy (see app/db/audit.py).
     hold_scaling_factor: float | None = None
     hold_timeout_bars: int | None = None
+    # PR-strategy-1 plumbing fix: PR1 analytics columns propagated from
+    # `pred` at open time so persist_closed_trade can forward them into
+    # `shadow_trades`. Default None; shadow_worker assigns directly
+    # after `from_signal()` + before `persist_open_position()`. Each
+    # column also lives in NON_HASHED_ALLOW_LIST per app/db/audit.py
+    # (PR1 alembic migration 0020).
+    #
+    # KNOWN LIMITATION (per spec §3): `shadow_open_positions` does NOT
+    # carry these columns. A restart between open + close → these are
+    # None on the reloaded ShadowPosition → NULL on the closed trade.
+    # Same-session open + close trades are populated correctly. Adding
+    # the columns to `shadow_open_positions` (alembic + thread persist /
+    # load) is the explicit follow-up — out of PR-strategy-1 scope.
+    mtf_agreement: int | None = None
+    mtf_dominant_tf: str | None = None
+    mtf_directions_json: str | None = None
+    p_win: float | None = None
+    effective_score: float | None = None
+    realized_vol_20d: float | None = None
+    funding_directional_adj: float | None = None
 
     @classmethod
     def from_signal(cls, sig: ShadowSignal, *, position_size_usdt: float) -> "ShadowPosition":

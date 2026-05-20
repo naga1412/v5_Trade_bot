@@ -26,6 +26,7 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.routes.ws import manager
+from app.core.gates.entry_quality import open_position_gate
 from app.core.predictor import _atr, build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient
@@ -68,6 +69,20 @@ class _StreamReader(Protocol):
     """Anything with an async ``stream()`` that yields MultiStreamCandle."""
 
     def stream(self) -> Any: ...
+
+
+@dataclass(frozen=True)
+class _EntryQualitySignal:
+    """Duck-typed adapter exposing the two attrs `open_position_gate` reads.
+
+    ShadowSignal carries `.score` not `.entry_score`, so the worker wraps
+    it here. The gate module stays uniform across both call sites (shadow
+    worker + dispatcher), each of which feeds it a differently-shaped
+    object.
+    """
+
+    direction: str
+    entry_score: float
 
 
 @dataclass
@@ -550,8 +565,41 @@ class ShadowWorker:
             signal.entry_price, signal.stop_loss, signal.take_profit,
         )
 
+        # PR-strategy-1: entry-quality gate. Both flags default OFF
+        # (MIN_ENTRY_SCORE_LONG=None + DISABLE_SHORT_SIGNALS=False) so this
+        # path is a no-op on a fresh deploy. The gate is duck-typed on
+        # `.direction` + `.entry_score`; ShadowSignal carries `.score`, so
+        # we feed it through a tiny shim that maps `.score → .entry_score`.
+        from app.config import get_settings as _get_entry_quality_settings
+        _eq_signal = _EntryQualitySignal(
+            direction=signal.direction.value, entry_score=signal.score,
+        )
+        _eq_decision = open_position_gate(
+            _eq_signal, _get_entry_quality_settings(),
+        )
+        if not _eq_decision.allow:
+            log.info(
+                "shadow_worker: %s/%s GATE_DENIED %s score=%.3f",
+                candle.symbol, tf, _eq_decision.reason, signal.score,
+            )
+            return
+
         position = ShadowPosition.from_signal(
             signal, position_size_usdt=SHADOW_POSITION_SIZE_USDT,
+        )
+        # PR-strategy-1 plumbing fix: propagate PR1 analytics from `pred`
+        # onto the in-memory ShadowPosition so persist_closed_trade can
+        # forward them into shadow_trades. Restart-survivor positions
+        # still get None here (shadow_open_positions doesn't carry these
+        # cols — out of scope; see spec §3 KNOWN limitation).
+        position.mtf_agreement = getattr(pred, "mtf_agreement", None)
+        position.mtf_dominant_tf = getattr(pred, "mtf_dominant_tf", None)
+        position.mtf_directions_json = getattr(pred, "mtf_directions_json", None)
+        position.p_win = getattr(pred, "p_win", None)
+        position.effective_score = getattr(pred, "effective_score", None)
+        position.realized_vol_20d = getattr(pred, "realized_vol_20d", None)
+        position.funding_directional_adj = getattr(
+            pred, "funding_directional_adj", None,
         )
         # PR3: stamp the TF on the position so persistence + the in-memory
         # cache key reflect the actual lane the trade was opened on.

@@ -90,11 +90,27 @@ def build_shadow_trade_payload(
     closed_at: datetime,
     bars_held: int,
     inputs_hash: str,
+    # PR-strategy-1 plumbing fix: PR1 analytics columns propagated from
+    # the `pred` that generated the position. All default None so callers
+    # that don't pass them (older tests, manual fixtures) keep
+    # bit-identical row shape against the production schema.
+    mtf_agreement: int | None = None,
+    mtf_dominant_tf: str | None = None,
+    mtf_directions_json: str | None = None,
+    p_win: float | None = None,
+    effective_score: float | None = None,
+    realized_vol_20d: float | None = None,
+    funding_directional_adj: float | None = None,
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the shadow_trades table.
 
     Computes ``pnl_pct`` and ``pnl_usdt`` internally (sign flips per direction).
     Direction comparison uses ``is Direction.LONG`` to match the original exactly.
+
+    The 7 PR1 record-only analytics fields are always written to the
+    returned dict (with ``None`` when not supplied by the caller). The
+    audit hash chain is unaffected because these keys are in
+    ``NON_HASHED_ALLOW_LIST``, not ``HASH_PAYLOAD_COLUMNS``.
 
     Bit-identical reference: backend/app/shadow/persistence.py:118-148.
     """
@@ -135,6 +151,16 @@ def build_shadow_trade_payload(
         # NON_HASHED_ALLOW_LIST per app/db/audit.py — out of the chain.
         "hold_scaling_factor": getattr(pos, "hold_scaling_factor", None),
         "hold_timeout_bars": getattr(pos, "hold_timeout_bars", None),
+        # PR-strategy-1 plumbing fix: PR1 analytics columns. None when
+        # the source pred lacked them (cold-cache MTF, missing funding
+        # rate, etc.) OR when the caller didn't pass them through.
+        "mtf_agreement": mtf_agreement,
+        "mtf_dominant_tf": mtf_dominant_tf,
+        "mtf_directions_json": mtf_directions_json,
+        "p_win": p_win,
+        "effective_score": effective_score,
+        "realized_vol_20d": realized_vol_20d,
+        "funding_directional_adj": funding_directional_adj,
     }
 
 

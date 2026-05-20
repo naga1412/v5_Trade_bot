@@ -62,6 +62,11 @@ _TRADES_DDL = (
     "signal_id TEXT NOT NULL UNIQUE, "
     # PR3 G1: recording-only scaling columns (NULL when scaling OFF)
     "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
+    # PR-strategy-1: PR1 analytics columns. NULL when source pred lacked
+    # them. NON_HASHED_ALLOW_LIST per app/db/audit.py.
+    "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+    "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
+    "realized_vol_20d REAL, funding_directional_adj REAL, "
     "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
 )
 
@@ -270,3 +275,49 @@ async def test_cooldowns_isolated_per_user() -> None:
     # New per-tf code uses `load_cooldowns_per_tf` instead (PR3 Phase 4).
     assert u1 == {"BTCUSDT": until1}
     assert u2 == {"BTCUSDT": until2}
+
+
+@pytest.mark.asyncio
+async def test_persist_closed_trade_writes_all_7_pr1_cols() -> None:
+    """PR-strategy-1: when ShadowPosition carries the 7 PR1 fields,
+    persist_closed_trade threads them through build_shadow_trade_payload and
+    they land in shadow_trades. Round-trip integration on SQLite."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(_TRADES_DDL))
+
+    sig = make_signal()
+    pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
+    # PR-strategy-1: worker populates these from `pred` between
+    # from_signal() and persist_open_position(). Simulate that here.
+    pos.mtf_agreement = 4
+    pos.mtf_dominant_tf = "1h"
+    pos.mtf_directions_json = '{"5m":1,"1h":1}'
+    pos.p_win = 0.65
+    pos.effective_score = 0.42
+    pos.realized_vol_20d = 0.018
+    pos.funding_directional_adj = 0.003
+    closed_at = datetime(2026, 5, 20, 18, tzinfo=timezone.utc)
+
+    async with AsyncSession(engine) as session:
+        await persist_closed_trade(
+            session, pos, user_id=1,
+            exit_price=80594.5, exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=closed_at, bars_held=4, inputs_hash="deadbeef",
+        )
+        await session.commit()
+        row = (await session.execute(
+            sa.text(
+                "SELECT mtf_agreement, mtf_dominant_tf, mtf_directions_json, "
+                "p_win, effective_score, realized_vol_20d, "
+                "funding_directional_adj FROM shadow_trades"
+            )
+        )).first()
+    assert row is not None
+    assert row.mtf_agreement == 4
+    assert row.mtf_dominant_tf == "1h"
+    assert row.mtf_directions_json == '{"5m":1,"1h":1}'
+    assert row.p_win == 0.65
+    assert row.effective_score == 0.42
+    assert row.realized_vol_20d == 0.018
+    assert row.funding_directional_adj == 0.003
