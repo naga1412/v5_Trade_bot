@@ -199,6 +199,22 @@ class Settings(BaseSettings):
     FU28_STALE_PNL_TICK_THRESHOLD_SECONDS: int = 1800
     FU28_AUTO_RECYCLE_ENABLED: bool = False
 
+    # --- PR10.7: SPOT-invalid symbols ------------------------------------
+    # Symbols that appear in the asset_universe (or persist in open
+    # positions) but FAIL on Binance SPOT /api/v3/ticker/price. Without
+    # blacklisting, fetch_spot_prices falls back to per-symbol calls
+    # (resilient but slow). Filtering upstream is cleaner.
+    #
+    # Known-bad as of 2026-05-20 diagnostic run 26147552565:
+    # - EDENUSDT: futures-only (never on SPOT)
+    # - LUNCUSDT: delisted from .com SPOT
+    # - PAXGUSDT / XAUTUSDT: gold-pegged tokens, region restricted
+    # - UUSDT: legacy data from pre-SPOT-migration universe (when source
+    #   was Binance Futures fapi). SPOT has UNIUSDT, not UUSDT.
+    SHADOW_SPOT_BLACKLIST: list[str] = [
+        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT",
+    ]
+
 
 @lru_cache
 def get_settings() -> Settings:
