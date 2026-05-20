@@ -38,6 +38,7 @@ on:
           - pr10.7-diagnose # READ-ONLY: PR10.7 hotfix diagnostic — Now/P&L empty, last_trade_closed_at suspect, ui_freshness_monitor silent. Runs D1-D9 from operator's spec: shadow_pnl_tick log scan, WS broadcast scan, WS client connections, shadow_open_positions row dump + schema introspection, TON-specific shadow_trades, per-symbol last-close roll-up, ui_freshness_monitor activity + heartbeat row, deployed _key_matches function (verifies PR10.6 landed).
           - investigate-four-issues # READ-ONLY: 4-question investigation per operator request — (1) SHADOW_SPOT_BLACKLIST contents + per-position price-fetch status, (2) /per-asset endpoint code + paper_trades vs shadow_trades coverage, (3) TONUSDT 7d trade history, (4) win-rate sanity check vs dashboard counter "34/150 (23%)". Raw output only, no interpretation.
           - pr10.8-investigate # READ-ONLY: PR10.8 UX investigation — (Inv1) shadow_trades grouped by user_id (test per-asset truncation hypothesis), (Inv2) UUSDT activity in shadow_worker / pnl_tick / kline streams (test blacklist-bypass-via-WS hypothesis), (Inv3) GET /open-positions hit count in last 30m + deployed binance_ticker.py code (test fetch_spot_prices silence hypothesis).
+          - pr-diag-1-strategy # READ-ONLY: PR-DIAG-1 strategy diagnostic — 7 queries on shadow_trades (Q1 WR by symbol, Q2 WR by direction, Q3 WR by exit_reason, Q4 WR by effective_score decile, Q5 WR by UTC hour, Q6 TP/SL avg per symbol, Q7 WR by mtf_agreement). Operator-input for next strategy PR scope.
 
 jobs:
   probe:
@@ -727,6 +728,47 @@ jobs:
                  docker compose exec -T backend grep -B 2 -A 18 'def _fetch_per_symbol' /app/app/data/binance_ticker.py | head -30 && \
                  echo '=== INV3.D: backend access log lines containing 200 OR 401 (last 30m) for bot-status ===' && \
                  docker compose logs --since=30m backend 2>&1 | grep -iE 'bot-status.*HTTP|bot-status.*\\\"' | tail -20 && \
+                 echo '(end)'"
+              ;;
+            pr-diag-1-strategy)
+              # READ-ONLY: 7 strategy diagnostic queries on shadow_trades.
+              # All bounded to closed trades in last 30 days, user_id-agnostic
+              # (single-user prod). Output is raw — operator interprets.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== Q1: WR by symbol (sorted by trade count desc) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL GROUP BY symbol ORDER BY trades DESC;\" && \
+                 echo '=== Q2: WR by direction (LONG vs SHORT) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL GROUP BY direction;\" && \
+                 echo '=== Q3: WR by exit_reason ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT exit_reason, COUNT(*) AS trades, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL GROUP BY exit_reason ORDER BY trades DESC;\" && \
+                 echo '=== Q4.PRE: shadow_trades score columns + null-count (effective_score from PR1, entry_score from PR3 base) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'effective_score' AS col, COUNT(*) AS rows_30d, COUNT(effective_score) AS non_null, COUNT(*) - COUNT(effective_score) AS null_count FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL UNION ALL SELECT 'entry_score', COUNT(*), COUNT(entry_score), COUNT(*) - COUNT(entry_score) FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL UNION ALL SELECT 'p_win', COUNT(*), COUNT(p_win), COUNT(*) - COUNT(p_win) FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL;\" && \
+                 echo '=== Q4.A: WR by entry_score decile (entry_score is always populated; effective_score may be null per Q4.PRE) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH bucketed AS (SELECT pnl_pct, NTILE(10) OVER (ORDER BY entry_score) AS bucket, entry_score FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL) SELECT bucket AS decile, COUNT(*) AS trades, ROUND(MIN(entry_score)::numeric, 4) AS min_score, ROUND(MAX(entry_score)::numeric, 4) AS max_score, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM bucketed GROUP BY bucket ORDER BY bucket;\" && \
+                 echo '=== Q4.B: WR by effective_score decile (skip rows where effective_score IS NULL) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH bucketed AS (SELECT pnl_pct, NTILE(10) OVER (ORDER BY effective_score) AS bucket, effective_score FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND effective_score IS NOT NULL) SELECT bucket AS decile, COUNT(*) AS trades, ROUND(MIN(effective_score)::numeric, 4) AS min_score, ROUND(MAX(effective_score)::numeric, 4) AS max_score, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM bucketed GROUP BY bucket ORDER BY bucket;\" && \
+                 echo '=== Q5: WR by hour-of-day (UTC) opened_at ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT EXTRACT(HOUR FROM opened_at) AS utc_hour, COUNT(*) AS trades, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL GROUP BY utc_hour ORDER BY utc_hour;\" && \
+                 echo '=== Q6: TP-vs-SL ratio per symbol (asymmetry check) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, ROUND(AVG(CASE WHEN exit_reason='TAKE_PROFIT' THEN pnl_pct END)::numeric, 3) AS avg_tp_pct, ROUND(AVG(CASE WHEN exit_reason='STOP_LOSS' THEN pnl_pct END)::numeric, 3) AS avg_sl_pct, COUNT(*) FILTER (WHERE exit_reason='TAKE_PROFIT') AS tp_count, COUNT(*) FILTER (WHERE exit_reason='STOP_LOSS') AS sl_count FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL GROUP BY symbol ORDER BY symbol;\" && \
+                 echo '=== Q7.PRE: column-exists check (operator asked about mtf_agreement_count; actual column is mtf_agreement) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT column_name, data_type FROM information_schema.columns WHERE table_name='shadow_trades' AND column_name LIKE 'mtf%' OR column_name IN ('p_win','effective_score','realized_vol_20d','funding_directional_adj','entry_score') ORDER BY column_name;\" && \
+                 echo '=== Q7: WR by mtf_agreement (PR1 column) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT mtf_agreement, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND mtf_agreement IS NOT NULL GROUP BY mtf_agreement ORDER BY mtf_agreement;\" && \
+                 echo '=== Q7.NULL: count of shadow_trades with mtf_agreement IS NULL in last 30d (PR1 column population) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'total_30d' AS k, COUNT(*) AS n FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL UNION ALL SELECT 'mtf_agreement_NULL', COUNT(*) FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND mtf_agreement IS NULL;\" && \
                  echo '(end)'"
               ;;
           esac
