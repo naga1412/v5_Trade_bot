@@ -633,3 +633,73 @@ Current alert + manual-restart path is functional. Operator availability
 risk is what FU-21 mitigates, not data loss — the live_trades table
 itself doesn't depend on the monitor's in-memory state to stay
 consistent (it's reconciled from Binance position queries each tick).
+
+---
+
+### FU-31 — /open-positions has no fallback polling
+
+**Status**: open · **Discovered**: 2026-05-20 (PR10.8 investigation)
+**Severity**: LOW (operator-visible dashboard staleness; no data risk)
+
+#### Symptom
+`useOpenPositionsLive` refetches `/api/v1/bot-status/open-positions`
+ONLY on:
+- WebSocket events (`shadow_position_opened`, `shadow_position_closed`),
+- Manual `refetch()` calls, or
+- Hard refresh.
+
+There is no time-based polling on this endpoint (unlike `/per-asset`
+which polls every 60s as of PR10.5 T-UI.2). If a WS event is dropped
+(server restart mid-session, network blip, client tab backgrounded
+through a close event), the Open Positions card silently stales and
+the operator may not notice for hours.
+
+#### Scope
+Add a low-priority 60s `setInterval` refetch to `useOpenPositionsLive`
+as belt-and-braces. Match the existing PR10.5 pattern used for
+`usePerAssetStats`: configurable `pollIntervalMs` prop with 0-disables,
+in-flight guard, cleanup on unmount.
+
+#### Effort
+~1 hour. Frontend-only. No backend or DB changes.
+
+#### Why LOW not MEDIUM
+WS is the primary source and works in steady state. This is a
+defensive fallback for edge cases. PR10.5's healer (FU-28) already
+detects stale ticks; this just adds a self-correcting refresh on
+top.
+
+---
+
+### FU-32 — SHADOW_SPOT_BLACKLIST is misnamed
+
+**Status**: cosmetic follow-up · **Discovered**: 2026-05-20 (PR10.8 Inv2)
+**Severity**: LOW (naming confusion, not a bug)
+
+#### Symptom
+`Settings.SHADOW_SPOT_BLACKLIST` (PR10.7) was added to filter symbols
+that fail `/api/v3/ticker/price` BATCH calls (EDENUSDT, LUNCUSDT,
+PAXGUSDT, XAUTUSDT, UUSDT). But Inv2 of PR10.8 confirmed that at
+least UUSDT IS priceable on Binance SPOT via klines + WebSocket — the
+shadow worker fetches `/api/v3/klines?symbol=UUSDT` every ~70s with
+200 OK, and `publish_pnl_tick` emits price updates from those candles.
+So "SPOT blacklist" is misleading: the symbols are batch-API-incompatible,
+not actually unpriceable.
+
+#### Scope
+Rename `SHADOW_SPOT_BLACKLIST` → `TICKER_BATCH_BLACKLIST` (or similar)
+in `app/config.py`, `app/data/binance_ticker.py`, `app/shadow/universe.py`,
+related tests, and the frontend mirror in `OpenPositions.tsx`. Update
+the comment block above the list to describe semantics accurately.
+PR10.8 also documents this in the Inv2 commit chat.
+
+#### Effort
+~30 min. Pure rename + comment update. No behavior change. No tests
+beyond compile-time renaming.
+
+#### Why LOW
+Just a misnomer. The filter does what it's supposed to do (avoids
+batch 400) and the WS-tick path correctly fills Now/P&L for the
+listed symbols when they trade. Operator confusion was the only
+downside; the PR10.8 tooltip + ⓘ icon already mitigate the user-facing
+ambiguity.
