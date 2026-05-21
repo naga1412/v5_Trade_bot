@@ -63,6 +63,12 @@ async def _mk_engine() -> Any:
             "entry_score REAL, entry_confidence REAL, entry_atr REAL, "
             "bars_held INTEGER, opened_at TEXT, last_check_at TEXT, "
             "signal_id TEXT, "
+            # PR-PLUMBING-1 alembic 0025: 7 PR1 analytics columns. NULLs
+            # for pre-fix restart-survivor rows; populated by shadow_worker
+            # for new same-session opens via persist_open_position.
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
+            "realized_vol_20d REAL, funding_directional_adj REAL, "
             "UNIQUE (symbol, timeframe))"
         ))
         # shadow_trades with PR1 + PR3 G1 columns + audit chain

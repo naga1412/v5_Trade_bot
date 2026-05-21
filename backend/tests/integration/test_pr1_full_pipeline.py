@@ -211,6 +211,7 @@ async def test_pr1_full_pipeline_smoke(pipeline_session: AsyncSession) -> None:
             effective_score,
             realized_vol_20d,
             funding_directional_adj,
+            _funding_rate,  # PR-PLUMBING-1: raw per-8h rate (unused here)
         ) = await _compute_aggregator_hook_fields(
             symbol="BTC/USDT",
             timeframe="1h",
@@ -443,6 +444,7 @@ async def test_pr1_pipeline_no_funding_data(pipeline_session: AsyncSession) -> N
             _effective_score,
             _realized_vol_20d,
             funding_directional_adj,
+            _funding_rate,  # PR-PLUMBING-1: raw per-8h rate (None here)
         ) = await _compute_aggregator_hook_fields(
             symbol="BTC/USDT",
             timeframe="1h",
@@ -537,6 +539,7 @@ async def test_pr1_pipeline_short_direction(pipeline_session: AsyncSession) -> N
             effective_score,
             realized_vol_20d,
             funding_directional_adj,
+            _funding_rate,  # PR-PLUMBING-1: raw per-8h rate (unused here)
         ) = await _compute_aggregator_hook_fields(
             symbol="BTC/USDT",
             timeframe="1h",

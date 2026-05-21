@@ -114,9 +114,13 @@ async def test_all_7_fields_attach_when_helpers_succeed():
     (
         mtf_agreement, mtf_dominant_tf, mtf_directions_json,
         p_win, effective_score, realized_vol_20d, funding_directional_adj,
+        funding_rate,  # PR-PLUMBING-1: raw per-8h rate threaded to caller
     ) = result
 
     assert mtf_agreement == 4
+    # PR-PLUMBING-1: helper now also surfaces the raw per-8h funding rate
+    # so build_prediction can attach a per-day value for the funding gate.
+    assert funding_rate == pytest.approx(-0.0008)
     assert mtf_dominant_tf == "1h"
     assert mtf_directions_json is not None
     directions_parsed = json.loads(mtf_directions_json)
@@ -346,7 +350,9 @@ async def test_long_signal_path():
         )
 
     # Hook should run to completion without exception
-    assert len(result) == 7
+    # PR-PLUMBING-1: helper now returns 8 fields (added raw per-8h
+    # funding rate as the 8th element for the funding kill-switch thread).
+    assert len(result) == 8
 
 
 async def test_short_signal_path():
@@ -372,7 +378,9 @@ async def test_short_signal_path():
             session=None,
         )
 
-    assert len(result) == 7
+    # PR-PLUMBING-1: helper now returns 8 fields (added raw per-8h
+    # funding rate as the 8th element for the funding kill-switch thread).
+    assert len(result) == 8
 
 
 async def test_neutral_signal_path():

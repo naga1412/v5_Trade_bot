@@ -351,6 +351,12 @@ async def _maybe_dispatch(
                     # score so the dispatcher's entry-quality gate can
                     # apply the LONG threshold.
                     "pred_score": pred.final.score,
+                    # PR-PLUMBING-1 Fix 1: thread the predictor's per-day
+                    # funding rate so the dispatcher's funding-rate
+                    # kill-switch evaluates real values instead of 0.0.
+                    # None when the predictor's intermarket lookup failed —
+                    # glue's `or 0.0` collapse keeps the gate fail-open.
+                    "pred_funding_rate_daily": pred.funding_rate_daily,
                 },
             )
             await dispatch_session.commit()
