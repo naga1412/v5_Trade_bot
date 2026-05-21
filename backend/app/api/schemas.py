@@ -157,6 +157,13 @@ class LivePredictionOut(BaseModel):
     effective_score: float | None = None
     realized_vol_20d: float | None = None
     funding_directional_adj: float | None = None
+    # PR-PLUMBING-1 Fix 1: raw daily funding rate (per-day fraction, e.g.
+    # 0.03 = 3 %/day). Threaded from the predictor's intermarket lookup
+    # (per-8h × 3) so the dispatcher's funding-rate kill-switch evaluates
+    # on real values instead of the hard-coded 0.0 default. None when the
+    # predictor's lookup returned None (no session, no rows for symbol,
+    # or fail-open exception path).
+    funding_rate_daily: float | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---
