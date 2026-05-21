@@ -41,6 +41,7 @@ on:
           - pr-diag-1-strategy # READ-ONLY: PR-DIAG-1 strategy diagnostic — 7 queries on shadow_trades (Q1 WR by symbol, Q2 WR by direction, Q3 WR by exit_reason, Q4 WR by effective_score decile, Q5 WR by UTC hour, Q6 TP/SL avg per symbol, Q7 WR by mtf_agreement). Operator-input for next strategy PR scope.
           - pr-diag-1.5-followup # READ-ONLY: PR-DIAG-1.5 follow-up — Q1 score-decile × direction crosstab, Q2 FIDA anomaly investigation, Q3 decile-9 paradox (high WR but negative avg pnl).
           - pr-strategy-1-baseline-and-perasset # READ-ONLY: PR-strategy-1 flip-day baseline (7d direction WR, opens-per-day, current opens, opens-last-6h, PR1 column population, entry_score percentiles, daily closes 14d) + Per-Asset Stats data-freshness investigation (TONUSDT 7d history, top-20 by trades with MAX(closed_at), 24h close volume, dashboard sanity 25% WR). Pure SELECTs; no writes.
+          - pr-strategy-1-verify-after-soak # READ-ONLY: post-flip 5h verification for DISABLE_SHORT_SIGNALS. FLIP_TS hardcoded to 2026-05-21T19:42:22Z; runner sleeps until 5h post-flip then runs 5 SSH checks (A: zero new SHORT opens, B: LONG opens+WR snapshot, C: gate denial log count, D: backend exceptions + audit chain, E: env-loaded flag values).
 
 jobs:
   probe:
@@ -833,6 +834,61 @@ jobs:
                  echo '=== M: overall dashboard sanity (last 30d) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT COUNT(*) AS total_30d, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins_30d, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL;\" && \
+                 echo '(end)'"
+              ;;
+            pr-strategy-1-verify-after-soak)
+              # READ-ONLY: post-flip verification for DISABLE_SHORT_SIGNALS=true.
+              # FLIP_TS is hardcoded based on operator's confirmed flip time.
+              # Runner sleeps until 5h post-flip, then runs all 5 checks via SSH.
+              FLIP_TS="2026-05-21T19:42:22Z"
+              TARGET_UNIX=$(date -u -d "$FLIP_TS" +%s)
+              TARGET_UNIX=$((TARGET_UNIX + 18000))
+              CURRENT_UNIX=$(date -u +%s)
+              DELAY=$((TARGET_UNIX - CURRENT_UNIX))
+              echo "=== verify-after-soak: FLIP_TS=$FLIP_TS, target=$(date -u -d @$TARGET_UNIX -Iseconds), delay=${DELAY}s ==="
+              if [ "$DELAY" -gt 0 ]; then
+                if [ "$DELAY" -gt 19800 ]; then
+                  echo "ERROR: delay ${DELAY}s exceeds 5h30m cap — refusing to sleep this long; aborting"
+                  exit 1
+                fi
+                echo "sleeping ${DELAY}s ..."
+                sleep "$DELAY"
+              else
+                echo "FLIP_TS is already $((-DELAY))s past target; proceeding immediately"
+              fi
+              CHECK_TS=$(date -u -Iseconds)
+              SOAK_HOURS=$(awk "BEGIN{printf \"%.2f\", ($(date -u +%s) - $(date -u -d "$FLIP_TS" +%s)) / 3600}")
+              echo "=== checks running at $CHECK_TS (soak_hours=$SOAK_HOURS) ==="
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== CHECK A: opens by direction since flip ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, COUNT(*) AS opens_post_flip FROM shadow_trades WHERE opened_at >= '$FLIP_TS'::timestamptz GROUP BY direction ORDER BY direction;\" && \
+                 echo '=== CHECK B: LONG opens + WR snapshot since flip ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS long_opens_post_flip, SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins, SUM(CASE WHEN pnl_pct <= 0 AND closed_at IS NOT NULL THEN 1 ELSE 0 END) AS losses, SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END) AS still_open, ROUND(AVG(pnl_pct) FILTER (WHERE closed_at IS NOT NULL)::numeric, 3) AS avg_pnl_pct_closed FROM shadow_trades WHERE opened_at >= '$FLIP_TS'::timestamptz AND direction='LONG';\" && \
+                 echo '=== CHECK C.1: Prometheus gate_denial_total ===' && \
+                 (docker compose exec -T backend curl -s -m 5 http://localhost:8000/metrics 2>&1 | grep -E 'gate_denial_total|blocked_entry_quality' | head -20) || echo '(no /metrics endpoint or no gate metric line)' && \
+                 echo '=== CHECK C.2: log lines mentioning blocked_entry_quality or short_disabled or GATE_DENIED since flip ===' && \
+                 docker compose logs backend --since '$FLIP_TS' 2>&1 | grep -E 'blocked_entry_quality|short_disabled|GATE_DENIED|below_long_threshold' | tail -40 && \
+                 echo '=== CHECK C.2 count ===' && \
+                 (docker compose logs backend --since '$FLIP_TS' 2>&1 | grep -cE 'blocked_entry_quality|short_disabled|GATE_DENIED|below_long_threshold') || true && \
+                 echo '=== CHECK D.1: backend exceptions since flip ===' && \
+                 docker compose logs backend --since '$FLIP_TS' 2>&1 | grep -iE 'error|exception|traceback' | head -30 && \
+                 echo '=== CHECK D.1 exception count ===' && \
+                 (docker compose logs backend --since '$FLIP_TS' 2>&1 | grep -ciE 'error|exception|traceback') || true && \
+                 echo '=== CHECK D.2: auth_violations audit_chain_broken rows since flip (preferred over predictions.prev_hash_mismatch which is not a column) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT category, attempted_email, COUNT(*) FROM auth_violations WHERE category = 'audit_chain_broken' AND attempted_at >= '$FLIP_TS'::timestamptz GROUP BY category, attempted_email;\" && \
+                 echo '=== CHECK D.3 fallback (operator query verbatim — predictions.prev_hash_mismatch is not a real column; expect ERROR) ===' && \
+                 (docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS new_chain_broken FROM predictions WHERE prev_hash_mismatch=true AND ts >= '$FLIP_TS'::timestamptz;\") || echo '(expected: column does not exist; use D.2 result instead)' && \
+                 echo '=== CHECK E: env-loaded flag values (operator path app.core.config is wrong; deployed path is app.config) ===' && \
+                 docker compose exec -T backend python -c \"from app.config import get_settings; s=get_settings(); print(f'DISABLE_SHORT_SIGNALS={s.DISABLE_SHORT_SIGNALS}'); print(f'MIN_ENTRY_SCORE_LONG={s.MIN_ENTRY_SCORE_LONG}')\" && \
+                 echo '=== meta: container restart count + start time ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '=== meta: .env grep for flag presence ===' && \
+                 grep -E '^(DISABLE_SHORT_SIGNALS|MIN_ENTRY_SCORE_LONG)=' .env || echo '(neither flag in .env)' && \
                  echo '(end)'"
               ;;
           esac
