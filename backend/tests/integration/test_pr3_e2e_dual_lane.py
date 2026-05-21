@@ -71,6 +71,12 @@ async def _mk_engine() -> Any:
             "entry_score REAL, entry_confidence REAL, entry_atr REAL, "
             "bars_held INTEGER DEFAULT 0, "
             "opened_at TEXT, last_check_at TEXT, signal_id TEXT, "
+            # PR-PLUMBING-1 alembic 0025: 7 PR1 analytics columns. NULLs
+            # for pre-fix restart-survivor rows; populated by shadow_worker
+            # for new same-session opens via persist_open_position.
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
+            "realized_vol_20d REAL, funding_directional_adj REAL, "
             "UNIQUE (symbol, timeframe))"
         ))
     return engine
@@ -136,6 +142,15 @@ async def test_dual_lane_same_symbol_produces_two_open_positions(
     fake_pred.final = MagicMock(score=0.5, confidence=0.7)
     fake_pred.mtf_agreement = None
     fake_pred.symbol = "BTCUSDT"
+    # PR-PLUMBING-1: shadow_worker copies these PR1 analytics fields onto
+    # the ShadowPosition before persist. MagicMock auto-generates attrs,
+    # so without explicit None we'd bind MagicMock instances into SQLite.
+    fake_pred.mtf_dominant_tf = None
+    fake_pred.mtf_directions_json = None
+    fake_pred.p_win = None
+    fake_pred.effective_score = None
+    fake_pred.realized_vol_20d = None
+    fake_pred.funding_directional_adj = None
 
     fake_cache = MagicMock()
     fake_cache.get_or_load = AsyncMock(return_value=None)
@@ -227,6 +242,14 @@ async def test_dual_lane_in_memory_state_keyed_per_tf(
     fake_pred.layer_scores = {}
     fake_pred.final = MagicMock(score=0.5, confidence=0.7)
     fake_pred.mtf_agreement = None
+    # PR-PLUMBING-1: see equivalent block in the prior test — auto-mocked
+    # PR1 attrs would bind MagicMock into the SQLite insert.
+    fake_pred.mtf_dominant_tf = None
+    fake_pred.mtf_directions_json = None
+    fake_pred.p_win = None
+    fake_pred.effective_score = None
+    fake_pred.realized_vol_20d = None
+    fake_pred.funding_directional_adj = None
 
     fake_cache = MagicMock()
     fake_cache.get_or_load = AsyncMock(return_value=None)

@@ -174,6 +174,14 @@ def proposal_from_prediction(
     # manual operator path). Defaults preserve the pre-PR-strategy-1
     # call-site contract.
     pred_score: float | None = None,
+    # PR-PLUMBING-1 Fix 1: per-day funding rate threaded from
+    # `LivePredictionOut.funding_rate_daily`. None when the predictor's
+    # intermarket lookup returned None — coerce to 0.0 below so the
+    # SignalProposal default (0.0) is preserved and the dispatcher's
+    # funding-rate kill-switch falls open (0.0 < 0.01 threshold).
+    # Callers that pre-date PR-PLUMBING-1 (admin_test_trade, telegram
+    # callback) can keep omitting this kwarg.
+    pred_funding_rate_daily: float | None = None,
 ) -> SignalProposal | None:
     """Build a SignalProposal from a Prediction. Returns None for
     NEUTRAL signals (nothing to dispatch)."""
@@ -182,6 +190,16 @@ def proposal_from_prediction(
         return None
     if entry_price <= 0 or stop_loss_price <= 0 or take_profit_price <= 0:
         return None
+    # PR-PLUMBING-1 Fix 1: prefer the threaded per-day rate when supplied.
+    # `is not None` (not truthiness) so a legitimate 0.0 from the predictor
+    # is preserved and not silently overridden by the legacy
+    # `funding_rate_daily` kwarg. None still falls back, keeping
+    # pre-PR-PLUMBING-1 callers that omit the kwarg byte-identical.
+    threaded_funding_rate_daily = (
+        pred_funding_rate_daily
+        if pred_funding_rate_daily is not None
+        else funding_rate_daily
+    )
     return SignalProposal(
         symbol=symbol, timeframe=timeframe,
         direction=direction,  # type: ignore[arg-type]
@@ -191,7 +209,7 @@ def proposal_from_prediction(
         confidence_pct=pred_confidence * 100.0,
         layer_summary=layer_summary,
         inputs_hash=inputs_hash,
-        funding_rate_daily=funding_rate_daily,
+        funding_rate_daily=threaded_funding_rate_daily,
         chart_base_url=chart_base_url,
         mtf_agreement=mtf_agreement,
         mtf_dominant_tf=mtf_dominant_tf,

@@ -48,6 +48,10 @@ _TRAP_CAP: int = 4
 # Kept in sync with app/core/scoring/aggregator.py. 1.0 = no penalty
 # (symmetric LONG/SHORT, 2026-05-14).
 _SHORT_DIRECTION_PENALTY: float = 1.0
+# PR-PLUMBING-1 Fix 1: Binance funding events per day (every 8h = 3/day).
+# Used to convert the per-8h `lookup_latest_funding_rate` return value to the
+# per-day fraction `evaluate_funding_rate` expects.
+_FUNDING_EVENTS_PER_DAY: int = 3
 
 
 def _layer_to_out(layer: LayerScore | None) -> LayerScoreOut | None:
@@ -324,6 +328,7 @@ async def _compute_aggregator_hook_fields(
     float | None,  # effective_score
     float | None,  # realized_vol_20d
     float | None,  # funding_directional_adj
+    float | None,  # funding_rate (per-8h, raw from Binance) — PR-PLUMBING-1
 ]:
     """Compute the 7 PR1 record-only analytics fields.
 
@@ -416,6 +421,11 @@ async def _compute_aggregator_hook_fields(
         effective,
         realized_vol,
         funding_adj,
+        # PR-PLUMBING-1 Fix 1: surface the raw per-8h funding rate to the
+        # caller so build_prediction can convert (×3) and attach to
+        # LivePredictionOut.funding_rate_daily for the dispatcher's
+        # funding-rate kill-switch.
+        funding_rate,
     )
 
 
@@ -580,6 +590,9 @@ async def build_prediction(
     # ─── PR1 Task 3.4: aggregator hook ───────────────────────────────────
     # Record-only attach of 7 analytics fields. NEVER modifies final_score,
     # confidence, direction, layer_scores. Fail-open on every helper.
+    # PR-PLUMBING-1 Fix 1: hook now also surfaces the raw per-8h funding
+    # rate so build_prediction can attach a per-day value to the schema
+    # for the dispatcher's funding-rate kill-switch.
     (
         _mtf_agreement,
         _mtf_dominant_tf,
@@ -588,12 +601,20 @@ async def build_prediction(
         _effective_score,
         _realized_vol_20d,
         _funding_directional_adj,
+        _funding_rate_per_8h,
     ) = await _compute_aggregator_hook_fields(
         symbol=symbol,
         timeframe=timeframe,
         bars=bars,
         final=final,
         session=session,
+    )
+    # Convert per-8h Binance funding rate → per-day fraction. None-guard so a
+    # missing lookup (no session, no rows, fail-open) propagates as None rather
+    # than crashing on arithmetic.
+    _funding_rate_daily = (
+        _funding_rate_per_8h * _FUNDING_EVENTS_PER_DAY
+        if _funding_rate_per_8h is not None else None
     )
     # ─── end aggregator hook ─────────────────────────────────────────────
 
@@ -623,6 +644,9 @@ async def build_prediction(
         effective_score=_effective_score,
         realized_vol_20d=_realized_vol_20d,
         funding_directional_adj=_funding_directional_adj,
+        # PR-PLUMBING-1 Fix 1: raw daily funding rate for the dispatcher
+        # kill-switch (None = lookup failed / no session — gate falls open).
+        funding_rate_daily=_funding_rate_daily,
     )
 
 
