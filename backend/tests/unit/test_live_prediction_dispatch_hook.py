@@ -38,6 +38,11 @@ class _FakePrediction:
     mtf_agreement: int | None = None
     mtf_dominant_tf: str | None = None
     mtf_directions_json: str | None = None
+    # PR-PLUMBING-1: live_prediction now forwards the per-day funding rate
+    # to proposal_from_prediction so the dispatcher's funding-rate
+    # kill-switch evaluates real values. Default None matches predictor's
+    # behavior when the intermarket lookup fails (gate fail-open).
+    funding_rate_daily: float | None = None
 
 
 class _FakeSession:

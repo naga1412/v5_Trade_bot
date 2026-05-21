@@ -43,6 +43,10 @@ _OPEN_POS_DDL = (
     "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
     "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
     "signal_id TEXT NOT NULL UNIQUE, "
+    # PR-PLUMBING-1 (alembic 0025): 7 PR1 analytics columns. All nullable.
+    "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+    "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
+    "realized_vol_20d REAL, funding_directional_adj REAL, "
     "UNIQUE (symbol, timeframe))"
 )
 
@@ -170,6 +174,10 @@ async def test_delete_open_position_filters_by_user() -> None:
             "entry_atr REAL NOT NULL, bars_held INTEGER NOT NULL DEFAULT 0, "
             "opened_at TEXT NOT NULL, last_check_at TEXT NOT NULL, "
             "signal_id TEXT NOT NULL, "
+            # PR-PLUMBING-1 (alembic 0025): 7 PR1 analytics columns.
+            "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
+            "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
+            "realized_vol_20d REAL, funding_directional_adj REAL, "
             "UNIQUE (user_id, symbol, timeframe))"
         ))
 

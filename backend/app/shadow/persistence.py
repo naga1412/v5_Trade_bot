@@ -43,15 +43,26 @@ async def persist_open_position(
     PR3: writes pos.timeframe into the row. Pre-PR3 callers that pass
     a position with default timeframe='1h' produce a bit-identical
     `'1h'` row, so the schema change is invisible to them.
+
+    PR-PLUMBING-1 Fix 3: also writes the 7 PR1 analytics fields when
+    populated on ``pos`` (shadow_worker sets them between
+    ``from_signal()`` and this call). ``getattr(..., None)`` keeps
+    pre-PR-PLUMBING-1 tests / fixture rows working — when the column
+    isn't on the dataclass, we INSERT NULL.
     """
     await session.execute(
         sa.text(
             "INSERT INTO shadow_open_positions "
             "(user_id, symbol, timeframe, direction, entry_price, stop_loss, "
             "take_profit, position_size_usdt, entry_score, entry_confidence, "
-            "entry_atr, bars_held, opened_at, last_check_at, signal_id) "
+            "entry_atr, bars_held, opened_at, last_check_at, signal_id, "
+            # PR-PLUMBING-1 Fix 3: 7 PR1 analytics columns. Nullable; the
+            # alembic 0025 migration adds them as NULL on existing rows.
+            "mtf_agreement, mtf_dominant_tf, mtf_directions_json, p_win, "
+            "effective_score, realized_vol_20d, funding_directional_adj) "
             "VALUES (:uid, :s, :tf, :d, :ep, :sl, :tp, :ps, :es, :ec, :ea, "
-            ":bh, :oa, :lc, :sig)"
+            ":bh, :oa, :lc, :sig, "
+            ":mtfa, :mtfd, :mtfj, :pw, :effs, :rv, :fda)"
         ),
         {
             "uid": user_id,
@@ -64,6 +75,16 @@ async def persist_open_position(
             # strings on TIMESTAMPTZ; SQLite tests still get TEXT via SQLAlchemy.
             "oa": pos.opened_at, "lc": pos.last_check_at,
             "sig": pos.signal_id,
+            # PR-PLUMBING-1 Fix 3: defensive getattr — NULL on pre-fix
+            # callers / legacy ShadowPosition instances missing the
+            # PR-strategy-1 fields.
+            "mtfa": getattr(pos, "mtf_agreement", None),
+            "mtfd": getattr(pos, "mtf_dominant_tf", None),
+            "mtfj": getattr(pos, "mtf_directions_json", None),
+            "pw": getattr(pos, "p_win", None),
+            "effs": getattr(pos, "effective_score", None),
+            "rv": getattr(pos, "realized_vol_20d", None),
+            "fda": getattr(pos, "funding_directional_adj", None),
         },
     )
 
@@ -96,6 +117,17 @@ async def list_open_positions(
             last_check_at=_to_dt(r.last_check_at),
             signal_id=r.signal_id,
             timeframe=tf,
+            # PR-PLUMBING-1 Fix 3: read the 7 PR1 analytics columns back
+            # from the row. ``getattr(..., None)`` keeps pre-fix test
+            # fixtures (rows without these columns / SQLite mirrors that
+            # haven't been updated yet) working without AttributeError.
+            mtf_agreement=getattr(r, "mtf_agreement", None),
+            mtf_dominant_tf=getattr(r, "mtf_dominant_tf", None),
+            mtf_directions_json=getattr(r, "mtf_directions_json", None),
+            p_win=getattr(r, "p_win", None),
+            effective_score=getattr(r, "effective_score", None),
+            realized_vol_20d=getattr(r, "realized_vol_20d", None),
+            funding_directional_adj=getattr(r, "funding_directional_adj", None),
         ))
     return out
 
