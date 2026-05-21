@@ -48,6 +48,10 @@ _TRAP_CAP: int = 4
 # Kept in sync with app/core/scoring/aggregator.py. 1.0 = no penalty
 # (symmetric LONG/SHORT, 2026-05-14).
 _SHORT_DIRECTION_PENALTY: float = 1.0
+# PR-PLUMBING-1 Fix 1: Binance funding events per day (every 8h = 3/day).
+# Used to convert the per-8h `lookup_latest_funding_rate` return value to the
+# per-day fraction `evaluate_funding_rate` expects.
+_FUNDING_EVENTS_PER_DAY: int = 3
 
 
 def _layer_to_out(layer: LayerScore | None) -> LayerScoreOut | None:
@@ -605,11 +609,12 @@ async def build_prediction(
         final=final,
         session=session,
     )
-    # Convert per-8h Binance funding rate → per-day fraction (3 funding
-    # events per 24h). None-guard so a missing lookup (no session, no rows,
-    # fail-open) propagates as None rather than crashing on arithmetic.
+    # Convert per-8h Binance funding rate → per-day fraction. None-guard so a
+    # missing lookup (no session, no rows, fail-open) propagates as None rather
+    # than crashing on arithmetic.
     _funding_rate_daily = (
-        _funding_rate_per_8h * 3 if _funding_rate_per_8h is not None else None
+        _funding_rate_per_8h * _FUNDING_EVENTS_PER_DAY
+        if _funding_rate_per_8h is not None else None
     )
     # ─── end aggregator hook ─────────────────────────────────────────────
 

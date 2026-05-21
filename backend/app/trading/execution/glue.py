@@ -190,10 +190,16 @@ def proposal_from_prediction(
         return None
     if entry_price <= 0 or stop_loss_price <= 0 or take_profit_price <= 0:
         return None
-    # PR-PLUMBING-1 Fix 1: prefer the threaded per-day rate when present.
-    # `pred_funding_rate_daily or 0.0` collapses both None and 0.0 to the
-    # legacy default (matches the SignalProposal field default), so callers
-    # that don't supply the kwarg behave identically to pre-fix.
+    # PR-PLUMBING-1 Fix 1: prefer the threaded per-day rate when supplied.
+    # `is not None` (not truthiness) so a legitimate 0.0 from the predictor
+    # is preserved and not silently overridden by the legacy
+    # `funding_rate_daily` kwarg. None still falls back, keeping
+    # pre-PR-PLUMBING-1 callers that omit the kwarg byte-identical.
+    threaded_funding_rate_daily = (
+        pred_funding_rate_daily
+        if pred_funding_rate_daily is not None
+        else funding_rate_daily
+    )
     return SignalProposal(
         symbol=symbol, timeframe=timeframe,
         direction=direction,  # type: ignore[arg-type]
@@ -203,7 +209,7 @@ def proposal_from_prediction(
         confidence_pct=pred_confidence * 100.0,
         layer_summary=layer_summary,
         inputs_hash=inputs_hash,
-        funding_rate_daily=pred_funding_rate_daily or funding_rate_daily,
+        funding_rate_daily=threaded_funding_rate_daily,
         chart_base_url=chart_base_url,
         mtf_agreement=mtf_agreement,
         mtf_dominant_tf=mtf_dominant_tf,
