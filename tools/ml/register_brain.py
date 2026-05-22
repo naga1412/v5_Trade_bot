@@ -34,11 +34,19 @@ side. For now, register-only (no auto-activate) is the safer default.
 """
 from __future__ import annotations
 
+# PR-BRAIN-BOOTSTRAP-FIX-3: prepend /app to sys.path so `from app.db.session
+# import ...` works in --direct mode when invoked as `python /app/host-tools/
+# ml/register_brain.py` via `docker compose exec`. The exec shell does NOT
+# inherit uvicorn's PYTHONPATH — only the script's directory is added to
+# sys.path by Python's startup, so `app.*` imports fail without this shim.
+# Same pattern as tools/ml/train_brain.py (PR-BRAIN-BOOTSTRAP-FIX-1).
+import sys
+sys.path.insert(0, "/app")
+
 import argparse
 import hashlib
 import json
 import logging
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
