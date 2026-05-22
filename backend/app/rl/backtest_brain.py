@@ -49,14 +49,38 @@ SHARPE_EPS: float = 1e-8
 
 @dataclass(frozen=True)
 class BacktestResult:
-    """Backtest output the trainer persists into ``rl_checkpoints.eval_results``."""
+    """Backtest output the trainer persists into ``rl_checkpoints.eval_results``.
+
+    PR-BRAIN-CORRECTNESS-METRIC (2026-05-22): added ``brain_correctness``
+    and ``cumulative_reward`` as the primary brain-quality signals.
+
+    Metric audit:
+      * sharpe — BRAIN-SENSITIVE (mean+std of synthetic rewards differ
+        with brain_adjust magnitudes)
+      * max_dd — BRAIN-SENSITIVE (cumulative path differs)
+      * cumulative_reward — BRAIN-SENSITIVE (sum of synthetic rewards;
+        $-denominated read of total brain effect)
+      * brain_correctness — BRAIN-SENSITIVE (PRIMARY signal — fraction of
+        decisions where the brain pushed the multiplier in the helpful
+        direction)
+      * win_rate — INVARIANT to brain (deprecated for brain-quality
+        evaluation; kept for backward compat with existing eval JSONs).
+        See module docstring + brain_backtest_winrate_metric_bug memory.
+      * total_trades — by-design counter, not a brain metric
+
+    For activation gating use ``brain_correctness`` + ``sharpe``. Do NOT
+    use ``win_rate`` as a brain-quality gate.
+    """
 
     sharpe: float
     max_dd: float
-    win_rate: float
+    win_rate: float                # DEPRECATED — invariant to brain decisions
     total_trades: int
     window_start: str
     window_end: str
+    brain_correctness: float = 0.0      # NEW — primary brain-quality metric
+    cumulative_reward: float = 0.0      # NEW — magnitude-aware total brain effect
+    brain_correctness_n: int = 0        # NEW — count of trades scored (denominator)
 
     def as_eval_dict(self) -> dict:
         """Serialise for JSON storage in ``eval_results`` JSONB column."""
@@ -67,6 +91,9 @@ class BacktestResult:
             "total_trades": self.total_trades,
             "window_start": self.window_start,
             "window_end": self.window_end,
+            "brain_correctness": self.brain_correctness,
+            "cumulative_reward": self.cumulative_reward,
+            "brain_correctness_n": self.brain_correctness_n,
         }
 
 
@@ -107,6 +134,48 @@ def _compute_max_drawdown(rewards: np.ndarray) -> float:
     running_peak = np.maximum.accumulate(cumulative)
     drawdown = running_peak - cumulative
     return float(drawdown.max())
+
+
+def _compute_brain_correctness(
+    brain_adjusts: np.ndarray, raw_rewards: np.ndarray,
+) -> tuple[float, int]:
+    """Return (correctness_rate, n_scored).
+
+    The brain is "correct" on a trade when it moved the multiplier in the
+    HELPFUL direction:
+      * brain_adjust > 1 (amplify) + raw_reward > 0 (winner)  → correct
+      * brain_adjust < 1 (suppress) + raw_reward < 0 (loser)   → correct
+      * brain_adjust > 1 + raw_reward < 0  → wrong (amplified a loser)
+      * brain_adjust < 1 + raw_reward > 0  → wrong (suppressed a winner)
+
+    Trades where the brain expressed no opinion (brain_adjust == 1.0,
+    happens when proposed_direction == NEUTRAL) or where the trade had
+    no outcome (raw_reward == 0) are EXCLUDED from the denominator —
+    they're not "wrong," they're "not scored."
+
+    Returns:
+      correctness_rate: float in [0, 1], or 0.0 if no trades scored
+      n_scored: int — denominator size (the denominator the rate is over)
+
+    A random brain → ~0.5. A perfectly predictive brain → 1.0.
+    Below 0.5 = anti-predictive (brain reliably picks the wrong direction).
+    """
+    if brain_adjusts.size == 0 or raw_rewards.size == 0:
+        return 0.0, 0
+    if brain_adjusts.size != raw_rewards.size:
+        raise ValueError(
+            f"brain_adjusts ({brain_adjusts.size}) and raw_rewards "
+            f"({raw_rewards.size}) must have the same length"
+        )
+    # Mask out the "no opinion" / "no outcome" trades.
+    adj_sign = np.sign(brain_adjusts - 1.0)
+    rew_sign = np.sign(raw_rewards)
+    scorable = (adj_sign != 0) & (rew_sign != 0)
+    n_scored = int(scorable.sum())
+    if n_scored == 0:
+        return 0.0, 0
+    correct = (adj_sign[scorable] == rew_sign[scorable])
+    return float(correct.mean()), n_scored
 
 
 def evaluate_brain_on_holdout(
@@ -168,6 +237,8 @@ def evaluate_brain_on_holdout(
     policy.eval()
     try:
         synthetic_rewards: list[float] = []
+        brain_adjusts_list: list[float] = []
+        raw_rewards_list: list[float] = []
         per_trade_records: list[dict] = []
         with torch.no_grad():
             for tr in holdout:
@@ -192,6 +263,8 @@ def evaluate_brain_on_holdout(
                 raw_reward = float(tr.reward)
                 synthetic = raw_reward * float(brain_adjust)
                 synthetic_rewards.append(synthetic)
+                brain_adjusts_list.append(float(brain_adjust))
+                raw_rewards_list.append(raw_reward)
                 if per_trade_log_path is not None:
                     # Capture top-3 action logits for the per-trade audit.
                     # Logits come from a fresh forward pass — cheap (~25K
@@ -232,6 +305,9 @@ def evaluate_brain_on_holdout(
         )
 
     rewards = np.asarray(synthetic_rewards, dtype=np.float64)
+    adjusts = np.asarray(brain_adjusts_list, dtype=np.float64)
+    raws = np.asarray(raw_rewards_list, dtype=np.float64)
+    correctness_rate, n_scored = _compute_brain_correctness(adjusts, raws)
     return BacktestResult(
         sharpe=_compute_sharpe(rewards),
         max_dd=_compute_max_drawdown(rewards),
@@ -239,6 +315,9 @@ def evaluate_brain_on_holdout(
         total_trades=int(rewards.size),
         window_start=str(holdout[0].opened_at_iso),
         window_end=str(holdout[-1].opened_at_iso),
+        brain_correctness=correctness_rate,
+        brain_correctness_n=n_scored,
+        cumulative_reward=float(rewards.sum()) if rewards.size else 0.0,
     )
 
 
@@ -246,4 +325,5 @@ __all__ = [
     "BacktestResult",
     "MIN_HOLDOUT_TRADES",
     "evaluate_brain_on_holdout",
+    "_compute_brain_correctness",  # exposed for tests + reeval harness
 ]
