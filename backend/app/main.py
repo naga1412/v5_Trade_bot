@@ -76,7 +76,7 @@ from app.trading.execution.live_exit_monitor import (
 from app.trading.execution.liquidation_monitor import (
     start_liquidation_monitor,
 )
-from app.trading.preflight import run_preflight
+from app.trading.preflight import check_audit_chain_intact, run_preflight
 from app.ws.keepalive import start_keepalive_task
 from app.ws.live_prediction import start_background_worker
 from app.core.scoring.mtf_confluence import (
@@ -288,28 +288,44 @@ async def lifespan(_app: FastAPI):
         # + ghost candles + dashboard keep running normally.
         if settings.autonomous_trading_enabled:
             try:
+                # PR-DECOUPLE-WORKERS: split the gate into two profiles.
+                # The reader profile (4 checks) gates safety-net worker
+                # spawn. The chain_intact check is run SEPARATELY purely
+                # for differential alerting — a broken chain no longer
+                # kills the safety net. Only run the chain check when
+                # reader passed; if reader failed the spawn aborts anyway
+                # and the chain status is irrelevant to alerting.
                 async with session_factory() as preflight_session:
-                    pf = await run_preflight(
-                        preflight_session, use_testnet=settings.binance_use_testnet,
+                    pf_reader = await run_preflight(
+                        preflight_session,
+                        use_testnet=settings.binance_use_testnet,
+                        profile="chain_reader",
                     )
-                if pf.all_passed:
+                    if pf_reader.all_passed:
+                        chain_check = await check_audit_chain_intact(
+                            preflight_session,
+                        )
+                    else:
+                        chain_check = None
+                if pf_reader.all_passed and chain_check is not None and chain_check.passed:
+                    # Happy path: all 5 effective checks passed.
                     log.info(
-                        "autonomous trading: pre-flight passed (%s)",
-                        pf.summary_line(),
+                        "autonomous trading: pre-flight passed (%s + "
+                        "audit_chain_intact)",
+                        pf_reader.summary_line(),
                     )
-                    # PR-PREFLIGHT-ALERT Fix C: heartbeat row marking the
-                    # preflight as "ran and passed". Distinguishes this
-                    # from "never ran" (no row at all when
-                    # autonomous_trading_enabled=False) so the watchdog /
-                    # operator can correlate a deploy with a successful
-                    # gate. record_heartbeat is best-effort internally.
+                    # PR-PREFLIGHT-ALERT Fix C / PR-DECOUPLE-WORKERS:
+                    # heartbeat row marking the preflight as "ran and
+                    # passed". profile='chain_writer' indicates full
+                    # 5-check success.
                     try:
                         await _record_heartbeat(
                             session_factory, _PREFLIGHT_WORKER_NAME,
                             status="passed",
                             details={
-                                "passed_count": len(pf.checks),
-                                "total_count": len(pf.checks),
+                                "profile": "chain_writer",
+                                "passed_count": len(pf_reader.checks) + 1,
+                                "total_count": len(pf_reader.checks) + 1,
                             },
                         )
                     except Exception as hb_exc:  # noqa: BLE001
@@ -317,6 +333,57 @@ async def lifespan(_app: FastAPI):
                             "preflight pass heartbeat write failed: %s",
                             hb_exc,
                         )
+                if pf_reader.all_passed:
+                    # PR-DECOUPLE-WORKERS partial-pass branch: reader
+                    # checks all green but the chain WRITER is blocked
+                    # (FU-24 race). Safety-net workers are SAFE to spawn
+                    # because they do not insert chained rows. Emit a
+                    # different alert so the operator knows the bot is
+                    # partially functional and what to do (FU-24 sweep).
+                    assert chain_check is not None  # guaranteed by branch above
+                    if not chain_check.passed:
+                        log.warning(
+                            "autonomous trading: chain WRITER blocked "
+                            "(FU-24); safety-net OK — %s",
+                            chain_check.detail,
+                        )
+                        try:
+                            await _route_alert(
+                                (
+                                    "⚠️ Audit chain WRITER blocked "
+                                    "(FU-24 race active). Safety-net "
+                                    "workers RUNNING. Run FU-24 sweep "
+                                    "when convenient. Live writes "
+                                    "blocked until chain healed."
+                                ),
+                                level="critical",
+                            )
+                        except Exception as alert_exc:  # noqa: BLE001
+                            log.error(
+                                "chain-writer-blocked alert dispatch "
+                                "failed: %s",
+                                alert_exc,
+                            )
+                        try:
+                            await _record_heartbeat(
+                                session_factory, _PREFLIGHT_WORKER_NAME,
+                                status="reader_only_passed",
+                                details={
+                                    "profile": "chain_reader",
+                                    "passed_count": len(pf_reader.checks),
+                                    "total_count": len(pf_reader.checks) + 1,
+                                    "failed_checks": [chain_check.name],
+                                    "failed_check_details": {
+                                        chain_check.name: chain_check.detail,
+                                    },
+                                },
+                            )
+                        except Exception as hb_exc:  # noqa: BLE001
+                            log.warning(
+                                "preflight reader_only_passed heartbeat "
+                                "write failed: %s",
+                                hb_exc,
+                            )
                     # SP-8 Phase J: cache the decrypted Binance keys at
                     # module level. The live worker calls vault_keys() on
                     # every tick — a cache miss returns None and the worker
@@ -408,9 +475,12 @@ async def lifespan(_app: FastAPI):
                             "startup; live workers will skip dispatch",
                         )
                 else:
-                    failed_checks = [c.name for c in pf.failures()]
+                    # PR-DECOUPLE-WORKERS: reader-side failure path —
+                    # uses the existing PR-PREFLIGHT-ALERT semantics
+                    # unchanged. Safety-net workers do NOT spawn.
+                    failed_checks = [c.name for c in pf_reader.failures()]
                     failures = "; ".join(
-                        f"{c.name}={c.detail}" for c in pf.failures()
+                        f"{c.name}={c.detail}" for c in pf_reader.failures()
                     )
                     # PR-PREFLIGHT-ALERT Fix A: elevate to CRITICAL so an
                     # unconfigured-telegram operator still sees a level
@@ -418,10 +488,13 @@ async def lifespan(_app: FastAPI):
                     log.critical(
                         "autonomous trading DISABLED: pre-flight failed "
                         "(%d/%d) — %s",
-                        len(pf.failures()), len(pf.checks), failures,
+                        len(pf_reader.failures()), len(pf_reader.checks),
+                        failures,
                     )
-                    passed_count = len(pf.checks) - len(pf.failures())
-                    total_count = len(pf.checks)
+                    passed_count = (
+                        len(pf_reader.checks) - len(pf_reader.failures())
+                    )
+                    total_count = len(pf_reader.checks)
                     # PR-PREFLIGHT-ALERT Fix A — telegram alert.
                     # Best-effort; the alerter must NEVER kill lifespan.
                     try:
@@ -455,7 +528,7 @@ async def lifespan(_app: FastAPI):
                                 "failed_checks": failed_checks,
                                 "failed_check_details": {
                                     c.name: c.detail
-                                    for c in pf.failures()
+                                    for c in pf_reader.failures()
                                 },
                             },
                         )
