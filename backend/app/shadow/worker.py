@@ -37,7 +37,7 @@ from app.shadow.engine import (
     ShadowPosition,
     SignalEvaluator,
 )
-from app.shadow.exit_monitor import ExitDecision, check_exit
+from app.shadow.exit_monitor import ExitDecision, ExitReason, check_exit
 from app.shadow.multi_stream import MultiStreamCandle, MultiStreamReader
 from app.shadow.observation import build_obs_components, persist_observation
 from app.shadow.persistence import (
@@ -461,6 +461,48 @@ class ShadowWorker:
             )
             return
 
+        # FU-33: slippage circuit-breaker. Only fires on SL exits — TP /
+        # TIMEOUT are not "slippage" events. Wrapped best-effort so a
+        # guard failure cannot suppress the publish path below. The
+        # guard short-circuits to halt=False when the flag is OFF, so
+        # the only DB I/O on the dormant default is the symbol-halted
+        # PK check inside check_slippage (and that only runs on
+        # threshold breach, which can't happen flag-OFF).
+        if decision.reason is ExitReason.STOP_LOSS:
+            from app.config import get_settings as _get_slippage_settings
+            from app.shadow.engine import Direction as _Dir
+            from app.trading.slippage_guard import check_slippage
+            try:
+                _entry = pos.entry_price
+                if _entry > 0:
+                    # Expected = the SL distance the engine sized the
+                    # position at (the price would-have-been the trigger
+                    # if there were zero slippage).
+                    expected_sl_pct = (
+                        (pos.stop_loss - _entry) / _entry * 100.0
+                        if pos.direction is _Dir.LONG
+                        else (_entry - pos.stop_loss) / _entry * 100.0
+                    )
+                    actual_sl_pct = (
+                        (decision.exit_price - _entry) / _entry * 100.0
+                        if pos.direction is _Dir.LONG
+                        else (_entry - decision.exit_price) / _entry * 100.0
+                    )
+                    async with self.session_factory() as slip_session:
+                        await check_slippage(
+                            slip_session, symbol=candle.symbol,
+                            expected_sl_pct=expected_sl_pct,
+                            actual_sl_pct=actual_sl_pct,
+                            settings=_get_slippage_settings(),
+                        )
+                        await slip_session.commit()
+            except Exception as slip_err:  # noqa: BLE001
+                log.warning(
+                    "shadow_worker: slippage check failed for %s/%s "
+                    "(suppressed): %s",
+                    candle.symbol, tf, slip_err,
+                )
+
         # Update in-memory caches only after the DB commit succeeds.
         self.open_positions.pop(key, None)
         self.cooldowns[key] = cooldown_until
@@ -483,6 +525,29 @@ class ShadowWorker:
     async def _maybe_open_position(
         self, candle: MultiStreamCandle, buf: pd.DataFrame, tf: str,
     ) -> None:
+        # FU-33: slippage circuit-breaker. Skip the symbol entirely while
+        # an unexpired halt is recorded on `symbol_halt_state`. Always-on
+        # at the call-site; check_slippage gates itself on
+        # SLIPPAGE_GUARD_ENABLED so a halt row only exists when the
+        # operator has flipped the flag and an SL slippage trigger fired.
+        # The read is best-effort: a DB blip MUST NOT block legitimate
+        # entries — fall through to the normal path on any error.
+        from app.trading.slippage_guard import is_symbol_halted
+        try:
+            async with self.session_factory() as halt_session:
+                if await is_symbol_halted(halt_session, symbol=candle.symbol):
+                    log.info(
+                        "shadow_worker: %s/%s SLIPPAGE_HALT — skipping entry",
+                        candle.symbol, tf,
+                    )
+                    return
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "shadow_worker: slippage halt-check failed for %s/%s "
+                "(fail-open): %s",
+                candle.symbol, tf, e,
+            )
+
         # PR3: PositionGate consumes the per-TF state. open_symbols and
         # cooldowns are filtered to entries matching THIS tf so a 1h BTC
         # cooldown does not block a 15m BTC entry (and vice versa).
