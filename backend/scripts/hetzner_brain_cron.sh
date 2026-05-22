@@ -98,10 +98,15 @@ log "eval file: ${EVAL_FILE}"
 # bind-mounted from $RL_CACHE_DIR (host) via the docker-compose volume
 # from PR #41, so the .pt the trainer just wrote is visible inside.
 log "▶ Phase D — registering candidate in rl_checkpoints"
+# --direct bypasses the HTTP /api/v1/admin/rl-checkpoints route, which is
+# gated by Cloudflare Access JWT (require_admin → require_cf_user) in
+# ENV=production. The cron has no JWT/bearer, so the HTTP path 401's.
+# --direct writes the row via SQLAlchemy using app.db.session — runs inside
+# the backend container where PYTHONPATH already includes /app.
 REGISTER_CMD="python /app/host-tools/ml/register_brain.py \
   --checkpoint /app/data/rl-cache/ppo_policy_${VERSION}.pt \
   --eval /app/data/rl-cache/eval_brain_${VERSION}.json \
-  --base-url http://localhost:8000"
+  --direct"
 
 REGISTER_OUT=$(cd "$INSTALL_DIR" && docker compose exec -T backend bash -c "$REGISTER_CMD" 2>&1 || true)
 echo "$REGISTER_OUT" >> "$LOG_FILE"
