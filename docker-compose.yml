@@ -43,6 +43,20 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+    # PR-FIX-FLAG-BINDING (2026-05-22): inject the full host .env into the
+    # backend container so pydantic-settings can bind UPPERCASE strategy
+    # flags (DISABLE_SHORT_SIGNALS, MIN_ENTRY_SCORE_LONG, SYMBOL_ALLOWLIST_ENABLED,
+    # DYNAMIC_SIZING_ENABLED, LIVE_COOLDOWN_ENABLED, MTF_MIN_AGREEMENT_1H, …).
+    # Pre-fix, the explicit `environment:` allowlist below was the ONLY
+    # channel — flags not enumerated here silently fell back to defaults
+    # regardless of what the operator put in .env. Discovered when the
+    # 2026-05-21 DISABLE_SHORT_SIGNALS flip didn't take effect (verify
+    # probe run 26249116921). The explicit entries below remain because
+    # `environment:` takes precedence over `env_file:` when both set the
+    # same key, preserving the YAML-interpolation defaults (`:-false`) for
+    # vars that are core deploy infrastructure.
+    env_file:
+      - .env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
@@ -52,10 +66,8 @@ services:
       CF_ACCESS_AUD: ${CF_ACCESS_AUD}
       BINANCE_USE_TESTNET: ${BINANCE_USE_TESTNET}
       MASTER_PASSPHRASE: ${MASTER_PASSPHRASE}
-      # SP-8 Phase J: autonomous trading. Without these the lifespan
-      # never reaches the pre-flight branch and the live workers
-      # never start (container env doesn't see vars unless listed
-      # here, even when set in .env).
+      # SP-8 Phase J: autonomous trading. Listed explicitly so the
+      # `:-false` default applies when the var is missing from .env.
       AUTONOMOUS_TRADING_ENABLED: ${AUTONOMOUS_TRADING_ENABLED:-false}
       AUTO_PROMOTE_TO_TELEGRAM_ENABLED: ${AUTO_PROMOTE_TO_TELEGRAM_ENABLED:-false}
       AUTO_PROMOTE_TO_FULLYAUTO_ENABLED: ${AUTO_PROMOTE_TO_FULLYAUTO_ENABLED:-false}
