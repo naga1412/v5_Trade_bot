@@ -183,26 +183,38 @@ async def _evaluate_mae(  # pragma: no cover — TDD seam, mocked in tests
     return max(0.0, min(1.0, 1.0 - result.win_rate))
 
 
-async def _evaluate_sharpe(  # pragma: no cover — TDD seam, mocked in tests
+async def _evaluate_sharpe(
     session: "AsyncSession",
     checkpoint_id: int,
 ) -> float:
-    """Backtest the given RL checkpoint and return its Sharpe ratio.
+    """Return the RL checkpoint's Sharpe — read from ``eval_results`` JSONB.
 
-    SP-4 Phase D — for L10 brain checkpoints, the metric is the
-    portfolio-level Sharpe ratio over the held-out window. Like
-    :func:`_evaluate_mae`, this delegates to the existing backtest
-    runner — for v1 we read ``result.sharpe`` directly. Tests
-    monkeypatch this seam so they never hit real OHLCV / brain
-    inference.
+    PR-BRAIN-BACKTEST-PHASEB5 (2026-05-22): the trainer
+    (:mod:`app.rl.backtest_brain`) computes Sharpe on a chronological
+    80/20 holdout AT TRAINING TIME and persists it in
+    ``rl_checkpoints.eval_results->>'sharpe'``. This helper no longer
+    re-runs a backtest at activation time — it just reads the column.
 
-    Returns the raw Sharpe (typically ~0..3 for crypto strategies).
-    Bootstrap callers (no champion yet) accept any value via the
-    `is None` branch upstream.
+    Returns ``0.0`` when the row has no Sharpe (legacy id=1, id=2 from
+    pre-PR-BACKTEST-PHASEB5 era still carry
+    ``{"_status": "deferred_to_phase_b5"}``; insufficient-data runs
+    carry ``{"_status": "insufficient_data", ...}``). The upstream
+    bootstrap branch (``champion_row is None``) auto-passes when there
+    is no incumbent, so 0.0 here is safe for the bootstrap path. For
+    head-to-head comparisons, 0.0 means "any new checkpoint with a real
+    Sharpe wins" — appropriate behaviour while we accumulate replay
+    data.
     """
-    from tools.backtest import run_backtest
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=HELD_OUT_DAYS)
-    result = run_backtest(symbol="BTC/USDT", timeframe="1h", start=start, end=end)
-    return float(getattr(result, "sharpe", 0.0))
+    row = (await session.execute(
+        sa.text(
+            "SELECT eval_results->>'sharpe' AS sharpe "
+            "FROM rl_checkpoints WHERE id = :i"
+        ),
+        {"i": checkpoint_id},
+    )).first()
+    if row is None or row.sharpe is None:
+        return 0.0
+    try:
+        return float(row.sharpe)
+    except (TypeError, ValueError):
+        return 0.0
