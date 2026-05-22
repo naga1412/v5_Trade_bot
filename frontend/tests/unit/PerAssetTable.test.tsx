@@ -120,4 +120,55 @@ describe("PerAssetTable", () => {
     expect(section?.className).toContain("overflow-y-auto");
     expect(section?.className).toContain("max-h-[60vh]");
   });
+
+  // ---------- PR-CLEANUP-BATCH-1 §J: Sharpe display sanity ----------
+  // Sharpe computed on N<5 trades is statistically meaningless. Suppress
+  // the value + show a tooltip explaining why.
+  test("PR-CLEANUP-BATCH-1 §J: renders em-dash for Sharpe when trades < 5", async () => {
+    const lowN: PerAssetStat[] = [
+      { symbol: "BTC/USDT", trades: 3, win_rate: 0.66, avg_rr: 2.0, pnl_usdt: 10.0,
+        sharpe_annualized: 1.2, computed_at: COMPUTED_AT, last_trade_closed_at: LAST_TRADE },
+    ];
+    vi.mocked(api.perAssetStats).mockResolvedValue(lowN);
+    render(<PerAssetTable />);
+    await waitFor(() => {
+      expect(screen.getByText("BTC/USDT")).toBeInTheDocument();
+    });
+    // The Sharpe cell shows em-dash, NOT "1.20".
+    const rows = screen.getAllByRole("row");
+    // sharpe cell is column index 5 (0=Symbol, 1=Trades, 2=Win%, 3=RR, 4=P&L, 5=Sharpe).
+    const sharpeCell = rows[1]?.children[5];
+    expect(sharpeCell?.textContent).toBe("—");
+    expect(sharpeCell?.textContent).not.toContain("1.20");
+  });
+
+  test("PR-CLEANUP-BATCH-1 §J: renders Sharpe value when trades >= 5", async () => {
+    const okN: PerAssetStat[] = [
+      { symbol: "BTC/USDT", trades: 5, win_rate: 0.60, avg_rr: 2.0, pnl_usdt: 10.0,
+        sharpe_annualized: 1.2, computed_at: COMPUTED_AT, last_trade_closed_at: LAST_TRADE },
+    ];
+    vi.mocked(api.perAssetStats).mockResolvedValue(okN);
+    render(<PerAssetTable />);
+    await waitFor(() => {
+      expect(screen.getByText("BTC/USDT")).toBeInTheDocument();
+    });
+    const rows = screen.getAllByRole("row");
+    const sharpeCell = rows[1]?.children[5];
+    expect(sharpeCell?.textContent).toBe("1.20");
+  });
+
+  test("PR-CLEANUP-BATCH-1 §J: tooltip explains low-N suppression", async () => {
+    const lowN: PerAssetStat[] = [
+      { symbol: "BTC/USDT", trades: 3, win_rate: 0.66, avg_rr: 2.0, pnl_usdt: 10.0,
+        sharpe_annualized: 1.2, computed_at: COMPUTED_AT, last_trade_closed_at: LAST_TRADE },
+    ];
+    vi.mocked(api.perAssetStats).mockResolvedValue(lowN);
+    render(<PerAssetTable />);
+    await waitFor(() => {
+      expect(screen.getByText("BTC/USDT")).toBeInTheDocument();
+    });
+    const rows = screen.getAllByRole("row");
+    const sharpeCell = rows[1]?.children[5] as HTMLElement | undefined;
+    expect(sharpeCell?.getAttribute("title")).toBe("Insufficient sample (N=3)");
+  });
 });
