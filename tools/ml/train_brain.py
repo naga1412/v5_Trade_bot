@@ -56,6 +56,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "backend"))
 
 from app.rl.adapter import AssetEmbeddingTable  # noqa: E402
+from app.rl.backtest_brain import (  # noqa: E402
+    BacktestResult,
+    evaluate_brain_on_holdout,
+)
 from app.rl.policy import PolicyNetwork, count_params  # noqa: E402
 from app.rl.ppo import TrainConfig, train_ppo  # noqa: E402
 from app.rl.replay_buffer import load_from_shadow_trades  # noqa: E402
@@ -165,15 +169,30 @@ def save_checkpoint(
 
 
 def build_eval_doc(
-    *, version: str, transitions, train_history, all_pass: bool,
+    *,
+    version: str,
+    transitions,
+    train_history,
+    all_pass: bool,
+    backtest: BacktestResult | dict | None = None,
 ) -> dict:
     """Assemble the eval JSON the registrar expects.
 
-    For the v1 trainer this is mostly training metadata + a placeholder
-    for backtest results. The 6-month backtest (spec sec 5.3) will be
-    wired in Phase B5 alongside the smoke tests; until then we report
-    training-side metrics only and the operator gates promotion manually.
+    ``backtest`` is either a :class:`BacktestResult` (populated metrics),
+    a sentinel dict like ``{"_status": "insufficient_data", ...}`` when
+    the buffer is too small for a stable Sharpe, or ``None`` (only used
+    by tests that haven't wired the backtest fixture).
     """
+    if backtest is None:
+        backtest_results: dict = {
+            "_status": "not_evaluated",
+            "_note": "evaluate_brain_on_holdout was not called by this entrypoint",
+        }
+    elif isinstance(backtest, BacktestResult):
+        backtest_results = backtest.as_eval_dict()
+    else:
+        backtest_results = backtest
+
     return {
         "model_name": "ppo_policy_v1",
         "version": version,
@@ -191,15 +210,7 @@ def build_eval_doc(
             "final_entropy": train_history[-1].entropy if train_history else None,
         },
         "all_regimes_pass": all_pass,
-        "backtest_results": {
-            "_status": "deferred_to_phase_b5",
-            "_note": (
-                "6-month per-asset Sharpe + portfolio-level metrics will be "
-                "computed by tools/ml/backtest_brain.py once Phase B5 lands. "
-                "Until then promote checkpoints via Telegram-approve mode "
-                "with the operator inspecting raw rewards."
-            ),
-        },
+        "backtest_results": backtest_results,
     }
 
 
@@ -281,6 +292,14 @@ async def _async_main(args: argparse.Namespace) -> int:
         device=device,
     )
 
+    # PR-BRAIN-BACKTEST-PHASEB5: chronological 80/20 holdout backtest of the
+    # newly-trained policy. Result is persisted into rl_checkpoints.eval_results
+    # so champion_challenger._evaluate_sharpe can read it without re-running.
+    backtest_outcome = evaluate_brain_on_holdout(
+        policy=policy, transitions=transitions, device=device,
+    )
+    log.info("backtest: %s", backtest_outcome)
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     version = args.version_tag or datetime.now(timezone.utc).strftime(
@@ -295,6 +314,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     eval_doc = build_eval_doc(
         version=version, transitions=transitions,
         train_history=train_result.history, all_pass=False,
+        backtest=backtest_outcome,
     )
     eval_doc["sha256"] = sha
     eval_path.write_text(json.dumps(eval_doc, indent=2, default=str))
