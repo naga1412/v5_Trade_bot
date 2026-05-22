@@ -26,7 +26,9 @@ Known limitations (documented for follow-ups):
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -114,6 +116,7 @@ def evaluate_brain_on_holdout(
     transitions: Sequence[Transition],
     holdout_fraction: float = 0.2,
     device: torch.device | None = None,
+    per_trade_log_path: Path | None = None,
 ) -> BacktestResult | dict:
     """Run the trained policy on the last ``holdout_fraction`` of transitions.
 
@@ -123,6 +126,12 @@ def evaluate_brain_on_holdout(
     would evaluate the trained policy against the PRE-TRAINING
     embeddings still baked into ``transition.obs`` (frozen at buffer
     build time) — invisible to the freshly-trained embedding weights.
+
+    PR-BRAIN-COLD-START-PROBE (2026-05-22): added optional
+    ``per_trade_log_path``. When provided, writes a JSON sidecar with
+    one row per holdout transition: brain action, top-3 logits, recorded
+    direction, synthetic reward, raw reward. Used by misclass-audit
+    workflow to identify systematic decision errors.
 
     Returns a :class:`BacktestResult` when the holdout has at least
     :data:`MIN_HOLDOUT_TRADES` rows; otherwise returns
@@ -159,6 +168,7 @@ def evaluate_brain_on_holdout(
     policy.eval()
     try:
         synthetic_rewards: list[float] = []
+        per_trade_records: list[dict] = []
         with torch.no_grad():
             for tr in holdout:
                 obs_t = torch.from_numpy(tr.obs).unsqueeze(0).to(dev)
@@ -179,11 +189,47 @@ def evaluate_brain_on_holdout(
                 brain_adjust = action_to_brain_adjust(
                     action_str, proposed_direction=proposed,
                 )
-                synthetic_rewards.append(
-                    float(tr.reward) * float(brain_adjust),
-                )
+                raw_reward = float(tr.reward)
+                synthetic = raw_reward * float(brain_adjust)
+                synthetic_rewards.append(synthetic)
+                if per_trade_log_path is not None:
+                    # Capture top-3 action logits for the per-trade audit.
+                    # Logits come from a fresh forward pass — cheap (~25K
+                    # params) and the hot-swap obs is already on dev.
+                    out = policy.forward(obs_live)
+                    logits = out.logits.squeeze(0).cpu().numpy()
+                    top3_idx = np.argsort(-logits)[:3]
+                    top3 = [
+                        {
+                            "action": ALL_ACTIONS[int(i)],
+                            "logit": float(logits[int(i)]),
+                        }
+                        for i in top3_idx
+                    ]
+                    per_trade_records.append({
+                        "symbol": tr.symbol,
+                        "asset_id": tr.asset_id,
+                        "opened_at": tr.opened_at_iso,
+                        "recorded_action": tr.action,
+                        "recorded_direction": proposed,
+                        "brain_action": action_str,
+                        "brain_top3_logits": top3,
+                        "brain_adjust": float(brain_adjust),
+                        "raw_reward": raw_reward,
+                        "synthetic_reward": synthetic,
+                        "outcome": (
+                            "WIN" if synthetic > 0
+                            else "LOSS" if synthetic < 0
+                            else "FLAT"
+                        ),
+                    })
     finally:
         policy.train(was_training)
+
+    if per_trade_log_path is not None and per_trade_records:
+        per_trade_log_path.write_text(
+            json.dumps(per_trade_records, indent=2, default=str),
+        )
 
     rewards = np.asarray(synthetic_rewards, dtype=np.float64)
     return BacktestResult(

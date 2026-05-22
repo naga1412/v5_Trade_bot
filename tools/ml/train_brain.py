@@ -293,19 +293,6 @@ async def _async_main(args: argparse.Namespace) -> int:
         device=device,
     )
 
-    # PR-BRAIN-BACKTEST-PHASEB5: chronological 80/20 holdout backtest of the
-    # newly-trained policy. Result is persisted into rl_checkpoints.eval_results
-    # so champion_challenger._evaluate_sharpe can read it without re-running.
-    # PR-BRAIN-EMBEDDINGS-LEARNABLE: pass asset_table so the backtest uses the
-    # post-training embeddings (hot-swap), not the pre-baked frozen values.
-    backtest_outcome = evaluate_brain_on_holdout(
-        policy=policy,
-        asset_table=asset_table,
-        transitions=transitions,
-        device=device,
-    )
-    log.info("backtest: %s", backtest_outcome)
-
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     version = args.version_tag or datetime.now(timezone.utc).strftime(
@@ -313,6 +300,24 @@ async def _async_main(args: argparse.Namespace) -> int:
     )
     ckpt_path = out_dir / f"ppo_policy_{version}.pt"
     eval_path = out_dir / f"eval_brain_{version}.json"
+    # PR-BRAIN-COLD-START-PROBE: per-trade audit sidecar for misclass analysis.
+    per_trade_path = out_dir / f"eval_brain_{version}_per_trade.json"
+
+    # PR-BRAIN-BACKTEST-PHASEB5: chronological 80/20 holdout backtest of the
+    # newly-trained policy. Result is persisted into rl_checkpoints.eval_results
+    # so champion_challenger._evaluate_sharpe can read it without re-running.
+    # PR-BRAIN-EMBEDDINGS-LEARNABLE: pass asset_table so the backtest uses the
+    # post-training embeddings (hot-swap), not the pre-baked frozen values.
+    # PR-BRAIN-COLD-START-PROBE: pass per_trade_log_path so misclass audit
+    # has the per-trade decision dump alongside the summary metrics.
+    backtest_outcome = evaluate_brain_on_holdout(
+        policy=policy,
+        asset_table=asset_table,
+        transitions=transitions,
+        device=device,
+        per_trade_log_path=per_trade_path,
+    )
+    log.info("backtest: %s", backtest_outcome)
 
     sha = save_checkpoint(
         policy=policy, asset_table=asset_table, ckpt_path=ckpt_path,

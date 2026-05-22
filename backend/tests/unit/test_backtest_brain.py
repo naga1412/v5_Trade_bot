@@ -211,6 +211,73 @@ def test_evaluate_preserves_policy_eval_mode() -> None:
     assert policy.training is False
 
 
+def test_evaluate_writes_per_trade_sidecar_when_path_given(tmp_path) -> None:
+    """PR-BRAIN-COLD-START-PROBE — per_trade_log_path argument writes a
+    JSON sidecar with one record per holdout trade, capturing brain
+    action + top-3 logits + outcome for misclass audit."""
+    import json
+    import torch
+    torch.manual_seed(7)
+    policy = PolicyNetwork()
+    transitions = [
+        _make_transition(
+            reward=0.05 if i % 2 == 0 else -0.05,
+            opened_at_iso=f"2026-05-{(i % 28) + 1:02d}T12:00:00+00:00",
+        )
+        for i in range(120)
+    ]
+    sidecar = tmp_path / "per_trade.json"
+
+    result = evaluate_brain_on_holdout(
+        policy=policy, asset_table=_asset_table(),
+        transitions=transitions, per_trade_log_path=sidecar,
+    )
+
+    assert isinstance(result, BacktestResult)
+    assert sidecar.exists(), "sidecar JSON not written"
+    records = json.loads(sidecar.read_text())
+    assert len(records) == result.total_trades
+    # Schema check on first record
+    r0 = records[0]
+    expected_keys = {
+        "symbol", "asset_id", "opened_at", "recorded_action",
+        "recorded_direction", "brain_action", "brain_top3_logits",
+        "brain_adjust", "raw_reward", "synthetic_reward", "outcome",
+    }
+    assert expected_keys.issubset(r0.keys())
+    # top3 should have exactly 3 entries each with action + logit
+    assert len(r0["brain_top3_logits"]) == 3
+    for entry in r0["brain_top3_logits"]:
+        assert "action" in entry and "logit" in entry
+    assert r0["outcome"] in {"WIN", "LOSS", "FLAT"}
+
+
+def test_evaluate_does_not_write_sidecar_when_path_none(tmp_path) -> None:
+    """Default behavior: no sidecar path → no file written.
+
+    Backward-compat: existing callers without per_trade_log_path keep
+    working with no extra I/O.
+    """
+    import torch
+    torch.manual_seed(7)
+    policy = PolicyNetwork()
+    transitions = [
+        _make_transition(
+            reward=0.05,
+            opened_at_iso=f"2026-05-{(i % 28) + 1:02d}T12:00:00+00:00",
+        )
+        for i in range(120)
+    ]
+
+    nonexistent = tmp_path / "should_not_be_created.json"
+    evaluate_brain_on_holdout(
+        policy=policy, asset_table=_asset_table(),
+        transitions=transitions,
+        # per_trade_log_path defaults to None
+    )
+    assert not nonexistent.exists()
+
+
 def test_backtest_result_as_eval_dict_round_trips() -> None:
     """The serialised dict has exactly the 6 expected keys with float/int types."""
     result = BacktestResult(
