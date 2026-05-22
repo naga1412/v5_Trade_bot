@@ -699,12 +699,10 @@ jobs:
                  echo '' && \
                  echo '=== running reeval against _predegenerate/ ===' && \
                  docker compose exec -T backend python /app/host-tools/ml/reeval_checkpoints.py \
-                   --pt-glob '/app/data/rl-cache/_predegenerate/ppo_policy_v*.pt' \
-                   --db-url postgresql+asyncpg://postgres:postgres@postgres:5432/trading_radar && \
+                   --pt-glob '/app/data/rl-cache/_predegenerate/ppo_policy_v*.pt' && \
                  echo '' && \
                  echo '=== running reeval against rl-cache/ (post-archive newer checkpoints) ===' && \
                  docker compose exec -T backend python /app/host-tools/ml/reeval_checkpoints.py \
-                   --pt-glob '/app/data/rl-cache/ppo_policy_v*.pt' \
-                   --db-url postgresql+asyncpg://postgres:postgres@postgres:5432/trading_radar || true"
+                   --pt-glob '/app/data/rl-cache/ppo_policy_v*.pt' || true"
               ;;
           esac
