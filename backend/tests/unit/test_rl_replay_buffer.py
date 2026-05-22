@@ -230,6 +230,44 @@ async def test_asset_id_map_assigns_per_symbol(session: AsyncSession) -> None:
     assert by_symbol == {"BTC/USDT": 0, "ETH/USDT": 1}
 
 
+@pytest.mark.asyncio
+async def test_load_from_shadow_trades_uses_provided_embeddings(
+    session: AsyncSession,
+) -> None:
+    """PR-BRAIN-WARMSTART-FIX: when asset_embeddings is provided, each
+    transition's obs contains the supplied embedding bytes for that asset_id
+    (not the zero fallback). Pins the bug that produced rl_checkpoints.id=1's
+    all-zero asset-id-zero observations.
+    """
+    await _insert_trade(session, sid="a-1", symbol="ASYMUSDT")
+    await _insert_trade(session, sid="b-1", symbol="BSYMUSDT")
+    await _insert_trade(session, sid="c-1", symbol="CSYMUSDT")
+    sym_to_id = {"ASYMUSDT": 0, "BSYMUSDT": 1, "CSYMUSDT": 2}
+    asset_embeddings = {
+        0: np.full(32, 1.0, dtype=np.float32),
+        1: np.full(32, 2.0, dtype=np.float32),
+        2: np.full(32, 3.0, dtype=np.float32),
+    }
+    out = await load_from_shadow_trades(
+        session,
+        window_days=365,
+        asset_id_for_symbol=sym_to_id,
+        asset_embeddings=asset_embeddings,
+    )
+    by_symbol = {t.symbol: t for t in out}
+    # The first 32 floats of every obs are the asset embedding (per obs.py
+    # build_observation: parts[0] = asset.embedding).
+    np.testing.assert_array_equal(
+        by_symbol["ASYMUSDT"].obs[:32], asset_embeddings[0],
+    )
+    np.testing.assert_array_equal(
+        by_symbol["BSYMUSDT"].obs[:32], asset_embeddings[1],
+    )
+    np.testing.assert_array_equal(
+        by_symbol["CSYMUSDT"].obs[:32], asset_embeddings[2],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Migration 0019 — shadow_observations table. The loader LEFT-JOINs against
 # this table to prefer exact obs components captured at trade-open time over

@@ -19,6 +19,7 @@ new symbols at runtime + a save/load pair for checkpoint persistence.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -79,6 +80,33 @@ class AssetEmbeddingTable:
                 median = known.median(dim=0).values
                 self._module.weight[next_id] = median
         return next_id
+
+    def bulk_register(self, symbols: Iterable[str]) -> None:
+        """Pre-register many symbols WITHOUT median-seeding their embeddings.
+
+        Differs from :meth:`register_asset`: we preserve the independent
+        Gaussian-init weight that ``__post_init__`` placed in each slot,
+        so the brain sees diverse per-asset signal during training.
+
+        ``register_asset`` is meant for INFERENCE-time unseen-symbol entry
+        (median-seed gives an "average asset" cold-start). Using it in a
+        tight training-time loop collapses all embeddings to a single
+        cluster near the first asset's Gaussian sample — which is what
+        produced the degenerate ``rl_checkpoints.id=1`` state.
+
+        Already-registered symbols are skipped (idempotent).
+        """
+        for symbol in symbols:
+            if symbol in self.symbol_to_id:
+                continue
+            next_id = len(self.symbol_to_id)
+            if next_id >= self.n_slots:
+                raise RuntimeError(
+                    f"AssetEmbeddingTable full: {self.n_slots} slots used"
+                )
+            self.symbol_to_id[symbol] = next_id
+            # Intentionally NO weight overwrite — preserves the Gaussian
+            # init from __post_init__.
 
     def get_embedding(
         self, symbol: str, *, n_trades_for_asset: int = 0,
