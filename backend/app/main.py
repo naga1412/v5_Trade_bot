@@ -3,7 +3,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +48,8 @@ from app.news.ingest_worker import (
     start_news_cleanup_task,
     start_news_ingest_task,
 )
+from app.ops.alert_routing import alert_admin as _route_alert
+from app.ops.heartbeat import record_heartbeat as _record_heartbeat
 from app.ops.monitoring import instrument_app
 from app.ops.telegram_polling import (
     PollerConfig,
@@ -93,6 +95,12 @@ logging.basicConfig(
 )
 
 log = logging.getLogger(__name__)
+
+
+# PR-PREFLIGHT-ALERT — heartbeat row name for the boot-time preflight gate.
+# Distinct from any other worker name in WORKER_REGISTRY so the row can be
+# read as "preflight ran + outcome" rather than mixed in with a loop's beats.
+_PREFLIGHT_WORKER_NAME: Final[str] = "preflight_gate"
 
 
 @asynccontextmanager
@@ -289,6 +297,26 @@ async def lifespan(_app: FastAPI):
                         "autonomous trading: pre-flight passed (%s)",
                         pf.summary_line(),
                     )
+                    # PR-PREFLIGHT-ALERT Fix C: heartbeat row marking the
+                    # preflight as "ran and passed". Distinguishes this
+                    # from "never ran" (no row at all when
+                    # autonomous_trading_enabled=False) so the watchdog /
+                    # operator can correlate a deploy with a successful
+                    # gate. record_heartbeat is best-effort internally.
+                    try:
+                        await _record_heartbeat(
+                            session_factory, _PREFLIGHT_WORKER_NAME,
+                            status="passed",
+                            details={
+                                "passed_count": len(pf.checks),
+                                "total_count": len(pf.checks),
+                            },
+                        )
+                    except Exception as hb_exc:  # noqa: BLE001
+                        log.warning(
+                            "preflight pass heartbeat write failed: %s",
+                            hb_exc,
+                        )
                     # SP-8 Phase J: cache the decrypted Binance keys at
                     # module level. The live worker calls vault_keys() on
                     # every tick — a cache miss returns None and the worker
@@ -380,18 +408,97 @@ async def lifespan(_app: FastAPI):
                             "startup; live workers will skip dispatch",
                         )
                 else:
+                    failed_checks = [c.name for c in pf.failures()]
                     failures = "; ".join(
                         f"{c.name}={c.detail}" for c in pf.failures()
                     )
-                    log.error(
+                    # PR-PREFLIGHT-ALERT Fix A: elevate to CRITICAL so an
+                    # unconfigured-telegram operator still sees a level
+                    # change in container logs (pre-PR was ERROR-only).
+                    log.critical(
                         "autonomous trading DISABLED: pre-flight failed "
                         "(%d/%d) — %s",
                         len(pf.failures()), len(pf.checks), failures,
                     )
+                    passed_count = len(pf.checks) - len(pf.failures())
+                    total_count = len(pf.checks)
+                    # PR-PREFLIGHT-ALERT Fix A — telegram alert.
+                    # Best-effort; the alerter must NEVER kill lifespan.
+                    try:
+                        await _route_alert(
+                            (
+                                f"⚠️ Preflight FAILED "
+                                f"({passed_count}/{total_count}) — "
+                                f"autonomous workers NOT spawned. "
+                                f"Failed checks: "
+                                f"{', '.join(failed_checks)}. "
+                                f"Investigate before next deploy."
+                            ),
+                            level="critical",
+                        )
+                    except Exception as alert_exc:  # noqa: BLE001
+                        log.error(
+                            "preflight-alert dispatch failed: %s",
+                            alert_exc,
+                        )
+                    # PR-PREFLIGHT-ALERT Fix B — heartbeat row.
+                    # record_heartbeat itself swallows internally; wrap
+                    # in try/except for defense-in-depth so any
+                    # unforeseen exception still doesn't break lifespan.
+                    try:
+                        await _record_heartbeat(
+                            session_factory, _PREFLIGHT_WORKER_NAME,
+                            status="failed",
+                            details={
+                                "passed_count": passed_count,
+                                "total_count": total_count,
+                                "failed_checks": failed_checks,
+                                "failed_check_details": {
+                                    c.name: c.detail
+                                    for c in pf.failures()
+                                },
+                            },
+                        )
+                    except Exception as hb_exc:  # noqa: BLE001
+                        log.warning(
+                            "preflight fail heartbeat write failed: %s",
+                            hb_exc,
+                        )
             except Exception as e:  # noqa: BLE001
-                log.error(
+                # PR-PREFLIGHT-ALERT Fix D: exception path. Elevate to
+                # CRITICAL + alert + heartbeat (status='raised').
+                # Both alert + heartbeat wrapped so a failed alerter or
+                # heartbeat write cannot kill the lifespan.
+                log.critical(
                     "autonomous trading pre-flight raised: %s", e,
                 )
+                try:
+                    await _route_alert(
+                        (
+                            f"⚠️ Preflight RAISED: "
+                            f"{type(e).__name__}: {str(e)[:200]}"
+                        ),
+                        level="critical",
+                    )
+                except Exception as alert_exc:  # noqa: BLE001
+                    log.error(
+                        "preflight-raised alert dispatch failed: %s",
+                        alert_exc,
+                    )
+                try:
+                    await _record_heartbeat(
+                        session_factory, _PREFLIGHT_WORKER_NAME,
+                        status="raised",
+                        details={
+                            "error_type": type(e).__name__,
+                            "error_msg": str(e)[:500],
+                        },
+                    )
+                except Exception as hb_exc:  # noqa: BLE001
+                    log.warning(
+                        "preflight raised heartbeat write failed: %s",
+                        hb_exc,
+                    )
 
             # SP-8 Phase J.2: daily auto-promotion worker. Independent of
             # pre-flight — auto-promotion only changes mode rows; it does
