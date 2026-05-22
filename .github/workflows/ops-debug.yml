@@ -40,6 +40,7 @@ on:
           - diag-hour5-investigation # READ-ONLY: PR-DIAG-HOUR5 — why hour 5 UTC has 0/8 LONG WR. Full row dump + symbol distribution + exit-reason breakdown + held-duration distribution. Pairs with the cron-schedule grep documented in the report.
           - diag-audit-bundle # READ-ONLY: PR-DIAG-AUDIT-BUNDLE — UUSDT Now/P&L regression diagnosis + dead-code / dormant-feature audit. Pure SELECT + python introspection.
           - diag-autonomous-workers # READ-ONLY: PR-DIAG-AUTONOMOUS-WORKERS — why telegram_poller_task / liquidation_monitor_task / live_exit_monitor are dead despite AUTONOMOUS_TRADING_ENABLED=True. Runs preflight in-process + dumps heartbeats + log grep for spawn events.
+          - preflight-alert-verify # READ-ONLY: PR-PREFLIGHT-ALERT post-deploy verification. Looks for the 'preflight_gate' heartbeat row + CRITICAL log line + (best-effort) telegram alert evidence in backend logs since the most recent container restart.
 
 jobs:
   probe:
@@ -730,5 +731,33 @@ jobs:
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT id, email, trading_mode FROM users ORDER BY id;\" && \
                  echo '=== Step 6b: any auth_violations from audit chain since flip ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT attempted_email, reason, attempted_at FROM auth_violations WHERE reason LIKE 'audit_chain_broken:%' ORDER BY attempted_at DESC LIMIT 10;\""
+              ;;
+            preflight-alert-verify)
+              # READ-ONLY: PR-PREFLIGHT-ALERT post-deploy verification.
+              # The deploy at 2026-05-22T07:43Z restarted the backend container.
+              # Preflight currently FAILS due to FU-24 chain break in predictions
+              # at row 796. Expected post-PR behavior:
+              #  - worker_heartbeats row with worker_name='preflight_gate', status='failed'
+              #  - log.critical message at backend startup (was log.error pre-PR)
+              #  - telegram alert (visible to operator; not directly verifiable from probe)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== verify-ts: '\$(date -u -Iseconds) && \
+                 echo '=== current main HEAD ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
+                 echo '=== container restart count + start time (post-deploy restart) ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '' && \
+                 echo '=== 1) preflight_gate heartbeat row exists? (this PR adds it) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, beat_at, last_status, details FROM worker_heartbeats WHERE worker_name='preflight_gate' ORDER BY beat_at DESC LIMIT 5;\" && \
+                 echo '' && \
+                 echo '=== 2) CRITICAL-level log lines since last restart (preflight fail signal) ===' && \
+                 (docker compose logs backend --since 30m 2>&1 | grep -iE 'critical|preflight failed|pre-flight failed|preflight raised|pre-flight raised|autonomous trading DISABLED|alert_admin' | head -30 || echo '(no matching lines)') && \
+                 echo '' && \
+                 echo '=== 3) preflight-related log lines since last restart (full) ===' && \
+                 (docker compose logs backend --since 30m 2>&1 | grep -iE 'preflight|pre-flight|autonomous' | head -40 || echo '(no preflight-related logs)') && \
+                 echo '' && \
+                 echo '=== 4) telegram POST attempts in logs (alert_routing) ===' && \
+                 (docker compose logs backend --since 30m 2>&1 | grep -iE 'telegram|alert_admin|alert_routing|sendMessage' | head -20 || echo '(no telegram POST signals)')"
               ;;
           esac
