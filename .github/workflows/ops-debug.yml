@@ -41,6 +41,7 @@ on:
           - diag-audit-bundle # READ-ONLY: PR-DIAG-AUDIT-BUNDLE — UUSDT Now/P&L regression diagnosis + dead-code / dormant-feature audit. Pure SELECT + python introspection.
           - diag-autonomous-workers # READ-ONLY: PR-DIAG-AUTONOMOUS-WORKERS — why telegram_poller_task / liquidation_monitor_task / live_exit_monitor are dead despite AUTONOMOUS_TRADING_ENABLED=True. Runs preflight in-process + dumps heartbeats + log grep for spawn events.
           - preflight-alert-verify # READ-ONLY: PR-PREFLIGHT-ALERT post-deploy verification. Looks for the 'preflight_gate' heartbeat row + CRITICAL log line + (best-effort) telegram alert evidence in backend logs since the most recent container restart.
+          - fu24-sweep-dryrun # READ-ONLY: PR-OPS-FU24-SWEEP-PREP dry-run. Counts broken chain rows in predictions + shadow_trades, distribution per-symbol/per-day, oldest+newest breaks. Pure SELECT. Operator runs the WRITE sweep (audit-chain-sweep-repair / audit-chain-sweep-apply-final on the fu-23-autonomous-trading-flag-gap branch) after reviewing this dry-run.
 
 jobs:
   probe:
@@ -759,5 +760,41 @@ jobs:
                  echo '' && \
                  echo '=== 4) telegram POST attempts in logs (alert_routing) ===' && \
                  (docker compose logs backend --since 30m 2>&1 | grep -iE 'telegram|alert_admin|alert_routing|sendMessage' | head -20 || echo '(no telegram POST signals)')"
+              ;;
+            fu24-sweep-dryrun)
+              # READ-ONLY: dry-run for the FU-24 sweep. Pure SELECT queries
+              # (no UPDATE, no INSERT, no backup write). Operator reviews
+              # the counts + distribution then decides whether to dispatch
+              # audit-chain-sweep-repair (the WRITE probe) on
+              # docs/fu-23-autonomous-trading-flag-gap branch.
+              # Uses the canonical LAG-over-id pattern from
+              # memory:audit-chain-insert-race + the existing repair probe.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== dryrun-ts: '\$(date -u -Iseconds) && \
+                 echo '=== main HEAD on host ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
+                 echo '' && \
+                 echo '=== 1) predictions: total broken rows ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, prev_hash AS stored_prev, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM predictions) SELECT COUNT(*) AS broken_rows, MIN(id) AS oldest_break_id, MAX(id) AS newest_break_id FROM ordered WHERE expected_prev IS NOT NULL AND stored_prev != expected_prev;\" && \
+                 echo '=== 1b) predictions: total row count + first/last id (context) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS total_rows, MIN(id) AS min_id, MAX(id) AS max_id, MIN(ts) AS oldest_ts, MAX(ts) AS newest_ts FROM predictions;\" && \
+                 echo '=== 1c) predictions: per-day break distribution (last 7d) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, ts, prev_hash AS stored_prev, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM predictions) SELECT DATE(ts) AS day, COUNT(*) AS broken_rows FROM ordered WHERE expected_prev IS NOT NULL AND stored_prev != expected_prev AND ts >= NOW() - INTERVAL '7 days' GROUP BY DATE(ts) ORDER BY day DESC;\" && \
+                 echo '=== 1d) predictions: per-symbol break distribution (top 15) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, symbol, prev_hash AS stored_prev, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM predictions) SELECT symbol, COUNT(*) AS broken_rows FROM ordered WHERE expected_prev IS NOT NULL AND stored_prev != expected_prev GROUP BY symbol ORDER BY broken_rows DESC LIMIT 15;\" && \
+                 echo '=== 1e) predictions: first 10 broken rows (id + ts + symbol + hash prefixes) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, ts, symbol, timeframe, prev_hash AS stored_prev, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM predictions) SELECT id, ts, symbol, timeframe, LEFT(stored_prev, 12) AS stored_prev_12, LEFT(expected_prev, 12) AS expected_prev_12 FROM ordered WHERE expected_prev IS NOT NULL AND stored_prev != expected_prev ORDER BY id ASC LIMIT 10;\" && \
+                 echo '' && \
+                 echo '=== 2) shadow_trades: total broken rows (separate chain) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, prev_hash AS stored_prev, LAG(row_hash) OVER (ORDER BY id) AS expected_prev FROM shadow_trades) SELECT COUNT(*) AS broken_rows, MIN(id) AS oldest_break_id, MAX(id) AS newest_break_id FROM ordered WHERE expected_prev IS NOT NULL AND stored_prev != expected_prev;\" && \
+                 echo '=== 2b) shadow_trades: total row count (context) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS total_rows, MIN(id) AS min_id, MAX(id) AS max_id FROM shadow_trades;\" && \
+                 echo '' && \
+                 echo '=== 3) auth_violations rows (recent audit_chain_broken detections) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT reason, COUNT(*) AS n, MAX(attempted_at) AS most_recent FROM auth_violations WHERE reason LIKE 'audit_chain_broken:%' GROUP BY reason ORDER BY n DESC;\" && \
+                 echo '' && \
+                 echo '=== 4) backup table check (does predictions_prev_hash_backup_* already exist?) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'predictions_prev_hash_backup_%' ORDER BY table_name;\""
               ;;
           esac
