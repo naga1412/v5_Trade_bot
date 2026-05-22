@@ -32,6 +32,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
+from app.rl.adapter import AssetEmbeddingTable
 from app.rl.inference import action_to_brain_adjust
 from app.rl.policy import PolicyNetwork
 from app.rl.replay_buffer import ALL_ACTIONS, Transition
@@ -109,11 +110,19 @@ def _compute_max_drawdown(rewards: np.ndarray) -> float:
 def evaluate_brain_on_holdout(
     *,
     policy: PolicyNetwork,
+    asset_table: AssetEmbeddingTable,
     transitions: Sequence[Transition],
     holdout_fraction: float = 0.2,
     device: torch.device | None = None,
 ) -> BacktestResult | dict:
     """Run the trained policy on the last ``holdout_fraction`` of transitions.
+
+    PR-BRAIN-EMBEDDINGS-LEARNABLE (2026-05-22): the backtest now uses
+    the CURRENT ``asset_table.module.weight`` values via a hot-swap of
+    each obs's pre-baked embedding region. Without this, the backtest
+    would evaluate the trained policy against the PRE-TRAINING
+    embeddings still baked into ``transition.obs`` (frozen at buffer
+    build time) — invisible to the freshly-trained embedding weights.
 
     Returns a :class:`BacktestResult` when the holdout has at least
     :data:`MIN_HOLDOUT_TRADES` rows; otherwise returns
@@ -139,6 +148,8 @@ def evaluate_brain_on_holdout(
 
     dev = device or torch.device("cpu")
     policy = policy.to(dev)
+    asset_table.module.to(dev)
+    emb_dim = asset_table.emb_dim
 
     # Save + restore caller's train/eval mode so the function is a pure
     # read on the policy. Without this, a caller that resumed training
@@ -151,8 +162,14 @@ def evaluate_brain_on_holdout(
         with torch.no_grad():
             for tr in holdout:
                 obs_t = torch.from_numpy(tr.obs).unsqueeze(0).to(dev)
+                # Hot-swap pre-baked embedding with current trained value.
+                asset_id_t = torch.tensor(
+                    [tr.asset_id], dtype=torch.long,
+                ).to(dev)
+                live_emb = asset_table.module(asset_id_t)
+                obs_live = torch.cat([live_emb, obs_t[:, emb_dim:]], dim=1)
                 action_t, _log_prob, _value = policy.act(
-                    obs_t, deterministic=True,
+                    obs_live, deterministic=True,
                 )
                 action_idx = int(action_t.squeeze(0).item())
                 if not 0 <= action_idx < len(ALL_ACTIONS):

@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from app.rl.adapter import AssetEmbeddingTable
 from app.rl.policy import N_ACTIONS, PolicyNetwork
 from app.rl.replay_buffer import ALL_ACTIONS, Transition
 
@@ -94,10 +95,14 @@ class TrainResult:
 
 def _stack_transitions(
     transitions: Sequence[Transition],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Stack a list of Transitions into batched torch tensors.
 
-    Returns (obs, actions, rewards) on CPU; caller moves to device.
+    Returns ``(obs, actions, rewards, asset_ids)`` on CPU; caller moves
+    to device. PR-BRAIN-EMBEDDINGS-LEARNABLE added the ``asset_ids``
+    return so the training loop can hot-swap pre-baked embeddings with
+    an autograd-aware lookup from ``asset_table.module(asset_ids)``.
+
     Actions are mapped from string to integer index here once so the
     inner training loop doesn't repeat the lookup.
     """
@@ -108,30 +113,43 @@ def _stack_transitions(
         [action_to_index(t.action) for t in transitions], dtype=torch.long,
     )
     rewards = torch.tensor([t.reward for t in transitions], dtype=torch.float32)
-    return obs, actions, rewards
+    asset_ids = torch.tensor(
+        [t.asset_id for t in transitions], dtype=torch.long,
+    )
+    return obs, actions, rewards, asset_ids
 
 
 def train_ppo(
     *,
     policy: PolicyNetwork,
     transitions: Sequence[Transition],
+    asset_table: AssetEmbeddingTable,
     config: TrainConfig | None = None,
     device: torch.device | None = None,
 ) -> TrainResult:
     """Train ``policy`` IN-PLACE on the supplied transitions.
 
+    PR-BRAIN-EMBEDDINGS-LEARNABLE (2026-05-22) made the per-asset
+    embeddings trainable. ``asset_table.module.parameters()`` are now in
+    the optimizer's param list, and each forward pass HOT-SWAPS the
+    pre-baked embedding region of each obs with an autograd-aware
+    lookup from ``asset_table.module(asset_ids)``. Gradients flow:
+    loss → policy.evaluate_actions(obs_live) → live_embs → module.weight.
+
     Returns a :class:`TrainResult` with per-epoch stats + final state_dict
-    snapshot. The policy weights are also updated on the input object.
+    snapshot. Both policy weights AND asset_table embeddings are updated
+    on the input objects.
     """
     cfg = config or TrainConfig()
     dev = device or torch.device("cpu")
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    obs, actions, rewards = _stack_transitions(transitions)
+    obs, actions, rewards, asset_ids = _stack_transitions(transitions)
     obs = obs.to(dev)
     actions = actions.to(dev)
     rewards = rewards.to(dev)
+    asset_ids = asset_ids.to(dev)
     n = obs.shape[0]
     log.info(
         "PPO training: n_transitions=%d batch=%d epochs=%d device=%s",
@@ -139,15 +157,35 @@ def train_ppo(
     )
 
     policy = policy.to(dev)
-    opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr)
+    asset_table.module.to(dev)
+    emb_dim = asset_table.emb_dim
+
+    def _live_obs(obs_baked: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        """Replace first ``emb_dim`` dims of obs with autograd-aware
+        embedding lookup. The lookup goes through ``nn.Embedding`` so
+        gradients flow back to ``module.weight`` during backward()."""
+        live_embs = asset_table.module(ids)
+        return torch.cat([live_embs, obs_baked[:, emb_dim:]], dim=1)
+
+    # PR-BRAIN-EMBEDDINGS-LEARNABLE: optimizer includes BOTH the policy's
+    # MLP parameters AND the asset_table embedding parameters. The hot-swap
+    # above provides the gradient path that makes this meaningful — without
+    # it, asset_table.module.weight.grad would always be None.
+    opt = torch.optim.Adam(
+        list(policy.parameters()) + list(asset_table.module.parameters()),
+        lr=cfg.lr,
+    )
 
     # ---- Compute the OLD log-probs + values BEFORE training begins. ----
     # PPO needs π_θ_old (the policy at rollout time) for the importance ratio.
-    # Since we're doing an offline batch update on existing trades, we treat
-    # the policy at function-entry as π_θ_old.
+    # Snapshot live embeddings here as frozen targets — old log probs use
+    # them as constants for the PPO ratio numerator below.
     policy.eval()
     with torch.no_grad():
-        old_log_probs, _, old_values = policy.evaluate_actions(obs, actions)
+        old_obs_live = _live_obs(obs, asset_ids).detach()
+        old_log_probs, _, old_values = policy.evaluate_actions(
+            old_obs_live, actions,
+        )
     policy.train()
 
     # Advantages on this single-step setup: A = R - V(s) (no GAE needed —
@@ -180,14 +218,16 @@ def train_ppo(
                 idx = perm[start : start + cfg.batch_size]
                 if len(idx) < 2:
                     continue
-                b_obs = obs[idx]
+                # Re-compute live obs per batch since asset_table.module.weight
+                # may have changed since the previous opt.step().
+                b_obs_live = _live_obs(obs[idx], asset_ids[idx])
                 b_actions = actions[idx]
                 b_advantages = advantages[idx]
                 b_returns = returns[idx]
                 b_old_log_probs = old_log_probs[idx]
 
                 new_log_probs, entropy, new_values = policy.evaluate_actions(
-                    b_obs, b_actions,
+                    b_obs_live, b_actions,
                 )
                 ratio = torch.exp(new_log_probs - b_old_log_probs)
                 clip_low = 1.0 - cfg.clip_eps
@@ -207,7 +247,12 @@ def train_ppo(
 
                 opt.zero_grad()
                 total_loss.backward()
-                nn.utils.clip_grad_norm_(policy.parameters(), max_norm=cfg.grad_clip)
+                # Clip gradients on BOTH policy and embedding parameters.
+                nn.utils.clip_grad_norm_(
+                    list(policy.parameters())
+                    + list(asset_table.module.parameters()),
+                    max_norm=cfg.grad_clip,
+                )
                 opt.step()
 
                 epoch_pol_losses.append(float(policy_loss.item()))
