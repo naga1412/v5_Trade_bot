@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from app.config import get_settings
 from app.rl.adapter import AssetEmbeddingTable
 from app.rl.checkpoints import (
     ActiveRlCheckpoint,
@@ -182,37 +183,67 @@ def test_forward_pass_failure_returns_none() -> None:
 
 
 # ---- action_to_brain_adjust ---------------------------------------------
+#
+# PR-BRAIN-SOFTER-ACTIONS replaced the hardcoded {0.5, 0.6, 1.0, 1.2, 1.4}
+# mapping with a single tunable SPREAD parameter (default 0.15).
+# Tests assert against the formula instead of literal values.
+
+
+def _spread() -> float:
+    """Read the current default spread from settings."""
+    return get_settings().BRAIN_ACTION_MULTIPLIER_SPREAD
 
 
 def test_brain_long_full_agrees_with_proposed_long_boosts() -> None:
-    assert action_to_brain_adjust(ACTION_LONG_FULL, proposed_direction="LONG") == 1.4
+    assert action_to_brain_adjust(
+        ACTION_LONG_FULL, proposed_direction="LONG",
+    ) == pytest.approx(1.0 + _spread())
 
 
 def test_brain_long_half_agrees_with_proposed_long_smaller_boost() -> None:
-    assert action_to_brain_adjust(ACTION_LONG_HALF, proposed_direction="LONG") == 1.2
+    assert action_to_brain_adjust(
+        ACTION_LONG_HALF, proposed_direction="LONG",
+    ) == pytest.approx(1.0 + _spread() / 2)
 
 
 def test_brain_short_full_agrees_with_proposed_short_boosts() -> None:
-    assert action_to_brain_adjust(ACTION_SHORT_FULL, proposed_direction="SHORT") == 1.4
+    assert action_to_brain_adjust(
+        ACTION_SHORT_FULL, proposed_direction="SHORT",
+    ) == pytest.approx(1.0 + _spread())
 
 
 def test_brain_short_half_agrees_with_proposed_short_smaller_boost() -> None:
-    assert action_to_brain_adjust(ACTION_SHORT_HALF, proposed_direction="SHORT") == 1.2
+    assert action_to_brain_adjust(
+        ACTION_SHORT_HALF, proposed_direction="SHORT",
+    ) == pytest.approx(1.0 + _spread() / 2)
 
 
 def test_brain_flat_suppresses() -> None:
+    expected = 1.0 - _spread()
     for direction in ("LONG", "SHORT", "NEUTRAL"):
-        assert action_to_brain_adjust(ACTION_FLAT, proposed_direction=direction) == 0.5
+        assert action_to_brain_adjust(
+            ACTION_FLAT, proposed_direction=direction,
+        ) == pytest.approx(expected)
 
 
 def test_brain_disagrees_with_proposed_long_suppresses() -> None:
-    assert action_to_brain_adjust(ACTION_SHORT_FULL, proposed_direction="LONG") == 0.6
-    assert action_to_brain_adjust(ACTION_SHORT_HALF, proposed_direction="LONG") == 0.6
+    expected = 1.0 - _spread() / 2
+    assert action_to_brain_adjust(
+        ACTION_SHORT_FULL, proposed_direction="LONG",
+    ) == pytest.approx(expected)
+    assert action_to_brain_adjust(
+        ACTION_SHORT_HALF, proposed_direction="LONG",
+    ) == pytest.approx(expected)
 
 
 def test_brain_disagrees_with_proposed_short_suppresses() -> None:
-    assert action_to_brain_adjust(ACTION_LONG_FULL, proposed_direction="SHORT") == 0.6
-    assert action_to_brain_adjust(ACTION_LONG_HALF, proposed_direction="SHORT") == 0.6
+    expected = 1.0 - _spread() / 2
+    assert action_to_brain_adjust(
+        ACTION_LONG_FULL, proposed_direction="SHORT",
+    ) == pytest.approx(expected)
+    assert action_to_brain_adjust(
+        ACTION_LONG_HALF, proposed_direction="SHORT",
+    ) == pytest.approx(expected)
 
 
 def test_brain_action_when_proposed_neutral_no_op() -> None:
@@ -232,3 +263,57 @@ def test_brain_adjust_stays_in_aggregator_open_interval() -> None:
         for direction in ("LONG", "SHORT", "NEUTRAL"):
             adj = action_to_brain_adjust(action, proposed_direction=direction)
             assert 0.0 < adj < 2.0
+
+
+# ---- PR-BRAIN-SOFTER-ACTIONS: spread parametrization tests -------------
+
+
+def test_brain_action_multiplier_spread_default_is_conservative() -> None:
+    """Default spread chosen post-PR-BACKTEST-PHASEB5 to reduce blast
+    radius. Pinning the value catches accidental retunes."""
+    assert get_settings().BRAIN_ACTION_MULTIPLIER_SPREAD == 0.15
+
+
+def test_action_to_brain_adjust_respects_spread_override(monkeypatch) -> None:
+    """When SPREAD is monkeypatched on the cached Settings instance, the
+    mapping shifts symmetrically.
+
+    With SPREAD=0.4, the legacy-ish mapping {0.6, 0.8, 1.0, 1.2, 1.4}
+    emerges — confirms backward-compat path via env/settings override.
+    """
+    monkeypatch.setattr(
+        get_settings(), "BRAIN_ACTION_MULTIPLIER_SPREAD", 0.4,
+    )
+    assert action_to_brain_adjust(
+        ACTION_FLAT, proposed_direction="LONG",
+    ) == pytest.approx(0.6)  # 1 - 0.4
+    assert action_to_brain_adjust(
+        ACTION_SHORT_FULL, proposed_direction="LONG",
+    ) == pytest.approx(0.8)  # 1 - 0.4/2 (disagree)
+    assert action_to_brain_adjust(
+        ACTION_LONG_HALF, proposed_direction="LONG",
+    ) == pytest.approx(1.2)  # 1 + 0.4/2
+    assert action_to_brain_adjust(
+        ACTION_LONG_FULL, proposed_direction="LONG",
+    ) == pytest.approx(1.4)  # 1 + 0.4
+
+
+@pytest.mark.parametrize("spread", [0.05, 0.15, 0.4, 0.7, 0.95])
+def test_action_to_brain_adjust_remains_in_aggregator_bounds_under_spread_sweep(
+    monkeypatch, spread: float,
+) -> None:
+    """Aggregator's (0, 2) exclusive bound must hold for any plausible
+    SPREAD ∈ (0, 1). Sweep catches off-by-one bound errors."""
+    monkeypatch.setattr(
+        get_settings(), "BRAIN_ACTION_MULTIPLIER_SPREAD", spread,
+    )
+    for action in (ACTION_LONG_FULL, ACTION_LONG_HALF,
+                   ACTION_FLAT, ACTION_SHORT_HALF, ACTION_SHORT_FULL):
+        for direction in ("LONG", "SHORT", "NEUTRAL"):
+            adj = action_to_brain_adjust(
+                action, proposed_direction=direction,
+            )
+            assert 0.0 < adj < 2.0, (
+                f"spread={spread} action={action} "
+                f"dir={direction} → adj={adj} out of bounds"
+            )
