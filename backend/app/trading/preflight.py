@@ -54,6 +54,17 @@ CheckName = Literal[
     "audit_chain_intact",
 ]
 
+# PR-DECOUPLE-WORKERS: two preflight profiles.
+# - "chain_writer" (default): runs all 5 checks including audit_chain_intact.
+#   Used for workers that INSERT chained rows (predictions, live_trades) and
+#   must abort if the chain is broken.
+# - "chain_reader": runs 4 checks, skipping audit_chain_intact. Used to gate
+#   safety-net workers (telegram_poller, liquidation_monitor, live_exit_monitor)
+#   that only READ open positions / UPDATE non-chained columns — their
+#   correctness does not depend on chain INSERT integrity, so they should
+#   stay alive even while FU-24's race has broken the chain.
+PreflightProfile = Literal["chain_writer", "chain_reader"]
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -244,9 +255,18 @@ async def run_preflight(
     use_testnet: bool = True,
     secrets_path: Path | None = None,
     http: httpx.AsyncClient | None = None,
+    profile: PreflightProfile = "chain_writer",
 ) -> PreflightResult:
     """Run all checks in order; short-circuit on vault failure since the
-    Binance check requires the API keys from inside the vault."""
+    Binance check requires the API keys from inside the vault.
+
+    PR-DECOUPLE-WORKERS: ``profile`` selects which check set runs.
+    ``chain_writer`` (default, backwards-compatible) runs all 5 checks
+    including ``check_audit_chain_intact``. ``chain_reader`` skips
+    ``check_audit_chain_intact`` and returns 4 checks — used by the main.py
+    spawn gate so safety-net workers stay alive when the chain WRITER is
+    blocked by FU-24's concurrent-insert race.
+    """
     results: list[CheckResult] = []
 
     # Default the vault path so callers (lifespan) don't have to know it.
@@ -299,9 +319,17 @@ async def run_preflight(
             detail="skipped (no API keys in vault)",
         ))
 
-    # 4 + 5. DB checks — independent of secrets, always run.
+    # 4. Migration check — runs in BOTH profiles.
     results.append(await check_migration_0016_applied(session))
-    results.append(await check_audit_chain_intact(session))
+
+    # 5. Audit chain integrity — chain_writer profile only.
+    # chain_reader skips this so safety-net workers (which only READ open
+    # positions / UPDATE non-chained columns) can spawn while the chain
+    # WRITER is blocked by FU-24's race. The main.py spawn chain calls
+    # check_audit_chain_intact directly when it needs to differentiate
+    # full-pass from reader-only-pass for alerting purposes.
+    if profile == "chain_writer":
+        results.append(await check_audit_chain_intact(session))
 
     result = PreflightResult(checks=results)
     log.info(result.summary_line())
@@ -313,6 +341,7 @@ async def run_preflight(
 __all__ = [
     "CheckName",
     "CheckResult",
+    "PreflightProfile",
     "PreflightResult",
     "check_audit_chain_intact",
     "check_binance_permissions",
