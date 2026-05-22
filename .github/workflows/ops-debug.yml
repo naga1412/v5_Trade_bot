@@ -661,55 +661,40 @@ jobs:
               ;;
             diag-audit-bundle)
               # READ-ONLY: PR-DIAG-AUDIT-BUNDLE — three-part audit.
-              # Section A: UUSDT Now/P&L regression diagnosis.
-              # Section B: dead-code / dormant-feature audit (Settings runtime
-              # values, worker heartbeats, env-vs-Settings drift).
+              # The Python introspection script lives at
+              # .github/workflows/scripts/diag_audit_bundle.py (checked out
+              # by the actions/checkout step above). We scp it to the host,
+              # docker-cp into the backend container, exec, then clean up.
+              # All SQL queries remain inline since they're simple enough
+              # to escape correctly.
+              SCRIPT_LOCAL_PATH=".github/workflows/scripts/diag_audit_bundle.py"
+              SCRIPT_REMOTE_PATH="/tmp/diag_audit_bundle_$$.py"
+              scp -i ~/.ssh/hetzner_key "$SCRIPT_LOCAL_PATH" \
+                "$USER_DEFAULTED@$HETZNER_HOST:$SCRIPT_REMOTE_PATH"
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && \
-                 echo '=== diag-ts: '$(date -u -Iseconds) && \
-                 echo '=== main HEAD on host ==='  && \
+                 echo '=== diag-ts: '\$(date -u -Iseconds) && \
+                 echo '=== main HEAD on host ===' && \
                  git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
                  echo '' && \
                  echo '################ SECTION A: UUSDT Now/P&L regression ################' && \
+                 echo '=== A1: shadow_open_positions UUSDT + TRUMPUSDT (direct DB) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT symbol, direction, entry_price, opened_at, last_check_at, timeframe FROM shadow_open_positions WHERE symbol IN ('UUSDT','TRUMPUSDT') ORDER BY symbol, opened_at;\" && \
+                 echo '=== A4: UUSDT WS / kline / pnl_tick log activity (last 1h) ===' && \
+                 (docker compose logs backend --since 1h 2>&1 | grep -i UUSDT | grep -iE 'pnl_tick|publish|shadow_pnl|position_opened|kline|stream' | tail -25 || echo '(no UUSDT WS activity in last 1h)') && \
+                 echo '=== A4b: TRUMPUSDT baseline ===' && \
+                 (docker compose logs backend --since 1h 2>&1 | grep -i TRUMPUSDT | grep -iE 'pnl_tick|publish|shadow_pnl|position_opened|kline|stream' | tail -10 || echo '(no TRUMPUSDT WS activity)') && \
+                 echo '=== A7: shadow_worker setup logs (last 6h) ===' && \
+                 (docker compose logs backend --since 6h 2>&1 | grep -iE 'shadow_worker.*setup|asset universe|MultiStream.*symbols=' | tail -10 || echo '(no setup log in last 6h)') && \
                  echo '' && \
-                 echo '=== A1: /open-positions API for UUSDT + TRUMPUSDT (baseline) ===' && \
-                 docker compose exec -T backend python -c \"import httpx, json; r = httpx.get('http://localhost:8000/api/v1/bot-status/open-positions', headers={'x-debug-no-auth':'1'}, timeout=10); data = r.json() if r.status_code==200 else r.text; targets = [p for p in (data if isinstance(data,list) else []) if p.get('symbol') in ('UUSDT','TRUMPUSDT')]; print(f'status={r.status_code}'); print(json.dumps(targets, indent=2, default=str) if targets else f'(no UUSDT/TRUMPUSDT in response — body type={type(data).__name__})'); print(f'(total positions in payload: {len(data) if isinstance(data,list) else 0})')\" 2>&1 || echo '(endpoint may require auth — A1 skipped; A_alt below queries DB directly)' && \
-                 echo '=== A1_alt: shadow_open_positions UUSDT + TRUMPUSDT direct DB read ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT symbol, direction, entry_price, opened_at, last_check_at, timeframe FROM shadow_open_positions WHERE symbol IN ('UUSDT','TRUMPUSDT') ORDER BY symbol, opened_at;\" && \
-                 echo '=== A2: confirm UUSDT klines still work (Binance /api/v3/klines) ===' && \
-                 docker compose exec -T backend python -c \"import httpx; r = httpx.get('https://api.binance.com/api/v3/klines', params={'symbol':'UUSDT','interval':'1h','limit':3}, timeout=10); print(f'klines status={r.status_code}'); print(f'klines body sample: {str(r.json())[:200]}')\" 2>&1 || echo '(klines call failed)' && \
-                 echo '=== A2b: confirm UUSDT /api/v3/ticker/price (the path fetch_spot_prices uses) ===' && \
-                 docker compose exec -T backend python -c \"import httpx; r = httpx.get('https://api.binance.com/api/v3/ticker/price', params={'symbol':'UUSDT'}, timeout=10); print(f'ticker status={r.status_code}'); print(f'ticker body: {r.text[:200]}')\" 2>&1 || echo '(ticker call failed)' && \
-                 echo '=== A2c: same for TRUMPUSDT (baseline) ===' && \
-                 docker compose exec -T backend python -c \"import httpx; r = httpx.get('https://api.binance.com/api/v3/ticker/price', params={'symbol':'TRUMPUSDT'}, timeout=10); print(f'ticker status={r.status_code}'); print(f'ticker body: {r.text[:200]}')\" 2>&1 || echo '(ticker call failed)' && \
-                 echo '=== A3: WS ConnectionManager subscription count + per-channel ===' && \
-                 docker compose exec -T backend python -c \"from app.api.routes.ws import manager; subs = manager._subs; print(f'total subs={len(subs)}'); per_channel = {}; [per_channel.setdefault(s.channel,0) for s,_ in subs.values()]; per_params = {}; \
-                 [per_channel.update({s.channel: per_channel.get(s.channel,0)+1}) for s,_ in subs.values()]; \
-                 print('subs per channel:', per_channel); uusdt_subs = [(s.channel, s.params) for s,_ in subs.values() if 'UUSDT' in str(s.params)]; print(f'UUSDT-targeted subs: {uusdt_subs}')\" 2>&1 || echo '(ws manager introspection failed)' && \
-                 echo '=== A4: shadow_pnl_tick + position_opened activity for UUSDT (last 1h) ===' && \
-                 docker compose logs backend --since 1h 2>&1 | grep -iE 'UUSDT' | grep -iE 'pnl_tick|publish|shadow_pnl|position_opened|kline|stream' | tail -25 || echo '(no UUSDT WS activity in last 1h)' && \
-                 echo '=== A4b: same for TRUMPUSDT (baseline) ===' && \
-                 docker compose logs backend --since 1h 2>&1 | grep -iE 'TRUMPUSDT' | grep -iE 'pnl_tick|publish|shadow_pnl|position_opened|kline|stream' | tail -10 || echo '(no TRUMPUSDT WS activity)' && \
-                 echo '=== A4c: get_last_pnl_tick_at() snapshot for both symbols ===' && \
-                 docker compose exec -T backend python -c \"from app.ws.shadow_updates import get_last_pnl_tick_at; snap = get_last_pnl_tick_at(); print(f'total symbols emitting: {len(snap)}'); print(f'UUSDT last_pnl_tick: {snap.get(\\\"UUSDT\\\", \\\"(never)\\\")}'); print(f'TRUMPUSDT last_pnl_tick: {snap.get(\\\"TRUMPUSDT\\\", \\\"(never)\\\")}'); print(f'sample of emitters (first 10): {sorted(snap.keys())[:10]}')\" 2>&1 || echo '(shadow_updates introspection failed)' && \
-                 echo '=== A5: _key_matches deployed source (PR10.6 fix verification) ===' && \
-                 docker compose exec -T backend python -c \"from app.ws.manager import _key_matches; import inspect; print(inspect.getsource(_key_matches))\" 2>&1 || echo '(_key_matches not introspectable)' && \
-                 echo '=== A6: SHADOW_SPOT_BLACKLIST runtime value ===' && \
-                 docker compose exec -T backend python -c \"from app.config import get_settings; print(f'SHADOW_SPOT_BLACKLIST={get_settings().SHADOW_SPOT_BLACKLIST}')\" 2>&1 && \
-                 echo '=== A7: shadow_worker symbols list (is UUSDT being subscribed?) ===' && \
-                 docker compose logs backend --since 6h 2>&1 | grep -iE 'shadow_worker.*setup|asset universe|MultiStream.*UUSDT|MultiStream.*symbols=' | tail -10 || echo '(no setup log in last 6h)' && \
+                 echo '################ Python introspection (A2-A6 + B1+B4b+B6) ################' && \
+                 docker cp $SCRIPT_REMOTE_PATH tr-backend:/tmp/diag.py && \
+                 docker compose exec -T backend python /tmp/diag.py && \
+                 docker compose exec -T backend rm -f /tmp/diag.py && \
+                 rm -f $SCRIPT_REMOTE_PATH && \
                  echo '' && \
-                 echo '################ SECTION B: dead-code / dormant-feature audit ################' && \
-                 echo '' && \
-                 echo '=== B1: full Settings runtime dump (operator-tunable fields only) ===' && \
-                 docker compose exec -T backend python -c \"from app.config import get_settings; s=get_settings(); fields = sorted([(f, getattr(s,f)) for f in s.model_fields.keys() if (f.isupper() or f.lower() != f.upper()) and not f.startswith('_')]); [print(f'{name}={val}') for name,val in fields]\" 2>&1 | head -80 && \
+                 echo '################ Section B: SQL-side ################' && \
                  echo '=== B4: worker_heartbeats — staleness per worker ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT worker_name, MAX(beat_at) AS last_beat, NOW() - MAX(beat_at) AS staleness, last_status FROM (SELECT DISTINCT ON (worker_name) worker_name, beat_at, last_status FROM worker_heartbeats ORDER BY worker_name, beat_at DESC) latest GROUP BY worker_name, last_status ORDER BY MAX(beat_at) DESC NULLS LAST;\" && \
-                 echo '=== B4b: worker_registry expected list — what SHOULD be heartbeating ===' && \
-                 docker compose exec -T backend python -c \"from app.ops.worker_registry import WORKER_REGISTRY; [print(f'{w.name:35s} stateful={str(w.stateful):5s} required_env={w.required_env}') for w in WORKER_REGISTRY]\" 2>&1 && \
-                 echo '=== B6: env vars vs Settings fields drift ===' && \
-                 docker compose exec -T backend python -c \"from app.config import Settings; import os; declared_upper = {f.upper() for f in Settings.model_fields.keys()}; env_upper = {k for k in os.environ if k.isupper() and not k.startswith('_') and k not in ('PATH','HOME','PWD','SHLVL','TERM','LANG','HOSTNAME','PYTHONPATH','LD_LIBRARY_PATH','PATH_INFO','HOSTTYPE','LC_CTYPE','LC_ALL','LANGUAGE','GPG_KEY','PYTHON_VERSION','PYTHON_SHA256','PYTHON_PIP_VERSION','PYTHON_GET_PIP_URL','PYTHON_GET_PIP_SHA256','PYTHON_SETUPTOOLS_VERSION','LESSCLOSE','LESSOPEN','OLDPWD','DEBIAN_FRONTEND','MAIL','LOGNAME','USER','TERM_PROGRAM','SSH_CLIENT','SSH_CONNECTION','SSH_TTY')}; print('IN_ENV_NOT_IN_SETTINGS (potential ghost flags):'); [print(f'  {x}') for x in sorted(env_upper - declared_upper)]; print(''); print('IN_SETTINGS_NOT_IN_ENV (operator never overrode, default holds):'); [print(f'  {x}') for x in sorted(declared_upper - env_upper)]\" 2>&1
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, MAX(beat_at) AS last_beat, NOW() - MAX(beat_at) AS staleness, MAX(last_status) AS status FROM worker_heartbeats GROUP BY worker_name ORDER BY MAX(beat_at) DESC NULLS LAST;\""
               ;;
           esac
