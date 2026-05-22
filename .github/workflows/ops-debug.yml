@@ -38,6 +38,7 @@ on:
           - brain-cron-trigger # WRITE: post-deploy verify of PR-BRAIN-BOOTSTRAP-FIX. Verifies the 3 fixes on disk, manually fires hetzner_brain_cron.sh, tails the resulting log, reports rl_checkpoints + rl-cache. Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint (is_active stays False).
           - brain-rl-cache-archive # WRITE: mv all *.pt + eval_brain_*.json files from rl-cache into rl-cache/_predegenerate/. Idempotent. Forces next cron to cold-start. Does NOT touch rl_checkpoints DB rows.
           - brain-holdout-labels # READ-ONLY: label-side audit of the 59 backtest holdout trades (2026-05-19 → 2026-05-22). Reports trade dump + by-direction + by-hour + top-15 by-symbol — informs misclass analysis without needing brain decisions.
+          - brain-reeval-checkpoints # READ-ONLY: re-evaluates each .pt in _predegenerate/ against current buffer state using PR-BRAIN-CORRECTNESS-METRIC. Outputs a comparison table with brain_correctness, sharpe, cumulative_reward — lets us judge old checkpoints by the new (non-invariant) metric without retraining.
 
 jobs:
   probe:
@@ -683,5 +684,27 @@ jobs:
                  echo '=== sidecar: per-trade brain decisions from latest checkpoint ===' && \
                  ls -la backend/data/rl-cache/ | grep per_trade || echo '(no per-trade sidecar yet — re-run brain-cron-trigger after PR-COLD-START-PROBE deploys)' && \
                  (cat backend/data/rl-cache/\$(ls -t backend/data/rl-cache/eval_brain_v*_per_trade.json 2>/dev/null | head -1) 2>/dev/null || true)"
+              ;;
+            brain-reeval-checkpoints)
+              # Re-evaluate each .pt in _predegenerate/ (plus any in rl-cache
+              # root) against the CURRENT buffer using PR-BRAIN-CORRECTNESS-METRIC.
+              # Computes brain_correctness for old checkpoints retroactively —
+              # they were saved before this field existed.
+              # READ-ONLY: does not modify rl_checkpoints or any .pt files.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== checkpoints to re-evaluate ===' && \
+                 ls -la backend/data/rl-cache/_predegenerate/*.pt 2>/dev/null; \
+                 ls -la backend/data/rl-cache/*.pt 2>/dev/null; \
+                 echo '' && \
+                 echo '=== running reeval against _predegenerate/ ===' && \
+                 docker compose exec -T backend python /app/host-tools/ml/reeval_checkpoints.py \
+                   --pt-glob '/app/data/rl-cache/_predegenerate/ppo_policy_v*.pt' \
+                   --db-url postgresql+asyncpg://postgres:postgres@postgres:5432/trading_radar && \
+                 echo '' && \
+                 echo '=== running reeval against rl-cache/ (post-archive newer checkpoints) ===' && \
+                 docker compose exec -T backend python /app/host-tools/ml/reeval_checkpoints.py \
+                   --pt-glob '/app/data/rl-cache/ppo_policy_v*.pt' \
+                   --db-url postgresql+asyncpg://postgres:postgres@postgres:5432/trading_radar || true"
               ;;
           esac
