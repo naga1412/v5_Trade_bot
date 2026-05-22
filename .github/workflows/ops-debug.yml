@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - brain-cron-trigger # WRITE: post-deploy verify of PR-BRAIN-BOOTSTRAP-FIX. Verifies the 3 fixes on disk, manually fires hetzner_brain_cron.sh, tails the resulting log, reports rl_checkpoints + rl-cache. Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint (is_active stays False).
 
 jobs:
   probe:
@@ -576,5 +577,41 @@ jobs:
                  docker compose logs --tail=500 backend 2>&1 | grep -iE 'keepalive|ping|pong|ws_keep' | tail -20 && \
                  echo '=== I-2d: last 80 backend log lines unfiltered (most recent activity floor) ===' && \
                  docker compose logs --tail=80 backend"
+              ;;
+            brain-cron-trigger)
+              # Post-deploy verification of PR-BRAIN-BOOTSTRAP-FIX (#222 / #223).
+              # Verifies the 3 fixes are on-disk, manually fires the brain
+              # training cron, tails the resulting log, reports rl_checkpoints +
+              # rl-cache contents. Trains a checkpoint with is_active=False
+              # (no activation; operator must review eval_results and PATCH
+              # is_active=True separately).
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== F1: cron script mode on host (expect -rwxr-xr-x = 0755) ===' && \
+                 ls -la backend/scripts/hetzner_brain_cron.sh && \
+                 echo '=== F2: train_brain.py sys.path.insert present (expect 1 hit) ===' && \
+                 docker compose exec -T backend grep -c 'sys.path.insert(0, \"/app\")' /app/host-tools/ml/train_brain.py || true && \
+                 echo '=== F3: rl-cache mount writable (expect no :ro on the rl-cache line) ===' && \
+                 docker inspect tr-backend --format '{{range .Mounts}}{{if eq .Destination \"/app/data/rl-cache\"}}rl-cache: ReadOnly={{.RW}} Mode={{.Mode}}{{end}}{{end}}' && \
+                 echo '=== B1: pre-state — rl_checkpoints row count ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -tAc \
+                   \"SELECT count(*) FROM rl_checkpoints;\" && \
+                 echo '=== B2: pre-state — rl-cache dir (host) ===' && \
+                 ls -la backend/data/rl-cache/ 2>/dev/null || echo '(empty or missing)' && \
+                 echo '=== B3: replay buffer pre-train sanity ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) AS closed_with_pnl FROM shadow_trades WHERE pnl_usdt IS NOT NULL AND closed_at IS NOT NULL;\" && \
+                 echo '=== T1: fire cron script manually (this will take 5-15 min CPU; output captured below) ===' && \
+                 bash backend/scripts/hetzner_brain_cron.sh 2>&1 | tail -120 || true && \
+                 echo '=== V1: post-state — rl_checkpoints (newest row should appear with is_active=false) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, model_name, version, is_active, trained_at, train_data_window FROM rl_checkpoints ORDER BY id DESC LIMIT 3;\" && \
+                 echo '=== V2: post-state — rl-cache dir (host) — expect .pt file ===' && \
+                 ls -la backend/data/rl-cache/ && \
+                 echo '=== V3: cron log file tail (last 80 lines, brain-train + register markers) ===' && \
+                 tail -80 /var/log/trading-radar-brain-cron.log 2>/dev/null || echo '(log file missing)' && \
+                 echo '=== V4: any new auth_violations from audit_chain_broken since deploy? (expect 0) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT count(*) FROM auth_violations WHERE kind = 'audit_chain_broken' AND created_at > now() - interval '30 minutes';\""
               ;;
           esac
