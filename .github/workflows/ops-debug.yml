@@ -39,6 +39,7 @@ on:
           - expost-tier1-filter-validation # READ-ONLY: PR-EXPOST-1 ex-post SQL analysis of Tier-1 filter ideas (SHORT-disable, MIN_ENTRY_SCORE_LONG=0.36, time-of-day, per-symbol cull) against 30-day shadow_trades history.
           - diag-hour5-investigation # READ-ONLY: PR-DIAG-HOUR5 — why hour 5 UTC has 0/8 LONG WR. Full row dump + symbol distribution + exit-reason breakdown + held-duration distribution. Pairs with the cron-schedule grep documented in the report.
           - diag-audit-bundle # READ-ONLY: PR-DIAG-AUDIT-BUNDLE — UUSDT Now/P&L regression diagnosis + dead-code / dormant-feature audit. Pure SELECT + python introspection.
+          - diag-autonomous-workers # READ-ONLY: PR-DIAG-AUTONOMOUS-WORKERS — why telegram_poller_task / liquidation_monitor_task / live_exit_monitor are dead despite AUTONOMOUS_TRADING_ENABLED=True. Runs preflight in-process + dumps heartbeats + log grep for spawn events.
 
 jobs:
   probe:
@@ -696,5 +697,38 @@ jobs:
                  echo '################ Section B: SQL-side ################' && \
                  echo '=== B4: worker_heartbeats — staleness per worker ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, MAX(beat_at) AS last_beat, NOW() - MAX(beat_at) AS staleness, MAX(last_status) AS status FROM worker_heartbeats GROUP BY worker_name ORDER BY MAX(beat_at) DESC NULLS LAST;\""
+              ;;
+            diag-autonomous-workers)
+              # READ-ONLY: PR-DIAG-AUTONOMOUS-WORKERS — why the 3
+              # AUTONOMOUS_TRADING_ENABLED-gated workers (telegram_poller,
+              # liquidation_monitor, live_exit_monitor) are dead despite
+              # the gate being True at runtime. Steps 1-6 per directive.
+              SCRIPT_LOCAL_PATH=".github/workflows/scripts/diag_autonomous_workers.py"
+              SCRIPT_REMOTE_PATH="/tmp/diag_autonomous_$$.py"
+              scp -i ~/.ssh/hetzner_key "$SCRIPT_LOCAL_PATH" \
+                "$USER_DEFAULTED@$HETZNER_HOST:$SCRIPT_REMOTE_PATH"
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== diag-ts: '\$(date -u -Iseconds) && \
+                 echo '=== main HEAD on host ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
+                 echo '' && \
+                 echo '=== Step 1: worker_heartbeats for the 3 gated workers ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, MAX(beat_at) AS last_hb, NOW() - MAX(beat_at) AS staleness, MAX(last_status) AS status FROM worker_heartbeats WHERE worker_name IN ('telegram_poller_task','liquidation_monitor_task','live_exit_monitor') GROUP BY worker_name;\" && \
+                 echo '=== Step 1b: last 10 heartbeats per gated worker (history) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, beat_at, last_status, details FROM worker_heartbeats WHERE worker_name IN ('telegram_poller_task','liquidation_monitor_task','live_exit_monitor') ORDER BY beat_at DESC LIMIT 10;\" && \
+                 echo '=== Step 3: spawn-time logs since last container restart (03:02Z) ===' && \
+                 (docker compose logs backend --since 2026-05-22T03:02:00Z 2>&1 | grep -iE 'autonomous|preflight|pre-flight|telegram poller|liquidation monitor|live_exit_monitor|vault' | head -100 || echo '(no spawn logs)') && \
+                 echo '' && \
+                 echo '=== Step 4+5: live preflight run + gate-chain check (python script) ===' && \
+                 docker cp $SCRIPT_REMOTE_PATH tr-backend:/tmp/diag.py && \
+                 docker compose exec -T backend python /tmp/diag.py && \
+                 docker compose exec -T backend rm -f /tmp/diag.py && \
+                 rm -f $SCRIPT_REMOTE_PATH && \
+                 echo '' && \
+                 echo '=== Step 6: trading_mode for users ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT id, email, trading_mode FROM users ORDER BY id;\" && \
+                 echo '=== Step 6b: any auth_violations from audit chain since flip ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT attempted_email, reason, attempted_at FROM auth_violations WHERE reason LIKE 'audit_chain_broken:%' ORDER BY attempted_at DESC LIMIT 10;\""
               ;;
           esac
