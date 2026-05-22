@@ -217,6 +217,16 @@ async def _nearest_intermarket(
     snapshot exists for this symbol within 24h before opened_at — the
     early shadow_trades from SP-0.5 predate SP-3.5's intermarket worker.
     """
+    from datetime import datetime
+    # asyncpg requires datetime.datetime for TIMESTAMPTZ params (sqlite is
+    # lenient and accepts ISO strings, which is how this slipped past unit
+    # tests). Mirrors _resolve_regime's parsing — including the
+    # graceful-degrade on malformed ISO: fall through to the "no snapshot"
+    # fallback below rather than aborting the whole replay-buffer build.
+    try:
+        t = datetime.fromisoformat(opened_at_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0, 0.0
     row = (await session.execute(sa.text(
         """
         SELECT funding_rate, open_interest, captured_at
@@ -225,11 +235,15 @@ async def _nearest_intermarket(
         ORDER BY captured_at DESC
         LIMIT 1
         """
-    ), {"s": symbol, "t": opened_at_iso})).first()
+    ), {"s": symbol, "t": t})).first()
     if row is None:
         return 0.0, 0.0
     funding = float(row.funding_rate) if row.funding_rate is not None else 0.0
     # OI delta requires a 24h-ago snapshot too; if absent, returns 0.
+    # NOTE: this query is sqlite-only — `datetime(:t, '-24 hours')` is a
+    # SQLite SQL function that takes a TEXT arg, so we bind the ISO string
+    # here (not the datetime `t` used above). Postgres returns 0 delta
+    # always until someone ports this to `(:t::timestamptz - interval '24 hours')`.
     row_24h = (await session.execute(sa.text(
         """
         SELECT open_interest

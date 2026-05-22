@@ -591,8 +591,8 @@ jobs:
                  ls -la backend/scripts/hetzner_brain_cron.sh && \
                  echo '=== F2: train_brain.py sys.path.insert present (expect 1 hit) ===' && \
                  docker compose exec -T backend grep -c 'sys.path.insert(0, \"/app\")' /app/host-tools/ml/train_brain.py || true && \
-                 echo '=== F3: rl-cache mount writable (expect no :ro on the rl-cache line) ===' && \
-                 docker inspect tr-backend --format '{{range .Mounts}}{{if eq .Destination \"/app/data/rl-cache\"}}rl-cache: ReadOnly={{.RW}} Mode={{.Mode}}{{end}}{{end}}' && \
+                 echo '=== F3: rl-cache mount writable (expect Writable=true Mode=rw) ===' && \
+                 docker inspect tr-backend --format '{{range .Mounts}}{{if eq .Destination \"/app/data/rl-cache\"}}rl-cache: Writable={{.RW}} Mode={{.Mode}}{{end}}{{end}}' && \
                  echo '=== B1: pre-state — rl_checkpoints row count ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -tAc \
                    \"SELECT count(*) FROM rl_checkpoints;\" && \
@@ -612,6 +612,6 @@ jobs:
                  tail -80 /var/log/trading-radar-brain-cron.log 2>/dev/null || echo '(log file missing)' && \
                  echo '=== V4: any new auth_violations from audit_chain_broken since deploy? (expect 0) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT count(*) FROM auth_violations WHERE kind = 'audit_chain_broken' AND created_at > now() - interval '30 minutes';\""
+                   \"SELECT count(*) FROM auth_violations WHERE reason = 'audit_chain_broken' AND attempted_at > now() - interval '30 minutes';\""
               ;;
           esac
