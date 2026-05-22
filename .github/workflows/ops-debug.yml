@@ -43,6 +43,7 @@ on:
           - preflight-alert-verify # READ-ONLY: PR-PREFLIGHT-ALERT post-deploy verification. Looks for the 'preflight_gate' heartbeat row + CRITICAL log line + (best-effort) telegram alert evidence in backend logs since the most recent container restart.
           - fu24-sweep-dryrun # READ-ONLY: PR-OPS-FU24-SWEEP-PREP dry-run. Counts broken chain rows in predictions + shadow_trades, distribution per-symbol/per-day, oldest+newest breaks. Pure SELECT. Operator runs the WRITE sweep (audit-chain-sweep-repair / audit-chain-sweep-apply-final on the fu-23-autonomous-trading-flag-gap branch) after reviewing this dry-run.
           - decouple-workers-verify # READ-ONLY: PR-DECOUPLE-WORKERS post-deploy verification. Confirms reader_only_passed heartbeat, new chain-WRITER-blocked alert, and the 3 previously-dead workers (telegram_poller, liquidation_monitor, live_exit_monitor) are now heartbeating.
+          - memory-sync-audit # READ-ONLY: PR-WEEK1-MEGA-BATCH Part A — runtime state audit (Settings flags, worker heartbeats, opens-since-flip, chain status, schema introspection, brain infra). All SELECT/inspection, zero writes.
 
 jobs:
   probe:
@@ -826,5 +827,59 @@ jobs:
                  echo '' && \
                  echo '=== 4) telegram alert evidence (post-deploy sendMessage POSTs) ===' && \
                  (docker compose logs backend --since 30m 2>&1 | grep -iE 'sendMessage|alert_admin.*critical' | head -10 || echo '(no telegram POSTs)')"
+              ;;
+            memory-sync-audit)
+              # READ-ONLY: PR-WEEK1-MEGA-BATCH Part A. Comprehensive
+              # runtime state audit for memory-sync verification.
+              SCRIPT_LOCAL_PATH=".github/workflows/scripts/memory_sync_audit.py"
+              SCRIPT_REMOTE_PATH="/tmp/memory_sync_audit_$$.py"
+              scp -i ~/.ssh/hetzner_key "$SCRIPT_LOCAL_PATH" \
+                "$USER_DEFAULTED@$HETZNER_HOST:$SCRIPT_REMOTE_PATH"
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== audit-ts: '\$(date -u -Iseconds) && \
+                 echo '=== current main HEAD on host ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
+                 echo '=== container restart count + start time ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '' && \
+                 echo '=== A1.sql: trading_mode for users ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT id, email, trading_mode FROM users ORDER BY id;\" && \
+                 echo '' && \
+                 echo '=== A1.sql: worker_heartbeats for 3 safety-net workers ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, MAX(beat_at) AS last_hb, NOW() - MAX(beat_at) AS staleness, MAX(last_status) AS status FROM worker_heartbeats WHERE worker_name IN ('telegram_poller_task','liquidation_monitor_task','live_exit_monitor') GROUP BY worker_name;\" && \
+                 echo '' && \
+                 echo '=== A1.sql: opens since validation window flip (2026-05-22T03:07Z) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT direction, COUNT(*) AS opens, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(AVG(pnl_pct)::numeric,3) AS avg_pnl_pct FROM shadow_trades WHERE opened_at >= '2026-05-22T03:07:00Z'::timestamptz GROUP BY direction ORDER BY direction;\" && \
+                 echo '' && \
+                 echo '=== A1.sql: audit chain status — predictions ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, prev_hash AS stored, LAG(row_hash) OVER (ORDER BY id) AS expected FROM predictions) SELECT COUNT(*) AS broken_predictions, MIN(id) AS oldest_break, MAX(id) AS newest_break FROM ordered WHERE expected IS NOT NULL AND stored != expected;\" && \
+                 echo '' && \
+                 echo '=== A1.sql: audit chain status — shadow_trades ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, prev_hash AS stored, LAG(row_hash) OVER (ORDER BY id) AS expected FROM shadow_trades) SELECT COUNT(*) AS broken_shadow_trades, MIN(id) AS oldest_break, MAX(id) AS newest_break FROM ordered WHERE expected IS NOT NULL AND stored != expected;\" && \
+                 echo '' && \
+                 echo '=== A5.sql: \\\\d shadow_trades (chain columns + opened_at) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT column_name, data_type FROM information_schema.columns WHERE table_name='shadow_trades' AND column_name IN ('id','prev_hash','row_hash','opened_at','closed_at','symbol') ORDER BY ordinal_position;\" && \
+                 echo '=== A5.sql: \\\\d auth_violations (claimed: no created_at column) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT column_name, data_type FROM information_schema.columns WHERE table_name='auth_violations' ORDER BY ordinal_position;\" && \
+                 echo '' && \
+                 echo '=== B3.sql: rl_checkpoints schema + rows ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT column_name, data_type FROM information_schema.columns WHERE table_name='rl_checkpoints' ORDER BY ordinal_position;\" && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT id, model_name, version, is_active, activated_at, deactivated_at, created_at FROM rl_checkpoints ORDER BY id DESC LIMIT 20;\" && \
+                 echo '' && \
+                 echo '=== B4.sql: brain_decisions count + range ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest FROM brain_decisions;\" && \
+                 echo '' && \
+                 echo '=== B5: brain cron log tail (last 60 lines) ===' && \
+                 (tail -n 60 /var/log/trading-radar-brain-cron.log 2>/dev/null || echo '(brain cron log not present)') && \
+                 echo '' && \
+                 echo '=== B5b: rl-cache directory contents ===' && \
+                 ls -la $DIR_DEFAULTED/backend/data/rl-cache/ 2>/dev/null || echo '(rl-cache dir missing)' && \
+                 echo '' && \
+                 echo '=== Python script (runtime Settings + brain module imports + outbound IP) ===' && \
+                 docker cp $SCRIPT_REMOTE_PATH tr-backend:/tmp/audit.py && \
+                 docker compose exec -T backend python /tmp/audit.py && \
+                 docker compose exec -T backend rm -f /tmp/audit.py && \
+                 rm -f $SCRIPT_REMOTE_PATH"
               ;;
           esac
