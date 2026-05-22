@@ -82,11 +82,16 @@ services:
       # calls load_active_checkpoint() at startup, which resolves
       # file:///app/data/ml-cache/<name>.pt against this mount. Without
       # the mount the .pt is wiped every restart and the loader fails.
-      # Read-only inside the container — the operator SCPs to the host
-      # path /opt/trading-radar/backend/data/{ml,rl}-cache/ and
-      # register.py records the file:// URI.
+      # ml-cache is read-only — operator SCPs to the host path
+      # /opt/trading-radar/backend/data/ml-cache/ and register.py records
+      # the file:// URI.
+      # rl-cache is READ-WRITE (PR-BRAIN-BOOTSTRAP-FIX): the brain
+      # trainer cron (backend/scripts/hetzner_brain_cron.sh) both READS
+      # warm-start .pt files AND WRITES new checkpoint .pt files to this
+      # same directory. A :ro mount makes the write fail with
+      # `Read-only file system`.
       - ./backend/data/ml-cache:/app/data/ml-cache:ro
-      - ./backend/data/rl-cache:/app/data/rl-cache:ro
+      - ./backend/data/rl-cache:/app/data/rl-cache
       # SP-1.1 — bind-mount the REPO-ROOT tools/ at /app/host-tools (NOT
       # /app/tools — that path is owned by the image's COPY of
       # backend/tools/{backtest,ml,...} which app/api/routes/admin_backtest.py

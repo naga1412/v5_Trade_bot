@@ -28,13 +28,20 @@ Usage on Colab T4 (manual, one-shot):
 """
 from __future__ import annotations
 
+# PR-BRAIN-BOOTSTRAP-FIX: prepend /app to sys.path so `from app.rl import ...`
+# works when the trainer is invoked as `python /app/host-tools/ml/train_brain.py`
+# from the cron (cron's working directory is /, not /app, and Python only adds
+# the script's directory to sys.path — not the bind-mount root). Same pattern
+# as scripts/diag_audit_bundle.py uses.
+import sys
+sys.path.insert(0, "/app")
+
 import argparse
 import asyncio
 import hashlib
 import json
 import logging
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
