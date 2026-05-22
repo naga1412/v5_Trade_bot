@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+from app.rl.adapter import AssetEmbeddingTable
 from app.rl.obs import OBS_DIM
 from app.rl.policy import N_ACTIONS, PolicyNetwork
 from app.rl.ppo import (
@@ -17,6 +18,18 @@ from app.rl.ppo import (
     train_ppo,
 )
 from app.rl.replay_buffer import ALL_ACTIONS, Transition
+
+
+def _asset_table() -> AssetEmbeddingTable:
+    """Fixture-style helper for tests that don't care about per-asset state.
+
+    PR-BRAIN-EMBEDDINGS-LEARNABLE made train_ppo require an asset_table
+    kwarg; tests that work with single-symbol transitions just need an
+    instance with that one symbol registered.
+    """
+    t = AssetEmbeddingTable()
+    t.bulk_register(["TEST"])
+    return t
 
 
 def _synthetic_transitions(
@@ -79,7 +92,7 @@ def test_train_one_epoch_runs_without_crash() -> None:
 
     transitions = _synthetic_transitions(64)
     cfg = TrainConfig(epochs=1, batch_size=32, ppo_epochs_per_batch=2)
-    result = train_ppo(policy=policy, transitions=transitions, config=cfg)
+    result = train_ppo(policy=policy, transitions=transitions, asset_table=_asset_table(), config=cfg)
 
     assert isinstance(result, TrainResult)
     assert result.epochs_completed == 1
@@ -93,7 +106,7 @@ def test_train_returns_state_dict_snapshot() -> None:
     policy = PolicyNetwork()
     transitions = _synthetic_transitions(64)
     cfg = TrainConfig(epochs=1, batch_size=32, ppo_epochs_per_batch=1)
-    result = train_ppo(policy=policy, transitions=transitions, config=cfg)
+    result = train_ppo(policy=policy, transitions=transitions, asset_table=_asset_table(), config=cfg)
     assert result.final_state_dict is not None
     assert "policy_head.weight" in result.final_state_dict
 
@@ -101,14 +114,14 @@ def test_train_returns_state_dict_snapshot() -> None:
 def test_empty_transitions_raises() -> None:
     policy = PolicyNetwork()
     with pytest.raises(ValueError, match="empty transitions"):
-        train_ppo(policy=policy, transitions=[], config=TrainConfig(epochs=1))
+        train_ppo(policy=policy, transitions=[], asset_table=_asset_table(), config=TrainConfig(epochs=1))
 
 
 def test_history_records_loss_per_epoch() -> None:
     policy = PolicyNetwork()
     transitions = _synthetic_transitions(64)
     cfg = TrainConfig(epochs=3, batch_size=16, ppo_epochs_per_batch=1)
-    result = train_ppo(policy=policy, transitions=transitions, config=cfg)
+    result = train_ppo(policy=policy, transitions=transitions, asset_table=_asset_table(), config=cfg)
     assert [s.epoch for s in result.history] == [1, 2, 3]
     for s in result.history:
         assert isinstance(s.policy_loss, float)
@@ -133,7 +146,7 @@ def test_trainer_learns_to_favour_high_reward_action() -> None:
         reward_for_action={0: -1.0, 1: -1.0, 2: 2.0, 3: -1.0, 4: -1.0},
     )
     cfg = TrainConfig(epochs=8, batch_size=64, ppo_epochs_per_batch=4, seed=7)
-    train_ppo(policy=policy, transitions=transitions, config=cfg)
+    train_ppo(policy=policy, transitions=transitions, asset_table=_asset_table(), config=cfg)
 
     policy.eval()
     avg_obs = torch.from_numpy(
@@ -160,11 +173,11 @@ def test_trainer_respects_seed_for_reproducibility() -> None:
 
     torch.manual_seed(99)
     p1 = PolicyNetwork()
-    train_ppo(policy=p1, transitions=transitions, config=cfg)
+    train_ppo(policy=p1, transitions=transitions, asset_table=_asset_table(), config=cfg)
 
     torch.manual_seed(99)
     p2 = PolicyNetwork()
-    train_ppo(policy=p2, transitions=transitions, config=cfg)
+    train_ppo(policy=p2, transitions=transitions, asset_table=_asset_table(), config=cfg)
 
     for k in p1.state_dict():
         assert torch.allclose(
@@ -182,7 +195,7 @@ def test_entropy_warmup_uses_higher_coef_first_n_epochs() -> None:
         entropy_warmup_coef=0.5,   # huge entropy bonus
         entropy_coef=0.0,
     )
-    result = train_ppo(policy=policy, transitions=transitions, config=cfg)
+    result = train_ppo(policy=policy, transitions=transitions, asset_table=_asset_table(), config=cfg)
     # With a 0.5 entropy coef, the log uniform-distribution entropy is
     # log(5) ≈ 1.6. Entropy should stay > 1.0.
     for stat in result.history:

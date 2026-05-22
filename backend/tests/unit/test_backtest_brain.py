@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+from app.rl.adapter import AssetEmbeddingTable
 from app.rl.backtest_brain import (
     MIN_HOLDOUT_TRADES,
     BacktestResult,
@@ -20,6 +21,14 @@ from app.rl.replay_buffer import (
     ACTION_SHORT_FULL,
     Transition,
 )
+
+
+def _asset_table() -> AssetEmbeddingTable:
+    """PR-BRAIN-EMBEDDINGS-LEARNABLE made evaluate_brain_on_holdout require
+    an asset_table kwarg (to read live, trained embeddings via hot-swap)."""
+    t = AssetEmbeddingTable()
+    t.bulk_register(["BTCUSDT"])
+    return t
 
 
 def _make_transition(
@@ -86,7 +95,7 @@ def test_evaluate_returns_insufficient_data_when_below_threshold() -> None:
     # 50 transitions × 20% = 10, well below MIN_HOLDOUT_TRADES (20).
     transitions = [_make_transition(reward=0.1) for _ in range(50)]
     out = evaluate_brain_on_holdout(
-        policy=policy, transitions=transitions,
+        policy=policy, asset_table=_asset_table(), transitions=transitions,
     )
     assert isinstance(out, dict)
     assert out["_status"] == "insufficient_data"
@@ -108,7 +117,7 @@ def test_evaluate_returns_backtest_result_when_above_threshold() -> None:
         for i in range(120)
     ]
 
-    out = evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+    out = evaluate_brain_on_holdout(policy=policy, asset_table=_asset_table(), transitions=transitions)
 
     assert isinstance(out, BacktestResult)
     assert out.total_trades == 24
@@ -134,7 +143,7 @@ def test_evaluate_uses_chronological_split() -> None:
             ),
         )
 
-    out = evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+    out = evaluate_brain_on_holdout(policy=policy, asset_table=_asset_table(), transitions=transitions)
     assert isinstance(out, BacktestResult)
     # Holdout starts at int(120 * 0.8) = 96, ends at 119.
     expected_window_start = transitions[96].opened_at_iso
@@ -156,7 +165,7 @@ def test_evaluate_handles_short_action_transitions() -> None:
         )
         for i in range(120)
     ]
-    out = evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+    out = evaluate_brain_on_holdout(policy=policy, asset_table=_asset_table(), transitions=transitions)
     # Just assert we get a valid result — the inference path covers SHORT too.
     assert isinstance(out, BacktestResult)
     assert out.total_trades == 24
@@ -176,7 +185,7 @@ def test_evaluate_preserves_policy_train_mode() -> None:
         )
         for i in range(120)
     ]
-    evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+    evaluate_brain_on_holdout(policy=policy, asset_table=_asset_table(), transitions=transitions)
 
     assert policy.training is True, (
         "policy.training was flipped to False — caller-state leak from "
@@ -197,7 +206,7 @@ def test_evaluate_preserves_policy_eval_mode() -> None:
         )
         for i in range(120)
     ]
-    evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+    evaluate_brain_on_holdout(policy=policy, asset_table=_asset_table(), transitions=transitions)
 
     assert policy.training is False
 
