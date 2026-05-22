@@ -197,6 +197,27 @@ async def insert_with_chain(
       - unknown table → raises ValueError (per Correction 1)
     """
     hashable = _filter_for_hash(table, payload)  # raises on unknown table BEFORE any DB I/O
+    # FU-24 fix: serialize per-table writers via a Postgres advisory lock.
+    # Lock key = hashtext(table_name) — a 32-bit signed int derived from
+    # the table name. Different tables get different keys (no cross-table
+    # contention); same-table writers strictly serialize on the read +
+    # insert window so two concurrent calls can never read the same
+    # `_last_row_hash` and chain-link to it. Lock auto-releases on COMMIT
+    # or ROLLBACK (xact_lock variant — no explicit release needed).
+    #
+    # Per-table (not per-symbol): the chain is global per-table, ordered
+    # by id. A per-symbol lock would let two writers on different symbols
+    # read the same `_last_row_hash` and break the chain — see PR-SAFETY-
+    # BATCH-1 spec §F for the proof.
+    #
+    # Postgres-only: SQLite has no `pg_advisory_xact_lock` / `hashtext`
+    # functions, and SQLite tests run single-process anyway so no race
+    # to fix. Dialect check keeps tests + dev sqlite paths unchanged.
+    if session.bind is not None and session.bind.dialect.name.startswith("postgres"):
+        await session.execute(
+            sa.text("SELECT pg_advisory_xact_lock(hashtext(:t))"),
+            {"t": table},
+        )
     prev = await _last_row_hash(session, table)
     new_hash = compute_row_hash(prev, hashable)
     full = {**payload, "prev_hash": prev, "row_hash": new_hash}

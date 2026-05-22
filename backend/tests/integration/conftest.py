@@ -264,6 +264,18 @@ async def _create_shadow_tables(engine: Any) -> None:
             "updated_at TEXT NOT NULL, "
             "PRIMARY KEY (user_id, symbol))"
         ))
+        # FU-33: symbol_halt_state SQLite mirror so shadow_worker tests
+        # that exercise _maybe_open_position / _maybe_close_position work
+        # without alembic. Mirror of alembic 0026_symbol_halt_state.
+        # No rows seeded — guard is default-OFF; check_slippage's flag
+        # gate keeps the table read-only when SLIPPAGE_GUARD_ENABLED=False.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS symbol_halt_state ("
+            "symbol TEXT PRIMARY KEY, "
+            "halted_until TEXT NOT NULL, "
+            "reason TEXT NOT NULL, "
+            "created_at TEXT NOT NULL)"
+        ))
         # PR10: symbol_performance_snapshots SQLite mirror so the
         # /bot-status/symbol-allowlist endpoint's integration tests can
         # seed snapshot rows. Mirror of the PR10 Phase 5 migration.

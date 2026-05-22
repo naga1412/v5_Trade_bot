@@ -232,6 +232,24 @@ class Settings(BaseSettings):
     MIN_ENTRY_SCORE_LONG: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
 
+    # --- FU-33: slippage circuit-breaker ---------------------------------
+    # Default-OFF — operator flips per-env after observing the metric.
+    # When True:
+    #   * shadow_worker._maybe_close_position calls check_slippage on SL
+    #     exit. A trigger (realized SL pct / expected > threshold) writes
+    #     a row to symbol_halt_state + sends a critical Telegram alert.
+    #   * shadow_worker._maybe_open_position blocks new entries on any
+    #     symbol carrying an unexpired halted_until.
+    SLIPPAGE_GUARD_ENABLED: bool = False
+    # Halt threshold: realized SL pct / expected SL pct > this → halt.
+    # 3.0 = "slippage was 3x worse than expected" — generous default that
+    # only catches obvious-outlier liquidity events (FIDAUSDT was ~14×).
+    SLIPPAGE_THRESHOLD_MULTIPLIER: float = 3.0
+    # How long to halt the symbol after a trigger. 4h gives enough time
+    # for the operator to investigate without missing >1 candle of
+    # opportunity on the 1h TF.
+    SLIPPAGE_HALT_COOLDOWN_HOURS: int = 4
+
 
 @lru_cache
 def get_settings() -> Settings:
