@@ -132,6 +132,8 @@ def test_extract_asset_embeddings_returns_diverse_embeddings_for_cold_start() ->
     """After bulk_register, the extracted embeddings are NOT identical
     across slots. Pins the bug fix: id=1 had cluster-near-Gaussian, this
     test asserts the post-fix output has real per-asset diversity."""
+    import torch
+    torch.manual_seed(42)  # determinism for the randomness-based assertion
     table = AssetEmbeddingTable()
     table.bulk_register([f"SYM{i:02d}" for i in range(10)])
 

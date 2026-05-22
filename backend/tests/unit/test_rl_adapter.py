@@ -173,6 +173,7 @@ def test_blend_returns_float32_regardless_of_input_dtype() -> None:
 def test_bulk_register_preserves_gaussian_init() -> None:
     """bulk_register must NOT median-seed; each slot keeps its independent
     Gaussian-init weight so the trainer sees diverse per-asset signal."""
+    torch.manual_seed(42)  # determinism for the randomness-based assertion
     t = AssetEmbeddingTable()
     symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "SOLUSDT", "DOTUSDT"]
     t.bulk_register(symbols)

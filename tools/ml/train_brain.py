@@ -78,6 +78,16 @@ async def _discover_training_symbols(db_url: str) -> list[str]:
     building the replay buffer. Without pre-registration, the buffer
     would assign asset_id=0 + embedding=zeros(32) to every transition
     (the bug PR-BRAIN-WARMSTART-FIX repairs).
+
+    NOTE: this query MUST stay row-set-equivalent to the WHERE clause
+    inside ``_fetch_closed_trades`` (replay_buffer.py). Today both are
+    "closed_at IS NOT NULL AND pnl_usdt IS NOT NULL" with no time
+    filter. If/when ``_fetch_closed_trades`` adopts a real
+    ``window_days`` filter, this helper must adopt the matching filter
+    in the same PR — otherwise the buffer can include symbols that
+    weren't pre-registered, and the defensive ``register_asset`` loop
+    at the end of ``_async_main`` will silently cluster-median-seed
+    them (the exact bug this PR fixes).
     """
     engine = create_async_engine(db_url)
     sm = async_sessionmaker(engine, expire_on_commit=False)
