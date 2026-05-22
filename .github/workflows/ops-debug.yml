@@ -44,6 +44,7 @@ on:
           - fu24-sweep-dryrun # READ-ONLY: PR-OPS-FU24-SWEEP-PREP dry-run. Counts broken chain rows in predictions + shadow_trades, distribution per-symbol/per-day, oldest+newest breaks. Pure SELECT. Operator runs the WRITE sweep (audit-chain-sweep-repair / audit-chain-sweep-apply-final on the fu-23-autonomous-trading-flag-gap branch) after reviewing this dry-run.
           - decouple-workers-verify # READ-ONLY: PR-DECOUPLE-WORKERS post-deploy verification. Confirms reader_only_passed heartbeat, new chain-WRITER-blocked alert, and the 3 previously-dead workers (telegram_poller, liquidation_monitor, live_exit_monitor) are now heartbeating.
           - memory-sync-audit # READ-ONLY: PR-WEEK1-MEGA-BATCH Part A — runtime state audit (Settings flags, worker heartbeats, opens-since-flip, chain status, schema introspection, brain infra). All SELECT/inspection, zero writes.
+          - fu24-post-deploy-verify # READ-ONLY: PR-SAFETY-BATCH-1 verification. Counts broken predictions chain rows with ts > deploy time (2026-05-22T11:52Z). Expected: 0 if FU-24 advisory lock works.
 
 jobs:
   probe:
@@ -881,5 +882,27 @@ jobs:
                  docker compose exec -T backend python /tmp/audit.py && \
                  docker compose exec -T backend rm -f /tmp/audit.py && \
                  rm -f $SCRIPT_REMOTE_PATH"
+              ;;
+            fu24-post-deploy-verify)
+              # READ-ONLY: Did the FU-24 advisory lock fix actually stop the
+              # chain re-break? Filters broken-row count by ts > deploy time
+              # (post-PR-SAFETY-BATCH-1 deploy at 2026-05-22T11:52Z).
+              # Expected: zero broken rows since deploy.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== verify-ts: '\$(date -u -Iseconds) && \
+                 echo '=== main HEAD ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline && \
+                 echo '=== container started ===' && \
+                 docker inspect tr-backend --format 'started={{.State.StartedAt}}' && \
+                 echo '' && \
+                 echo '=== predictions: ALL broken rows (count + range) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, ts, prev_hash AS stored, LAG(row_hash) OVER (ORDER BY id) AS expected FROM predictions) SELECT COUNT(*) AS total_broken, MIN(id) AS oldest_id, MAX(id) AS newest_id, MIN(ts) AS oldest_ts, MAX(ts) AS newest_ts FROM ordered WHERE expected IS NOT NULL AND stored != expected;\" && \
+                 echo '=== predictions: broken rows with ts > deploy (2026-05-22T11:52:00Z) — the fix-test ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"WITH ordered AS (SELECT id, ts, prev_hash AS stored, LAG(row_hash) OVER (ORDER BY id) AS expected FROM predictions) SELECT COUNT(*) AS post_deploy_broken, MIN(id) AS oldest_post_deploy_id, MIN(ts) AS oldest_post_deploy_ts FROM ordered WHERE expected IS NOT NULL AND stored != expected AND ts > '2026-05-22T11:52:00Z'::timestamptz;\" && \
+                 echo '=== predictions: total rows since deploy ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS rows_since_deploy, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM predictions WHERE ts > '2026-05-22T11:52:00Z'::timestamptz;\" && \
+                 echo '=== auth_violations since deploy (verifier detections) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT reason, COUNT(*) AS n FROM auth_violations WHERE attempted_at > '2026-05-22T11:52:00Z'::timestamptz AND reason LIKE 'audit_chain_broken:%' GROUP BY reason;\""
               ;;
           esac
