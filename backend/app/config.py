@@ -209,10 +209,13 @@ class Settings(BaseSettings):
     # - EDENUSDT: futures-only (never on SPOT)
     # - LUNCUSDT: delisted from .com SPOT
     # - PAXGUSDT / XAUTUSDT: gold-pegged tokens, region restricted
-    # - UUSDT: legacy data from pre-SPOT-migration universe (when source
-    #   was Binance Futures fapi). SPOT has UNIUSDT, not UUSDT.
+    #
+    # PR-CLEANUP-BATCH-1 (2026-05-22): removed UUSDT — verified priceable
+    # via `GET https://api.binance.com/api/v3/ticker/price?symbol=UUSDT`
+    # → {"symbol":"UUSDT","price":"1.00100000"}. PR10.7's blacklist
+    # entry was correct at the time but is now stale.
     SHADOW_SPOT_BLACKLIST: list[str] = [
-        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT",
+        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT",
     ]
 
     # --- PR-strategy-1: entry-quality gate -------------------------------

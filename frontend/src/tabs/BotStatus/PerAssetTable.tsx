@@ -167,7 +167,17 @@ export function PerAssetTable() {
               <td className={`px-1 py-0.5 text-right ${pnlClass(s.pnl_usdt)}`}>
                 {fmtPnl(s.pnl_usdt)}
               </td>
-              <td className="px-1 py-0.5 text-right">{fmtNum(s.sharpe_annualized, 2)}</td>
+              {/* PR-CLEANUP-BATCH-1 §J: Sharpe on N<5 trades is statistically
+                  meaningless. Suppress the value + tooltip-explain why so the
+                  operator isn't misled by a noisy ratio computed from 1-4
+                  samples. Matches PR10.8's tooltip pattern for blacklisted
+                  symbols. Backend `/per-asset` contract unchanged. */}
+              <td
+                className="px-1 py-0.5 text-right"
+                title={s.trades < 5 ? `Insufficient sample (N=${s.trades})` : undefined}
+              >
+                {s.trades < 5 ? "—" : fmtNum(s.sharpe_annualized, 2)}
+              </td>
               {/* PR10.6 T-UI.3 completion: per-row relative-time stamp. */}
               <td className="px-1 py-0.5 text-right text-text-tertiary">
                 {fmtRelativeTime(s.last_trade_closed_at)}

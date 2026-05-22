@@ -204,7 +204,12 @@ async def test_per_symbol_network_error_returns_partial() -> None:
 
 @pytest.mark.asyncio
 async def test_blacklist_filters_before_batch() -> None:
-    """SHADOW_SPOT_BLACKLIST symbols never reach the network."""
+    """SHADOW_SPOT_BLACKLIST symbols never reach the network.
+
+    PR-CLEANUP-BATCH-1 removed UUSDT from the blacklist (verified priceable
+    on Binance SPOT 2026-05-22). Test now uses PAXGUSDT (still blacklisted)
+    to assert the filtering still works.
+    """
     captured_symbols: list[Any] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -214,7 +219,7 @@ async def test_blacklist_filters_before_batch() -> None:
 
     async with _client(handler) as http:
         out = await fetch_spot_prices(
-            ["BTCUSDT", "EDENUSDT", "LUNCUSDT", "UUSDT"], http=http,
+            ["BTCUSDT", "EDENUSDT", "LUNCUSDT", "PAXGUSDT"], http=http,
         )
 
     assert captured_symbols == [["BTCUSDT"]], "blacklist filtered upfront"
