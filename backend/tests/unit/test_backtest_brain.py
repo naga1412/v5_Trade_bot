@@ -9,6 +9,7 @@ from app.rl.adapter import AssetEmbeddingTable
 from app.rl.backtest_brain import (
     MIN_HOLDOUT_TRADES,
     BacktestResult,
+    _compute_brain_correctness,
     _compute_max_drawdown,
     _compute_sharpe,
     _infer_proposed_direction,
@@ -278,8 +279,109 @@ def test_evaluate_does_not_write_sidecar_when_path_none(tmp_path) -> None:
     assert not nonexistent.exists()
 
 
+# PR-BRAIN-CORRECTNESS-METRIC tests
+
+
+def test_brain_correctness_returns_one_for_perfect_brain() -> None:
+    """When brain_adjust pushes in the right direction every time, correctness=1.0."""
+    adjusts = np.array([1.1, 1.1, 0.9, 0.9])   # amplify winners, suppress losers
+    rewards = np.array([+0.3, +0.5, -0.4, -0.2])
+    rate, n = _compute_brain_correctness(adjusts, rewards)
+    assert rate == pytest.approx(1.0)
+    assert n == 4
+
+
+def test_brain_correctness_returns_zero_for_perfectly_wrong_brain() -> None:
+    """Brain that always pushes the wrong way → 0.0."""
+    adjusts = np.array([0.9, 0.9, 1.1, 1.1])   # suppress winners, amplify losers
+    rewards = np.array([+0.3, +0.5, -0.4, -0.2])
+    rate, n = _compute_brain_correctness(adjusts, rewards)
+    assert rate == pytest.approx(0.0)
+    assert n == 4
+
+
+def test_brain_correctness_about_half_for_random_brain() -> None:
+    """A random brain on random rewards → ~0.5. Deterministic test with
+    a balanced 50/50 mix."""
+    adjusts = np.array([1.1, 0.9, 1.1, 0.9])    # alternating up/down
+    rewards = np.array([+0.3, +0.5, -0.4, -0.2])  # alternating +/-
+    # i=0: +0.1 * +0.3 → up-up → correct
+    # i=1: -0.1 * +0.5 → down-up → wrong
+    # i=2: +0.1 * -0.4 → up-down → wrong
+    # i=3: -0.1 * -0.2 → down-down → correct
+    rate, n = _compute_brain_correctness(adjusts, rewards)
+    assert rate == pytest.approx(0.5)
+    assert n == 4
+
+
+def test_brain_correctness_excludes_neutral_adjust() -> None:
+    """brain_adjust == 1.0 → 'no opinion' → excluded from denominator."""
+    adjusts = np.array([1.0, 1.0, 1.1, 0.9])
+    rewards = np.array([+0.1, -0.1, +0.2, -0.2])  # 1.0/+ and 1.0/- not scored
+    rate, n = _compute_brain_correctness(adjusts, rewards)
+    assert n == 2   # only the last two count
+    assert rate == pytest.approx(1.0)
+
+
+def test_brain_correctness_excludes_zero_reward() -> None:
+    """raw_reward == 0 → 'no outcome' → excluded from denominator."""
+    adjusts = np.array([1.1, 0.9, 1.1, 0.9])
+    rewards = np.array([0.0, 0.0, +0.2, -0.2])    # first 2 excluded
+    rate, n = _compute_brain_correctness(adjusts, rewards)
+    assert n == 2
+    assert rate == pytest.approx(1.0)
+
+
+def test_brain_correctness_returns_zero_zero_for_empty_input() -> None:
+    rate, n = _compute_brain_correctness(np.array([]), np.array([]))
+    assert rate == 0.0 and n == 0
+
+
+def test_brain_correctness_raises_on_length_mismatch() -> None:
+    with pytest.raises(ValueError, match="must have the same length"):
+        _compute_brain_correctness(np.array([1.1]), np.array([+0.1, -0.1]))
+
+
+def test_backtest_result_emits_new_correctness_fields() -> None:
+    """End-to-end: a real backtest fills in brain_correctness + cumulative_reward."""
+    torch.manual_seed(11)
+    policy = PolicyNetwork()
+    transitions = [
+        _make_transition(
+            reward=0.05 if i % 2 == 0 else -0.05,
+            opened_at_iso=f"2026-05-{(i % 28) + 1:02d}T12:00:00+00:00",
+        )
+        for i in range(120)
+    ]
+    out = evaluate_brain_on_holdout(
+        policy=policy, asset_table=_asset_table(), transitions=transitions,
+    )
+    assert isinstance(out, BacktestResult)
+    # Both new fields populated (correctness in [0,1], cum_reward a real float).
+    assert 0.0 <= out.brain_correctness <= 1.0
+    assert out.brain_correctness_n >= 0
+    assert isinstance(out.cumulative_reward, float)
+
+
+def test_eval_dict_includes_new_metric_keys() -> None:
+    """as_eval_dict must include the 3 new keys for downstream consumers."""
+    r = BacktestResult(
+        sharpe=0.0, max_dd=0.0, win_rate=0.0, total_trades=0,
+        window_start="x", window_end="x",
+        brain_correctness=0.7, brain_correctness_n=42,
+        cumulative_reward=1.5,
+    )
+    d = r.as_eval_dict()
+    assert d["brain_correctness"] == 0.7
+    assert d["brain_correctness_n"] == 42
+    assert d["cumulative_reward"] == 1.5
+    # Backward compat: win_rate still present (DEPRECATED but kept).
+    assert "win_rate" in d
+
+
 def test_backtest_result_as_eval_dict_round_trips() -> None:
-    """The serialised dict has exactly the 6 expected keys with float/int types."""
+    """The serialised dict has all 9 expected keys (6 original + 3 new from
+    PR-BRAIN-CORRECTNESS-METRIC) with float/int types."""
     result = BacktestResult(
         sharpe=1.23, max_dd=0.45, win_rate=0.55, total_trades=42,
         window_start="2026-05-01T00:00:00+00:00",
@@ -289,6 +391,12 @@ def test_backtest_result_as_eval_dict_round_trips() -> None:
     assert set(d.keys()) == {
         "sharpe", "max_dd", "win_rate", "total_trades",
         "window_start", "window_end",
+        # PR-BRAIN-CORRECTNESS-METRIC additions
+        "brain_correctness", "brain_correctness_n", "cumulative_reward",
     }
     assert d["sharpe"] == 1.23
     assert d["total_trades"] == 42
+    # New fields default to 0.0 / 0 when not provided
+    assert d["brain_correctness"] == 0.0
+    assert d["brain_correctness_n"] == 0
+    assert d["cumulative_reward"] == 0.0
