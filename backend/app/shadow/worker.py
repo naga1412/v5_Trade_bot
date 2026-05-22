@@ -17,12 +17,14 @@ publish over the WS once persistence succeeds (mirroring live_prediction.py).
 import asyncio
 import hashlib
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
 import pandas as pd
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.routes.ws import manager
@@ -803,6 +805,28 @@ def _candles_to_raw_klines(
     return out
 
 
+async def _load_open_position_symbols(session: AsyncSession) -> set[str]:
+    """Symbols with at least one open position, regardless of universe / blacklist.
+
+    PR-CLEANUP-BATCH-1 §I: prevents universe drift from orphaning positions
+    (TRUMPUSDT-class issue from PR-DIAG-AUDIT-BUNDLE — a symbol dropped from
+    the top-30 universe still has an open position, but the worker stops
+    subscribing to it, leaving ``last_check_at`` stale and the exit monitor
+    blind to the symbol). Union with the top-30 universe at boot fixes this.
+    """
+    result = await session.execute(sa.text(
+        "SELECT DISTINCT symbol FROM shadow_open_positions"
+    ))
+    return {r.symbol for r in result}
+
+
+def _compute_subscription_set(
+    top_n: Iterable[str], open_position_symbols: Iterable[str],
+) -> list[str]:
+    """Deduped + sorted union — stable ordering for log readability."""
+    return sorted(set(top_n) | set(open_position_symbols))
+
+
 async def _build_default_worker() -> ShadowWorker:
     """Build a worker using the production session factory + settings.
 
@@ -812,6 +836,11 @@ async def _build_default_worker() -> ShadowWorker:
     legacy single-reader build path can continue to construct the worker
     directly with ``reader=...`` — this helper is the production wiring
     only.
+
+    PR-CLEANUP-BATCH-1 §I: the subscription set is
+    ``top_30 ∪ open_position_symbols`` (deduped, sorted). Open positions
+    on symbols that have since dropped from the universe still receive
+    WS ticks and can be exited cleanly.
     """
     from app.config import get_settings
     settings = get_settings()
@@ -820,7 +849,18 @@ async def _build_default_worker() -> ShadowWorker:
 
     factory = get_session_factory()
     async with factory() as session:
-        symbols = await load_shadow_universe(session, narrow=narrow)
+        top_n = await load_shadow_universe(session, narrow=narrow)
+        # PR-CLEANUP-BATCH-1 §I: union with open positions.
+        open_position_symbols = await _load_open_position_symbols(session)
+
+    symbols = _compute_subscription_set(top_n, open_position_symbols)
+    extra = sorted(set(open_position_symbols) - set(top_n))
+    if extra:
+        log.info(
+            "shadow_worker: subscription union added %d open-position "
+            "symbol(s) outside top-N: %s",
+            len(extra), extra,
+        )
 
     readers: dict[str, _StreamReader] = {
         tf: MultiStreamReader(symbols=symbols, timeframe=tf) for tf in timeframes
