@@ -36,6 +36,8 @@ on:
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
           - brain-cron-trigger # WRITE: post-deploy verify of PR-BRAIN-BOOTSTRAP-FIX. Verifies the 3 fixes on disk, manually fires hetzner_brain_cron.sh, tails the resulting log, reports rl_checkpoints + rl-cache. Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint (is_active stays False).
+          - brain-rl-cache-archive # WRITE: mv all *.pt + eval_brain_*.json files from rl-cache into rl-cache/_predegenerate/. Idempotent. Forces next cron to cold-start. Does NOT touch rl_checkpoints DB rows.
+          - brain-holdout-labels # READ-ONLY: label-side audit of the 59 backtest holdout trades (2026-05-19 → 2026-05-22). Reports trade dump + by-direction + by-hour + top-15 by-symbol — informs misclass analysis without needing brain decisions.
 
 jobs:
   probe:
@@ -613,5 +615,73 @@ jobs:
                  echo '=== V4: any new auth_violations from audit_chain_broken since deploy? (expect 0) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT count(*) FROM auth_violations WHERE reason = 'audit_chain_broken' AND attempted_at > now() - interval '30 minutes';\""
+              ;;
+            brain-rl-cache-archive)
+              # Move existing .pt and eval_brain_*.json files out of rl-cache
+              # into _predegenerate/, forcing the next cron to cold-start.
+              # Idempotent — if rl-cache is already empty, the mv -t is a no-op.
+              # PR-BRAIN-COLD-START-PROBE (2026-05-22).
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== BEFORE: rl-cache contents ===' && \
+                 ls -la backend/data/rl-cache/ && \
+                 echo '=== archiving *.pt and eval_brain_*.json to _predegenerate/ ===' && \
+                 mkdir -p backend/data/rl-cache/_predegenerate/ && \
+                 (find backend/data/rl-cache/ -maxdepth 1 -name 'ppo_policy_v*.pt' -exec mv {} backend/data/rl-cache/_predegenerate/ \\; 2>/dev/null || true) && \
+                 (find backend/data/rl-cache/ -maxdepth 1 -name 'eval_brain_v*.json' -exec mv {} backend/data/rl-cache/_predegenerate/ \\; 2>/dev/null || true) && \
+                 echo '=== AFTER: rl-cache should contain only _predegenerate/ subdir ===' && \
+                 ls -la backend/data/rl-cache/ && \
+                 echo '=== _predegenerate/ contents (archived files) ===' && \
+                 ls -la backend/data/rl-cache/_predegenerate/ | tail -20"
+              ;;
+            brain-holdout-labels)
+              # Label-side audit of the 59 backtest holdout trades window
+              # (2026-05-19T04:30 UTC → 2026-05-22T01:45 UTC, matching the
+              # window backtest_brain.evaluate_brain_on_holdout uses on the
+              # 293-trade buffer after chronological 80/20 split). READ-ONLY.
+              # PR-BRAIN-COLD-START-PROBE (2026-05-22).
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT id, symbol, direction, opened_at::time AS open_time_utc, \
+                    extract(hour from opened_at) AS hour_utc, \
+                    round(entry_score::numeric, 3) AS score, \
+                    round(entry_confidence::numeric, 3) AS conf, \
+                    round(pnl_pct::numeric * 100, 2) AS pnl_pct, \
+                    round(pnl_usdt::numeric, 4) AS pnl_usdt, \
+                    CASE WHEN pnl_usdt > 0 THEN 'WIN' WHEN pnl_usdt < 0 THEN 'LOSS' ELSE 'FLAT' END AS outcome, \
+                    exit_reason \
+                    FROM shadow_trades \
+                    WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL \
+                      AND opened_at >= '2026-05-19T04:30:00+00:00' \
+                      AND opened_at <= '2026-05-22T01:45:00+00:00' \
+                    ORDER BY opened_at;\" -c \
+                 \"SELECT direction, COUNT(*) AS n, \
+                    round(100.0 * SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS win_rate_pct, \
+                    round(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct, \
+                    round(SUM(pnl_usdt)::numeric, 2) AS total_pnl_usdt \
+                    FROM shadow_trades \
+                    WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL \
+                      AND opened_at >= '2026-05-19T04:30:00+00:00' \
+                      AND opened_at <= '2026-05-22T01:45:00+00:00' \
+                    GROUP BY direction;\" -c \
+                 \"SELECT extract(hour from opened_at) AS hour_utc, COUNT(*) AS n, \
+                    round(100.0 * SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS win_rate_pct \
+                    FROM shadow_trades \
+                    WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL \
+                      AND opened_at >= '2026-05-19T04:30:00+00:00' \
+                      AND opened_at <= '2026-05-22T01:45:00+00:00' \
+                    GROUP BY 1 ORDER BY 1;\" -c \
+                 \"SELECT symbol, COUNT(*) AS n, \
+                    round(100.0 * SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS win_rate_pct, \
+                    round(SUM(pnl_usdt)::numeric, 4) AS total_pnl \
+                    FROM shadow_trades \
+                    WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL \
+                      AND opened_at >= '2026-05-19T04:30:00+00:00' \
+                      AND opened_at <= '2026-05-22T01:45:00+00:00' \
+                    GROUP BY symbol ORDER BY n DESC LIMIT 15;\" && \
+                 echo '=== sidecar: per-trade brain decisions from latest checkpoint ===' && \
+                 ls -la backend/data/rl-cache/ | grep per_trade || echo '(no per-trade sidecar yet — re-run brain-cron-trigger after PR-COLD-START-PROBE deploys)' && \
+                 (cat backend/data/rl-cache/\$(ls -t backend/data/rl-cache/eval_brain_v*_per_trade.json 2>/dev/null | head -1) 2>/dev/null || true)"
               ;;
           esac
