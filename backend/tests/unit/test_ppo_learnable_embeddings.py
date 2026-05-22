@@ -17,7 +17,7 @@ from app.rl.adapter import AssetEmbeddingTable
 from app.rl.obs import OBS_DIM
 from app.rl.policy import PolicyNetwork
 from app.rl.ppo import TrainConfig, _stack_transitions, train_ppo
-from app.rl.replay_buffer import ACTION_LONG_FULL, ACTION_SHORT_FULL, Transition
+from app.rl.replay_buffer import ACTION_LONG_FULL, Transition
 
 
 def _make_transition(
