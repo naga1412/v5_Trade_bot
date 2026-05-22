@@ -3,7 +3,14 @@
 Executed inside the backend container by the ops-debug `diag-audit-bundle`
 probe. Read-only. Prints sectioned output to stdout for capture by the
 workflow log.
+
+When invoked as `python /tmp/diag.py`, Python prepends `/tmp` (not /app)
+to sys.path — so `import app.config` would fail. Container WORKDIR is
+/app, but we run the script from /tmp. Fix: prepend /app explicitly.
 """
+import sys
+sys.path.insert(0, "/app")
+
 import inspect
 import os
 
