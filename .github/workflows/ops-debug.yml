@@ -598,17 +598,6 @@ jobs:
                  echo '=== container env: same flag set as seen INSIDE the backend container ===' && \
                  docker compose exec -T backend sh -c 'env | grep -E \"^(DISABLE_SHORT_SIGNALS|MIN_ENTRY_SCORE_LONG|SYMBOL_ALLOWLIST_ENABLED|DYNAMIC_SIZING_ENABLED|LIVE_COOLDOWN_ENABLED|HOLD_TP_SCALING_ENABLED|AUTONOMOUS_TRADING_ENABLED|MTF_MIN_AGREEMENT_1H)=\" | sort' || echo '(no matching env vars inside container)' && \
                  echo '=== app.config.get_settings() runtime values ===' && \
-                 docker compose exec -T backend python -c \"
-from app.config import get_settings
-s = get_settings()
-print(f'DISABLE_SHORT_SIGNALS={s.DISABLE_SHORT_SIGNALS}')
-print(f'MIN_ENTRY_SCORE_LONG={s.MIN_ENTRY_SCORE_LONG}')
-print(f'SYMBOL_ALLOWLIST_ENABLED={s.SYMBOL_ALLOWLIST_ENABLED}')
-print(f'DYNAMIC_SIZING_ENABLED={s.DYNAMIC_SIZING_ENABLED}')
-print(f'LIVE_COOLDOWN_ENABLED={s.LIVE_COOLDOWN_ENABLED}')
-print(f'HOLD_TP_SCALING_ENABLED={s.HOLD_TP_SCALING_ENABLED}')
-print(f'autonomous_trading_enabled={s.autonomous_trading_enabled}')
-print(f'MTF_MIN_AGREEMENT_1H={s.MTF_MIN_AGREEMENT_1H}')
-\""
+                 docker compose exec -T backend python -c \"from app.config import get_settings; s=get_settings(); print(f'DISABLE_SHORT_SIGNALS={s.DISABLE_SHORT_SIGNALS}'); print(f'MIN_ENTRY_SCORE_LONG={s.MIN_ENTRY_SCORE_LONG}'); print(f'SYMBOL_ALLOWLIST_ENABLED={s.SYMBOL_ALLOWLIST_ENABLED}'); print(f'DYNAMIC_SIZING_ENABLED={s.DYNAMIC_SIZING_ENABLED}'); print(f'LIVE_COOLDOWN_ENABLED={s.LIVE_COOLDOWN_ENABLED}'); print(f'HOLD_TP_SCALING_ENABLED={s.HOLD_TP_SCALING_ENABLED}'); print(f'autonomous_trading_enabled={s.autonomous_trading_enabled}'); print(f'MTF_MIN_AGREEMENT_1H={s.MTF_MIN_AGREEMENT_1H}')\""
               ;;
           esac
