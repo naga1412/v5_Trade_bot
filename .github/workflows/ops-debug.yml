@@ -42,6 +42,7 @@ on:
           - diag-autonomous-workers # READ-ONLY: PR-DIAG-AUTONOMOUS-WORKERS — why telegram_poller_task / liquidation_monitor_task / live_exit_monitor are dead despite AUTONOMOUS_TRADING_ENABLED=True. Runs preflight in-process + dumps heartbeats + log grep for spawn events.
           - preflight-alert-verify # READ-ONLY: PR-PREFLIGHT-ALERT post-deploy verification. Looks for the 'preflight_gate' heartbeat row + CRITICAL log line + (best-effort) telegram alert evidence in backend logs since the most recent container restart.
           - fu24-sweep-dryrun # READ-ONLY: PR-OPS-FU24-SWEEP-PREP dry-run. Counts broken chain rows in predictions + shadow_trades, distribution per-symbol/per-day, oldest+newest breaks. Pure SELECT. Operator runs the WRITE sweep (audit-chain-sweep-repair / audit-chain-sweep-apply-final on the fu-23-autonomous-trading-flag-gap branch) after reviewing this dry-run.
+          - decouple-workers-verify # READ-ONLY: PR-DECOUPLE-WORKERS post-deploy verification. Confirms reader_only_passed heartbeat, new chain-WRITER-blocked alert, and the 3 previously-dead workers (telegram_poller, liquidation_monitor, live_exit_monitor) are now heartbeating.
 
 jobs:
   probe:
@@ -796,5 +797,34 @@ jobs:
                  echo '' && \
                  echo '=== 4) backup table check (does predictions_prev_hash_backup_* already exist?) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'predictions_prev_hash_backup_%' ORDER BY table_name;\""
+              ;;
+            decouple-workers-verify)
+              # READ-ONLY: PR-DECOUPLE-WORKERS post-deploy verification.
+              # The deploy at 2026-05-22T09:03Z restarted the backend container.
+              # Audit chain remains broken (FU-24 sweep not yet run).
+              # Expected post-PR behavior:
+              #  - worker_heartbeats has 'preflight_gate' status='reader_only_passed'
+              #  - log.warning shows chain WRITER blocked branch fired
+              #  - The 3 safety-net workers heartbeat fresh (within ~2-3 min)
+              #  - NEW telegram alert (chain WRITER blocked, NOT old Preflight FAILED)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== verify-ts: '\$(date -u -Iseconds) && \
+                 echo '=== current main HEAD ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
+                 echo '=== container restart count + start time ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '' && \
+                 echo '=== 1) preflight_gate heartbeat (NEW status=reader_only_passed expected) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, beat_at, last_status, details FROM worker_heartbeats WHERE worker_name='preflight_gate' ORDER BY beat_at DESC LIMIT 3;\" && \
+                 echo '' && \
+                 echo '=== 2) the 3 previously-dead workers (status + staleness) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT worker_name, MAX(beat_at) AS last_beat, NOW() - MAX(beat_at) AS staleness, MAX(last_status) AS status FROM worker_heartbeats WHERE worker_name IN ('telegram_poller_task','liquidation_monitor_task','live_exit_monitor') GROUP BY worker_name;\" && \
+                 echo '' && \
+                 echo '=== 3) backend log: preflight + chain-writer-blocked + worker spawn ===' && \
+                 (docker compose logs backend --since 30m 2>&1 | grep -iE 'preflight|chain.WRITER|chain WRITER|telegram poller|liquidation monitor|live_exit_monitor|alert_admin' | head -30 || echo '(no relevant log lines)') && \
+                 echo '' && \
+                 echo '=== 4) telegram alert evidence (post-deploy sendMessage POSTs) ===' && \
+                 (docker compose logs backend --since 30m 2>&1 | grep -iE 'sendMessage|alert_admin.*critical' | head -10 || echo '(no telegram POSTs)')"
               ;;
           esac
