@@ -33,10 +33,17 @@ import pytest
 from app.config import Settings
 
 
-# Operator-tunable strategy flags. Each one was at least once "shipped
-# default-OFF, operator flips per env after staging soak" — meaning the
-# env→Settings binding is load-bearing for the rollout plan.
+# Operator-tunable strategy + launch flags. Each one was at least once
+# "shipped default-OFF, operator flips per env after staging soak" —
+# meaning the env→Settings binding is load-bearing for the rollout plan.
+# Same failure mode that hid DISABLE_SHORT_SIGNALS would apply to any of
+# these if the env_file or Settings declaration regresses.
 _OPERATOR_TUNABLE_FLAGS: frozenset[str] = frozenset({
+    # SP-8 Phase J: autonomous-launch master switches
+    "autonomous_trading_enabled",
+    "auto_promote_to_telegram_enabled",
+    "auto_promote_to_fullyauto_enabled",
+    "worker_enabled",
     # PR-strategy-1 (2026-05-20)
     "DISABLE_SHORT_SIGNALS",
     "MIN_ENTRY_SCORE_LONG",
@@ -59,9 +66,29 @@ _OPERATOR_TUNABLE_FLAGS: frozenset[str] = frozenset({
 
 
 def _s(**kwargs) -> Settings:
+    # ``_env_file=None`` immunises the test against a repo-root `.env`
+    # contaminating Settings construction (Settings.model_config has
+    # ``env_file=".env"`` at app/config.py — pydantic-settings reads it
+    # by default).  Tests assert behavior under explicit env state only.
     return Settings(
-        database_url="postgresql://x", redis_url="redis://x", **kwargs,
+        database_url="postgresql://x", redis_url="redis://x",
+        _env_file=None, **kwargs,
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_strategy_flag_env(monkeypatch) -> None:
+    """Strip operator-tunable flags from the shell env before every test.
+
+    A developer running ``DISABLE_SHORT_SIGNALS=true pytest`` (or with the
+    same line in a non-test shell rc) would otherwise see false failures.
+    """
+    for flag in _OPERATOR_TUNABLE_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+        # case_sensitive=False on Settings means the lowercase form binds
+        # too — purge it as well.
+        monkeypatch.delenv(flag.upper(), raising=False)
+        monkeypatch.delenv(flag.lower(), raising=False)
 
 
 def test_all_strategy_flags_present_in_settings() -> None:
