@@ -288,6 +288,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     train_result = train_ppo(
         policy=policy,
         transitions=transitions,
+        asset_table=asset_table,
         config=cfg,
         device=device,
     )
@@ -295,8 +296,13 @@ async def _async_main(args: argparse.Namespace) -> int:
     # PR-BRAIN-BACKTEST-PHASEB5: chronological 80/20 holdout backtest of the
     # newly-trained policy. Result is persisted into rl_checkpoints.eval_results
     # so champion_challenger._evaluate_sharpe can read it without re-running.
+    # PR-BRAIN-EMBEDDINGS-LEARNABLE: pass asset_table so the backtest uses the
+    # post-training embeddings (hot-swap), not the pre-baked frozen values.
     backtest_outcome = evaluate_brain_on_holdout(
-        policy=policy, transitions=transitions, device=device,
+        policy=policy,
+        asset_table=asset_table,
+        transitions=transitions,
+        device=device,
     )
     log.info("backtest: %s", backtest_outcome)
 
