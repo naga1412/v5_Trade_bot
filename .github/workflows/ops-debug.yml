@@ -37,6 +37,7 @@ on:
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
           - flag-binding-verify # READ-ONLY: PR-FIX-FLAG-BINDING Step 3 — prints runtime values of operator-tunable flags from app.config.get_settings(). Expected post-fix: DISABLE_SHORT_SIGNALS=True (since /opt/trading-radar/.env has it set since 2026-05-21T19:42:22Z).
           - expost-tier1-filter-validation # READ-ONLY: PR-EXPOST-1 ex-post SQL analysis of Tier-1 filter ideas (SHORT-disable, MIN_ENTRY_SCORE_LONG=0.36, time-of-day, per-symbol cull) against 30-day shadow_trades history.
+          - diag-hour5-investigation # READ-ONLY: PR-DIAG-HOUR5 — why hour 5 UTC has 0/8 LONG WR. Full row dump + symbol distribution + exit-reason breakdown + held-duration distribution. Pairs with the cron-schedule grep documented in the report.
 
 jobs:
   probe:
@@ -636,5 +637,25 @@ jobs:
                  echo '=== SCENARIO G (diagnostic): hours cut by 13-22 UTC filter ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC')::int AS utc_hour, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') NOT BETWEEN 13 AND 22 GROUP BY utc_hour ORDER BY utc_hour;\""
+              ;;
+            diag-hour5-investigation)
+              # READ-ONLY: PR-DIAG-HOUR5 — investigate why hour 5 UTC has 0/8
+              # LONG WR. Q3 (cron-schedule grep) is done in-tree on the
+              # controller side and reported alongside these SQL results.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== diag-ts: '$(date -u -Iseconds) && \
+                 echo '=== Q1: full row dump of all hour-5 LONG trades (last 30d) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, opened_at, closed_at, entry_score, entry_price, stop_loss, take_profit, ROUND(pnl_pct::numeric, 3) AS pnl_pct, exit_reason, ROUND((EXTRACT(EPOCH FROM (closed_at - opened_at))/60)::numeric, 1) AS held_minutes FROM shadow_trades WHERE direction='LONG' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') = 5 AND closed_at >= NOW() - INTERVAL '30 days' ORDER BY opened_at;\" && \
+                 echo '=== Q2: symbol distribution at hours 5 vs 6 (sanity check) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC')::int AS utc_hour, symbol, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct FROM shadow_trades WHERE direction='LONG' AND closed_at IS NOT NULL AND closed_at >= NOW() - INTERVAL '30 days' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') IN (5, 6) GROUP BY utc_hour, symbol ORDER BY utc_hour, trades DESC;\" && \
+                 echo '=== Q4: exit reason breakdown for hour-5 LONG ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT exit_reason, COUNT(*) AS n, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl FROM shadow_trades WHERE direction='LONG' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') = 5 AND closed_at >= NOW() - INTERVAL '30 days' GROUP BY exit_reason ORDER BY n DESC;\" && \
+                 echo '=== Q5: close-hour distribution for hour-5 LONG (how long held) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT EXTRACT(HOUR FROM closed_at AT TIME ZONE 'UTC')::int AS close_hour, COUNT(*) AS n, ROUND(AVG(EXTRACT(EPOCH FROM (closed_at - opened_at))/60)::numeric, 1) AS avg_held_minutes FROM shadow_trades WHERE direction='LONG' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') = 5 AND closed_at >= NOW() - INTERVAL '30 days' GROUP BY close_hour ORDER BY close_hour;\""
               ;;
           esac
