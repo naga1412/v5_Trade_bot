@@ -21,6 +21,7 @@ import sqlalchemy as sa
 import torch
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.config import get_settings
 from app.rl.checkpoints import (
     ActiveRlCheckpoint,
     clear_active,
@@ -144,8 +145,10 @@ async def test_active_checkpoint_returns_multiplier_and_writes_row(
     )
     await session.commit()
 
-    # LONG_FULL + proposed=LONG → boost to 1.4
-    assert result.brain_adjust == 1.4
+    # LONG_FULL + proposed=LONG → boost to 1 + SPREAD
+    # (PR-BRAIN-SOFTER-ACTIONS: spread-parametric mapping, default 0.15)
+    spread = get_settings().BRAIN_ACTION_MULTIPLIER_SPREAD
+    assert result.brain_adjust == pytest.approx(1.0 + spread)
     assert result.decision is not None
     assert result.decision.raw_action == "LONG_FULL"
     assert result.decision.smoothed_action == "LONG_FULL"
@@ -167,7 +170,7 @@ async def test_active_checkpoint_returns_multiplier_and_writes_row(
 async def test_active_checkpoint_brain_disagrees_suppresses(
     session: AsyncSession,
 ) -> None:
-    """Brain says LONG_FULL but L1..L9 proposed SHORT → suppress (0.6)."""
+    """Brain says LONG_FULL but L1..L9 proposed SHORT → suppress (1 - SPREAD/2)."""
     _activate_long_full_policy()
     result = await compute_brain_adjust_and_persist(
         symbol="BTC/USDT",
@@ -178,7 +181,9 @@ async def test_active_checkpoint_brain_disagrees_suppresses(
         macro=_macro(),
         session=session,
     )
-    assert result.brain_adjust == 0.6
+    # PR-BRAIN-SOFTER-ACTIONS: disagree → 1 - SPREAD/2 (default 0.925).
+    spread = get_settings().BRAIN_ACTION_MULTIPLIER_SPREAD
+    assert result.brain_adjust == pytest.approx(1.0 - spread / 2)
     assert result.decision is not None
 
 
@@ -225,7 +230,9 @@ async def test_session_none_skips_persistence(session: AsyncSession) -> None:
         macro=_macro(),
         session=None,
     )
-    assert result.brain_adjust == 1.4
+    # PR-BRAIN-SOFTER-ACTIONS: agree-full → 1 + SPREAD (default 1.15).
+    spread = get_settings().BRAIN_ACTION_MULTIPLIER_SPREAD
+    assert result.brain_adjust == pytest.approx(1.0 + spread)
     assert result.decision is not None
     # Use the live session as a witness — brain_decisions table should
     # be empty since we asked the glue to skip persistence.
