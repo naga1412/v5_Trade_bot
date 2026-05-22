@@ -250,6 +250,21 @@ class Settings(BaseSettings):
     # opportunity on the 1h TF.
     SLIPPAGE_HALT_COOLDOWN_HOURS: int = 4
 
+    # === BRAIN ACTION MULTIPLIER (PR-BRAIN-SOFTER-ACTIONS) ===
+    # Maximum signed multiplier offset from 1.0 produced by
+    # app.rl.inference.action_to_brain_adjust. With SPREAD=0.15 the brain's
+    # effect on the aggregator's final score is bounded to [0.85, 1.15] ×
+    # static. Symmetric mapping with linear half-steps:
+    #   FLAT       → 1 − SPREAD       (full-strength suppress)
+    #   disagree   → 1 − SPREAD / 2   (half-strength suppress)
+    #   NEUTRAL    → 1.0              (no-op)
+    #   agree-half → 1 + SPREAD / 2   (half-strength boost)
+    #   agree-full → 1 + SPREAD       (full-strength boost)
+    # Lower = brain is more conservative; higher = brain has more sway.
+    # Default 0.15 chosen post-PR-BRAIN-BACKTEST-PHASEB5 to reduce blast
+    # radius of bad decisions during v1 (id=3 holdout Sharpe = −3.21).
+    BRAIN_ACTION_MULTIPLIER_SPREAD: float = 0.15
+
 
 @lru_cache
 def get_settings() -> Settings:

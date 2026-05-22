@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from app.config import get_settings
 from app.rl.adapter import AssetEmbeddingTable
 from app.rl.checkpoints import (
     get_active_policy_and_checkpoint,
@@ -164,30 +165,44 @@ def action_to_brain_adjust(
 ) -> float:
     """Map a brain action + the L1..L9 proposed direction to a brain_adjust.
 
-    The aggregator's ``brain_adjust`` is a multiplier in (0, 2) on the
-    raw final score. SP-4 v1 uses a CONSERVATIVE mapping — brain
-    modulates signal strength rather than overriding direction:
+    PR-BRAIN-SOFTER-ACTIONS (2026-05-22) parameterised the mapping on a
+    single ``SPREAD`` knob (``settings.BRAIN_ACTION_MULTIPLIER_SPREAD``,
+    default 0.15). The mapping is symmetric around 1.0 with linear
+    half-steps:
 
-    * Brain action agrees with proposed direction → boost (1.4 / 1.2)
-    * Brain says FLAT → suppress (0.5)
-    * Brain disagrees with proposed direction → suppress (0.6) but
-      don't flip (direction-override is a future Phase D refinement
-      after we see brain track record)
+      FLAT       → 1 − SPREAD          (full-strength suppress)
+      disagree   → 1 − SPREAD / 2      (half-strength suppress)
+      NEUTRAL    → 1.0                 (no-op)
+      agree-half → 1 + SPREAD / 2      (half-strength boost)
+      agree-full → 1 + SPREAD          (full-strength boost)
+
+    Lower SPREAD = brain is more conservative (less influence per
+    decision); higher SPREAD = brain has more sway. v1 default 0.15
+    chosen post-PR-BRAIN-BACKTEST-PHASEB5 to reduce blast radius of
+    bad brain decisions while id=3-class checkpoints accumulate
+    evidence; raise as the brain demonstrates consistent positive
+    Sharpe.
+
+    The aggregator (``app.core.scoring.aggregator``) bounds-checks the
+    return value to ``(0, 2)`` exclusive — guaranteed satisfied for any
+    SPREAD < 1.0.
 
     ``proposed_direction`` is one of ``"LONG"`` / ``"SHORT"`` / ``"NEUTRAL"``
     matching ``app.core.scoring.types.Direction``.
     """
+    spread = get_settings().BRAIN_ACTION_MULTIPLIER_SPREAD
+
     if smoothed_action == "FLAT":
-        return 0.5
+        return 1.0 - spread
 
     is_brain_long = smoothed_action.startswith("LONG_")
     is_brain_short = smoothed_action.startswith("SHORT_")
     is_brain_full = smoothed_action.endswith("_FULL")
 
     if proposed_direction == "LONG" and is_brain_long:
-        return 1.4 if is_brain_full else 1.2
+        return (1.0 + spread) if is_brain_full else (1.0 + spread / 2)
     if proposed_direction == "SHORT" and is_brain_short:
-        return 1.4 if is_brain_full else 1.2
+        return (1.0 + spread) if is_brain_full else (1.0 + spread / 2)
 
     if proposed_direction == "NEUTRAL":
         # L1..L9 abstained but brain says trade; conservative: keep
@@ -196,7 +211,7 @@ def action_to_brain_adjust(
         return 1.0
 
     # Brain disagrees with proposed (proposed=LONG, brain=SHORT or vice versa).
-    return 0.6
+    return 1.0 - spread / 2
 
 
 __all__ = [
