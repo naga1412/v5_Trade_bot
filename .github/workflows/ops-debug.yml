@@ -45,6 +45,7 @@ on:
           - decouple-workers-verify # READ-ONLY: PR-DECOUPLE-WORKERS post-deploy verification. Confirms reader_only_passed heartbeat, new chain-WRITER-blocked alert, and the 3 previously-dead workers (telegram_poller, liquidation_monitor, live_exit_monitor) are now heartbeating.
           - memory-sync-audit # READ-ONLY: PR-WEEK1-MEGA-BATCH Part A — runtime state audit (Settings flags, worker heartbeats, opens-since-flip, chain status, schema introspection, brain infra). All SELECT/inspection, zero writes.
           - fu24-post-deploy-verify # READ-ONLY: PR-SAFETY-BATCH-1 verification. Counts broken predictions chain rows with ts > deploy time (2026-05-22T11:52Z). Expected: 0 if FU-24 advisory lock works.
+          - brain-cron-audit # READ-ONLY: PR-BRAIN-CRON-AUDIT — is hetzner_brain_cron actually installed + firing + producing output? Inspects crontab, log file existence, rl-cache contents, replay-buffer-source row count, dry-run training entrypoint.
 
 jobs:
   probe:
@@ -904,5 +905,46 @@ jobs:
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS rows_since_deploy, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM predictions WHERE ts > '2026-05-22T11:52:00Z'::timestamptz;\" && \
                  echo '=== auth_violations since deploy (verifier detections) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT reason, COUNT(*) AS n FROM auth_violations WHERE attempted_at > '2026-05-22T11:52:00Z'::timestamptz AND reason LIKE 'audit_chain_broken:%' GROUP BY reason;\""
+              ;;
+            brain-cron-audit)
+              # READ-ONLY: PR-BRAIN-CRON-AUDIT. Inspects whether the
+              # hetzner_brain_cron is actually firing + producing output.
+              # No DB writes, no checkpoint activation, no model touches.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== audit-ts: '\$(date -u -Iseconds) && \
+                 echo '' && \
+                 echo '=== 1) crontab -l (root crontab — is the brain cron installed?) ===' && \
+                 crontab -l 2>&1 | grep -iE 'brain|trading|cron' || echo '(no matching crontab entries)' && \
+                 echo '' && \
+                 echo '=== 2) log file presence + last 80 lines if any ===' && \
+                 ls -la /var/log/trading-radar-brain-cron.log 2>&1 || echo '(log file MISSING — cron has never written)' && \
+                 (tail -n 80 /var/log/trading-radar-brain-cron.log 2>/dev/null || echo '(no log content)') && \
+                 echo '' && \
+                 echo '=== 3) rl-cache directory on host (bind-mount source) ===' && \
+                 ls -la $DIR_DEFAULTED/backend/data/rl-cache/ 2>&1 || echo '(rl-cache dir MISSING on host)' && \
+                 echo '' && \
+                 echo '=== 4) rl-cache directory inside backend container (bind-mount dest) ===' && \
+                 docker compose exec -T backend ls -la /app/data/rl-cache/ 2>&1 || echo '(rl-cache dir MISSING inside container)' && \
+                 echo '' && \
+                 echo '=== 5) docker compose volumes for rl-cache ===' && \
+                 grep -A1 'rl-cache' $DIR_DEFAULTED/docker-compose.yml || echo '(no rl-cache mount in docker-compose.yml)' && \
+                 echo '' && \
+                 echo '=== 6) sanity: train_brain.py --help (does the entrypoint load?) ===' && \
+                 docker compose exec -T backend python /app/host-tools/ml/train_brain.py --help 2>&1 | head -40 || echo '(train_brain.py --help failed)' && \
+                 echo '' && \
+                 echo '=== 7) shadow_trades training-eligible rows (closed + pnl_usdt NOT NULL) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS total_closed_with_pnl, MIN(opened_at) AS oldest_opened, MAX(closed_at) AS newest_closed FROM shadow_trades WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL;\" && \
+                 echo '=== 7b) shadow_observations coverage (LEFT JOIN target for obs_components) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT COUNT(*) AS rows, COUNT(components) AS rows_with_components FROM shadow_observations;\" 2>&1 || echo '(shadow_observations query failed)' && \
+                 echo '' && \
+                 echo '=== 8) rl_checkpoints rows (with correct column trained_at) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \"SELECT id, model_name, version, trained_at, is_active, train_data_window FROM rl_checkpoints ORDER BY id DESC LIMIT 20;\" && \
+                 echo '' && \
+                 echo '=== 9) recent cron-cycle evidence — any train_brain mentions in backend logs? ===' && \
+                 (docker compose logs backend --since 72h 2>&1 | grep -iE 'train_brain|brain.cron|rl_train|replay_buffer|ppo' | tail -30 || echo '(no brain training log lines in last 72h)') && \
+                 echo '' && \
+                 echo '=== 10) verify the cron script exists at the expected host path ===' && \
+                 ls -la $DIR_DEFAULTED/backend/scripts/hetzner_brain_cron.sh 2>&1 || echo '(cron script MISSING)'"
               ;;
           esac
