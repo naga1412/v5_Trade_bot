@@ -165,3 +165,90 @@ def test_blend_returns_float32_regardless_of_input_dtype() -> None:
     learned = np.ones(32, dtype=np.float64)
     out = cold_start_blend(median, learned, n_trades=50)
     assert out.dtype == np.float32
+
+
+# PR-BRAIN-WARMSTART-FIX — bulk_register preserves Gaussian init
+
+
+def test_bulk_register_preserves_gaussian_init() -> None:
+    """bulk_register must NOT median-seed; each slot keeps its independent
+    Gaussian-init weight so the trainer sees diverse per-asset signal."""
+    t = AssetEmbeddingTable()
+    symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "SOLUSDT", "DOTUSDT"]
+    t.bulk_register(symbols)
+
+    assert t.symbol_to_id == {s: i for i, s in enumerate(symbols)}
+
+    weights = t.module.weight.detach().cpu().numpy()
+    # The 5 registered slots should NOT be identical — that would be the
+    # symptom if bulk_register accidentally called register_asset.
+    pairwise_max_diff = 0.0
+    for i in range(5):
+        for j in range(i + 1, 5):
+            pairwise_max_diff = max(
+                pairwise_max_diff,
+                float(np.abs(weights[i] - weights[j]).max()),
+            )
+    # With Gaussian(0, 0.05) init on 32-dim vectors, the max-abs pairwise
+    # difference between any 2 slots is overwhelmingly likely to exceed
+    # 0.01 (well below the std of 0.05).
+    assert pairwise_max_diff > 0.01, (
+        f"slots are too similar (max pairwise diff {pairwise_max_diff:.4f}) — "
+        "bulk_register likely median-seeded instead of preserving init"
+    )
+
+
+def test_bulk_register_is_idempotent() -> None:
+    """Calling bulk_register twice with overlapping symbols doesn't double-
+    allocate or overwrite."""
+    t = AssetEmbeddingTable()
+    t.bulk_register(["BTCUSDT", "ETHUSDT"])
+    snapshot = t.module.weight[:2].detach().cpu().numpy().copy()
+
+    t.bulk_register(["BTCUSDT", "ETHUSDT", "ADAUSDT"])
+
+    assert t.symbol_to_id == {"BTCUSDT": 0, "ETHUSDT": 1, "ADAUSDT": 2}
+    # The first 2 slots' weights must be byte-identical to the snapshot.
+    after = t.module.weight[:2].detach().cpu().numpy()
+    np.testing.assert_array_equal(snapshot, after)
+
+
+def test_bulk_register_respects_n_slots_cap() -> None:
+    """Exceeding n_slots raises RuntimeError (matches register_asset)."""
+    t = AssetEmbeddingTable(n_slots=3)
+    t.bulk_register(["A", "B", "C"])
+    with pytest.raises(RuntimeError, match="AssetEmbeddingTable full"):
+        t.bulk_register(["D"])
+
+
+def test_bulk_register_vs_register_asset_diversity() -> None:
+    """Direct comparison: bulk_register gives independent per-slot vectors,
+    register_asset in a loop collapses all slots to the first asset's
+    Gaussian sample (median-of-{same}={same}, propagated). Documents the
+    failure mode the PR avoids."""
+    t_bulk = AssetEmbeddingTable()
+    t_loop = AssetEmbeddingTable()
+    symbols = [f"SYM{i:02d}" for i in range(10)]
+
+    t_bulk.bulk_register(symbols)
+    for s in symbols:
+        t_loop.register_asset(s)
+
+    bulk_w = t_bulk.module.weight[:10].detach().cpu().numpy()
+    loop_w = t_loop.module.weight[:10].detach().cpu().numpy()
+
+    # In the loop case, slot 1+ are all median-seeded from prior slots.
+    # With a single starting Gaussian sample (slot 0), every subsequent
+    # slot collapses to slot 0's value. Assert that holds:
+    for i in range(1, 10):
+        np.testing.assert_array_equal(loop_w[i], loop_w[0])
+
+    # In the bulk case, all 10 slots are independent Gaussian samples —
+    # adjacent slots should differ.
+    distinct_pairs = sum(
+        1 for i in range(10) for j in range(i + 1, 10)
+        if not np.array_equal(bulk_w[i], bulk_w[j])
+    )
+    assert distinct_pairs == 45, (
+        f"expected all 45 slot pairs distinct, got {distinct_pairs}"
+    )

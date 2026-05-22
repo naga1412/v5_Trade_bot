@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import sqlalchemy as sa
 import torch
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -69,9 +70,49 @@ def pick_device(want: str) -> torch.device:
     return torch.device(want)
 
 
+async def _discover_training_symbols(db_url: str) -> list[str]:
+    """Return distinct symbols appearing in closed shadow_trades.
+
+    Separate cheap query used during cold-start so we can pre-register
+    every training-window symbol into the AssetEmbeddingTable BEFORE
+    building the replay buffer. Without pre-registration, the buffer
+    would assign asset_id=0 + embedding=zeros(32) to every transition
+    (the bug PR-BRAIN-WARMSTART-FIX repairs).
+    """
+    engine = create_async_engine(db_url)
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    async with sm() as session:
+        rows = (await session.execute(sa.text(
+            "SELECT DISTINCT symbol FROM shadow_trades "
+            "WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL "
+            "ORDER BY symbol"
+        ))).all()
+    await engine.dispose()
+    return [r.symbol for r in rows]
+
+
+def _extract_asset_embeddings(
+    asset_table: AssetEmbeddingTable,
+) -> dict[int, np.ndarray]:
+    """Snapshot the table's current embeddings as a ``{asset_id: ndarray}`` dict.
+
+    Passed to load_from_shadow_trades so obs vectors carry the real
+    per-asset embedding instead of zeros(32). Snapshot semantics are
+    fine here because asset embeddings are frozen during PPO training
+    (the nn.Embedding is NOT in policy.parameters() — see follow-up
+    in spec).
+    """
+    out: dict[int, np.ndarray] = {}
+    weight = asset_table.module.weight.detach().cpu().numpy().astype(np.float32)
+    for asset_id in asset_table.symbol_to_id.values():
+        out[asset_id] = weight[asset_id].copy()
+    return out
+
+
 async def _build_buffer(
     *, db_url: str, window_days: int, asset_table: AssetEmbeddingTable,
 ):
+    asset_embeddings = _extract_asset_embeddings(asset_table)
     engine = create_async_engine(db_url)
     sm = async_sessionmaker(engine, expire_on_commit=False)
     async with sm() as session:
@@ -79,6 +120,7 @@ async def _build_buffer(
             session,
             window_days=window_days,
             asset_id_for_symbol=asset_table.symbol_to_id,
+            asset_embeddings=asset_embeddings,
         )
     await engine.dispose()
     return transitions
@@ -163,6 +205,42 @@ async def _async_main(args: argparse.Namespace) -> int:
     )
 
     asset_table = AssetEmbeddingTable()
+    policy = PolicyNetwork().to(device)
+    log.info("policy params: %d", count_params(policy))
+
+    # PR-BRAIN-WARMSTART-FIX: ordering matters here.
+    #
+    # Old order was: build_buffer → register_asset → maybe_warm_start, which
+    # meant the buffer was always built with an empty symbol_to_id (every
+    # transition got asset_id=0 + embedding=zeros) regardless of warm-start.
+    #
+    # New order:
+    #   1. maybe_warm_start  — restores asset_table.symbol_to_id + weights
+    #                          from prior .pt if one exists.
+    #   2. bulk_register     — for cold-start only, pre-register all training
+    #                          symbols WITHOUT median-seeding their embeddings,
+    #                          so each gets its own diverse Gaussian-init.
+    #   3. build_buffer      — now sees a populated symbol_to_id AND real
+    #                          embeddings via _extract_asset_embeddings.
+    #   4. register_asset    — defensive sweep for symbols that appeared in
+    #                          the buffer but aren't in asset_table yet
+    #                          (warm-start case: new symbols entered universe
+    #                          since prior training). Uses the median-seed
+    #                          register_asset since these are truly new.
+    warm_start_path = (
+        Path(args.warm_start) if args.warm_start else None
+    )
+    warm_started = maybe_warm_start(policy, asset_table, warm_start_path)
+
+    if not warm_started:
+        training_symbols = await _discover_training_symbols(args.db_url)
+        asset_table.bulk_register(training_symbols)
+        log.info(
+            "cold-start: pre-registered %d symbols with diverse Gaussian-init "
+            "embeddings (skipping median-seed to avoid clustering)",
+            len(asset_table.symbol_to_id),
+        )
+
     transitions = await _build_buffer(
         db_url=args.db_url,
         window_days=args.window_days,
@@ -175,17 +253,11 @@ async def _async_main(args: argparse.Namespace) -> int:
     log.info("loaded %d transitions across %d assets",
              len(transitions), len({t.symbol for t in transitions}))
 
-    # Make sure every symbol that appears in transitions has an embedding slot.
+    # Defensive: any symbol that slipped through (e.g., warm-start case where
+    # a new symbol entered the universe after prior training) gets the standard
+    # median-seed register_asset — appropriate for genuinely-unseen assets.
     for t in transitions:
         asset_table.register_asset(t.symbol)
-
-    policy = PolicyNetwork().to(device)
-    log.info("policy params: %d", count_params(policy))
-
-    warm_start_path = (
-        Path(args.warm_start) if args.warm_start else None
-    )
-    maybe_warm_start(policy, asset_table, warm_start_path)
 
     cfg = TrainConfig(
         epochs=args.epochs,
