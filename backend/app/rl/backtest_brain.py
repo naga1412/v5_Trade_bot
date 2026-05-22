@@ -139,22 +139,34 @@ def evaluate_brain_on_holdout(
 
     dev = device or torch.device("cpu")
     policy = policy.to(dev)
-    policy.eval()
 
-    synthetic_rewards: list[float] = []
-    with torch.no_grad():
-        for tr in holdout:
-            obs_t = torch.from_numpy(tr.obs).unsqueeze(0).to(dev)
-            action_t, _log_prob, _value = policy.act(obs_t, deterministic=True)
-            action_idx = int(action_t.squeeze(0).item())
-            if not 0 <= action_idx < len(ALL_ACTIONS):
-                continue
-            action_str = ALL_ACTIONS[action_idx]
-            proposed = _infer_proposed_direction(tr.action)
-            brain_adjust = action_to_brain_adjust(
-                action_str, proposed_direction=proposed,
-            )
-            synthetic_rewards.append(float(tr.reward) * float(brain_adjust))
+    # Save + restore caller's train/eval mode so the function is a pure
+    # read on the policy. Without this, a caller that resumed training
+    # after the backtest would silently inherit eval-mode (no dropout,
+    # no batchnorm updates) — a sneaky latent bug.
+    was_training = policy.training
+    policy.eval()
+    try:
+        synthetic_rewards: list[float] = []
+        with torch.no_grad():
+            for tr in holdout:
+                obs_t = torch.from_numpy(tr.obs).unsqueeze(0).to(dev)
+                action_t, _log_prob, _value = policy.act(
+                    obs_t, deterministic=True,
+                )
+                action_idx = int(action_t.squeeze(0).item())
+                if not 0 <= action_idx < len(ALL_ACTIONS):
+                    continue
+                action_str = ALL_ACTIONS[action_idx]
+                proposed = _infer_proposed_direction(tr.action)
+                brain_adjust = action_to_brain_adjust(
+                    action_str, proposed_direction=proposed,
+                )
+                synthetic_rewards.append(
+                    float(tr.reward) * float(brain_adjust),
+                )
+    finally:
+        policy.train(was_training)
 
     rewards = np.asarray(synthetic_rewards, dtype=np.float64)
     return BacktestResult(

@@ -162,6 +162,46 @@ def test_evaluate_handles_short_action_transitions() -> None:
     assert out.total_trades == 24
 
 
+def test_evaluate_preserves_policy_train_mode() -> None:
+    """The backtest must restore policy.training=True after running,
+    so a caller that resumes training isn't silently in eval mode."""
+    policy = PolicyNetwork()
+    policy.train()  # ensure we're in training mode
+    assert policy.training is True
+
+    transitions = [
+        _make_transition(
+            reward=0.1,
+            opened_at_iso=f"2026-05-{(i % 28) + 1:02d}T12:00:00+00:00",
+        )
+        for i in range(120)
+    ]
+    evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+
+    assert policy.training is True, (
+        "policy.training was flipped to False — caller-state leak from "
+        "policy.eval() inside evaluate_brain_on_holdout"
+    )
+
+
+def test_evaluate_preserves_policy_eval_mode() -> None:
+    """And vice versa — a caller in eval mode stays in eval mode."""
+    policy = PolicyNetwork()
+    policy.eval()
+    assert policy.training is False
+
+    transitions = [
+        _make_transition(
+            reward=0.1,
+            opened_at_iso=f"2026-05-{(i % 28) + 1:02d}T12:00:00+00:00",
+        )
+        for i in range(120)
+    ]
+    evaluate_brain_on_holdout(policy=policy, transitions=transitions)
+
+    assert policy.training is False
+
+
 def test_backtest_result_as_eval_dict_round_trips() -> None:
     """The serialised dict has exactly the 6 expected keys with float/int types."""
     result = BacktestResult(
