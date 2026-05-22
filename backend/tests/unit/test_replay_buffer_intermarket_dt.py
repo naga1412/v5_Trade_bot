@@ -62,6 +62,25 @@ async def test_nearest_intermarket_binds_datetime_for_offset_iso() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nearest_intermarket_falls_back_on_malformed_iso() -> None:
+    """Malformed ISO must NOT raise — mirrors _resolve_regime's graceful degrade.
+
+    Returns (0.0, 0.0) sentinel rather than aborting the replay-buffer build.
+    """
+    session = MagicMock()
+    session.bind = MagicMock()
+    session.bind.dialect.name = "postgresql"
+    session.execute = AsyncMock()
+
+    result = await _nearest_intermarket(
+        session, symbol="ADAUSDT", opened_at_iso="not-an-iso-timestamp",
+    )
+
+    assert result == (0.0, 0.0)
+    session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_nearest_intermarket_passes_string_to_sqlite_24h_query() -> None:
     """The SQLite-only second query (line 241) keeps using the ISO string —
     SQLite's `datetime(:t, '-24 hours')` SQL function expects a string."""
