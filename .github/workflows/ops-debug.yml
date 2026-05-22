@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - flag-binding-verify # READ-ONLY: PR-FIX-FLAG-BINDING Step 3 — prints runtime values of operator-tunable flags from app.config.get_settings(). Expected post-fix: DISABLE_SHORT_SIGNALS=True (since /opt/trading-radar/.env has it set since 2026-05-21T19:42:22Z).
 
 jobs:
   probe:
@@ -576,5 +577,38 @@ jobs:
                  docker compose logs --tail=500 backend 2>&1 | grep -iE 'keepalive|ping|pong|ws_keep' | tail -20 && \
                  echo '=== I-2d: last 80 backend log lines unfiltered (most recent activity floor) ===' && \
                  docker compose logs --tail=80 backend"
+              ;;
+            flag-binding-verify)
+              # READ-ONLY: PR-FIX-FLAG-BINDING Step 3 verification.
+              # Asserts that operator-tunable flags set in /opt/trading-radar/.env
+              # actually reach pydantic-settings inside the container. Pre-fix
+              # (verify probe 26249116921 on 2026-05-22T00:42Z) showed
+              # DISABLE_SHORT_SIGNALS=False despite .env containing true.
+              # Post-fix (env_file: .env added to backend service in PR #212)
+              # the same probe must show DISABLE_SHORT_SIGNALS=True.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== verify-ts: '$(date -u -Iseconds) && \
+                 echo '=== current main HEAD ===' && \
+                 git -C $DIR_DEFAULTED log -1 --oneline 2>&1 && \
+                 echo '=== container restart count + start time ===' && \
+                 docker inspect tr-backend --format 'restarts={{.RestartCount}} status={{.State.Status}} started={{.State.StartedAt}}' && \
+                 echo '=== meta: .env flag values on host ===' && \
+                 grep -E '^(DISABLE_SHORT_SIGNALS|MIN_ENTRY_SCORE_LONG|SYMBOL_ALLOWLIST_ENABLED|DYNAMIC_SIZING_ENABLED|LIVE_COOLDOWN_ENABLED|HOLD_TP_SCALING_ENABLED|AUTONOMOUS_TRADING_ENABLED|MTF_MIN_AGREEMENT_1H)=' .env || echo '(no strategy flags set in .env)' && \
+                 echo '=== container env: same flag set as seen INSIDE the backend container ===' && \
+                 docker compose exec -T backend sh -c 'env | grep -E \"^(DISABLE_SHORT_SIGNALS|MIN_ENTRY_SCORE_LONG|SYMBOL_ALLOWLIST_ENABLED|DYNAMIC_SIZING_ENABLED|LIVE_COOLDOWN_ENABLED|HOLD_TP_SCALING_ENABLED|AUTONOMOUS_TRADING_ENABLED|MTF_MIN_AGREEMENT_1H)=\" | sort' || echo '(no matching env vars inside container)' && \
+                 echo '=== app.config.get_settings() runtime values ===' && \
+                 docker compose exec -T backend python -c \"
+from app.config import get_settings
+s = get_settings()
+print(f'DISABLE_SHORT_SIGNALS={s.DISABLE_SHORT_SIGNALS}')
+print(f'MIN_ENTRY_SCORE_LONG={s.MIN_ENTRY_SCORE_LONG}')
+print(f'SYMBOL_ALLOWLIST_ENABLED={s.SYMBOL_ALLOWLIST_ENABLED}')
+print(f'DYNAMIC_SIZING_ENABLED={s.DYNAMIC_SIZING_ENABLED}')
+print(f'LIVE_COOLDOWN_ENABLED={s.LIVE_COOLDOWN_ENABLED}')
+print(f'HOLD_TP_SCALING_ENABLED={s.HOLD_TP_SCALING_ENABLED}')
+print(f'autonomous_trading_enabled={s.autonomous_trading_enabled}')
+print(f'MTF_MIN_AGREEMENT_1H={s.MTF_MIN_AGREEMENT_1H}')
+\""
               ;;
           esac
