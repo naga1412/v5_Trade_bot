@@ -36,6 +36,7 @@ on:
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
           - flag-binding-verify # READ-ONLY: PR-FIX-FLAG-BINDING Step 3 — prints runtime values of operator-tunable flags from app.config.get_settings(). Expected post-fix: DISABLE_SHORT_SIGNALS=True (since /opt/trading-radar/.env has it set since 2026-05-21T19:42:22Z).
+          - expost-tier1-filter-validation # READ-ONLY: PR-EXPOST-1 ex-post SQL analysis of Tier-1 filter ideas (SHORT-disable, MIN_ENTRY_SCORE_LONG=0.36, time-of-day, per-symbol cull) against 30-day shadow_trades history.
 
 jobs:
   probe:
@@ -599,5 +600,41 @@ jobs:
                  docker compose exec -T backend sh -c 'env | grep -E \"^(DISABLE_SHORT_SIGNALS|MIN_ENTRY_SCORE_LONG|SYMBOL_ALLOWLIST_ENABLED|DYNAMIC_SIZING_ENABLED|LIVE_COOLDOWN_ENABLED|HOLD_TP_SCALING_ENABLED|AUTONOMOUS_TRADING_ENABLED|MTF_MIN_AGREEMENT_1H)=\" | sort' || echo '(no matching env vars inside container)' && \
                  echo '=== app.config.get_settings() runtime values ===' && \
                  docker compose exec -T backend python -c \"from app.config import get_settings; s=get_settings(); print(f'DISABLE_SHORT_SIGNALS={s.DISABLE_SHORT_SIGNALS}'); print(f'MIN_ENTRY_SCORE_LONG={s.MIN_ENTRY_SCORE_LONG}'); print(f'SYMBOL_ALLOWLIST_ENABLED={s.SYMBOL_ALLOWLIST_ENABLED}'); print(f'DYNAMIC_SIZING_ENABLED={s.DYNAMIC_SIZING_ENABLED}'); print(f'LIVE_COOLDOWN_ENABLED={s.LIVE_COOLDOWN_ENABLED}'); print(f'HOLD_TP_SCALING_ENABLED={s.HOLD_TP_SCALING_ENABLED}'); print(f'autonomous_trading_enabled={s.autonomous_trading_enabled}'); print(f'MTF_MIN_AGREEMENT_1H={s.MTF_MIN_AGREEMENT_1H}')\""
+              ;;
+            expost-tier1-filter-validation)
+              # READ-ONLY: PR-EXPOST-1 ex-post SQL analysis of Tier-1 filter
+              # ideas against the 30-day closed shadow_trades window.
+              # Scenarios: BASELINE / A SHORT-disable / B +MIN_ENTRY_SCORE_LONG=0.36 /
+              # C +time-of-day filter (13-22 UTC) / D +per-symbol cull (WR<20% N>=8) /
+              # E ALL stacked / F diagnostic: which symbols get culled /
+              # G diagnostic: which hours get cut.
+              # All queries are pure SELECT - no writes, no flag flips.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== expost-ts: '$(date -u -Iseconds) && \
+                 echo '=== BASELINE: all closed shadow_trades last 30 days ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'BASELINE' AS scenario, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL;\" && \
+                 echo '=== SCENARIO A: DISABLE_SHORT only ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'SCENARIO_A' AS scenario, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG';\" && \
+                 echo '=== SCENARIO B: SHORT-disable + MIN_ENTRY_SCORE_LONG=0.36 ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'SCENARIO_B' AS scenario, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' AND entry_score >= 0.36;\" && \
+                 echo '=== SCENARIO C: SHORT-disable + time-of-day (13-22 UTC) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'SCENARIO_C' AS scenario, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') BETWEEN 13 AND 22;\" && \
+                 echo '=== SCENARIO D: SHORT-disable + per-symbol cull (WR<20% N>=8 excluded) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH symbol_stats AS (SELECT symbol, COUNT(*) AS n, 100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*) AS sym_wr FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' GROUP BY symbol), allowed_symbols AS (SELECT symbol FROM symbol_stats WHERE n < 8 OR sym_wr >= 20.0) SELECT 'SCENARIO_D' AS scenario, COUNT(*) AS trades, SUM(CASE WHEN st.pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN st.pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(st.pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(st.pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades st JOIN allowed_symbols a USING (symbol) WHERE st.closed_at >= NOW() - INTERVAL '30 days' AND st.closed_at IS NOT NULL AND st.direction='LONG';\" && \
+                 echo '=== SCENARIO E: ALL Tier-1 filters stacked ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"WITH symbol_stats AS (SELECT symbol, COUNT(*) AS n, 100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*) AS sym_wr FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' GROUP BY symbol), allowed_symbols AS (SELECT symbol FROM symbol_stats WHERE n < 8 OR sym_wr >= 20.0) SELECT 'SCENARIO_E' AS scenario, COUNT(*) AS trades, SUM(CASE WHEN st.pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN st.pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(st.pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(st.pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades st JOIN allowed_symbols a USING (symbol) WHERE st.closed_at >= NOW() - INTERVAL '30 days' AND st.closed_at IS NOT NULL AND st.direction='LONG' AND st.entry_score >= 0.36 AND EXTRACT(HOUR FROM st.opened_at AT TIME ZONE 'UTC') BETWEEN 13 AND 22;\" && \
+                 echo '=== SCENARIO F (diagnostic): symbols the cull EXCLUDES (WR<20% N>=8) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, COUNT(*) AS n, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' GROUP BY symbol HAVING COUNT(*) >= 8 AND 100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*) < 20.0 ORDER BY wr_pct;\" && \
+                 echo '=== SCENARIO G (diagnostic): hours cut by 13-22 UTC filter ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC')::int AS utc_hour, COUNT(*) AS trades, SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END) AS wins, ROUND(100.0*SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END)/COUNT(*), 1) AS wr_pct, ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, ROUND(SUM(pnl_pct)::numeric, 2) AS sum_pnl_pct FROM shadow_trades WHERE closed_at >= NOW() - INTERVAL '30 days' AND closed_at IS NOT NULL AND direction='LONG' AND EXTRACT(HOUR FROM opened_at AT TIME ZONE 'UTC') NOT BETWEEN 13 AND 22 GROUP BY utc_hour ORDER BY utc_hour;\""
               ;;
           esac
