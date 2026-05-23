@@ -8,6 +8,7 @@ Both behind ``Depends(require_admin)`` per spec section 6.4.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Any
@@ -18,26 +19,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import require_admin
+from app.auth.models import User
 from app.db.session import get_session
-
-# PR-AUDIT-FIXES-1 (2026-05-23): the original module-level import
-#   `from tools.backtest import persist_backtest_result, run_backtest`
-# referenced a `tools.backtest` module that does NOT EXIST in the codebase.
-# Importing this module crashed the FastAPI worker at startup AND any call to
-# POST /api/v1/admin/backtests returned 500 (ModuleNotFoundError). PR-FULL-
-# SYSTEM-AUDIT (Cat A3.1) identified this as a critical dead-code finding,
-# same class as the `_evaluate_sharpe` ghost-import fixed by PR-BRAIN-
-# BACKTEST-PHASEB5 in champion_challenger.py.
-#
-# Resolution: drop the broken module-level import (which crashed module
-# load) and replace the POST handler with a 501 NOT IMPLEMENTED stub.
-# The GET handler stays — it reads the existing `backtests` table via raw
-# SQL and never needed tools.backtest.
-#
-# If/when a real backtest harness for the SP-7 ConvLSTM path is built, the
-# POST handler should be re-implemented to drive that harness. For now, no
-# operator was calling it (per PR-BACKTEST-1's findings + this PR's audit),
-# so the 501 is honest behavior.
+from tools.backtest import persist_backtest_result, run_backtest
 
 router = APIRouter(
     prefix="/api/v1/admin/backtests",
@@ -112,29 +96,48 @@ def _row_to_out(row: Any) -> BacktestOut:
 
 @router.post(
     "",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    response_model=BacktestOut,
+    status_code=status.HTTP_201_CREATED,
 )
 async def run_backtest_endpoint(
     body: BacktestRunIn,
-) -> dict[str, str]:
-    """STUB — backtest harness not yet implemented for this path.
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    user: User = Depends(require_admin),  # noqa: B008
+) -> BacktestOut:
+    """Kick off a backtest. Blocks until complete (typically 30-60s).
 
-    Previously raised 500 due to the missing ``tools.backtest`` module
-    (see file-header comment). Now returns 501 with a clear message so
-    callers know the path is intentionally disabled, not silently broken.
-
-    GET /api/v1/admin/backtests still works (lists existing rows).
+    Heavy numpy/pandas work runs inside ``asyncio.to_thread`` so the
+    FastAPI event loop isn't blocked. v2 may push to a background queue.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=(
-            "Backtest harness for the SP-7 ConvLSTM path is not "
-            "implemented. The `tools.backtest` module referenced by this "
-            "endpoint does not exist; the endpoint returns 501 instead "
-            "of crashing with ModuleNotFoundError. Operator can list "
-            "existing backtests via GET /api/v1/admin/backtests."
-        ),
+    layer_weights_int = (
+        {int(k): v for k, v in body.layer_weights.items()}
+        if body.layer_weights else None
     )
+    enabled_layers = set(body.enabled_layers) if body.enabled_layers else None
+    enabled_traps = set(body.enabled_traps) if body.enabled_traps else None
+
+    result = await asyncio.to_thread(
+        run_backtest,
+        symbol=body.symbol,
+        timeframe=body.timeframe,
+        start=body.start, end=body.end,
+        layer_weights=layer_weights_int,
+        enabled_layers=enabled_layers,
+        enabled_traps=enabled_traps,
+        initial_balance_usdt=body.initial_balance_usdt,
+    )
+    new_id = await persist_backtest_result(
+        session, result=result, triggered_by_user_id=user.id,
+    )
+    await session.commit()
+    row = (await session.execute(sa.text(
+        "SELECT * FROM backtests WHERE id = :i"
+    ), {"i": new_id})).first()
+    if row is None:  # pragma: no cover
+        raise HTTPException(
+            status_code=500, detail="row not visible after insert",
+        )
+    return _row_to_out(row)
 
 
 @router.get("", response_model=list[BacktestOut])

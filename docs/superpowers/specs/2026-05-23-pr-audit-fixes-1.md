@@ -3,39 +3,41 @@
 **Date:** 2026-05-23
 **Branch:** `feat/pr-audit-fixes-1`
 **Base:** `dev`
-**Class:** small bug + security + ops fix bundle. NO trading-logic change.
+**Class:** small security + ops fix. NO trading-logic change.
 
 ## Scope
 
-PR-FULL-SYSTEM-AUDIT (2026-05-23) surfaced three small, attribution-safe
-issues. This PR addresses two of them and explicitly defers the third because
-its surface turned out to be larger than the original audit framing suggested.
+PR-FULL-SYSTEM-AUDIT (2026-05-23) surfaced three candidates. After deeper
+investigation, **only Fix 2 is shipped**:
 
-### Fix 1 — `admin_backtest.py` ghost-import (Cat A3.1 / CRITICAL)
+- **Fix 1** turned out to be a **bad audit finding** — see "Fix 1 retracted".
+- **Fix 2** is a real security fix and ships in this PR.
+- **Fix 3** is deferred (framework already supports the conditional pattern;
+  real fix needs prod-state inspection).
 
-**Symptom:** `backend/app/api/routes/admin_backtest.py` imported
-`tools.backtest.persist_backtest_result` and `tools.backtest.run_backtest` at
-module load. The `tools.backtest` module does not exist anywhere in the
-repository. The import is the same class of dead-code bug that
-PR-BRAIN-BACKTEST-PHASEB5 fixed in `champion_challenger.py` (the
-`_evaluate_sharpe` ghost-import).
+## Fix 1 — RETRACTED — admin_backtest.py ghost-import
 
-**Concrete impact:**
-- POST `/api/v1/admin/backtests` returns 500 (ModuleNotFoundError) every call.
-- If FastAPI eagerly imports the routes module at startup (and it does, via
-  the `include_router` call in `app.main`), the import error can crash the
-  worker on boot — a latent landmine.
+The audit claimed `backend/app/api/routes/admin_backtest.py` imported a
+non-existent `tools.backtest` module at line 24. **This was wrong.** The
+module exists at `backend/tools/backtest.py` (552 LoC, fully implemented:
+`run_backtest`, `persist_backtest_result`, `_default_bars_loader`,
+`_compute_params_hash`, etc.). The import resolves cleanly when FastAPI
+imports the routes module.
 
-**Fix shape:** Remove the broken import. Replace the POST handler body with
-an honest 501 NOT IMPLEMENTED that returns a clear message: *the backtest
-harness for the SP-7 ConvLSTM path is not implemented, the underlying
-`tools.backtest` module does not exist, GET still works*. The GET handler
-reads the `backtests` table via raw SQL and never depended on
-`tools.backtest`, so it stays intact. The router and `BacktestRunIn` /
-`BacktestOut` Pydantic models stay so anyone wiring a real harness later has
-the shape pre-defined.
+The audit tool used did not find `backend/tools/backtest.py` (probably
+searched for `tools/backtest.py` at the repo root instead of inside the
+`backend/` working directory where pytest / uvicorn cwd from).
 
-### Fix 2 — Telegram bot token redacted in httpx logs (Cat I4.1 / IMPORTANT)
+The 501-stub PR commit was reverted to dev's original implementation. The
+existing integration tests in `tests/integration/test_api_admin_backtest.py`
+that monkeypatch `tools.backtest._default_bars_loader` and expect HTTP 201
+continue to pass.
+
+Lesson: audit findings that claim "module X does not exist" must be
+verified by running the actual import (`python -c "import tools.backtest"`
+from inside the backend directory) before being acted on.
+
+## Fix 2 — Telegram bot token redacted in httpx logs (Cat I4.1 / IMPORTANT)
 
 **Symptom:** httpx logs every outgoing HTTP request URL at INFO. The
 telegram-poller hits
@@ -58,11 +60,11 @@ stack duplicates. Wired from `app.main` right after `logging.basicConfig`
 so the filter is live BEFORE the first HTTP request.
 
 The filter uses the standard `record.getMessage()` → regex sub →
-`record.msg = redacted, record.args = None` pattern because `logging.Filter`
+`record.msg = redacted, record.args = ()` pattern because `logging.Filter`
 runs before the formatter and naïvely rewriting `record.msg` while keeping
 `record.args` would let the formatter re-interpolate and undo the redaction.
 
-### Fix 3 — auto_promote_task watchdog conditional registration — DEFERRED
+## Fix 3 — auto_promote_task watchdog conditional registration — DEFERRED
 
 **Original audit framing:** the watchdog reports `auto_promote_task` as
 `never_heartbeated` even though it's gated behind `AUTONOMOUS_TRADING_ENABLED`.
@@ -94,48 +96,43 @@ already implemented) from "spawn-failed" (which deserves a different alert
 shape). That's a feature, not a one-liner, and it requires inspecting the
 actual prod heartbeat log to know which path is firing.
 
-This PR explicitly does NOT touch the watchdog. A follow-up PR
-(`feat/pr-audit-fixes-2-watchdog`) will inspect prod state and write the
-correct fix.
+A follow-up PR (`feat/pr-audit-fixes-2-watchdog`) will inspect prod state
+and write the correct fix.
 
-## Files Changed
+## Files Changed (final)
 
-- `backend/app/api/routes/admin_backtest.py` — drop broken import, stub POST
-  to 501, expand header docstring with audit-finding link.
 - `backend/app/main.py` — wire `install_redaction_filter()` after
   `logging.basicConfig`.
 - `backend/app/ops/log_redaction.py` — new module, ~108 LoC.
-- `backend/tests/unit/test_log_redaction.py` — 7 tests covering: positive
-  redaction in URL, preservation of unrelated URLs, negative cases (robot,
-  abbot, short token), %s args interpolation, idempotent install, no-args
-  records, module-load pattern compile sanity.
+- `backend/tests/unit/test_log_redaction.py` — 8 tests: positive redaction
+  in URL, preservation of unrelated URLs, negative cases (robot, abbot,
+  short token), %s args interpolation, idempotent install (httpx AND root),
+  no-args records, module-load pattern compile sanity, bad-getMessage
+  swallow.
+
+`backend/app/api/routes/admin_backtest.py` is **NOT changed** in the final
+PR (Fix 1 retracted; reverted to dev's version).
 
 ## Tests
 
-`pytest backend/tests/unit/test_log_redaction.py -v` → 7/7 pass.
+`pytest backend/tests/unit/test_log_redaction.py -v` → 8/8 pass.
 
-`pytest backend/tests/unit/` (minus `test_ml_checkpoints.py` Windows-pathlib
-issue unrelated to this PR) → all green.
+Full backend unit suite (minus unrelated Windows pathlib
+`test_ml_checkpoints.py` failure) — all green locally.
 
-Manual smoke:
-- Module import: `from app.api.routes import admin_backtest` → success.
-- POST endpoint via TestClient with `require_admin` overridden →
-  HTTP 501 with the explanatory `detail` message.
+Integration tests in `test_api_admin_backtest.py` continue to pass on the
+unchanged admin_backtest.py.
 
 ## Acceptance — post-deploy
 
-- POST `/api/v1/admin/backtests` returns 501 (not 500). The pre-existing 500
-  behavior was the bug we're fixing.
-- GET `/api/v1/admin/backtests` still returns 200 with the list of recorded
-  backtests.
 - A grep of recent Docker log stdout for `bot[0-9]+:[A-Za-z0-9_-]{20,}` matches
   zero lines after the deploy (filter is live and the next telegram-poller
   iteration emits redacted form).
 - A grep for `bot\*\*\*REDACTED\*\*\*` returns hits in `tr-backend` stdout
   from the telegram-poller.
+- POST `/api/v1/admin/backtests` continues to return its normal 201/422/etc.
+  responses (unchanged by this PR).
 
 ## Out of scope
 
 - Watchdog conditional registration (Fix 3) — deferred to a follow-up PR.
-- Backtest harness re-implementation — deferred indefinitely; no operator was
-  using it (per PR-BACKTEST-1 + this audit's findings).
