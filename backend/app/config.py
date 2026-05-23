@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -231,6 +232,65 @@ class Settings(BaseSettings):
     # the model's score distribution lacks a high-conviction SHORT tail.
     MIN_ENTRY_SCORE_LONG: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
+
+    # --- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) -----------------------
+    # Confidence-tiered routing modifier on the existing telegram-approve
+    # mode. None (default) keeps every signal routed to Telegram approval.
+    # When set: for `trading_mode='telegram-approve'`, signals whose
+    # `abs(proposal.entry_score) >= HYBRID_AUTO_SCORE_THRESHOLD` route
+    # directly to `_place_live_order` (auto-execute) instead of the
+    # Telegram-approval handshake. Below-threshold signals continue to
+    # route via Telegram as today. The lower bound is the existing
+    # entry-quality gate (MIN_ENTRY_SCORE_LONG on LONGs + DISABLE_SHORT_
+    # SIGNALS on SHORTs) — this setting adds an upper-tier auto-execute
+    # bucket, it does NOT replace the entry filter.
+    #
+    # Operator-facing: this is a behavior-modifier on telegram-approve
+    # mode. It does NOT introduce a new `trading_mode` value. The choice
+    # avoids touching the alembic CHECK constraint on `users.trading_mode`,
+    # the promotion-gate TargetMode Literal, and the frontend mode
+    # selector. The per-trade routing decision is logged at dispatch
+    # time as `outcome="placed_hybrid"` vs `outcome="sent_telegram"` —
+    # full audit trail at the per-trade level.
+    #
+    # Default None keeps PR-HYBRID-CONFIDENCE-ROUTING dormant. To enable:
+    # set HYBRID_AUTO_SCORE_THRESHOLD=0.45 (conservative — only the
+    # strongest signals auto-execute) and **recreate the backend
+    # container** (`docker compose up -d backend`). `get_settings()` is
+    # `@lru_cache`d, so changes to the host `.env` are NOT picked up
+    # by a running process — env unset + restart is the only path.
+    # Reversibility: remove or empty the env var, recreate the container.
+    #
+    # Validation: rejects values <= 0 and >= 1.0. Score magnitude is
+    # bounded to [0, 1] (the aggregator clamps |score| to 1), so any
+    # threshold outside (0, 1) is a typo or misconfiguration that
+    # would silently auto-execute every signal (or none).
+    HYBRID_AUTO_SCORE_THRESHOLD: float | None = None
+
+    @field_validator("HYBRID_AUTO_SCORE_THRESHOLD")
+    @classmethod
+    def _validate_hybrid_threshold(cls, v: float | None) -> float | None:
+        """Reject foot-gun values:
+        * <= 0   → `abs(score) >= 0` is true for every non-zero score,
+                   so every telegram-approve signal would auto-execute.
+        * >= 1.0 → no score can clear; equivalent to unset but silently.
+        Typos like 0.045 (intended 0.45) DO pass this validator — that
+        risk is inherent to the operator's threshold-tuning loop.
+        """
+        if v is None:
+            return None
+        if v <= 0.0:
+            raise ValueError(
+                f"HYBRID_AUTO_SCORE_THRESHOLD={v} <= 0 would auto-execute "
+                "every signal. Set to a positive value in (0, 1) or unset."
+            )
+        if v >= 1.0:
+            raise ValueError(
+                f"HYBRID_AUTO_SCORE_THRESHOLD={v} >= 1.0 cannot be cleared "
+                "by any score (aggregator clamps |score| to 1). Use a "
+                "value in (0, 1) or unset to disable hybrid routing."
+            )
+        return v
 
     # --- FU-33: slippage circuit-breaker ---------------------------------
     # Default-OFF — operator flips per-env after observing the metric.
