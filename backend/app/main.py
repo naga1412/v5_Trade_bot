@@ -94,6 +94,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+# PR-AUDIT-FIXES-1 (2026-05-23): mask Telegram bot tokens (and similar
+# secrets) before they hit log files. httpx logs each request URL at INFO
+# which previously included the full bot token in the path. The filter
+# rewrites those tokens in-process so neither docker stdout nor any log
+# aggregator sees the raw secret.
+from app.ops.log_redaction import install_redaction_filter  # noqa: E402
+install_redaction_filter()
+
 log = logging.getLogger(__name__)
 
 
