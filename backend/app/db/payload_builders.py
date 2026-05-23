@@ -18,6 +18,39 @@ from typing import Any, Literal
 from app.shadow.engine import Direction
 
 
+def _normalize_mtf_directions_json(value: Any) -> str | None:
+    """Coerce ``mtf_directions_json`` to a canonical JSON string for INSERT.
+
+    PR-MTF-DIRECTIONS-JSON-SERIALIZATION-FIX (2026-05-23): the column is
+    JSONB on Postgres. When a ``ShadowPosition`` is round-tripped through
+    ``shadow_open_positions`` (e.g. after a container restart;
+    ``list_open_positions`` reads the row back), asyncpg auto-decodes JSONB
+    into a Python ``dict`` and assigns it back to the position. The next
+    close attempt then passes that ``dict`` to ``insert_with_chain``, where
+    asyncpg blows up with ``DataError`` ("'dict' object has no attribute
+    'encode'") because the INSERT parameter binding expects a str.
+
+    This helper is the single chokepoint that absorbs every shape we may
+    receive at the boundary:
+
+    * ``None`` → ``None`` (NULL on the wire)
+    * ``str`` → returned unchanged (already canonical from the writer)
+    * ``dict`` → ``json.dumps(value, sort_keys=True, separators=(",", ":"))``
+      — same canonical form the writer uses, so the byte sequence is
+      stable on round-trips and recompute-friendly for the audit chain
+    * anything else → coerced via ``json.dumps`` with the same options
+
+    Defense-in-depth: callers ``list_open_positions`` (source — fixes the
+    JSONB read-back) and ``build_shadow_trade_payload`` (boundary — catches
+    any future call site that forgets) both apply this normalization.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def build_predictions_payload(
     pred: Any,  # LivePredictionOut-shaped (duck-typed for testability)
     *,
@@ -156,7 +189,11 @@ def build_shadow_trade_payload(
         # rate, etc.) OR when the caller didn't pass them through.
         "mtf_agreement": mtf_agreement,
         "mtf_dominant_tf": mtf_dominant_tf,
-        "mtf_directions_json": mtf_directions_json,
+        # PR-MTF-DIRECTIONS-JSON-SERIALIZATION-FIX: belt-and-suspenders.
+        # The parameter contract says str|None, but if asyncpg
+        # round-tripped a JSONB value into a dict at any point upstream,
+        # serialize it here so the INSERT param binding stays valid.
+        "mtf_directions_json": _normalize_mtf_directions_json(mtf_directions_json),
         "p_win": p_win,
         "effective_score": effective_score,
         "realized_vol_20d": realized_vol_20d,
