@@ -769,6 +769,47 @@ async def dispatch(
 
     try:
         if current_mode == "telegram-approve":
+            # ---- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) --------------
+            # Inside telegram-approve mode, when HYBRID_AUTO_SCORE_THRESHOLD
+            # is set AND the signal's |entry_score| meets the threshold,
+            # route directly to _place_live_order (skip Telegram approval).
+            # Below-threshold or no-score signals fall through to the
+            # existing telegram-approve handshake. Default None keeps
+            # this dormant; flip on by setting the env var + restart.
+            from app.config import get_settings as _get_hybrid_settings
+            _hybrid_threshold = _get_hybrid_settings().HYBRID_AUTO_SCORE_THRESHOLD
+            if (
+                _hybrid_threshold is not None
+                and proposal.entry_score is not None
+                and abs(proposal.entry_score) >= _hybrid_threshold
+            ):
+                log.info(
+                    "hybrid_routing: user=%d %s/%s score=%.3f >= "
+                    "HYBRID_AUTO_SCORE_THRESHOLD=%.3f -> _place_live_order "
+                    "(skip Telegram approval)",
+                    user.user_id, proposal.symbol, proposal.direction,
+                    abs(proposal.entry_score), _hybrid_threshold,
+                )
+                order_id, sig_id = await _place_live_order(
+                    session, user=user, proposal=proposal,
+                    leverage=leverage, margin_usdt=margin, now=n,
+                )
+                return DispatchResult(
+                    outcome="placed_hybrid",
+                    detail=(
+                        f"hybrid auto-execute: "
+                        f"|score|={abs(proposal.entry_score):.3f} "
+                        f">= {_hybrid_threshold:.3f}; "
+                        f"placed {proposal.direction} {proposal.symbol} "
+                        f"qty={(margin*leverage)/proposal.entry_price:.6f} @ "
+                        f"~${proposal.entry_price:.2f} lev={leverage}× "
+                        f"binance_order={order_id}"
+                    ),
+                    signal_id=sig_id, binance_order_id=order_id,
+                    leverage_chosen=leverage,
+                )
+            # ---- end PR-HYBRID-CONFIDENCE-ROUTING -----------------------
+
             sig_id = await _send_telegram_signal(
                 session, user=user, proposal=proposal,
                 leverage=leverage, margin_usdt=margin, now=n,

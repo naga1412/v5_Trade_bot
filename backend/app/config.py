@@ -232,6 +232,32 @@ class Settings(BaseSettings):
     MIN_ENTRY_SCORE_LONG: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
 
+    # --- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) -----------------------
+    # Confidence-tiered routing modifier on the existing telegram-approve
+    # mode. None (default) keeps every signal routed to Telegram approval.
+    # When set: for `trading_mode='telegram-approve'`, signals whose
+    # `abs(proposal.entry_score) >= HYBRID_AUTO_SCORE_THRESHOLD` route
+    # directly to `_place_live_order` (auto-execute) instead of the
+    # Telegram-approval handshake. Below-threshold signals continue to
+    # route via Telegram as today. The lower bound is the existing
+    # entry-quality gate (MIN_ENTRY_SCORE_LONG on LONGs + DISABLE_SHORT_
+    # SIGNALS on SHORTs) — this setting adds an upper-tier auto-execute
+    # bucket, it does NOT replace the entry filter.
+    #
+    # Operator-facing: this is a behavior-modifier on telegram-approve
+    # mode. It does NOT introduce a new `trading_mode` value. The choice
+    # avoids touching the alembic CHECK constraint on `users.trading_mode`,
+    # the promotion-gate TargetMode Literal, and the frontend mode
+    # selector. The per-trade routing decision is logged at dispatch
+    # time as `outcome="placed_hybrid"` vs `outcome="sent_telegram"` —
+    # full audit trail at the per-trade level.
+    #
+    # Default None keeps PR-HYBRID-CONFIDENCE-ROUTING dormant. To enable:
+    # set HYBRID_AUTO_SCORE_THRESHOLD=0.45 (conservative — only the
+    # strongest signals auto-execute) and restart the backend.
+    # Reversibility: unset (or set higher) and restart.
+    HYBRID_AUTO_SCORE_THRESHOLD: float | None = None
+
     # --- FU-33: slippage circuit-breaker ---------------------------------
     # Default-OFF — operator flips per-env after observing the metric.
     # When True:

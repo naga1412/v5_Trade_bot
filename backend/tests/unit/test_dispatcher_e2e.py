@@ -328,3 +328,246 @@ async def test_dispatch_ignores_stale_user_context_mode() -> None:
         )
     assert result.outcome == "emitted"  # DB wins
     assert _StubBinance.instances == []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23)
+# ────────────────────────────────────────────────────────────────────────────
+#
+# The hybrid setting is a *modifier* on telegram-approve mode. When
+# HYBRID_AUTO_SCORE_THRESHOLD is set AND |entry_score| >= threshold, the
+# dispatcher routes the signal to _place_live_order (auto-execute) INSTEAD
+# of the Telegram-approval handshake. Below-threshold or no-score signals
+# fall through to the existing telegram-approve path. Default None keeps
+# the modifier dormant.
+#
+# Reuses the existing engine + stub + fixture machinery defined above.
+
+
+def _override_setting(monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> None:
+    """Patch the `get_settings()` cached singleton for the duration of one
+    test. The dispatcher reads HYBRID_AUTO_SCORE_THRESHOLD via
+    get_settings() lazily inside the routing branch, so monkeypatching
+    the module-level cache works without touching env vars.
+    """
+    from app.config import Settings, get_settings
+    base = get_settings()
+    # Pydantic-settings: model_copy(update=...) builds a fresh Settings
+    # without mutating the cached instance.
+    fake: Settings = base.model_copy(update=kwargs)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        "app.trading.execution.dispatcher.get_settings",
+        lambda: fake,
+        raising=False,
+    )
+    # Some sites import get_settings directly; patch the canonical too.
+    monkeypatch.setattr("app.config.get_settings", lambda: fake)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_dormant_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanity: with HYBRID_AUTO_SCORE_THRESHOLD=None (default), every
+    telegram-approve signal goes through the Telegram path regardless
+    of score. This is the behavior on every prod backend today."""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=None)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    # A very high score that WOULD trigger auto-execute if threshold set.
+    proposal = _proposal(entry_score=0.95)
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "sent_telegram", (
+        f"threshold None must keep telegram routing; got {result.outcome}"
+    )
+    assert _StubBinance.instances == [], (
+        "no Binance order should be placed when threshold is None"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_below_threshold_routes_to_telegram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Score below HYBRID_AUTO_SCORE_THRESHOLD → fall through to the
+    existing telegram-approve handshake. (Lower bound is the existing
+    entry-quality gate; this PR's threshold only affects the upper
+    auto-execute bucket.)"""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    # Score above the entry-quality gate floor (0.30) but below the
+    # hybrid auto-execute threshold (0.45).
+    proposal = _proposal(entry_score=0.35)
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "sent_telegram", (
+        f"|0.35| < 0.45 must route to telegram; got {result.outcome}"
+    )
+    assert _StubBinance.instances == [], (
+        "no Binance order should be placed for below-threshold scores"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_at_or_above_threshold_auto_executes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Score at/above HYBRID_AUTO_SCORE_THRESHOLD → route to
+    _place_live_order, skip Telegram entirely. Outcome is
+    `placed_hybrid` (NOT `placed` — distinguishable from fully-auto)."""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(entry_score=0.55)  # well above threshold
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "placed_hybrid", (
+        f"|0.55| >= 0.45 must auto-execute; got {result.outcome}"
+    )
+    assert result.binance_order_id == "stub-order-1"
+    assert len(_StubBinance.instances) == 1
+    # No Telegram signal row written — direct auto-execute path.
+    async with AsyncSession(engine) as s:
+        n_tg = (await s.execute(sa.text(
+            "SELECT count(*) FROM telegram_signals"
+        ))).scalar()
+        n_live = (await s.execute(sa.text(
+            "SELECT count(*) FROM live_trades"
+        ))).scalar()
+    assert n_tg == 0
+    assert n_live == 1
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_exact_threshold_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact equality is INCLUSIVE — `|score| >= threshold` not `>`."""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(entry_score=0.45)  # exact equality
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "placed_hybrid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_short_signal_above_threshold_auto_executes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threshold is on abs(score), so high-conviction SHORTs auto-execute
+    too — unless DISABLE_SHORT_SIGNALS blocks them upstream (separate
+    test).
+
+    For SHORT, stop_loss is ABOVE entry and take_profit BELOW (inverse
+    of LONG). The default proposal helper uses LONG-shaped levels, so
+    we override to match the SHORT geometry — otherwise the recommended
+    leverage falls out too low and notional gets rejected at the
+    min_notional check.
+    """
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(
+        direction="SHORT", entry_score=-0.60,
+        entry_price=80_000.0,
+        stop_loss_price=81_600.0,    # 2% above entry (SHORT-appropriate)
+        take_profit_price=76_720.0,  # ~4.1% below entry
+    )
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "placed_hybrid", (
+        f"|-0.60| >= 0.45 SHORT must auto-execute; got {result.outcome}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_short_blocked_by_disable_short_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DISABLE_SHORT_SIGNALS fires at the entry-quality gate which runs
+    BEFORE the routing branch. SHORTs are blocked regardless of
+    hybrid threshold or routing destination."""
+    _override_setting(
+        monkeypatch,
+        HYBRID_AUTO_SCORE_THRESHOLD=0.45,
+        DISABLE_SHORT_SIGNALS=True,
+    )
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(direction="SHORT", entry_score=-0.60)
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "blocked_entry_quality", (
+        f"DISABLE_SHORT_SIGNALS must block before routing; got {result.outcome}"
+    )
+    assert _StubBinance.instances == []
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_no_score_falls_through_to_telegram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SignalProposal without `entry_score` (admin manual test trade,
+    older code path) MUST NOT crash the routing branch and MUST NOT
+    accidentally auto-execute. Falls through to telegram-approve."""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(entry_score=None)
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "sent_telegram", (
+        f"entry_score=None must NOT auto-execute; got {result.outcome}"
+    )
+    assert _StubBinance.instances == []
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_does_not_affect_fully_auto_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: setting HYBRID_AUTO_SCORE_THRESHOLD does NOT change
+    fully-auto mode behavior. fully-auto already auto-executes every
+    signal; the new code path is exclusive to telegram-approve mode."""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="fully-auto")
+    proposal = _proposal(entry_score=0.20)  # below threshold
+    async with AsyncSession(engine) as s:
+        result = await dispatch(
+            s, proposal=proposal, user=_user(mode="fully-auto"),
+        )
+        await s.commit()
+    # fully-auto's outcome stays `placed` — NOT `placed_hybrid` — and
+    # NOT `sent_telegram` (the new threshold doesn't gate fully-auto).
+    assert result.outcome == "placed", (
+        f"fully-auto outcome must stay 'placed'; got {result.outcome}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_does_not_affect_manual_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: manual mode short-circuits BEFORE any gate or routing
+    branch, regardless of HYBRID_AUTO_SCORE_THRESHOLD."""
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="manual")
+    proposal = _proposal(entry_score=0.95)  # very high score
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "emitted"
+    assert _StubBinance.instances == []
