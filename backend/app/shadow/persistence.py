@@ -17,7 +17,10 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.audit import insert_with_chain
-from app.db.payload_builders import build_shadow_trade_payload
+from app.db.payload_builders import (
+    _normalize_mtf_directions_json,
+    build_shadow_trade_payload,
+)
 from app.shadow.engine import Direction, ShadowPosition
 from app.shadow.exit_monitor import ExitReason
 
@@ -121,9 +124,16 @@ async def list_open_positions(
             # from the row. ``getattr(..., None)`` keeps pre-fix test
             # fixtures (rows without these columns / SQLite mirrors that
             # haven't been updated yet) working without AttributeError.
+            #
+            # PR-MTF-DIRECTIONS-JSON-SERIALIZATION-FIX: the column is
+            # JSONB on Postgres — asyncpg returns a Python dict on read.
+            # Normalize back to the canonical JSON string the rest of
+            # the code (and ShadowPosition's str|None contract) expects.
             mtf_agreement=getattr(r, "mtf_agreement", None),
             mtf_dominant_tf=getattr(r, "mtf_dominant_tf", None),
-            mtf_directions_json=getattr(r, "mtf_directions_json", None),
+            mtf_directions_json=_normalize_mtf_directions_json(
+                getattr(r, "mtf_directions_json", None),
+            ),
             p_win=getattr(r, "p_win", None),
             effective_score=getattr(r, "effective_score", None),
             realized_vol_20d=getattr(r, "realized_vol_20d", None),

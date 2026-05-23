@@ -782,3 +782,125 @@ class TestBuildLiveTradePayload:
         )
         assert result["mtf_agreement"] == 4
         assert result["mtf_directions_json"] is None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PR-MTF-DIRECTIONS-JSON-SERIALIZATION-FIX (2026-05-23)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+from app.db.payload_builders import _normalize_mtf_directions_json
+
+
+class TestNormalizeMtfDirectionsJson:
+    """The helper that absorbs str|dict|None and emits a canonical JSON str.
+
+    Production bug: ``shadow_open_positions.mtf_directions_json`` is JSONB
+    on Postgres. asyncpg decodes JSONB to a Python dict on read. The dict
+    then flows back through ``persist_closed_trade`` → ``build_shadow_trade_payload``
+    → ``insert_with_chain`` and asyncpg blows up at INSERT-bind time
+    because the column expects a string. This helper normalizes at the
+    boundary so the rest of the code can pretend it's always a string.
+    """
+
+    def test_dict_input_serialises_to_canonical_json(self) -> None:
+        """The most common form coming back from asyncpg JSONB decode."""
+        out = _normalize_mtf_directions_json(
+            {"1d": -1, "1h": 0, "1w": -1, "4h": -1},
+        )
+        # sort_keys=True + compact separators — same format the writer uses,
+        # so the byte sequence is stable across read/write round-trips.
+        assert out == '{"1d":-1,"1h":0,"1w":-1,"4h":-1}'
+
+    def test_str_input_returned_unchanged(self) -> None:
+        """Already-canonical input from the writer's hot path passes through."""
+        s = '{"1d":1,"1h":1,"1w":0,"4h":1}'
+        assert _normalize_mtf_directions_json(s) is s
+
+    def test_none_returned_unchanged(self) -> None:
+        """None → None (NULL on the wire), NOT the string 'null'."""
+        assert _normalize_mtf_directions_json(None) is None
+
+    def test_empty_dict_serialises_to_empty_object(self) -> None:
+        """{} → '{}', not None — distinct from 'no data'."""
+        assert _normalize_mtf_directions_json({}) == "{}"
+
+    def test_canonical_order_is_deterministic(self) -> None:
+        """Sort-keys=True ensures any dict order produces the same bytes."""
+        a = _normalize_mtf_directions_json({"1w": -1, "1d": 1, "4h": 0, "1h": 1})
+        b = _normalize_mtf_directions_json({"1h": 1, "4h": 0, "1d": 1, "1w": -1})
+        assert a == b == '{"1d":1,"1h":1,"1w":-1,"4h":0}'
+
+
+class TestBuildShadowTradePayloadAcceptsDict:
+    """Regression: caller may pass a dict in addition to a string.
+
+    Pre-fix the builder copied ``mtf_directions_json`` to the output dict
+    verbatim. If the caller passed a dict (the bug surfaced when asyncpg
+    JSONB-decoded a round-tripped position), the INSERT would fail at
+    parameter binding with ``'dict' object has no attribute 'encode'``.
+
+    Post-fix the builder normalizes via ``_normalize_mtf_directions_json``
+    so the output always carries a ``str`` or ``None``.
+    """
+
+    @staticmethod
+    def _pos() -> SimpleNamespace:
+        return SimpleNamespace(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            entry_price=50000.0,
+            stop_loss=49000.0,
+            take_profit=52000.0,
+            position_size_usdt=100.0,
+            entry_score=0.65,
+            entry_confidence=0.8,
+            layer_scores={"1": {"score": 0.7}},
+            entry_atr=500.0,
+            opened_at=_OPENED_AT,
+            signal_id="sig-xyz",
+            timeframe="1h",
+        )
+
+    def test_dict_mtf_directions_json_is_serialised(self) -> None:
+        """The bug: pass a dict → output must be a JSON string."""
+        out = build_shadow_trade_payload(
+            self._pos(),
+            user_id=1,
+            exit_price=51000.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=10,
+            inputs_hash="hash",
+            mtf_directions_json={"1d": -1, "1h": 0, "1w": -1, "4h": -1},  # type: ignore[arg-type]
+        )
+        assert isinstance(out["mtf_directions_json"], str)
+        assert out["mtf_directions_json"] == '{"1d":-1,"1h":0,"1w":-1,"4h":-1}'
+
+    def test_string_mtf_directions_json_passes_through(self) -> None:
+        """Already-serialised string from the writer hot path: unchanged."""
+        s = '{"1d":1,"1h":1,"1w":0,"4h":1}'
+        out = build_shadow_trade_payload(
+            self._pos(),
+            user_id=1,
+            exit_price=51000.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=10,
+            inputs_hash="hash",
+            mtf_directions_json=s,
+        )
+        assert out["mtf_directions_json"] == s
+
+    def test_none_stays_none(self) -> None:
+        out = build_shadow_trade_payload(
+            self._pos(),
+            user_id=1,
+            exit_price=51000.0,
+            exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=_CLOSED_AT,
+            bars_held=10,
+            inputs_hash="hash",
+            mtf_directions_json=None,
+        )
+        assert out["mtf_directions_json"] is None
