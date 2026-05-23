@@ -123,9 +123,11 @@ async def test_verifier_detects_tampered_predictions_row(
         return True
 
     monkeypatch.setattr(vs, "alert_admin", _fake_alert)
-    monkeypatch.setattr(vs, "CHAINED_TABLES", {
-        "predictions": vs.CHAINED_TABLES["predictions"],
-    })
+    # PR-FU24-VERIFIER-COLUMN-DRIFT: the legacy `CHAINED_TABLES` dict is
+    # gone — production iterates HASH_PAYLOAD_COLUMNS. This test's in-memory
+    # schema only has `predictions`, so narrow the verifier via the new
+    # `_tables_to_verify` indirection.
+    monkeypatch.setattr(vs, "_tables_to_verify", lambda: ("predictions",))
 
     # 4. One-shot verifier round (no time loop, no sleep).
     await vs._check_all_chains(factory)
@@ -182,9 +184,11 @@ async def test_verifier_clean_chain_does_not_alert(
         return True
 
     monkeypatch.setattr(vs, "alert_admin", _fake_alert)
-    monkeypatch.setattr(vs, "CHAINED_TABLES", {
-        "predictions": vs.CHAINED_TABLES["predictions"],
-    })
+    # PR-FU24-VERIFIER-COLUMN-DRIFT: the legacy `CHAINED_TABLES` dict is
+    # gone — production iterates HASH_PAYLOAD_COLUMNS. This test's in-memory
+    # schema only has `predictions`, so narrow the verifier via the new
+    # `_tables_to_verify` indirection.
+    monkeypatch.setattr(vs, "_tables_to_verify", lambda: ("predictions",))
 
     await vs._check_all_chains(factory)
 

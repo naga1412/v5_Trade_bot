@@ -3,8 +3,8 @@
 For each iteration:
     sleep until the next 03:00 UTC
     open a session
-    for each chained table:
-        result = verify_chain(session, table, columns=...)
+    for each table in HASH_PAYLOAD_COLUMNS:
+        result = verify_chain(session, table)   # whitelist-native path
         if not result.ok:
             log.error
             alert_admin(...)
@@ -18,23 +18,40 @@ Adapted from SP-1 app.shadow.universe_refresh — the seconds_until_next_utc
 helper is duplicated locally to keep the two daemons independent (changing
 the universe-refresh signature must not silently shift the verifier hour).
 
-Column lists per table mirror what insert_with_chain saw at write time
-(sources: app.core.execution.persistence, app.shadow.persistence,
-app.ws.live_prediction). When new chained columns are added at write time,
-they MUST be added here too — otherwise verify_chain will mis-recompute
-row_hash and report a (spurious) break.
+PR-FU24-VERIFIER-COLUMN-DRIFT (2026-05-23): pre-fix this module owned a
+local ``CHAINED_TABLES`` dict that duplicated the writer's column lists
+by hand. The dict drifted: ``predictions`` had 11 columns here vs 19 in
+``app.db.audit.HASH_PAYLOAD_COLUMNS`` (missing 8 ghost_* columns and
+``model_checkpoint_id``). Every night at 03:00 UTC the verifier recomputed
+hashes with the 11-column view, mismatched the 19-column stored hashes,
+and emitted false ``audit_chain_broken`` alarms on row_id=1. PR-SAFETY-
+BATCH-1's per-table advisory lock fixed the actual concurrent-insert race
+but did nothing for these alarms because the alarms are not a race —
+they are a verifier↔writer column-list mismatch. This module now iterates
+``HASH_PAYLOAD_COLUMNS.keys()`` directly and calls ``verify_chain`` in its
+whitelist-native mode (no ``columns=`` argument), so verifier and writer
+stay in lockstep with no hand-sync.
+
+Bonus consequence: the old hardcoded list covered only 3 of the 8 tables
+registered in ``HASH_PAYLOAD_COLUMNS`` (predictions, paper_trades,
+shadow_trades). The remaining 5 — ``live_trades``, ``brain_decisions``,
+``tax_events``, ``mode_change_log``, ``symbol_performance_snapshots`` —
+are now verified for the first time. Expect a possible first-night alarm
+on any historical row whose JSONB columns drift through asyncpg round-trip;
+that drift is the subject of the follow-up Component B investigation.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.audit import HASH_PAYLOAD_COLUMNS
 from app.db.audit_verify import verify_chain
 from app.ops.alerts import alert_admin
 from app.ops.heartbeat import record_heartbeat
@@ -46,69 +63,15 @@ WORKER_NAME: str = "audit_verifier_task"
 
 DEFAULT_VERIFIER_HOUR_UTC: int = 3
 
-# Map table → list of column names that participate in the row hash.
-# These MUST match the payload keys insert_with_chain saw at write time.
-# Sources of truth (kept in sync by hand for now):
-#   predictions   — app.ws.live_prediction.start_background_worker
-#                   (calls app.core.execution.persistence.persist_prediction)
-#   paper_trades  — app.core.execution.persistence.persist_trade
-#   shadow_trades — app.shadow.persistence.persist_shadow_trade
-CHAINED_TABLES: dict[str, list[str]] = {
-    "predictions": [
-        "user_id",
-        "symbol",
-        "timeframe",
-        "ts",
-        "layer_scores",
-        "final_score",
-        "direction",
-        "confidence",
-        "inputs_hash",
-        "model_version",
-        "cold_start",
-    ],
-    "paper_trades": [
-        "symbol",
-        "direction",
-        "entry_price",
-        "exit_price",
-        "stop_loss",
-        "take_profit",
-        "position_size",
-        "opened_at",
-        "closed_at",
-        "pnl_pct",
-        "max_drawdown_during",
-        "bars_held",
-        "exit_reason",
-        "reasoning",
-        "model_version",
-    ],
-    "shadow_trades": [
-        "user_id",
-        "symbol",
-        "timeframe",
-        "direction",
-        "entry_price",
-        "stop_loss",
-        "take_profit",
-        "position_size_usdt",
-        "entry_score",
-        "entry_confidence",
-        "layer_scores",
-        "entry_atr",
-        "exit_price",
-        "exit_reason",
-        "pnl_pct",
-        "pnl_usdt",
-        "bars_held",
-        "opened_at",
-        "closed_at",
-        "inputs_hash",
-        "model_version",
-        "signal_id",
-    ],
-}
+
+def _tables_to_verify() -> Iterable[str]:
+    """Tables the nightly verifier walks.
+
+    Single source of truth: ``HASH_PAYLOAD_COLUMNS`` in ``app.db.audit``.
+    Tests that want to narrow the set (e.g. an in-memory test schema that
+    only has ``predictions``) monkeypatch this function.
+    """
+    return tuple(HASH_PAYLOAD_COLUMNS.keys())
 
 
 # Adapted from SP-1 app.shadow.universe_refresh.seconds_until_next_utc — copied
@@ -151,7 +114,7 @@ async def _record_violation(
 async def _check_all_chains(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """One-shot verifier round across every CHAINED_TABLES entry.
+    """One-shot verifier round across every table the verifier walks.
 
     Public for D4 integration tests so the test can drive a single round
     without spinning up the full :func:`run_audit_verifier_loop` time-loop.
@@ -159,9 +122,9 @@ async def _check_all_chains(
     of the round continues; asyncio.CancelledError still propagates.
     """
     async with session_factory() as session:
-        for table, columns in CHAINED_TABLES.items():
+        for table in _tables_to_verify():
             try:
-                result = await verify_chain(session, table, columns=columns)
+                result = await verify_chain(session, table)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -254,9 +217,9 @@ def start_audit_verifier_task(
 
 
 __all__ = [
-    "CHAINED_TABLES",
     "DEFAULT_VERIFIER_HOUR_UTC",
     "_check_all_chains",
+    "_tables_to_verify",
     "run_audit_verifier_loop",
     "seconds_until_next_utc_hour",
     "start_audit_verifier_task",
