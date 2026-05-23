@@ -78,6 +78,11 @@ def test_install_redaction_filter_idempotent() -> None:
     httpx_logger = logging.getLogger("httpx")
     by_type = [type(f) for f in httpx_logger.filters]
     assert by_type.count(SensitiveTokenRedactingFilter) == 1
+    # Root logger must also not stack — the "root" and "" names alias the
+    # same logger, and re-install must respect that.
+    root_logger = logging.getLogger()
+    root_by_type = [type(f) for f in root_logger.filters]
+    assert root_by_type.count(SensitiveTokenRedactingFilter) == 1
 
 
 def test_filter_handles_record_with_no_args() -> None:
@@ -92,3 +97,18 @@ def test_pattern_compiled_once_at_module_load() -> None:
     for pattern, replacement in REDACT_PATTERNS:
         assert isinstance(pattern, re.Pattern)
         assert isinstance(replacement, str)
+
+
+def test_filter_never_crashes_on_bad_getmessage() -> None:
+    """A record whose getMessage() raises (e.g., bad %s/args mismatch) must
+    not bring down log emission. The filter swallows the error and returns
+    True so the broken record still flows to the handler (handler will
+    surface its own error)."""
+    f = SensitiveTokenRedactingFilter()
+    # msg has two %s placeholders but only one arg → TypeError on
+    # interpolation inside record.getMessage().
+    record = logging.LogRecord(
+        name="test", level=logging.INFO, pathname="", lineno=0,
+        msg="%s %s", args=("only-one",), exc_info=None,
+    )
+    assert f.filter(record) is True

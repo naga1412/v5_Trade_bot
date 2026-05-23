@@ -18,7 +18,6 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import require_admin
-from app.auth.models import User  # noqa: F401 — kept for type-only annotation
 from app.db.session import get_session
 
 # PR-AUDIT-FIXES-1 (2026-05-23): the original module-level import

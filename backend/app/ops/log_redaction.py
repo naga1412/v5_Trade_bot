@@ -69,7 +69,9 @@ class SensitiveTokenRedactingFilter(logging.Filter):
             redacted = pattern.sub(replacement, redacted)
         if redacted != formatted:
             record.msg = redacted
-            record.args = None
+            # Python logging documents record.args as a tuple/dict.
+            # Empty tuple is the portable "no args" sentinel.
+            record.args = ()
         return True
 
 
