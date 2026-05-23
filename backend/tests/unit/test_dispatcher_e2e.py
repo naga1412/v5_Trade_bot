@@ -571,3 +571,110 @@ async def test_hybrid_routing_does_not_affect_manual_mode(
         await s.commit()
     assert result.outcome == "emitted"
     assert _StubBinance.instances == []
+
+
+# ─── Reviewer-flagged hardening tests ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_nan_score_falls_through_to_telegram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NaN entry_score must NOT auto-execute. `abs(nan) >= threshold` is
+    False in Python, so the existing guard happens to work — but the
+    explicit isfinite() check makes the intent clear and protects
+    against the inf case too."""
+    import math
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(entry_score=math.nan)
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "sent_telegram", (
+        f"NaN entry_score must NOT auto-execute; got {result.outcome}"
+    )
+    assert _StubBinance.instances == []
+
+
+@pytest.mark.asyncio
+async def test_hybrid_routing_inf_score_falls_through_to_telegram(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive infinity entry_score (a buggy-predictor sentinel) must
+    NOT auto-execute. WITHOUT the isfinite() guard, abs(inf) >= 0.45
+    is True and we'd execute on garbage. Critical regression test."""
+    import math
+    _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    engine = await _mk_engine()
+    await _seed_user(engine, mode="telegram-approve")
+    proposal = _proposal(entry_score=math.inf)
+    async with AsyncSession(engine) as s:
+        result = await dispatch(s, proposal=proposal, user=_user())
+        await s.commit()
+    assert result.outcome == "sent_telegram", (
+        f"inf entry_score must NOT auto-execute; got {result.outcome}"
+    )
+    assert _StubBinance.instances == [], (
+        "no Binance order should be placed for non-finite scores"
+    )
+
+
+def test_hybrid_threshold_validator_rejects_zero() -> None:
+    """Operator typo `HYBRID_AUTO_SCORE_THRESHOLD=0` would auto-execute
+    every non-zero-score signal. Pydantic validator must reject."""
+    from app.config import Settings
+    with pytest.raises(ValueError, match="HYBRID_AUTO_SCORE_THRESHOLD"):
+        Settings(  # type: ignore[call-arg]
+            database_url="postgresql+asyncpg://x:y@localhost/z",
+            redis_url="redis://localhost",
+            HYBRID_AUTO_SCORE_THRESHOLD=0.0,
+        )
+
+
+def test_hybrid_threshold_validator_rejects_negative() -> None:
+    """Negative threshold: `abs(score) >= -0.45` is true for every score
+    (since abs is non-negative). Pydantic validator must reject."""
+    from app.config import Settings
+    with pytest.raises(ValueError, match="HYBRID_AUTO_SCORE_THRESHOLD"):
+        Settings(  # type: ignore[call-arg]
+            database_url="postgresql+asyncpg://x:y@localhost/z",
+            redis_url="redis://localhost",
+            HYBRID_AUTO_SCORE_THRESHOLD=-0.45,
+        )
+
+
+def test_hybrid_threshold_validator_rejects_one_or_above() -> None:
+    """Threshold >= 1.0 cannot be cleared (aggregator clamps |score| to
+    1) — silently disables hybrid routing. Validator rejects so the
+    operator sees the error at startup rather than dormant-by-typo."""
+    from app.config import Settings
+    with pytest.raises(ValueError, match="HYBRID_AUTO_SCORE_THRESHOLD"):
+        Settings(  # type: ignore[call-arg]
+            database_url="postgresql+asyncpg://x:y@localhost/z",
+            redis_url="redis://localhost",
+            HYBRID_AUTO_SCORE_THRESHOLD=1.0,
+        )
+
+
+def test_hybrid_threshold_validator_accepts_valid_range() -> None:
+    """Sanity: values in (0, 1) load cleanly."""
+    from app.config import Settings
+    for v in (0.30, 0.45, 0.55, 0.99):
+        s = Settings(  # type: ignore[call-arg]
+            database_url="postgresql+asyncpg://x:y@localhost/z",
+            redis_url="redis://localhost",
+            HYBRID_AUTO_SCORE_THRESHOLD=v,
+        )
+        assert s.HYBRID_AUTO_SCORE_THRESHOLD == v
+
+
+def test_hybrid_threshold_validator_accepts_none() -> None:
+    """Sanity: explicit None / unset is the dormant default."""
+    from app.config import Settings
+    s = Settings(  # type: ignore[call-arg]
+        database_url="postgresql+asyncpg://x:y@localhost/z",
+        redis_url="redis://localhost",
+    )
+    assert s.HYBRID_AUTO_SCORE_THRESHOLD is None

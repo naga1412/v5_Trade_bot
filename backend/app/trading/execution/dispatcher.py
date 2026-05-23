@@ -151,6 +151,11 @@ DispatchOutcome = Literal[
     "blocked_low_sharpe",
     # PR-strategy-1 — entry-quality gate
     "blocked_entry_quality",
+    # PR-HYBRID-CONFIDENCE-ROUTING — auto-executed under telegram-approve
+    # mode when |entry_score| >= HYBRID_AUTO_SCORE_THRESHOLD. Distinct
+    # from `placed` (fully-auto) so dispatch logs / counters / dashboards
+    # can split the two routing paths.
+    "placed_hybrid",
 ]
 
 
@@ -776,11 +781,29 @@ async def dispatch(
             # Below-threshold or no-score signals fall through to the
             # existing telegram-approve handshake. Default None keeps
             # this dormant; flip on by setting the env var + restart.
+            #
+            # math.isfinite() guard: a buggy predictor or NaN/inf
+            # propagation upstream would otherwise produce abs(inf)>=t
+            # → True → auto-execute on garbage. The guard ensures only
+            # finite, well-formed scores can clear the threshold.
+            # entry_score range is bounded to (-1, +1) by the aggregator
+            # (HASH_PAYLOAD-side), but defense-in-depth.
+            #
+            # The threshold itself is validated by Settings.field_validator
+            # at startup to reject <=0 and >=1.0 — see config.py.
+            #
+            # Polarity note: the threshold gates on abs(score), so
+            # high-conviction SHORTs and LONGs auto-execute symmetrically.
+            # Direction-specific filters (MIN_ENTRY_SCORE_LONG,
+            # DISABLE_SHORT_SIGNALS) fire at the entry-quality gate
+            # above this branch; their semantics are signed.
+            import math as _math
             from app.config import get_settings as _get_hybrid_settings
             _hybrid_threshold = _get_hybrid_settings().HYBRID_AUTO_SCORE_THRESHOLD
             if (
                 _hybrid_threshold is not None
                 and proposal.entry_score is not None
+                and _math.isfinite(proposal.entry_score)
                 and abs(proposal.entry_score) >= _hybrid_threshold
             ):
                 log.info(
