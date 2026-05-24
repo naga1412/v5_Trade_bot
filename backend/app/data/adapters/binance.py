@@ -303,10 +303,19 @@ class BinanceKlineStream:
     async def stream(self) -> AsyncIterator[ValidatorCandle]:
         connect = self._connect or self._real_connect
         backoff = 1.0
+        # PR-BINANCE-WS-OBSERVABILITY (2026-05-24): track consecutive
+        # failures so the log severity reflects "single hiccup" vs
+        # "sustained outage". Pre-PR the bare-except swallowed every
+        # exception with zero observability — every live_worker silent
+        # death was diagnostically opaque (two such incidents on
+        # 2026-05-24 cost ~90 min of operator panic each). Counter
+        # resets on every successful candle yield.
+        consecutive_failures = 0
         while True:
             try:
                 async for raw in connect(self.url):
                     backoff = 1.0
+                    consecutive_failures = 0
                     payload = json.loads(raw)
                     kline = payload.get("k") if isinstance(payload, dict) else None
                     if not kline or not kline.get("x"):
@@ -319,6 +328,21 @@ class BinanceKlineStream:
                         low=float(kline["l"]),  close=float(kline["c"]),
                         volume=float(kline["v"]),
                     )
-            except Exception:  # noqa: BLE001 - resilient WS loop
+            except Exception as e:  # noqa: BLE001 - resilient WS loop
+                consecutive_failures += 1
+                # PR-BINANCE-WS-OBSERVABILITY: first failure logs at ERROR
+                # so a NEW problem surfaces immediately in routine
+                # log scanning; subsequent retries downgrade to WARNING
+                # so a legitimate transient hiccup doesn't spam ERROR
+                # over the backoff window. Caller's stale-heartbeat
+                # detection still fires on sustained outage; this
+                # observability is purely additive (no behavior change).
+                log_fn = log.error if consecutive_failures == 1 else log.warning
+                log_fn(
+                    "BinanceKlineStream(%s/%s) connect/recv failed "
+                    "(consecutive=%d, next_retry_in=%.1fs): %s: %s",
+                    self.symbol, self.timeframe, consecutive_failures,
+                    min(30.0, backoff), type(e).__name__, e,
+                )
                 await asyncio.sleep(min(30.0, backoff))
                 backoff = min(30.0, backoff * 2)
