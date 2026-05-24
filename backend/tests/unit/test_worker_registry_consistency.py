@@ -136,3 +136,123 @@ def test_no_pending_heartbeat_after_fu1() -> None:
         f"drop the flag (or, if a new worker is being added before its "
         f"heartbeat is wired, complete the wiring first)."
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PR-WATCHDOG-MAX-STALENESS-TUNE (2026-05-24): max_staleness_seconds must be
+# strictly greater than the worker's natural cadence, or the watchdog cries
+# wolf during the inter-cadence quiet window. Today's incident lost ~3h of
+# operator triage to chasing a healthy 1h-cadence worker through its 45-min
+# of natural mid-hour silence.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_live_worker_max_staleness_matches_1h_cadence() -> None:
+    """live_worker is a singleton on BTC/USDT @ 1h timeframe; it heartbeats
+    once per closed candle = once per hour. max_staleness must allow for a
+    full hour of mid-cycle silence + grace; otherwise the watchdog alarms
+    during normal operation.
+
+    Sanity cap: stay below 4500s (1h15m). Looser than that delays genuine
+    death detection beyond a realistic operator OODA window.
+    """
+    spec = next(s for s in WORKER_REGISTRY if s.name == "live_worker")
+    assert spec.max_staleness_seconds >= 3600, (
+        f"live_worker.max_staleness_seconds={spec.max_staleness_seconds} is "
+        f"below the natural 1h candle cadence (3600s). The watchdog raises "
+        f"a false-positive stale alarm for the entire inter-candle window. "
+        f"See PR-WATCHDOG-MAX-STALENESS-TUNE."
+    )
+    assert spec.max_staleness_seconds <= 4500, (
+        f"live_worker.max_staleness_seconds={spec.max_staleness_seconds} is "
+        f"above the 4500s sanity cap (1h15m). Looser than this delays real "
+        f"death detection past acceptable operator-response windows."
+    )
+
+
+# Derivable natural-cadence floor for each worker name. Used by the
+# cross-worker mismatch sweep below. Workers NOT in this dict either have
+# no cleanly-derivable cadence (event-driven without a fixed beat) or are
+# single-shot — they opt out of the floor check.
+_NATURAL_CADENCE_SECONDS: dict[str, int] = {
+    # 1h candle close → 1 beat / hour
+    "live_worker": 3600,
+    # 15m fastest TF on multi-TF shadow → 1 beat / 900s
+    "shadow_worker": 900,
+    # 30s polling cadence
+    "liquidation_monitor_task": 30,
+    "live_exit_monitor": 30,
+    "mtf_cache_ttl_refresh_task": 30,
+    # 60s polling cadence
+    "scanner_batch_task": 60,
+    "prediction_validator_task": 60,
+    # Telegram long-poll cycles complete every ~30s (poll timeout + slack);
+    # heartbeat fires per cycle. Use 60s as the upper-bound cadence.
+    "telegram_poller_task": 60,
+    # 5min cadence
+    "health_pinger_task": 5 * 60,
+    "intermarket_snapshot_task": 5 * 60,
+    "ws_keepalive_task": 5 * 60,  # SUPERVISOR heartbeat cadence
+    "ui_freshness_monitor": 5 * 60,
+    # 24h nightly
+    "universe_refresh_task": 24 * 60 * 60,
+    "universe_sync_task": 24 * 60 * 60,
+    "audit_verifier_task": 24 * 60 * 60,
+    "news_cleanup_task": 24 * 60 * 60,
+    "intermarket_cleanup_task": 24 * 60 * 60,
+    "auto_promote_task": 24 * 60 * 60,
+    "symbol_allowlist_refresh": 24 * 60 * 60,
+}
+
+
+def test_no_worker_has_max_staleness_below_its_cadence() -> None:
+    """Sweep guard: every WorkerSpec with a derivable natural cadence must
+    have max_staleness_seconds >= that cadence. Without this guard, future
+    changes can re-introduce the live_worker class of false-positive
+    cry-wolf alarm for a different worker.
+    """
+    mismatches: list[str] = []
+    for spec in WORKER_REGISTRY:
+        cadence = _NATURAL_CADENCE_SECONDS.get(spec.name)
+        if cadence is None:
+            continue
+        if spec.max_staleness_seconds < cadence:
+            mismatches.append(
+                f"  - {spec.name}: max_staleness={spec.max_staleness_seconds}s "
+                f"< natural cadence={cadence}s — watchdog will false-positive "
+                f"during normal operation"
+            )
+    assert not mismatches, (
+        "Workers with max_staleness below their natural cadence:\n"
+        + "\n".join(mismatches)
+        + "\n\nFix: bump max_staleness_seconds to at least the cadence + slack. "
+        "If a worker SHOULD beat faster than its current cadence (i.e. add a "
+        "heartbeat tick inside a polling loop), do that instead — better than "
+        "raising the threshold."
+    )
+
+
+def test_natural_cadence_table_covers_every_heartbeat_worker() -> None:
+    """If a worker uses HEARTBEAT as its liveness signal, it MUST have an
+    entry in _NATURAL_CADENCE_SECONDS so the cadence sweep above catches
+    future mismatches. Workers with DB-natural liveness signals (e.g.
+    SELECT max(...) on a domain table) opt out by design — their cadence
+    is governed by their domain table's update frequency, not by a
+    heartbeat tick.
+
+    Single-shot workers also opt out — they don't have a "cadence."
+    """
+    from app.ops.worker_registry import HEARTBEAT
+    missing: list[str] = []
+    for spec in WORKER_REGISTRY:
+        if spec.single_shot:
+            continue
+        if spec.liveness_query != HEARTBEAT:
+            continue
+        if spec.name not in _NATURAL_CADENCE_SECONDS:
+            missing.append(spec.name)
+    assert not missing, (
+        f"Workers using HEARTBEAT but missing from _NATURAL_CADENCE_SECONDS: "
+        f"{missing}. Add their natural beat interval to the table so the "
+        f"cadence sweep guards against future false-positive thresholds."
+    )
