@@ -59,15 +59,34 @@ HEARTBEAT = "SELECT beat_at FROM worker_heartbeats WHERE worker_name = :n"
 
 
 WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
-    # 1. Per-user dashboard live predictor. Cadence is event-driven on WS
-    #    klines; on the active user's selected timeframe this can be once
-    #    per minute (1m) up to once per day (1d). We track via heartbeat
-    #    so we don't false-alarm when no users are connected.
+    # 1. Singleton BTC/USDT @ 1h predictor. Spawned by start_background_worker()
+    #    in app/main.py with NO arguments → uses run_live_prediction defaults
+    #    (symbol_pair="BTC/USDT", timeframe="1h"). The "per-user" framing in
+    #    the prior version of this comment was aspirational and inaccurate;
+    #    there is only one instance and it's hard-coded to BTC/USDT @ 1h.
+    #
+    #    PR-WATCHDOG-MAX-STALENESS-TUNE (2026-05-24): cadence is exactly ONE
+    #    beat per closed candle. For 1h timeframe that's 3600s between beats.
+    #    The previous 15-min threshold (900s) was set under the assumption
+    #    of multi-timeframe operation (1m..1d) and produced FALSE-POSITIVE
+    #    stale alarms for 45 minutes of every healthy hour — confirmed in
+    #    today's incident where ~3 hours of operator triage was spent
+    #    chasing a healthy worker's natural mid-cycle silence (see
+    #    feedback_v5_bot_diagnostic_discipline.md lesson 14). Bumped to
+    #    3700s = 1h cadence + 100s grace; threshold is strict `>` in
+    #    worker_watchdog.py:215 so any genuine inter-candle stall longer
+    #    than ~1h:40s will still alarm.
+    #
+    #    Note for future contributors: if this worker is ever extended to
+    #    serve multiple timeframes (1m, 5m, 15m, etc.), this budget needs
+    #    to shrink to the FASTEST configured timeframe's natural cadence
+    #    plus grace. The current value is correct ONLY while live_worker
+    #    remains a 1h-only singleton.
     WorkerSpec(
         name="live_worker",
-        description="WS-driven per-user live prediction worker",
+        description="Singleton BTC/USDT @ 1h WS-driven live prediction worker",
         liveness_query=HEARTBEAT,
-        max_staleness_seconds=15 * 60,
+        max_staleness_seconds=3700,  # 1h candle cadence + 100s slack
         stateful=True,
         # FU-1 closed for live_worker — record_heartbeat wired in
         # run_live_prediction's per-candle iteration body.
