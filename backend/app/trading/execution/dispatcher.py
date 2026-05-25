@@ -93,7 +93,11 @@ class SignalProposal:
     stop_loss_price: float
     take_profit_price: float
     confidence_pct: float     # 0-100
-    layer_summary: dict[str, dict]
+    # Values can be None when the upstream layer abstained (e.g. L9 news
+    # for symbols with no recent matching items; L2 patterns when
+    # pattern_stats_lookup load failed). The render path is None-tolerant
+    # — see `_format_layers` in app/telegram/signals.py.
+    layer_summary: dict[str, dict | None]
     inputs_hash: str
     funding_rate_daily: float = 0.0
     chart_base_url: str = ""
