@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from app.trading.leverage import (
     liquidation_distance_pct,
@@ -105,10 +105,10 @@ def _layer_signed_score(data: dict) -> float | None:
     return 0.0  # NEUTRAL
 
 
-def _format_layers(layers: dict[str, dict | None]) -> str:
+def _format_layers(layers: dict[str, Any]) -> str:
     """Render the per-layer breakdown for the Telegram message body.
 
-    Tolerant of two failure modes uncovered 2026-05-25:
+    Tolerant of three failure modes uncovered 2026-05-25 / 2026-05-26:
       1. An entry can be ``None`` when its upstream layer abstained
          (e.g. L9 news returns None when no items match the symbol;
          L2 patterns stays None if pattern_stats_lookup load failed).
@@ -123,6 +123,20 @@ def _format_layers(layers: dict[str, dict | None]) -> str:
          messages had been rendering ``L1: --`` for every layer since
          SP-9 wired L9. Now reads via ``_layer_signed_score`` which
          accepts both shapes.
+      3. An entry can be a non-dict scalar / list / string when the
+         upstream caller merged ``prediction_extras`` into the layer
+         payload (live_prediction.py:208 does
+         ``_layer_payload.update(pred.prediction_extras)``). The
+         merged keys — ``static_score``, ``brain_adjust``,
+         ``trap_factor``, ``news_multiplier``, ``direction_penalty``,
+         ``final``, ``tier``, ``traps_fired`` — are metadata, not
+         layers, so we skip them silently. The previous behavior was
+         ``"score" in <float>`` → ``TypeError: argument of type
+         'float' is not iterable``, which escaped to the dispatcher's
+         outer except and converted dispatch to outcome=error —
+         dropping every signal whose ``prediction_extras`` were
+         attached (i.e. every signal that reached the render path
+         post-SP-5 Phase F1).
     """
     if not layers:
         return "  (no layer scores)"
@@ -130,6 +144,10 @@ def _format_layers(layers: dict[str, dict | None]) -> str:
     for name, data in sorted(layers.items()):
         if data is None:
             lines.append(f"  {name}:    --  (abstained)")
+            continue
+        # PR-FIX-DISPATCH-FLOAT-NOT-ITERABLE: skip metadata merged from
+        # prediction_extras (floats / strings / lists). See docstring §3.
+        if not isinstance(data, dict):
             continue
         score = _layer_signed_score(data)
         note = data.get("note") or data.get("notes", "") or ""

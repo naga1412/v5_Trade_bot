@@ -267,3 +267,133 @@ def test_format_layers_mixed_synthetic_and_model_dump_shapes() -> None:
     # synthetic-shape entry with no "score" renders as -- without raising
     assert "test_trade" in msg.body
     assert "(abstained)" in msg.body
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PR-FIX-DISPATCH-FLOAT-NOT-ITERABLE (2026-05-26)
+# ────────────────────────────────────────────────────────────────────────────
+# 2026-05-25 18:00 UTC: WLD/USDT cleared every dispatcher gate at the
+# highest entry_score (0.340) and errored with
+#   dispatch WLD/USDT/1h -> error: unexpected: argument of type 'float'
+#   is not iterable
+# Root cause: live_prediction.py:208 merges `pred.prediction_extras`
+# (output of predictor._build_extras) into `_layer_payload`. The merged
+# keys — static_score, brain_adjust, trap_factor, news_multiplier,
+# direction_penalty, final, tier, traps_fired — are floats / strings /
+# lists, not layer dicts. _format_layers iterated all entries and
+# called `_layer_signed_score(data)` which does `"score" in data`. On
+# a float, `"score" in 0.42` raises TypeError. The exception escaped
+# to dispatcher.py's outer except, converting outcome to "error" and
+# dropping every signal whose prediction_extras were attached.
+#
+# Until PR #258 (outcome honesty) the dispatcher LIED — reported
+# outcome="sent_telegram" even on this error. So this bug had been
+# silently killing signals since SP-5 Phase F1 wired the
+# `_layer_payload.update(prediction_extras)` merge.
+#
+# The fix in _format_layers skips non-dict values. The merged metadata
+# (scalars / lists / strings) doesn't render as layer rows — it isn't
+# a layer.
+
+
+def test_format_layers_skips_float_metadata_from_prediction_extras() -> None:
+    """The actual WLD/USDT 2026-05-25 prod bug repro: a float value in
+    layer_summary (from `_build_extras` merged into _layer_payload) must
+    NOT raise TypeError: argument of type 'float' is not iterable."""
+    cand = _candidate(layer_summary={
+        "L1": {"direction": "LONG", "strength": 0.85, "notes": "ok"},
+        # prediction_extras-merged scalars — pre-fix these crashed render:
+        "static_score": 0.42,
+        "brain_adjust": 1.0,
+        "trap_factor": 0.95,
+        "news_multiplier": 1.1,
+        "direction_penalty": 1.0,
+        "final": 0.42,
+    })
+    # Must not raise.
+    msg = render_message(cand, leverage=5, now=_NOW)
+    # The valid layer renders.
+    assert "L1" in msg.body
+    assert "+0.85" in msg.body
+    # The scalar metadata keys do NOT appear as layer rows (they aren't
+    # layers, just metadata). This is the spec-correct behavior — the
+    # body's "Layer scores:" section is for layers, not for extras.
+    assert "static_score" not in msg.body
+    assert "trap_factor" not in msg.body
+
+
+def test_format_layers_skips_string_metadata() -> None:
+    """``tier`` is a string in prediction_extras. Pre-fix `"score" in
+    "high"` would have returned False (silently no-op), but the next
+    line `data.get("note")` would raise AttributeError on a str.
+    Tolerate both."""
+    cand = _candidate(layer_summary={
+        "L1": {"direction": "LONG", "strength": 0.85, "notes": "ok"},
+        "tier": "high",
+    })
+    msg = render_message(cand, leverage=5, now=_NOW)
+    assert "L1" in msg.body
+    # `tier` should NOT show up as a layer row.
+    assert "tier:" not in msg.body or "L1" in msg.body  # sanity
+
+
+def test_format_layers_skips_list_metadata_traps_fired() -> None:
+    """``traps_fired`` is a list[dict] in prediction_extras. Pre-fix
+    `"score" in [{}]` would have returned False (the list contains
+    no "score" string), but then `data.get("note")` on a list raises
+    AttributeError. Tolerate."""
+    cand = _candidate(layer_summary={
+        "L1": {"direction": "LONG", "strength": 0.85, "notes": "ok"},
+        "traps_fired": [
+            {"trap_id": "trap_1", "severity": "high", "side": "LONG"},
+            {"trap_id": "trap_2", "severity": "low", "side": "SHORT"},
+        ],
+    })
+    msg = render_message(cand, leverage=5, now=_NOW)
+    assert "L1" in msg.body
+
+
+def test_format_layers_real_production_payload_shape() -> None:
+    """Regression guard: build a layer_summary exactly as
+    ``live_prediction.py:203-208`` produces in prod — LayerScoreOut
+    dicts for L1/L3/L9 + every key from _build_extras merged on top.
+    This is the wire-true shape; if the renderer breaks on it, we've
+    regressed back to the WLD/USDT silent-drop pattern."""
+    real_payload = {
+        # Layer dicts (from LayerScoreOut.model_dump()):
+        "L1": {
+            "direction": "LONG", "strength": 0.65,
+            "confidence": 0.7, "notes": "EMAs aligned",
+        },
+        "L3": {
+            "direction": "LONG", "strength": 0.55,
+            "confidence": 0.6, "notes": "RSI rising",
+        },
+        "L9": None,  # news layer abstained
+        # _build_extras merged scalars / lists / strings:
+        "static_score": 0.42,
+        "brain_adjust": 1.0,
+        "trap_factor": 1.0,
+        "news_multiplier": 1.0,
+        "direction_penalty": 1.0,
+        "final": 0.42,
+        "tier": "high",
+        "traps_fired": [],
+    }
+    cand = _candidate(layer_summary=real_payload)
+    # Must not raise.
+    msg = render_message(cand, leverage=5, now=_NOW)
+    assert "L1" in msg.body
+    assert "L3" in msg.body
+    assert "(abstained)" in msg.body  # L9 rendered with abstain marker
+    assert "+0.65" in msg.body
+    # None of the metadata keys leak into the layer section.
+    for key in (
+        "static_score", "brain_adjust", "trap_factor",
+        "news_multiplier", "direction_penalty", "traps_fired",
+    ):
+        # The key name might appear elsewhere in the body (e.g. funding
+        # context), so we check it's not as a layer row prefix.
+        assert f"  {key}:" not in msg.body, (
+            f"metadata key {key!r} leaked into layer rendering"
+        )
