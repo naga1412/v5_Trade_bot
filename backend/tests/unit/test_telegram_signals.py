@@ -193,3 +193,77 @@ def test_build_signal_payload_round_trips() -> None:
     assert parsed["initial_leverage"] == 5
     assert parsed["rendered_at"] == _NOW.isoformat()
     assert parsed["layer_summary"]["L1 macro"]["score"] == 0.85
+
+
+# ---- Regression tests for PR-DISPATCH-RENDER-ABSTAINED-LAYER-FIX --------
+#
+# 2026-05-25: BNB/USDT and ZEC/USDT were the only two symbols that
+# cleared every dispatcher gate at the 12:00 UTC candle close. Both
+# errored with "'NoneType' object has no attribute 'get'" because L9
+# (news/sentiment) abstained — returning None — and _format_layers
+# called .get() on the None entry directly. Separately, the renderer
+# read data.get("score") but LayerScoreOut.model_dump() produces
+# {direction, strength, confidence, notes} with no "score" key, so
+# every Telegram message had rendered "L1: -- " for every layer
+# since SP-9 went live. Both bugs are covered below.
+
+
+def test_format_layers_handles_abstained_none_entry() -> None:
+    """An abstained layer (None value) must render as ``(abstained)``
+    rather than raising AttributeError. This is the actual prod bug
+    that silently dropped BNB/USDT and ZEC/USDT signals."""
+    cand = _candidate(layer_summary={
+        "L1": {"direction": "LONG", "strength": 0.85, "notes": "ok"},
+        "L9": None,  # news layer abstained — no recent items for the symbol
+    })
+    # Must not raise.
+    msg = render_message(cand, leverage=5, now=_NOW)
+    assert "(abstained)" in msg.body
+    # The abstained layer still names itself in the body so the operator
+    # can see which layer abstained.
+    assert "L9" in msg.body
+
+
+def test_format_layers_renders_layer_score_out_model_dump_shape() -> None:
+    """Production code paths build layer_summary via
+    LayerScoreOut.model_dump() → {direction, strength, confidence, notes}.
+    The renderer must read this real shape, not just the synthetic
+    {"score", "note"} test fixture shape."""
+    cand = _candidate(layer_summary={
+        "L1": {
+            "direction": "LONG", "strength": 0.85,
+            "confidence": 0.70, "notes": "EMAs aligned",
+        },
+        "L3": {
+            "direction": "SHORT", "strength": 0.60,
+            "confidence": 0.55, "notes": "RSI overbought",
+        },
+        "L7": {
+            "direction": "NEUTRAL", "strength": 0.0,
+            "confidence": 0.5, "notes": "",
+        },
+    })
+    msg = render_message(cand, leverage=5, now=_NOW)
+    # LONG layer: positive signed score, "LONG" direction marker
+    assert "+0.85" in msg.body
+    # SHORT layer: negative signed score, "SHORT" direction marker
+    assert "-0.60" in msg.body
+    # Notes from the "notes" key (not "note") should appear
+    assert "EMAs aligned" in msg.body
+    assert "RSI overbought" in msg.body
+
+
+def test_format_layers_mixed_synthetic_and_model_dump_shapes() -> None:
+    """admin_test_trade.py builds layer_summary with the synthetic
+    {"score": ..., "note": ...} shape, while live_prediction builds it
+    via model_dump(). The renderer must accept both. A test_trade entry
+    next to an abstained L9 must not raise."""
+    cand = _candidate(layer_summary={
+        "L1": {"direction": "LONG", "strength": 0.5, "notes": "ok"},
+        "test_trade": {"note": "admin smoke test"},  # synthetic, no score
+        "L9": None,  # abstained
+    })
+    msg = render_message(cand, leverage=5, now=_NOW)
+    # synthetic-shape entry with no "score" renders as -- without raising
+    assert "test_trade" in msg.body
+    assert "(abstained)" in msg.body
