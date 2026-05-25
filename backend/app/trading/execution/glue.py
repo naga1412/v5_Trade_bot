@@ -154,9 +154,11 @@ def proposal_from_prediction(
     timeframe: str,
     pred_direction: str,
     pred_confidence: float,
-    # Values can be None when the upstream layer abstained — propagated
-    # from live_prediction._layer_payload through to SignalProposal.
-    layer_summary: dict[str, dict | None],
+    # Mixed-shape: per-layer dicts (LayerScoreOut.model_dump shape),
+    # abstained-layer None entries, AND prediction_extras (float/str/list)
+    # merged in by live_prediction._layer_payload. See `_format_layers`
+    # in app/telegram/signals.py for the type-aware render path.
+    layer_summary: dict[str, Any],
     inputs_hash: str,
     entry_price: float,
     stop_loss_price: float,
