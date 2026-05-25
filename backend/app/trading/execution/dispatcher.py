@@ -164,6 +164,14 @@ DispatchOutcome = Literal[
     # from `placed` (fully-auto) so dispatch logs / counters / dashboards
     # can split the two routing paths.
     "placed_hybrid",
+    # PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26): the
+    # operator approved a stale telegram_signals row but the current
+    # mark price has drifted more than APPROVAL_MAX_PRICE_DRIFT_PCT
+    # from the signal's original entry. Emitted by `_place_approved_order`
+    # in the telegram_polling worker (NOT by `dispatch()` itself — the
+    # outcome lives on the literal so dashboards / dispatch-log greps
+    # treat it as a first-class outcome alongside the gate blocks).
+    "stale_price",
 ]
 
 

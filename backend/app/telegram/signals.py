@@ -30,9 +30,28 @@ from app.trading.leverage import (
 )
 
 
-_DEFAULT_AUTO_SKIP_SECONDS = 30
+# Fallback used only when Settings lookup fails AND no auto_skip_seconds
+# is passed to render_message. The real value comes from
+# `Settings.TELEGRAM_APPROVAL_TIMEOUT_SECONDS` (default 600s, per
+# PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE, 2026-05-26). Tests
+# typically pass `auto_skip_seconds=...` explicitly and bypass settings.
+_FALLBACK_AUTO_SKIP_SECONDS = 600
 _DEFAULT_HARD_CAP = 10
 _MIN_LEVERAGE = 1
+
+
+def _resolved_auto_skip_seconds() -> int:
+    """Look up `TELEGRAM_APPROVAL_TIMEOUT_SECONDS` from Settings.
+
+    Lazy import + try/except keeps `app.telegram.signals` importable in
+    contexts where the env / pydantic settings aren't fully wired (e.g.
+    isolated unit tests that don't set required env vars).
+    """
+    try:
+        from app.config import get_settings
+        return int(get_settings().TELEGRAM_APPROVAL_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 — fall back to a sensible default
+        return _FALLBACK_AUTO_SKIP_SECONDS
 
 
 @dataclass(frozen=True)
@@ -193,11 +212,20 @@ def render_message(
     candidate: SignalCandidate,
     *,
     leverage: int,
-    auto_skip_seconds: int = _DEFAULT_AUTO_SKIP_SECONDS,
+    auto_skip_seconds: int | None = None,
     now: datetime | None = None,
 ) -> RenderedMessage:
-    """Build the Telegram message body + inline keyboard for spec §7.2."""
+    """Build the Telegram message body + inline keyboard for spec §7.2.
+
+    `auto_skip_seconds` overrides the configured
+    `TELEGRAM_APPROVAL_TIMEOUT_SECONDS` from Settings — when omitted, the
+    rendered "Auto-skip in Ns" footer line reflects the env-configured
+    value the auto-skip worker is actually enforcing. Tests pass an
+    explicit override to assert UI behavior independent of env.
+    """
     n = now or datetime.now(timezone.utc)
+    if auto_skip_seconds is None:
+        auto_skip_seconds = _resolved_auto_skip_seconds()
     direction_emoji = "🔔"
     sl_pct = candidate.sl_distance_pct * 100
     tp_distance = abs(
