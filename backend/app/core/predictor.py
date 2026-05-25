@@ -400,7 +400,18 @@ async def _compute_aggregator_hook_fields(
         mtf_agreement_val = mtf.agreement
         mtf_dominant_tf_val = mtf.dominant_tf
         try:
-            mtf_directions_json_val = json.dumps(mtf.directions)
+            # Canonical form: sort_keys=True + tight separators. MUST match
+            # `_normalize_mtf_directions_json` in app/db/payload_builders.py
+            # so the bytes are stable on round-trip through asyncpg's JSONB
+            # decode (PR-MTF-DIRECTIONS-JSON-SERIALIZATION-FIX, 2026-05-23).
+            # Without this, a position re-loaded from `shadow_open_positions`
+            # after a container restart re-serializes to a different byte
+            # sequence (default `", "` + `": "` separators, unsorted keys),
+            # which is pure hygiene noise — the column is in
+            # NON_HASHED_ALLOW_LIST so chain hashes are unaffected.
+            mtf_directions_json_val = json.dumps(
+                mtf.directions, sort_keys=True, separators=(",", ":"),
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("aggregator_hook: mtf.directions json.dumps failed: %s", exc)
 
