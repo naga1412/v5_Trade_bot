@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from app.trading.leverage import (
     liquidation_distance_pct,
@@ -47,12 +47,16 @@ class SignalCandidate:
     stop_loss_price: float
     take_profit_price: float
     confidence_pct: float            # 0-100
-    # {"1": {"direction": "LONG", "strength": 0.85, "confidence": 0.7,
-    #         "notes": "..."}, "9": None, ...} — None values are tolerated
-    # (abstained layers render as "-- (abstained)"). The synthetic
-    # {"score": float, "note": str} shape used by admin_test_trade.py is
-    # still accepted by the renderer.
-    layer_summary: dict[str, dict | None]
+    # The dict shape is mixed in production because
+    # `live_prediction._layer_payload` merges `pred.prediction_extras`
+    # (floats: static_score / brain_adjust / trap_factor / news_multiplier
+    # / direction_penalty / final; str: tier; list: traps_fired) on top
+    # of the per-layer dicts (LayerScoreOut.model_dump() shape) and the
+    # abstained-layer None entries. The renderer skips non-dict values
+    # (extras) and renders None as "(abstained)" — see `_format_layers`.
+    # Typed as `Any` rather than a union because the extras schema is
+    # not stable; future PRs may add new keys.
+    layer_summary: dict[str, Any]
     margin_usdt: float
     funding_rate_daily: float        # signed; +0.012 means longs pay shorts 1.2%/day
     chart_url: str
@@ -87,9 +91,8 @@ def _layer_signed_score(data: dict) -> float | None:
         ``LayerScoreOut.model_dump()`` produces in production
         (via ``live_prediction._layer_payload``).
 
-    The function returns the signed score for either shape. None when
-    neither shape matches (e.g. a synthetic dict missing both ``score``
-    and ``strength``).
+    Caller MUST pass a ``dict`` — `_format_layers` filters non-dict
+    entries upstream so this never sees an extras float/str/list.
     """
     if "score" in data:
         score = data["score"]
@@ -105,24 +108,41 @@ def _layer_signed_score(data: dict) -> float | None:
     return 0.0  # NEUTRAL
 
 
-def _format_layers(layers: dict[str, dict | None]) -> str:
+def _format_layers(layers: dict[str, Any]) -> str:
     """Render the per-layer breakdown for the Telegram message body.
 
-    Tolerant of two failure modes uncovered 2026-05-25:
-      1. An entry can be ``None`` when its upstream layer abstained
-         (e.g. L9 news returns None when no items match the symbol;
-         L2 patterns stays None if pattern_stats_lookup load failed).
-         These render as ``-- (abstained)`` rather than raising
-         ``AttributeError: 'NoneType' object has no attribute 'get'``,
-         which used to escape into the dispatcher's outer except and
-         convert the entire dispatch to outcome=error — silently
-         dropping the strongest signal that cleared every gate.
-      2. The original implementation read ``data["score"]`` but
-         ``LayerScoreOut.model_dump()`` emits ``{direction, strength,
-         confidence, notes}`` with no ``"score"`` key, so production
+    The input dict is mixed-shape because
+    ``live_prediction._layer_payload`` first builds
+    ``{"1".."10" -> LayerScoreOut.model_dump() | None}`` then merges
+    ``pred.prediction_extras`` (``{static_score: float, brain_adjust:
+    float, trap_factor: float, news_multiplier: float,
+    direction_penalty: float, final: float, tier: str, traps_fired:
+    list[dict]}``) on top. The same dict is then re-used for the
+    JSONB persistence layer AND threaded into ``SignalCandidate`` for
+    rendering — so the renderer has to handle non-dict entries
+    gracefully.
+
+    Tolerated failure modes (all uncovered 2026-05-25 by surfacing live
+    LONG signals that previously crashed silently):
+
+      1. ``data is None`` — the upstream layer abstained (e.g. L9 news
+         returns None when no items match the symbol; L2 patterns stays
+         None if pattern_stats_lookup load failed). Rendered as
+         ``-- (abstained)``. Pre-fix raised ``AttributeError:
+         'NoneType' object has no attribute 'get'``.
+      2. ``data`` is not a dict (float / str / list) — prediction_extras
+         merge from live_prediction.py. Skipped entirely. Pre-fix raised
+         ``TypeError: argument of type 'float' is not iterable``
+         (post-#256 surface) or ``AttributeError: 'float' object has
+         no attribute 'get'`` (pre-#256 surface). Extras are useful
+         metadata for persistence + replay but not for the Telegram
+         "Layer scores" UI section, so dropping them from the rendered
+         body is semantically correct.
+      3. ``LayerScoreOut.model_dump()`` emits ``{direction, strength,
+         confidence, notes}`` with no ``"score"`` key — production
          messages had been rendering ``L1: --`` for every layer since
-         SP-9 wired L9. Now reads via ``_layer_signed_score`` which
-         accepts both shapes.
+         SP-9 wired L9. Read via ``_layer_signed_score`` which accepts
+         both shapes.
     """
     if not layers:
         return "  (no layer scores)"
@@ -130,6 +150,13 @@ def _format_layers(layers: dict[str, dict | None]) -> str:
     for name, data in sorted(layers.items()):
         if data is None:
             lines.append(f"  {name}:    --  (abstained)")
+            continue
+        if not isinstance(data, dict):
+            # prediction_extras merge: static_score (float),
+            # brain_adjust (float), tier (str), traps_fired (list),
+            # etc. Not layer scores — drop from the rendered "Layer
+            # scores" section. Persistence sites still see them via
+            # the same dict (this is render-only filtering).
             continue
         score = _layer_signed_score(data)
         note = data.get("note") or data.get("notes", "") or ""
