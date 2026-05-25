@@ -35,7 +35,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import httpx
@@ -104,6 +104,72 @@ class PollerConfig:
 def _api_url(*, bot_token: str, method: str) -> str:
     from app.ops.telegram_bot import TELEGRAM_API_BASE
     return f"{TELEGRAM_API_BASE}/bot{bot_token}/{method}"
+
+
+# ---- Auto-skip stale approvals ------------------------------------------
+
+
+async def _auto_skip_expired_signals(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    timeout_seconds: int,
+    now: datetime | None = None,
+) -> int:
+    """Mark pending signals older than `timeout_seconds` as auto_skipped.
+
+    PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26): the
+    "Auto-skip in Ns" UI text was previously cosmetic — there was no
+    actual server-side enforcement. Operators slept through approvals
+    overnight because they (reasonably) believed the signal had
+    auto-skipped at the displayed deadline, when in fact it stayed
+    pending indefinitely.
+
+    This helper runs once per telegram_poller cycle (~30s). It writes
+    `response='auto_skipped'` on any `telegram_signals` row where
+    `response IS NULL AND sent_at < (now - timeout_seconds)`. The
+    `WHERE response IS NULL` guard prevents overwriting a legitimate
+    'approved' / 'skipped' / 'stale_price' value if the operator
+    interacted in the same cycle.
+
+    Returns the number of rows that were auto-skipped. Never raises —
+    a DB failure here is logged + the poller continues. Caller commits
+    its own session.
+    """
+    n = now or datetime.now(timezone.utc)
+    cutoff = n - timedelta(seconds=timeout_seconds)
+    # Bind cutoff + ts as ISO-T strings so the comparison is dialect-
+    # portable. Production runs Postgres (TIMESTAMPTZ + asyncpg auto-
+    # casts ISO strings); CI tests run SQLite (TEXT column, lex compare
+    # works iff both sides use the same ISO-T format). SQLAlchemy's
+    # default datetime->TEXT stringification for SQLite uses a SPACE
+    # separator ('2026-05-09 13:00:00') which lex-compares incorrectly
+    # against ISO-T inputs (`T` < `space` in ASCII would yield wrong
+    # ordering when one side uses each format).
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                sa.text(
+                    "UPDATE telegram_signals "
+                    "SET response='auto_skipped', response_at=:ts "
+                    "WHERE response IS NULL AND sent_at < :cutoff"
+                ),
+                {"ts": n.isoformat(), "cutoff": cutoff.isoformat()},
+            )
+            await session.commit()
+    except Exception as e:  # noqa: BLE001 — never let cleanup kill the poller
+        log.warning("auto_skip_expired_signals: DB error (failing open): %s", e)
+        return 0
+    # SQLAlchemy's async UPDATE result is a CursorResult exposing rowcount;
+    # the static type is Result which doesn't declare the attribute.
+    rowcount = (
+        result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
+    )
+    if rowcount > 0:
+        log.info(
+            "telegram-auto-skip: marked %d signal(s) auto_skipped "
+            "(timeout=%ds)", rowcount, timeout_seconds,
+        )
+    return int(rowcount)
 
 
 # ---- Order placement after Telegram approve ------------------------------
@@ -180,6 +246,47 @@ async def _place_approved_order(
 
     client = binance_factory()
     try:
+        # ----- PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE -----------
+        # Drift guard: reject the approval if the current mark price has
+        # drifted more than APPROVAL_MAX_PRICE_DRIFT_PCT (%) from the
+        # signal's original entry_price. Prevents an approve-after-sleep
+        # scenario where the operator OKs a 10-minute-old signal but the
+        # market has moved well past the original entry zone — the
+        # resulting order would fill at a price the original SL/TP was
+        # never designed for.
+        #
+        # fail-open: when fetch_mark_price returns None (HTTP error,
+        # unknown symbol, parse failure) we DO NOT block — same
+        # philosophy as the funding-rate / borrow lookups. A stuck
+        # ticker should not silently shut down the approve path.
+        from app.config import get_settings as _get_drift_settings
+        _drift_threshold_pct = _get_drift_settings().APPROVAL_MAX_PRICE_DRIFT_PCT
+        current_price = await client.fetch_mark_price(symbol=binance_native_sym)
+        if current_price is not None and entry_price > 0:
+            drift_pct = abs(current_price - entry_price) / entry_price * 100.0
+            if drift_pct > _drift_threshold_pct:
+                # Mark the row stale_price (overwrites the 'approved'
+                # state handle_callback just wrote). Brief flip-flop is
+                # tolerated: caller commits this session right after
+                # this function returns, so the row never publishes a
+                # 'approved' state externally before becoming 'stale_price'.
+                await session.execute(
+                    sa.text(
+                        "UPDATE telegram_signals "
+                        "SET response='stale_price', response_at=:ts "
+                        "WHERE id=:id"
+                    ),
+                    {"ts": n, "id": signal_id},
+                )
+                log.warning(
+                    "dispatch %s -> stale_price: drift=%.3f%% > %.3f%% "
+                    "threshold (entry=%.6f current=%.6f)",
+                    signal_id, drift_pct, _drift_threshold_pct,
+                    entry_price, current_price,
+                )
+                return None
+        # ----- end drift guard ------------------------------------------
+
         order = await client.place_order(
             symbol=binance_native_sym,
             side=side, quantity=qty, leverage=leverage,
@@ -452,6 +559,21 @@ async def run_telegram_poller(
                     binance_factory=binance_factory,
                     use_testnet=use_testnet, user_id=user_id,
                 )
+                # PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE: piggyback
+                # the auto-skip cleanup on the poll cycle (~30s cadence,
+                # naturally). Reads the configured timeout each tick so an
+                # operator can adjust the env without redeploying the poller.
+                # Helper is fail-open — a DB blip here logs WARNING and
+                # returns 0; the poller continues unaffected.
+                try:
+                    from app.config import get_settings as _get_skip_settings
+                    _timeout_s = _get_skip_settings().TELEGRAM_APPROVAL_TIMEOUT_SECONDS
+                    await _auto_skip_expired_signals(
+                        session_factory, timeout_seconds=_timeout_s,
+                    )
+                except Exception as e:  # noqa: BLE001 — never let cleanup kill poller
+                    log.warning("telegram-poll: auto_skip tick failed: %s", e)
+
                 # FU-1: heartbeat after each long-poll cycle. Watchdog uses
                 # this to detect Telegram connectivity / poller crashes.
                 # Telegram returning ``{"ok": false}`` is routine flood-control
