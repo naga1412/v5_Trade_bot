@@ -147,7 +147,7 @@ class CallbackOutcome:
     """What handle_callback did. Drives the answerCallbackQuery + audit."""
 
     signal_id: str
-    action: str                  # 'approve' | 'adjust' | 'custom' | 'skip' | 'unknown'
+    action: str                  # 'approve' | 'approve_lost_race' | 'adjust' | 'custom' | 'skip' | 'unknown'
     note: str                    # short user-facing toast (≤200 chars)
     leverage: int | None = None  # set for adjust/approve
     placed_order: bool = False
@@ -218,15 +218,36 @@ async def handle_callback(
         # Mark approved + record the chosen leverage. Order placement
         # happens in the polling worker right after this returns,
         # using the dispatcher.fully_auto path.
-        await session.execute(
+        #
+        # `WHERE response IS NULL` guards against the auto-skip race
+        # (PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE, 2026-05-26):
+        # the auto-skip worker writes `response='auto_skipped'` on
+        # signals older than TELEGRAM_APPROVAL_TIMEOUT_SECONDS. If the
+        # operator's approve callback arrives a fraction of a second
+        # after the auto-skip UPDATE, we must NOT overwrite the
+        # auto_skipped marker with 'approved' — otherwise the polling
+        # worker would happily call _place_approved_order on a signal
+        # the system already declared expired. Detect by rowcount=0
+        # and return action="approve_lost_race" so the caller skips
+        # order placement.
+        result = await session.execute(
             sa.text(
                 "UPDATE telegram_signals "
                 "SET response='approved', response_at=:ts, "
                 "    response_leverage=:lev "
-                "WHERE id=:id"
+                "WHERE id=:id AND response IS NULL"
             ),
             {"ts": n, "lev": parsed.leverage, "id": parsed.signal_id},
         )
+        if result.rowcount == 0:  # type: ignore[attr-defined]
+            return CallbackOutcome(
+                signal_id=parsed.signal_id, action="approve_lost_race",
+                leverage=parsed.leverage, placed_order=False,
+                note=(
+                    "approve arrived after auto-skip (or duplicate "
+                    "callback) — signal already resolved; no order placed"
+                ),
+            )
         return CallbackOutcome(
             signal_id=parsed.signal_id, action="approve",
             leverage=parsed.leverage, placed_order=False,

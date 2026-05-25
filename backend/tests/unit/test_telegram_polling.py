@@ -80,6 +80,13 @@ class _StubBinance:
             "avg_fill_price": 80_100.0,
         })
 
+    async def fetch_mark_price(self, *, symbol: str) -> float | None:
+        """Default: return None → drift check fails open in
+        PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (existing tests
+        proceed exactly as before). Tests that exercise drift behavior
+        use the _StubBinanceWithPrice subclass."""
+        return None
+
     async def aclose(self) -> None:
         return None
 
@@ -582,3 +589,179 @@ async def test_poll_once_429_keeps_offset_and_returns_failure() -> None:
         )
     assert ok is False
     assert next_offset == 10
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26)
+# Auto-skip cleanup tick + drift guard at approve-time + stale_price outcome.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+from app.ops.telegram_polling import _auto_skip_expired_signals
+
+
+def _factory_for(engine):
+    """async_sessionmaker-shaped callable for the auto-skip helper."""
+    def _f():
+        return AsyncSession(engine)
+    return _f
+
+
+@pytest.mark.asyncio
+async def test_auto_skip_marks_expired_signals_after_timeout() -> None:
+    """A signal older than `timeout_seconds` with response=NULL must be
+    marked auto_skipped. A signal younger than the cutoff is untouched.
+    A signal already resolved (response='approved') is also untouched."""
+    engine = await _mk_engine()
+    # Seed 3 rows with different sent_at and response state
+    old_ts = datetime(2026, 5, 9, 13, 0, 0, tzinfo=timezone.utc)  # 1 hour old vs _NOW
+    fresh_ts = datetime(2026, 5, 9, 13, 59, 0, tzinfo=timezone.utc)  # 1 min old
+    async with AsyncSession(engine) as s:
+        for sig_id, ts, resp in (
+            ("expired-pending", old_ts.isoformat(), None),
+            ("fresh-pending",   fresh_ts.isoformat(), None),
+            ("already-approved", old_ts.isoformat(), "approved"),
+        ):
+            await s.execute(sa.text(
+                "INSERT INTO telegram_signals "
+                "(id, user_id, symbol, direction, sent_at, payload, response) "
+                "VALUES (:i, 1, 'BTC/USDT', 'LONG', :ts, '{}', :r)"
+            ), {"i": sig_id, "ts": ts, "r": resp})
+        await s.commit()
+
+    # Timeout = 600s (10 min). Old row (1h ago) is expired; fresh row (1m ago) is not.
+    n = await _auto_skip_expired_signals(
+        _factory_for(engine),  # type: ignore[arg-type]
+        timeout_seconds=600, now=_NOW,
+    )
+    assert n == 1  # only "expired-pending" should have been updated
+
+    async with AsyncSession(engine) as s:
+        rows = {
+            r.id: r.response for r in (await s.execute(sa.text(
+                "SELECT id, response FROM telegram_signals ORDER BY id"
+            ))).all()
+        }
+    assert rows["expired-pending"] == "auto_skipped"
+    assert rows["fresh-pending"] is None
+    assert rows["already-approved"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_default_values_when_env_unset() -> None:
+    """Settings defaults are 600s timeout + 0.5% drift. Reload via
+    `get_settings.cache_clear()` after env mutation."""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.TELEGRAM_APPROVAL_TIMEOUT_SECONDS == 600
+    assert s.APPROVAL_MAX_PRICE_DRIFT_PCT == 0.5
+
+
+@pytest.mark.asyncio
+async def test_env_var_override_changes_thresholds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both fields honour env-var override via Pydantic Settings."""
+    from app.config import get_settings
+    monkeypatch.setenv("TELEGRAM_APPROVAL_TIMEOUT_SECONDS", "1200")
+    monkeypatch.setenv("APPROVAL_MAX_PRICE_DRIFT_PCT", "1.5")
+    get_settings.cache_clear()
+    s = get_settings()
+    try:
+        assert s.TELEGRAM_APPROVAL_TIMEOUT_SECONDS == 1200
+        assert s.APPROVAL_MAX_PRICE_DRIFT_PCT == 1.5
+    finally:
+        # Restore default for downstream tests
+        get_settings.cache_clear()
+
+
+class _StubBinanceWithPrice(_StubBinance):
+    """Adds `fetch_mark_price` for drift-check tests."""
+
+    def __init__(self, *, order_id: str = "ord-1",
+                 mark_price: float | None = 80_000.0) -> None:
+        super().__init__(order_id=order_id)
+        self._mark_price = mark_price
+        self.mark_price_calls: list[str] = []
+
+    async def fetch_mark_price(self, *, symbol: str) -> float | None:
+        self.mark_price_calls.append(symbol)
+        return self._mark_price
+
+
+@pytest.mark.asyncio
+async def test_approve_with_acceptable_drift_places_order() -> None:
+    """Mark price within 0.5% of entry → order placed as normal."""
+    engine = await _mk_engine()
+    await _seed(engine, "drift-ok")
+    # Entry = 80_000, mark = 80_300 → drift = 0.375% < 0.5%
+    stub = _StubBinanceWithPrice(order_id="bin-OK", mark_price=80_300.0)
+    async with AsyncSession(engine) as s:
+        order_id = await _place_approved_order(
+            s, signal_id="drift-ok", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+        await s.commit()
+    assert order_id == "bin-OK"
+    # fetch_mark_price was called once for the BTCUSDT symbol
+    assert stub.mark_price_calls == ["BTCUSDT"]
+    # The order WAS placed
+    assert len(stub.placed) == 1
+
+
+@pytest.mark.asyncio
+async def test_approve_with_excessive_drift_returns_stale_price() -> None:
+    """Mark price has drifted >0.5% from entry → reject with stale_price,
+    no Binance order placed, telegram_signals.response set to 'stale_price'."""
+    engine = await _mk_engine()
+    await _seed(engine, "drift-bad")
+    # Pre-mark the row as 'approved' (mimicking what handle_callback wrote)
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE telegram_signals SET response='approved' "
+            "WHERE id='drift-bad'"
+        ))
+        await s.commit()
+
+    # Entry = 80_000, mark = 81_000 → drift = 1.25% > 0.5%
+    stub = _StubBinanceWithPrice(order_id="should-not-place", mark_price=81_000.0)
+    async with AsyncSession(engine) as s:
+        order_id = await _place_approved_order(
+            s, signal_id="drift-bad", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+        await s.commit()
+    # No order placed
+    assert order_id is None
+    assert stub.placed == []
+    # Row flipped from 'approved' to 'stale_price'
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT response FROM telegram_signals WHERE id='drift-bad'"
+        ))).first()
+    assert row.response == "stale_price"
+
+
+@pytest.mark.asyncio
+async def test_stale_price_outcome_persists_to_telegram_signals() -> None:
+    """End-to-end: after stale_price rejection, the telegram_signals row
+    carries response='stale_price' so audits + dashboards can count it."""
+    engine = await _mk_engine()
+    await _seed(engine, "audit-stale")
+    # Drift well above threshold
+    stub = _StubBinanceWithPrice(order_id="x", mark_price=82_500.0)
+    async with AsyncSession(engine) as s:
+        await _place_approved_order(
+            s, signal_id="audit-stale", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+        await s.commit()
+    async with AsyncSession(engine) as s:
+        responses = [
+            r.response for r in (await s.execute(sa.text(
+                "SELECT response FROM telegram_signals "
+                "WHERE response='stale_price'"
+            ))).all()
+        ]
+    assert responses == ["stale_price"]

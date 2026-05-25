@@ -235,3 +235,73 @@ async def test_callback_unknown_returns_unknown_outcome() -> None:
             config=_config(), now=_NOW,
         )
     assert out.action == "unknown"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26)
+# Race guard on approve UPDATE: prevent late approves from overwriting
+# `auto_skipped` markers + creating phantom 'approved' rows that the poller
+# would happily call _place_approved_order on.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_in_flight_approve_loses_to_auto_skip_race() -> None:
+    """Auto-skip worker wrote response='auto_skipped' first; then the
+    operator's approve callback arrives. The race guard
+    (`WHERE response IS NULL`) must reject the late approve so the poller
+    never calls _place_approved_order on an already-expired signal.
+    """
+    engine = await _mk_engine()
+    await _seed_signal(engine)
+    # Simulate auto-skip having already fired
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE telegram_signals "
+            "SET response='auto_skipped', response_at=:ts "
+            "WHERE id='abc123'"
+        ), {"ts": _NOW.isoformat()})
+        await s.commit()
+
+    # Now the operator's approve arrives (late)
+    async with AsyncSession(engine) as s:
+        out = await handle_callback(
+            s, callback_data="sig:abc123:approve:7",
+            config=_config(), now=_NOW,
+        )
+        await s.commit()
+
+    # Distinct action so the caller (_route_callback) skips order placement
+    assert out.action == "approve_lost_race"
+    assert out.placed_order is False
+    # Row state was NOT overwritten — auto_skipped is preserved
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT response FROM telegram_signals WHERE id='abc123'"
+        ))).first()
+    assert row.response == "auto_skipped"
+
+
+@pytest.mark.asyncio
+async def test_approve_within_timeout_still_works() -> None:
+    """Sanity check: approve flow continues to work the existing way when
+    the row is still pending (response IS NULL)."""
+    engine = await _mk_engine()
+    await _seed_signal(engine)
+
+    async with AsyncSession(engine) as s:
+        out = await handle_callback(
+            s, callback_data="sig:abc123:approve:5",
+            config=_config(), now=_NOW,
+        )
+        await s.commit()
+
+    assert out.action == "approve"
+    assert out.leverage == 5
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT response, response_leverage FROM telegram_signals "
+            "WHERE id='abc123'"
+        ))).first()
+    assert row.response == "approved"
+    assert row.response_leverage == 5
