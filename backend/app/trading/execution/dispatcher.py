@@ -38,7 +38,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,6 +156,13 @@ DispatchOutcome = Literal[
     # from `placed` (fully-auto) so dispatch logs / counters / dashboards
     # can split the two routing paths.
     "placed_hybrid",
+    # PR-FIX-DISPATCHER-TELEGRAM-OUTCOME-LIE (2026-05-25) — telegram-approve
+    # row was written to telegram_signals but the outbound POST did not
+    # deliver (creds missing, send_trade_signal_message returned None, or
+    # the call raised). Distinct from `sent_telegram` so operators can
+    # grep for actual delivery failures instead of trusting a lying
+    # success outcome. detail string carries the specific reason.
+    "queued_send_failed",
 ]
 
 
@@ -393,6 +400,30 @@ async def _check_funding_block(
     return False, None
 
 
+class _TelegramSendResult(NamedTuple):
+    """Return tuple from _send_telegram_signal capturing both the DB-side
+    signal_id and the outbound-send status. Pre-PR-FIX-DISPATCHER-TELEGRAM-
+    OUTCOME-LIE the function returned only signal_id, so dispatch() had no
+    way to distinguish actual delivery from queued-but-undelivered → the
+    outcome label was reported as "sent_telegram" regardless. Callers now
+    inspect `.sent` and map to outcome="queued_send_failed" when False.
+
+    `reason` is a short stable identifier suitable for log greps + metric
+    labels:
+      "ok"          — outbound POST succeeded (msg_id returned)
+      "send_failed" — send_trade_signal_message returned None (POST 4xx /
+                      non-200 / send_trade_signal_message rejected the
+                      payload at trade_signals.py:body+keyboard check)
+      "raised"      — send_trade_signal_message raised an exception
+      "no_creds"    — TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID unset; the
+                      outbound POST was skipped entirely
+    """
+
+    signal_id: str
+    sent: bool
+    reason: str
+
+
 async def _send_telegram_signal(
     session: AsyncSession,
     *,
@@ -401,9 +432,9 @@ async def _send_telegram_signal(
     leverage: int,
     margin_usdt: float,
     now: datetime,
-) -> str:
+) -> _TelegramSendResult:
     """Build + persist a telegram_signals row, send the outbound Telegram
-    message, and return signal_id.
+    message, and return (signal_id, sent, reason).
 
     Originally this only wrote the DB row — the polling worker was
     supposed to scan for unsent rows and POST them. That polling-side
@@ -417,8 +448,10 @@ async def _send_telegram_signal(
     updates it with the Telegram message_id on success so the
     edit-on-callback path (poller) can locate the right message later.
     If the outbound POST fails (no creds, network blip, Telegram API
-    error), the row is still in the DB and a retry from a future
-    healer or manual ops command can flush it without losing context.
+    error), the row is still in the DB (retry path preserved) AND
+    `sent=False` propagates up so dispatch() can return
+    outcome="queued_send_failed" instead of falsely reporting
+    "sent_telegram" — see PR-FIX-DISPATCHER-TELEGRAM-OUTCOME-LIE.
     """
     sig_id = "sig_" + secrets.token_hex(8)
     candidate = SignalCandidate(
@@ -473,42 +506,43 @@ async def _send_telegram_signal(
     )
 
     # Outbound POST to Telegram. Reads bot_token + chat_id from env
-    # (same as the polling worker uses for inbound). Best-effort here —
-    # if the message fails to send (creds missing, Telegram outage,
-    # network), we log and return the signal_id anyway so the dispatch
-    # appears as outcome=sent_telegram. The DB row is the source of
-    # truth so manual retry is always possible.
+    # (same as the polling worker uses for inbound). The DB row above is
+    # the source of truth so manual retry is always possible; the
+    # returned `sent` bool tells dispatch() whether to report success
+    # or queued_send_failed.
     import os
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if bot_token and chat_id:
-        try:
-            msg_id = await send_trade_signal_message(
-                session, signal_id=sig_id,
-                config=TelegramTradeConfig(
-                    bot_token=bot_token, chat_id=chat_id,
-                ),
-            )
-            if msg_id is None:
-                log.error(
-                    "_send_telegram_signal: signal %s row written but "
-                    "outbound POST failed; check Telegram bot creds + "
-                    "network reachability to api.telegram.org",
-                    sig_id,
-                )
-        except Exception as e:  # noqa: BLE001
-            log.exception(
-                "_send_telegram_signal: outbound POST raised for %s: %s",
-                sig_id, e,
-            )
-    else:
+    if not (bot_token and chat_id):
         log.warning(
             "_send_telegram_signal: signal %s queued in DB but "
             "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID unset — operator will "
             "NOT see the message until those are configured",
             sig_id,
         )
-    return sig_id
+        return _TelegramSendResult(sig_id, sent=False, reason="no_creds")
+    try:
+        msg_id = await send_trade_signal_message(
+            session, signal_id=sig_id,
+            config=TelegramTradeConfig(
+                bot_token=bot_token, chat_id=chat_id,
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception(
+            "_send_telegram_signal: outbound POST raised for %s: %s",
+            sig_id, e,
+        )
+        return _TelegramSendResult(sig_id, sent=False, reason="raised")
+    if msg_id is None:
+        log.error(
+            "_send_telegram_signal: signal %s row written but "
+            "outbound POST failed; check Telegram bot creds + "
+            "network reachability to api.telegram.org",
+            sig_id,
+        )
+        return _TelegramSendResult(sig_id, sent=False, reason="send_failed")
+    return _TelegramSendResult(sig_id, sent=True, reason="ok")
 
 
 def _binance_native(symbol: str) -> str:
@@ -833,14 +867,31 @@ async def dispatch(
                 )
             # ---- end PR-HYBRID-CONFIDENCE-ROUTING -----------------------
 
-            sig_id = await _send_telegram_signal(
+            send_result = await _send_telegram_signal(
                 session, user=user, proposal=proposal,
                 leverage=leverage, margin_usdt=margin, now=n,
             )
+            if send_result.sent:
+                return DispatchResult(
+                    outcome="sent_telegram",
+                    detail=f"Telegram message queued ({send_result.signal_id})",
+                    signal_id=send_result.signal_id,
+                    leverage_chosen=leverage,
+                )
+            # PR-FIX-DISPATCHER-TELEGRAM-OUTCOME-LIE: the DB row exists
+            # (caller can manually retry / heal) but the outbound POST
+            # did not deliver. Surface the truth so operators stop
+            # chasing phantom successes.
             return DispatchResult(
-                outcome="sent_telegram",
-                detail=f"Telegram message queued ({sig_id})",
-                signal_id=sig_id, leverage_chosen=leverage,
+                outcome="queued_send_failed",
+                detail=(
+                    f"Telegram row persisted as {send_result.signal_id} "
+                    f"but outbound POST not delivered: {send_result.reason}. "
+                    f"Operator action: docker compose logs backend | grep "
+                    f"send_trade_signal_message for the underlying cause."
+                ),
+                signal_id=send_result.signal_id,
+                leverage_chosen=leverage,
             )
 
         # fully-auto

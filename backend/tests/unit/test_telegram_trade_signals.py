@@ -139,6 +139,107 @@ async def test_send_returns_none_when_signal_id_unknown() -> None:
     assert mid is None
 
 
+# ---- PR-FIX-DISPATCHER-TELEGRAM-OUTCOME-LIE: log-enhancement tests -----
+#
+# The pre-fix log line was generic ("missing body/keyboard") with no
+# field-name, symbol, timeframe, or payload-key context, so an operator
+# triaging from logs could not tell which field was missing or which
+# (symbol, timeframe) hit the failure. The enhanced log carries all of
+# that — these tests pin the contract so a future regression to the
+# generic shape would fail CI.
+
+
+async def _seed_signal_with_payload(
+    engine: Any, *, signal_id: str, payload: dict[str, Any],
+) -> None:
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "INSERT INTO telegram_signals (id, user_id, symbol, direction, "
+            "sent_at, payload, response, response_at, response_leverage) "
+            "VALUES (:id, 1, 'BTC/USDT', 'LONG', :ts, :p, NULL, NULL, NULL)"
+        ), {"id": signal_id, "ts": _NOW.isoformat(),
+             "p": json.dumps(payload)})
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_send_log_names_missing_rendered_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = await _mk_engine()
+    await _seed_signal_with_payload(engine, signal_id="sig_missing_body",
+        payload={
+            "symbol": "ETH/USDT", "timeframe": "15m",
+            "inline_keyboard": [[{"text": "Approve", "callback_data": "sig:..."}]],
+            # rendered_body intentionally omitted
+        },
+    )
+    import logging
+    with caplog.at_level(logging.ERROR, logger="app.telegram.trade_signals"):
+        async with AsyncSession(engine) as s:
+            mid = await send_trade_signal_message(
+                s, signal_id="sig_missing_body", config=_config(),
+            )
+    assert mid is None
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("missing=['rendered_body']" in m for m in msgs), msgs
+    assert any("symbol=ETH/USDT" in m for m in msgs), msgs
+    assert any("tf=15m" in m for m in msgs), msgs
+
+
+@pytest.mark.asyncio
+async def test_send_log_names_missing_inline_keyboard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = await _mk_engine()
+    await _seed_signal_with_payload(engine, signal_id="sig_missing_kb",
+        payload={
+            "symbol": "BTC/USDT", "timeframe": "1h",
+            "rendered_body": "Some body text",
+            # inline_keyboard intentionally omitted
+        },
+    )
+    import logging
+    with caplog.at_level(logging.ERROR, logger="app.telegram.trade_signals"):
+        async with AsyncSession(engine) as s:
+            mid = await send_trade_signal_message(
+                s, signal_id="sig_missing_kb", config=_config(),
+            )
+    assert mid is None
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("missing=['inline_keyboard']" in m for m in msgs), msgs
+    assert any("symbol=BTC/USDT" in m for m in msgs), msgs
+
+
+@pytest.mark.asyncio
+async def test_send_log_names_both_missing_and_lists_payload_keys(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = await _mk_engine()
+    await _seed_signal_with_payload(engine, signal_id="sig_missing_both",
+        payload={
+            "symbol": "SOL/USDT", "timeframe": "4h",
+            "entry_price": 150.0, "stop_loss_price": 145.0,
+            # both rendered_body + inline_keyboard intentionally omitted
+        },
+    )
+    import logging
+    with caplog.at_level(logging.ERROR, logger="app.telegram.trade_signals"):
+        async with AsyncSession(engine) as s:
+            mid = await send_trade_signal_message(
+                s, signal_id="sig_missing_both", config=_config(),
+            )
+    assert mid is None
+    msgs = [r.getMessage() for r in caplog.records]
+    # Both fields named.
+    assert any(
+        "missing=['rendered_body', 'inline_keyboard']" in m for m in msgs
+    ), msgs
+    # Payload key list captured so operator can see what WAS present.
+    assert any("payload_keys=" in m for m in msgs), msgs
+    assert any("entry_price" in m for m in msgs), msgs
+
+
 # ---- handle_callback ---------------------------------------------------
 
 

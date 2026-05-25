@@ -150,7 +150,23 @@ async def test_manual_mode_emits_no_side_effects() -> None:
 
 
 @pytest.mark.asyncio
-async def test_telegram_approve_writes_signal_row() -> None:
+async def test_telegram_approve_writes_signal_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telegram-approve mode persists the DB row + reports outcome
+    truthfully. With creds set + outbound mocked to succeed, outcome
+    is ``sent_telegram``. See ``test_telegram_approve_*`` siblings for
+    the no-creds and send-failure paths."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    async def _fake_send(session, *, signal_id, config, http=None):
+        return 9999  # fake telegram message_id (success)
+
+    monkeypatch.setattr(
+        dispatcher_mod, "send_trade_signal_message", _fake_send,
+    )
+
     engine = await _mk_engine()
     await _seed_user(engine, mode="telegram-approve")
     async with AsyncSession(engine) as s:
@@ -220,9 +236,16 @@ async def test_telegram_approve_sends_outbound_when_creds_set(
 async def test_telegram_approve_skips_outbound_when_creds_missing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When creds are missing, dispatch must still write the DB row and
-    return sent_telegram (the row is the source of truth, can be flushed
-    later). It must NOT raise, and must log a clear warning."""
+    """When creds are missing, dispatch must still write the DB row but
+    report ``queued_send_failed`` outcome (the row is the source of truth
+    and can be flushed later; the outcome label must reflect reality).
+    It must NOT raise, and must log a clear warning.
+
+    PR-FIX-DISPATCHER-TELEGRAM-OUTCOME-LIE updated this assertion: the
+    pre-fix code reported ``sent_telegram`` even when the outbound POST
+    was skipped — a lie that wasted operator triage time. The honest
+    outcome is now ``queued_send_failed`` with detail naming the reason.
+    """
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 
@@ -242,7 +265,9 @@ async def test_telegram_approve_skips_outbound_when_creds_missing(
         result = await dispatch(s, proposal=_proposal(), user=_user())
         await s.commit()
 
-    assert result.outcome == "sent_telegram"
+    assert result.outcome == "queued_send_failed"
+    assert "no_creds" in result.detail
+    assert result.signal_id and result.signal_id.startswith("sig_")
     assert sent == []
     # Row still persisted so a manual retry can flush it.
     async with AsyncSession(engine) as s:
@@ -370,8 +395,23 @@ async def test_hybrid_routing_dormant_by_default(
 ) -> None:
     """Sanity: with HYBRID_AUTO_SCORE_THRESHOLD=None (default), every
     telegram-approve signal goes through the Telegram path regardless
-    of score. This is the behavior on every prod backend today."""
+    of score. This is the behavior on every prod backend today.
+
+    Creds + outbound mock are set so the assertion is about routing
+    (telegram path vs auto-execute), not the orthogonal no-creds path
+    asserted by ``test_telegram_approve_skips_outbound_when_creds_missing``.
+    """
     _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    async def _fake_send(session, *, signal_id, config, http=None):
+        return 9999
+
+    monkeypatch.setattr(
+        dispatcher_mod, "send_trade_signal_message", _fake_send,
+    )
+
     engine = await _mk_engine()
     await _seed_user(engine, mode="telegram-approve")
     # A very high score that WOULD trigger auto-execute if threshold set.
@@ -394,8 +434,22 @@ async def test_hybrid_routing_below_threshold_routes_to_telegram(
     """Score below HYBRID_AUTO_SCORE_THRESHOLD → fall through to the
     existing telegram-approve handshake. (Lower bound is the existing
     entry-quality gate; this PR's threshold only affects the upper
-    auto-execute bucket.)"""
+    auto-execute bucket.)
+
+    Creds + outbound mock are set so the assertion is about routing
+    (below-threshold → telegram path), not the no-creds outcome.
+    """
     _override_setting(monkeypatch, HYBRID_AUTO_SCORE_THRESHOLD=0.45)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    async def _fake_send(session, *, signal_id, config, http=None):
+        return 9999
+
+    monkeypatch.setattr(
+        dispatcher_mod, "send_trade_signal_message", _fake_send,
+    )
+
     engine = await _mk_engine()
     await _seed_user(engine, mode="telegram-approve")
     # Score above the entry-quality gate floor (0.30) but below the

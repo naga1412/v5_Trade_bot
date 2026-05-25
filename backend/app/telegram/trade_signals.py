@@ -90,9 +90,19 @@ async def send_trade_signal_message(
     body = payload.get("rendered_body")
     keyboard = payload.get("inline_keyboard")
     if not body or not keyboard:
+        missing: list[str] = []
+        if not body:
+            missing.append("rendered_body")
+        if not keyboard:
+            missing.append("inline_keyboard")
         log.error(
-            "send_trade_signal_message: signal_id=%s missing body/keyboard",
+            "send_trade_signal_message: signal_id=%s symbol=%s tf=%s "
+            "missing=%s payload_keys=%s — dropping send",
             signal_id,
+            payload.get("symbol", "?"),
+            payload.get("timeframe", "?"),
+            missing,
+            sorted(payload.keys()),
         )
         return None
 
