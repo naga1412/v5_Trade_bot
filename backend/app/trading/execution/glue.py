@@ -154,7 +154,9 @@ def proposal_from_prediction(
     timeframe: str,
     pred_direction: str,
     pred_confidence: float,
-    layer_summary: dict[str, dict],
+    # Values can be None when the upstream layer abstained — propagated
+    # from live_prediction._layer_payload through to SignalProposal.
+    layer_summary: dict[str, dict | None],
     inputs_hash: str,
     entry_price: float,
     stop_loss_price: float,
