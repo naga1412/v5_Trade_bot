@@ -115,7 +115,13 @@ async def test_all_7_fields_attach_when_helpers_succeed():
         mtf_agreement, mtf_dominant_tf, mtf_directions_json,
         p_win, effective_score, realized_vol_20d, funding_directional_adj,
         funding_rate,  # PR-PLUMBING-1: raw per-8h rate threaded to caller
+        mtf_adx_by_tf_json,  # PR-BOT-INTELLIGENCE-UPGRADE C3: in-memory only
     ) = result
+    # mtf_adx_by_tf_json mirrors mtf_directions_json — populated when MTF
+    # compute returns a result, None when it returns None.
+    assert mtf_adx_by_tf_json is not None
+    adx_parsed = json.loads(mtf_adx_by_tf_json)
+    assert isinstance(adx_parsed, dict)
 
     assert mtf_agreement == 4
     # PR-PLUMBING-1: helper now also surfaces the raw per-8h funding rate
@@ -349,10 +355,14 @@ async def test_long_signal_path():
             session=None,
         )
 
-    # Hook should run to completion without exception
+    # Hook should run to completion without exception.
     # PR-PLUMBING-1: helper now returns 8 fields (added raw per-8h
     # funding rate as the 8th element for the funding kill-switch thread).
-    assert len(result) == 8
+    # PR-BOT-INTELLIGENCE-UPGRADE C3: 9th field is serialized per-TF ADX
+    # JSON (in-memory only; None here since compute_mtf_confluence is
+    # mocked to return None).
+    assert len(result) == 9
+    assert result[8] is None
 
 
 async def test_short_signal_path():
@@ -380,7 +390,10 @@ async def test_short_signal_path():
 
     # PR-PLUMBING-1: helper now returns 8 fields (added raw per-8h
     # funding rate as the 8th element for the funding kill-switch thread).
-    assert len(result) == 8
+    # PR-BOT-INTELLIGENCE-UPGRADE C3: 9th field is serialized per-TF ADX
+    # JSON (None when compute_mtf_confluence returns None).
+    assert len(result) == 9
+    assert result[8] is None
 
 
 async def test_neutral_signal_path():

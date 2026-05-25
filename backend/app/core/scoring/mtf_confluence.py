@@ -73,11 +73,17 @@ class MtfConfluence:
                    six TFs voted 0 (no trending TF).
       directions:  per-TF vote map { "5m": +1, "15m": -1, "1h": 0, ... } —
                    always populated fully even for NEUTRAL signals.
+      adx_by_tf:   per-TF ADX(14) magnitude {"5m": 18.3, "1h": 31.2, ...}.
+                   Computed alongside the EMA cross vote; surfaced so the
+                   entry-quality gate can apply a global ADX threshold on
+                   the dominant TF without re-fetching klines.
+                   PR-BOT-INTELLIGENCE-UPGRADE CHANGE 3.
     """
 
     agreement: int | None
     dominant_tf: str | None
     directions: dict[str, int] = field(default_factory=dict)
+    adx_by_tf: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -325,10 +331,12 @@ async def compute_mtf_confluence(
 
     agreement, dominant = _compute_agreement_and_dominant(signal_direction, tf_data)
     votes_only: dict[str, int] = {tf: v for tf, (v, _) in tf_data.items()}
+    adx_only: dict[str, float] = {tf: adx for tf, (_, adx) in tf_data.items()}
     return MtfConfluence(
         agreement=agreement,
         dominant_tf=dominant,
         directions=votes_only,
+        adx_by_tf=adx_only,
     )
 
 

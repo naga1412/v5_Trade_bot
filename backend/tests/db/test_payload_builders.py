@@ -921,6 +921,7 @@ class TestPredictorMtfDirectionsCanonicalForm:
             (
                 mtf_agreement, mtf_dominant_tf, mtf_directions_json,
                 _p_win, _eff, _vol, _fund_adj, _fund_rate,
+                _mtf_adx_by_tf_json,  # PR-BOT-INTELLIGENCE-UPGRADE C3
             ) = await _compute_aggregator_hook_fields(
                 symbol="BTC/USDT", timeframe="1h", bars=bars,
                 final=final, session=None,
