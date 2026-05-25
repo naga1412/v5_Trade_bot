@@ -832,6 +832,109 @@ class TestNormalizeMtfDirectionsJson:
         assert a == b == '{"1d":1,"1h":1,"1w":-1,"4h":0}'
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# PR-MTF-DIRECTIONS-FOLLOWUP-1 (2026-05-25)
+# Predictor's inline serialization MUST match the helper's canonical form.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestPredictorMtfDirectionsCanonicalForm:
+    """The predictor's aggregator_hook (app/core/predictor.py:403) inlines
+    ``json.dumps(mtf.directions, sort_keys=True, separators=(",", ":"))``
+    instead of importing the helper from app.db.payload_builders (would be
+    a wrong-direction layering dep: core → db). These tests assert that
+    the two serialization sites are byte-identical for the same input.
+
+    Pre-fix: predictor used bare ``json.dumps(mtf.directions)`` with
+    default separators and no sort_keys. The audit chain was unaffected
+    (column is in NON_HASHED_ALLOW_LIST), but a position round-tripped
+    through asyncpg's JSONB decode would re-serialize to different bytes
+    (``'{"1h": 0, "1d": -1}'`` → ``'{"1d":-1,"1h":0}'``), polluting any
+    recompute / diff / log-grep tooling.
+    """
+
+    @pytest.mark.parametrize("directions", [
+        {"1h": 0, "1d": -1, "1w": 1, "4h": 0},
+        {"1h": 1},
+        {},
+        {"1d": -1, "1h": 0, "1w": -1, "4h": -1},
+        {"1w": -1, "1d": 1, "4h": 0, "1h": 1},  # unsorted input
+    ])
+    def test_predictor_inline_form_byte_matches_helper(
+        self, directions: dict[str, int],
+    ) -> None:
+        """The exact serialization call at predictor.py:403 must produce
+        the same bytes as ``_normalize_mtf_directions_json``."""
+        predictor_form = json.dumps(
+            directions, sort_keys=True, separators=(",", ":"),
+        )
+        helper_form = _normalize_mtf_directions_json(directions)
+        assert predictor_form == helper_form
+
+    @pytest.mark.asyncio
+    async def test_aggregator_hook_emits_canonical_mtf_directions_json(
+        self,
+    ) -> None:
+        """End-to-end check: exercise the real predictor code path with
+        a mocked ``compute_mtf_confluence`` returning a known directions
+        dict, then assert the third return-tuple element (the
+        mtf_directions_json string) equals ``_normalize_mtf_directions_json``
+        on the same dict. Catches drift on the predictor side without
+        having to grep the source.
+        """
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from app.core.predictor import _compute_aggregator_hook_fields
+
+        # Bars: minimal — the aggregator_hook only uses .close for
+        # realized-vol compute, and that returning None is fine here.
+        import pandas as pd
+        bars = pd.DataFrame(
+            {"close": [100.0, 101.0, 102.0]},
+            index=pd.date_range("2026-05-25", periods=3, freq="1h", tz="UTC"),
+        )
+        final = SimpleNamespace(score=0.5, direction="LONG")
+
+        # Order is sort_keys-shuffleable so the test catches a regression
+        # to bare json.dumps (different separators) AND a regression to
+        # default sort=False (different order).
+        directions = {"1w": 0, "1d": -1, "4h": 1, "1h": 1}
+        mtf_result = SimpleNamespace(
+            agreement=3, dominant_tf="1d", directions=directions,
+        )
+
+        with (
+            patch(
+                "app.core.scoring.mtf_confluence.compute_mtf_confluence",
+                new=AsyncMock(return_value=mtf_result),
+            ),
+            patch(
+                "app.core.scoring.p_win_calibrator.predict_p_win",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.core.scoring.intermarket_lookup.lookup_latest_funding_rate",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            (
+                mtf_agreement, mtf_dominant_tf, mtf_directions_json,
+                _p_win, _eff, _vol, _fund_adj, _fund_rate,
+            ) = await _compute_aggregator_hook_fields(
+                symbol="BTC/USDT", timeframe="1h", bars=bars,
+                final=final, session=None,
+            )
+
+        assert mtf_agreement == 3
+        assert mtf_dominant_tf == "1d"
+        assert mtf_directions_json == _normalize_mtf_directions_json(directions)
+        # Belt-and-braces: assert the literal canonical bytes too. If this
+        # ever changes, both _normalize and the predictor must be updated
+        # together.
+        assert mtf_directions_json == '{"1d":-1,"1h":1,"1w":0,"4h":1}'
+
+
 class TestBuildShadowTradePayloadAcceptsDict:
     """Regression: caller may pass a dict in addition to a string.
 
