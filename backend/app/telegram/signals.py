@@ -47,7 +47,12 @@ class SignalCandidate:
     stop_loss_price: float
     take_profit_price: float
     confidence_pct: float            # 0-100
-    layer_summary: dict[str, dict]   # {"L1": {"score": 0.85, "note": "..."}, ...}
+    # {"1": {"direction": "LONG", "strength": 0.85, "confidence": 0.7,
+    #         "notes": "..."}, "9": None, ...} — None values are tolerated
+    # (abstained layers render as "-- (abstained)"). The synthetic
+    # {"score": float, "note": str} shape used by admin_test_trade.py is
+    # still accepted by the renderer.
+    layer_summary: dict[str, dict | None]
     margin_usdt: float
     funding_rate_daily: float        # signed; +0.012 means longs pay shorts 1.2%/day
     chart_url: str
@@ -70,13 +75,64 @@ class RenderedMessage:
     inline_keyboard: list[list[dict]]
 
 
-def _format_layers(layers: dict[str, dict]) -> str:
+def _layer_signed_score(data: dict) -> float | None:
+    """Read a signed score from a layer dict in either shape.
+
+    Two shapes coexist in callers of render_message:
+
+      * ``{"score": float, "note": str}`` — synthetic shape used by
+        ``admin_test_trade.py`` and the original unit-test fixture.
+      * ``{"direction": "LONG"/"SHORT"/"NEUTRAL", "strength": float,
+        "confidence": float, "notes": str}`` — what
+        ``LayerScoreOut.model_dump()`` produces in production
+        (via ``live_prediction._layer_payload``).
+
+    The function returns the signed score for either shape. None when
+    neither shape matches (e.g. a synthetic dict missing both ``score``
+    and ``strength``).
+    """
+    if "score" in data:
+        score = data["score"]
+        return float(score) if score is not None else None
+    strength = data.get("strength")
+    if strength is None:
+        return None
+    direction = data.get("direction")
+    if direction == "LONG":
+        return float(strength)
+    if direction == "SHORT":
+        return -float(strength)
+    return 0.0  # NEUTRAL
+
+
+def _format_layers(layers: dict[str, dict | None]) -> str:
+    """Render the per-layer breakdown for the Telegram message body.
+
+    Tolerant of two failure modes uncovered 2026-05-25:
+      1. An entry can be ``None`` when its upstream layer abstained
+         (e.g. L9 news returns None when no items match the symbol;
+         L2 patterns stays None if pattern_stats_lookup load failed).
+         These render as ``-- (abstained)`` rather than raising
+         ``AttributeError: 'NoneType' object has no attribute 'get'``,
+         which used to escape into the dispatcher's outer except and
+         convert the entire dispatch to outcome=error — silently
+         dropping the strongest signal that cleared every gate.
+      2. The original implementation read ``data["score"]`` but
+         ``LayerScoreOut.model_dump()`` emits ``{direction, strength,
+         confidence, notes}`` with no ``"score"`` key, so production
+         messages had been rendering ``L1: --`` for every layer since
+         SP-9 wired L9. Now reads via ``_layer_signed_score`` which
+         accepts both shapes.
+    """
     if not layers:
         return "  (no layer scores)"
     lines = []
     for name, data in sorted(layers.items()):
-        score = data.get("score")
-        note = data.get("note", "")
+        if data is None:
+            lines.append(f"  {name}:    --  (abstained)")
+            continue
+        score = _layer_signed_score(data)
+        note = data.get("note") or data.get("notes", "") or ""
         sign = "+" if score is not None and score >= 0 else ""
         score_str = f"{sign}{score:.2f}" if score is not None else "  --"
         direction_marker = (
