@@ -38,7 +38,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,11 +93,15 @@ class SignalProposal:
     stop_loss_price: float
     take_profit_price: float
     confidence_pct: float     # 0-100
-    # Values can be None when the upstream layer abstained (e.g. L9 news
-    # for symbols with no recent matching items; L2 patterns when
-    # pattern_stats_lookup load failed). The render path is None-tolerant
-    # — see `_format_layers` in app/telegram/signals.py.
-    layer_summary: dict[str, dict | None]
+    # Dict shape is mixed in production: per-layer dicts
+    # (LayerScoreOut.model_dump() shape), abstained-layer None entries,
+    # AND prediction_extras merged in by live_prediction._layer_payload
+    # (float / str / list values like static_score / tier / traps_fired).
+    # The render path is type-aware — see `_format_layers` in
+    # app/telegram/signals.py. JSONB-bound consumers
+    # (build_predictions_payload, reasoning_json) serialize the whole
+    # dict via json.dumps which handles mixed types natively.
+    layer_summary: dict[str, Any]
     inputs_hash: str
     funding_rate_daily: float = 0.0
     chart_base_url: str = ""
