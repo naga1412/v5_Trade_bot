@@ -267,3 +267,106 @@ def test_format_layers_mixed_synthetic_and_model_dump_shapes() -> None:
     # synthetic-shape entry with no "score" renders as -- without raising
     assert "test_trade" in msg.body
     assert "(abstained)" in msg.body
+
+
+# ---- Regression tests for PR-FIX-DISPATCH-FLOAT-NOT-ITERABLE -----------
+#
+# 2026-05-25 18:00 UTC: WLD/USDT/1h (final_score=0.340) — a LONG signal
+# that cleared every dispatcher gate — errored with
+# "TypeError: argument of type 'float' is not iterable". Root cause:
+# live_prediction._layer_payload merges pred.prediction_extras (float /
+# str / list values: static_score, brain_adjust, trap_factor,
+# news_multiplier, direction_penalty, final, tier, traps_fired) on top
+# of the per-layer dicts. The same dict is then both persisted (where
+# extras are useful for replay) and passed to SignalCandidate for
+# rendering (where extras crash the layer-shape interpretation). The
+# render path now type-checks each value and skips non-dict entries.
+#
+# The error is a regression-of-shape from PR-DISPATCH-RENDER-ABSTAINED-
+# LAYER-FIX (#256) which switched `_format_layers` from
+# `data.get("score")` (raises AttributeError on float) to `"score" in
+# data` (raises TypeError on float). Pre-#256 the same scenario would
+# have also crashed (with a different exception class), so this is also
+# a pre-existing latent bug that was masked by the cosmetic "L1: --"
+# rendering and by signals that mostly never reached the render path.
+
+
+def test_format_layers_skips_float_extras_entries() -> None:
+    """prediction_extras float values (static_score, brain_adjust, etc.)
+    must be skipped from the rendered layer breakdown, NOT raise
+    ``TypeError: argument of type 'float' is not iterable``. This is the
+    actual prod bug that silently dropped WLD/USDT at 18:00 UTC
+    2026-05-25."""
+    cand = _candidate(layer_summary={
+        "1": {"direction": "LONG", "strength": 0.5, "notes": "ok"},
+        "9": None,
+        # The exact prediction_extras shape from `_build_extras`:
+        "static_score": 0.340,
+        "brain_adjust": 1.0,
+        "trap_factor": 0.95,
+        "news_multiplier": 1.0,
+        "direction_penalty": 1.0,
+        "final": 0.340,
+        "tier": "A",
+        "traps_fired": [],
+    })
+    # Must not raise.
+    msg = render_message(cand, leverage=5, now=_NOW)
+    # Layer entries still render
+    assert "+0.50" in msg.body
+    assert "(abstained)" in msg.body
+    # Extras are filtered from the "Layer scores" section — they're
+    # persistence-time metadata, not user-visible layer scores.
+    assert "static_score" not in msg.body
+    assert "brain_adjust" not in msg.body
+    assert "traps_fired" not in msg.body
+    # "tier" appears in other places ("RR ratio", "Confidence", etc.)
+    # so we only assert the extras VALUE isn't rendered as a standalone
+    # layer entry — a hypothetical render would be "  tier:  --". A
+    # bare-word "A" might match the date string, so instead assert no
+    # line matches "tier:" with a leading two-space indent.
+    assert "  tier:  " not in msg.body
+
+
+def test_format_layers_handles_full_live_prediction_layer_payload_shape() -> None:
+    """End-to-end: build the exact dict shape that
+    ``live_prediction._layer_payload`` produces (10 LayerScoreOut dicts
+    + 1 None abstention + 8 prediction_extras keys) and confirm the
+    renderer survives + emits a clean message body. Future regression
+    guard for the dual-use shape of ``layer_summary``."""
+    layer_summary = {
+        # 10 layers, model_dump shape, mostly populated, one None
+        "1": {"direction": "LONG", "strength": 0.6, "confidence": 0.7, "notes": "L1"},
+        "2": {"direction": "LONG", "strength": 0.4, "confidence": 0.6, "notes": "L2"},
+        "3": {"direction": "SHORT", "strength": 0.2, "confidence": 0.5, "notes": "L3"},
+        "4": {"direction": "NEUTRAL", "strength": 0.0, "confidence": 0.5, "notes": ""},
+        "5": {"direction": "LONG", "strength": 0.3, "confidence": 0.6, "notes": "L5"},
+        "6": {"direction": "LONG", "strength": 0.5, "confidence": 0.7, "notes": "L6"},
+        "7": {"direction": "SHORT", "strength": 0.1, "confidence": 0.4, "notes": "L7"},
+        "8": {"direction": "LONG", "strength": 0.7, "confidence": 0.8, "notes": "L8"},
+        "9": None,  # L9 news abstained (most common case for non-headline alts)
+        "10": {"direction": "LONG", "strength": 0.55, "confidence": 0.65, "notes": "L10"},
+        # 8 prediction_extras keys (exact shape from `_build_extras`)
+        "static_score": 0.42,
+        "brain_adjust": 1.0,
+        "trap_factor": 0.95,
+        "news_multiplier": 1.05,
+        "direction_penalty": 1.0,
+        "final": 0.42,
+        "tier": "B",
+        "traps_fired": [],
+    }
+    cand = _candidate(layer_summary=layer_summary)
+    msg = render_message(cand, leverage=5, now=_NOW)
+    # Every layer renders (including abstained L9 with "(abstained)" marker)
+    for layer_key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"):
+        # Each layer key appears in the body; some show as signed scores,
+        # "9" shows as abstained.
+        assert f"  {layer_key}:" in msg.body
+    assert "(abstained)" in msg.body  # L9
+    # No extras key shows up as a layer line
+    for extras_key in (
+        "static_score", "brain_adjust", "trap_factor",
+        "news_multiplier", "direction_penalty", "traps_fired",
+    ):
+        assert f"  {extras_key}:" not in msg.body
