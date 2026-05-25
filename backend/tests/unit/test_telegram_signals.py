@@ -75,8 +75,12 @@ def test_render_message_includes_spec_section_7_2_fields() -> None:
     assert "you receive funding" in body
     # Chart link
     assert "aji12.nagayuaj.com" in body
-    # Auto-skip footer
-    assert "Auto-skip in 30s" in body
+    # Auto-skip footer — value comes from Settings
+    # (TELEGRAM_APPROVAL_TIMEOUT_SECONDS, default 600). The
+    # `test_render_message_uses_custom_auto_skip_seconds` test below
+    # asserts the explicit-override path; here we just assert the
+    # footer line is present.
+    assert "Auto-skip in" in body and "s if no response" in body
 
 
 def test_render_message_short_funding_text_inverts() -> None:

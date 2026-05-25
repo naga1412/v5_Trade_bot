@@ -292,6 +292,54 @@ class Settings(BaseSettings):
             )
         return v
 
+    # --- PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26) ----
+    # Two safety knobs on the telegram-approve flow:
+    #
+    # 1. TELEGRAM_APPROVAL_TIMEOUT_SECONDS — server-side auto-skip window.
+    #    The telegram_poller cycle (~30s) marks any telegram_signals row
+    #    older than this with response='auto_skipped'. Replaces the
+    #    previously-cosmetic "Auto-skip in 30s" UI string (which had no
+    #    enforcement — signals stayed pending forever, defeating the
+    #    operator's expectation of a bounded approval window).
+    #
+    # 2. APPROVAL_MAX_PRICE_DRIFT_PCT — drift guard at approve-time.
+    #    BEFORE `_place_approved_order` calls Binance, fetch current
+    #    mark price; if |current - entry| / entry × 100 > this threshold,
+    #    reject with outcome=stale_price. Prevents approving a 10-minute-
+    #    old signal where the entry zone is already invalidated.
+    #
+    # Both default-conservative for the operator's "can sleep through a
+    # candle close" use case: 600s window + 0.5% drift threshold means
+    # a signal placed at the 1h-candle close is valid for up to 10
+    # minutes provided the market hasn't moved more than 50bps.
+    #
+    # Validation: both must be positive. Timeout in seconds (int).
+    # Drift in percent (float; 0.5 means 0.5%, NOT 50%).
+    TELEGRAM_APPROVAL_TIMEOUT_SECONDS: int = 600
+    APPROVAL_MAX_PRICE_DRIFT_PCT: float = 0.5
+
+    @field_validator("TELEGRAM_APPROVAL_TIMEOUT_SECONDS")
+    @classmethod
+    def _validate_approval_timeout(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(
+                f"TELEGRAM_APPROVAL_TIMEOUT_SECONDS={v} must be > 0. "
+                "Zero or negative would auto-skip every signal the moment "
+                "it's sent. Set a positive value (default 600 = 10 min)."
+            )
+        return v
+
+    @field_validator("APPROVAL_MAX_PRICE_DRIFT_PCT")
+    @classmethod
+    def _validate_approval_drift_pct(cls, v: float) -> float:
+        if v <= 0.0:
+            raise ValueError(
+                f"APPROVAL_MAX_PRICE_DRIFT_PCT={v} must be > 0. Zero or "
+                "negative would reject every approval (any drift exceeds 0). "
+                "Set a positive value (default 0.5 = 0.5 percent)."
+            )
+        return v
+
     # --- FU-33: slippage circuit-breaker ---------------------------------
     # Default-OFF — operator flips per-env after observing the metric.
     # When True:

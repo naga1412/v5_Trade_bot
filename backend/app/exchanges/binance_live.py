@@ -347,6 +347,47 @@ class BinanceLiveClient:
         except (httpx.HTTPError, OSError):
             return False
 
+    async def fetch_mark_price(self, *, symbol: str) -> float | None:
+        """Fetch the latest trade price for ``symbol`` (e.g. "BTCUSDT").
+
+        Used by the telegram-approve drift guard: before placing an
+        approved order, the polling worker compares this against the
+        signal's original entry_price and rejects with outcome=stale_price
+        if the drift exceeds APPROVAL_MAX_PRICE_DRIFT_PCT.
+
+        Endpoint: GET /fapi/v1/ticker/price?symbol={sym}. No auth, no
+        signature, no rate-limit cost beyond the public ticker pool.
+        Returns None on any HTTP / parse failure — callers MUST treat
+        None as "skip drift check" (fail-open per the watchdog +
+        observability conventions; a stuck ticker should not block the
+        approve flow).
+        """
+        try:
+            r = await self._http.get(
+                f"{self._base}/fapi/v1/ticker/price",
+                params={"symbol": symbol},
+                timeout=5.0,
+            )
+        except (httpx.HTTPError, OSError) as e:
+            log.warning(
+                "fetch_mark_price(%s): HTTP error: %s — failing open", symbol, e,
+            )
+            return None
+        if r.status_code != 200:
+            log.warning(
+                "fetch_mark_price(%s): non-200 %d %s — failing open",
+                symbol, r.status_code, r.text[:120],
+            )
+            return None
+        try:
+            return float(r.json()["price"])
+        except (KeyError, ValueError, TypeError) as e:
+            log.warning(
+                "fetch_mark_price(%s): parse error: %s — failing open",
+                symbol, e,
+            )
+            return None
+
 
 __all__ = [
     "ApiKeyPermissionViolation",
