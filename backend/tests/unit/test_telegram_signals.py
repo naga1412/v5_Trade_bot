@@ -175,11 +175,85 @@ def test_parse_custom_callback() -> None:
     "sig:abc:approve",        # approve without leverage
     "sig:abc:approve:abc",    # non-int leverage
     "sig:abc:approve:0",      # leverage below min
-    "sig:abc:approve:11",     # leverage above hard cap
+    "sig:abc:approve:126",    # leverage above parser ceiling (125)
     "sig:abc:approve:5:6",    # too many parts
 ])
 def test_parse_callback_returns_none_on_malformed(bad: str) -> None:
     assert parse_callback_data(bad) is None
+
+
+# ---- Regression tests for PR-FIX-CALLBACK-DATA-PARSER-MISMATCH ----------
+# Root cause: parser hard-capped leverage at _DEFAULT_HARD_CAP=10, but
+# dispatcher renders signals with leverage = recommended_leverage(
+# hard_cap=user.max_leverage_cap), which can be > 10. Operator's signal
+# sig_625980a074ef41be (WLD/USDT LONG, 2026-05-25 22:00 UTC) rendered at
+# 13× and the Approve button emitted `sig:sig_625980a074ef41be:approve:13`,
+# which the parser rejected as "unrecognised callback_data". Fix decouples
+# parser decode range (_PARSER_MAX_LEVERAGE=125, Binance ceiling) from
+# policy cap (_DEFAULT_HARD_CAP=10, +1× button clamp).
+
+
+def test_parse_approve_above_old_cap() -> None:
+    """Operator's exact failing case: leverage=13 must now decode."""
+    p = parse_callback_data("sig:abc:approve:13")
+    assert p == ParsedCallback(signal_id="abc", action="approve", leverage=13)
+
+
+def test_parse_approve_at_new_max() -> None:
+    """Parser ceiling is 125 (Binance Futures absolute max)."""
+    p = parse_callback_data("sig:abc:approve:125")
+    assert p == ParsedCallback(signal_id="abc", action="approve", leverage=125)
+
+
+def test_parse_approve_above_new_max() -> None:
+    """Leverage > 125 still rejected as decode garbage."""
+    assert parse_callback_data("sig:abc:approve:126") is None
+
+
+def test_parse_approve_zero() -> None:
+    """Leverage below _MIN_LEVERAGE rejected unchanged."""
+    assert parse_callback_data("sig:abc:approve:0") is None
+
+
+def test_parse_adjust_above_old_cap() -> None:
+    """Same fix covers adjust path — adjust uses the same parts[3] branch."""
+    p = parse_callback_data("sig:abc:adjust:13")
+    assert p == ParsedCallback(signal_id="abc", action="adjust", leverage=13)
+
+
+def test_parse_skip_unchanged() -> None:
+    """3-part skip callback still parses (no leverage)."""
+    p = parse_callback_data("sig:abc:skip")
+    assert p == ParsedCallback(signal_id="abc", action="skip", leverage=None)
+
+
+def test_parse_custom_unchanged() -> None:
+    """3-part custom callback still parses (no leverage)."""
+    p = parse_callback_data("sig:abc:custom")
+    assert p == ParsedCallback(signal_id="abc", action="custom", leverage=None)
+
+
+def test_parse_approve_real_signal_id() -> None:
+    """Operator's exact prod callback string from 2026-05-25 22:01 UTC."""
+    p = parse_callback_data("sig:sig_625980a074ef41be:approve:13")
+    assert p == ParsedCallback(
+        signal_id="sig_625980a074ef41be", action="approve", leverage=13,
+    )
+
+
+def test_parse_malformed_too_short() -> None:
+    """Truncated callbacks still rejected."""
+    assert parse_callback_data("sig:abc") is None
+
+
+def test_parse_malformed_unknown_action() -> None:
+    """Unknown action names still rejected even with valid leverage."""
+    assert parse_callback_data("sig:abc:nuke:5") is None
+
+
+def test_parse_malformed_non_int_leverage() -> None:
+    """Non-int leverage still rejected."""
+    assert parse_callback_data("sig:abc:approve:high") is None
 
 
 # ---- Payload serialisation ----------------------------------------------

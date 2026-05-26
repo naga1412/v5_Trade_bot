@@ -38,6 +38,14 @@ from app.trading.leverage import (
 _FALLBACK_AUTO_SKIP_SECONDS = 600
 _DEFAULT_HARD_CAP = 10
 _MIN_LEVERAGE = 1
+# Decoding range for parse_callback_data — intentionally wider than
+# `_DEFAULT_HARD_CAP`. The parser's job is to decode what the keyboard
+# itself emits; risk policy (the +1× clamp at _DEFAULT_HARD_CAP and the
+# initial leverage from `recommended_leverage(hard_cap=user.max_leverage_cap)`)
+# lives in `_build_keyboard` and the dispatcher. 125 = Binance Futures
+# absolute ceiling, broad enough to never reject a legitimately-emitted
+# leverage, narrow enough to still reject obvious garbage.
+_PARSER_MAX_LEVERAGE = 125
 
 
 def _resolved_auto_skip_seconds() -> int:
@@ -366,7 +374,7 @@ def parse_callback_data(data: str) -> ParsedCallback | None:
             leverage = int(parts[3])
         except ValueError:
             return None
-        if leverage < _MIN_LEVERAGE or leverage > _DEFAULT_HARD_CAP:
+        if leverage < _MIN_LEVERAGE or leverage > _PARSER_MAX_LEVERAGE:
             return None
     if action in ("approve", "adjust") and leverage is None:
         return None
