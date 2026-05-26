@@ -98,6 +98,39 @@ def reset_vault_cache_for_tests() -> None:
 # ---- Prediction -> SignalProposal ---------------------------------------
 
 
+def _parse_mtf_adx_by_tf_json(raw: str | None) -> dict[str, float] | None:
+    """Parse `LivePredictionOut.mtf_adx_by_tf_json` into a `dict[str, float]`.
+
+    Fail-open contract (mirrors `_parse_mtf_directions_json`): malformed JSON,
+    non-dict roots, or non-numeric values all return None so the dispatcher's
+    ADX gate falls open ("no opinion, don't block") instead of raising.
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        log.warning("mtf_adx_by_tf_json parse failed: %s (raw=%r)", exc, raw[:80])
+        return None
+    if not isinstance(parsed, dict):
+        log.warning(
+            "mtf_adx_by_tf_json parsed to non-dict (%s); treating as None",
+            type(parsed).__name__,
+        )
+        return None
+    result: dict[str, float] = {}
+    for k, v in parsed.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            log.warning(
+                "mtf_adx_by_tf_json value at key=%r is %s (not numeric); "
+                "treating dict as None to keep the gate unbiased",
+                k, type(v).__name__,
+            )
+            return None
+        result[str(k)] = float(v)
+    return result
+
+
 def _parse_mtf_directions_json(raw: str | None) -> dict[str, int] | None:
     """Parse `LivePredictionOut.mtf_directions_json` into a `dict[str, int]`.
 
@@ -186,6 +219,14 @@ def proposal_from_prediction(
     # Callers that pre-date PR-PLUMBING-1 (admin_test_trade, telegram
     # callback) can keep omitting this kwarg.
     pred_funding_rate_daily: float | None = None,
+    # PR-BOT-INTELLIGENCE-UPGRADE — context the extended entry-quality
+    # gate consumes. All three default None so admin_test_trade /
+    # telegram-callback call sites stay unchanged. live_prediction
+    # extracts these from pred.layer_scores["2"] and the predictor's
+    # mtf_adx_by_tf_json field.
+    layer2_direction: str | None = None,
+    layer2_confidence: float | None = None,
+    mtf_adx_by_tf_json: str | None = None,
 ) -> SignalProposal | None:
     """Build a SignalProposal from a Prediction. Returns None for
     NEUTRAL signals (nothing to dispatch)."""
@@ -219,6 +260,9 @@ def proposal_from_prediction(
         mtf_dominant_tf=mtf_dominant_tf,
         mtf_directions=_parse_mtf_directions_json(mtf_directions_json),
         entry_score=pred_score,
+        layer2_direction=layer2_direction,
+        layer2_confidence=layer2_confidence,
+        mtf_adx_by_tf=_parse_mtf_adx_by_tf_json(mtf_adx_by_tf_json),
     )
 
 
