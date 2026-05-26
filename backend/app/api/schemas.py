@@ -164,6 +164,13 @@ class LivePredictionOut(BaseModel):
     # predictor's lookup returned None (no session, no rows for symbol,
     # or fail-open exception path).
     funding_rate_daily: float | None = None
+    # PR-BOT-INTELLIGENCE-UPGRADE CHANGE 3: per-TF ADX(14) magnitudes from
+    # the MTF computation, serialized as canonical JSON ({"5m": 18.3,
+    # "1h": 31.2, ...}). In-memory only — NOT persisted to a DB column.
+    # The dispatcher's open_position_gate looks up the dominant_tf entry
+    # for the optional global ADX trend-strength gate. None when MTF
+    # itself returned None (cold cache / all-TF fetch failure).
+    mtf_adx_by_tf_json: str | None = None
 
 
 # --- Phase J: Bot Status tab schemas ---
