@@ -29,8 +29,12 @@ Safety:
 
 ABORT CONDITIONS (script bails out with a clear message)
 ========================================================
-* `HYBRID_AUTO_SCORE_THRESHOLD` < 90 (interpreted as: safety freeze is
-  lifted — operator should run this script themselves, not delegate)
+* `HYBRID_AUTO_SCORE_THRESHOLD` < 0.9 (interpreted as: safety freeze is
+  lifted — operator should run this script themselves, not delegate).
+  The threshold is on a fraction scale (0, 1) — Pydantic validator at
+  `app/config.py` rejects values >= 1.0 or <= 0. Earlier draft of this
+  script used `< 90` which can NEVER pass, blocking the safety check
+  entirely. Fixed 2026-05-27 per PR-FIX-PR275-FOLLOWUP.
 * Vault keys not loaded (need real Binance creds; testnet won't
   exercise the real Binance order pipeline)
 * `_place_approved_order` returns None → indicates Part 1 fix didn't
@@ -260,15 +264,22 @@ async def _run() -> dict[str, Any]:
     vault_keys = deps["vault_keys"]
 
     # ─── Safety: only run while HYBRID is frozen ──────────────────────
+    # The threshold is on the fraction scale (0, 1) — Pydantic validator
+    # in app/config.py rejects values <= 0 or >= 1.0. Treat any value
+    # < 0.9 as "freeze is lifted, normal trading active, this script
+    # should not run autonomously" (operator would invoke directly if
+    # they intended a test trade outside the frozen window).
+    _SAFETY_FREEZE_FLOOR = 0.9
     settings = get_settings()
     hybrid_threshold = settings.HYBRID_AUTO_SCORE_THRESHOLD
-    if hybrid_threshold is None or hybrid_threshold < 90:
+    if hybrid_threshold is None or hybrid_threshold < _SAFETY_FREEZE_FLOOR:
         return {
             "status": "abort",
             "phase": "safety_freeze",
             "reason": (
                 f"HYBRID_AUTO_SCORE_THRESHOLD={hybrid_threshold} suggests "
-                "the safety freeze is lifted. This script is for the "
+                "the safety freeze is lifted (expected >= 0.9 for a "
+                "frozen-state validation run). This script is for the "
                 "frozen-state validation only — operator runs it directly "
                 "post-freeze. Refusing to proceed."
             ),
