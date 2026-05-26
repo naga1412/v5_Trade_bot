@@ -41,6 +41,11 @@ async def _mk_engine() -> Any:
             "direction TEXT, sent_at TEXT, payload TEXT, "
             "response TEXT, response_at TEXT, response_leverage INTEGER)"
         ))
+        # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP columns (alembic 0028,
+        # 2026-05-26): status / sl_order_id / tp_order_id /
+        # failure_reason. Default status='pending' matches the Phase 1
+        # pre-INSERT semantics so the migration's server_default isn't
+        # required at SQLite-test time.
         await conn.execute(sa.text(
             "CREATE TABLE live_trades ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -52,8 +57,12 @@ async def _mk_engine() -> Any:
             "closed_at TEXT, pnl_usdt REAL, "
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
             "mtf_directions_json TEXT, "
+            "status TEXT NOT NULL DEFAULT 'pending', "
+            "sl_order_id TEXT, tp_order_id TEXT, failure_reason TEXT, "
             "prev_hash TEXT, row_hash TEXT)"
         ))
+    # Stash so the autouse-patched get_session_factory finds it.
+    _TEST_ENGINE_HOLDER["engine"] = engine
     return engine
 
 
@@ -112,10 +121,71 @@ class _StubBinance:
         self, *, symbol: str, side: str, quantity: float,
         leverage: int, order_type: str,
     ) -> Any:
+        # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP: place_with_sltp logs
+        # `entry_order.qty` + `entry_order.symbol` + `entry_order.side`
+        # at INFO. Stub returns the full set so the log isn't a
+        # missing-attr crash.
         return type("Order", (), {
             "binance_order_id": "stub-order-1",
             "avg_fill_price": 80_100.0,
+            "qty": quantity, "symbol": symbol, "side": side,
+            "status": "FILLED", "raw": {},
         })
+
+    async def place_stop_loss_close(
+        self, *, symbol: str, close_side: str, stop_price: float,
+    ) -> Any:
+        """PR-FIX-GHOST-POSITIONS stub: succeeds with predictable SL id."""
+        return type("Order", (), {
+            "binance_order_id": "stub-sl-1",
+            "avg_fill_price": 0.0,
+        })
+
+    async def place_take_profit_close(
+        self, *, symbol: str, close_side: str, stop_price: float,
+    ) -> Any:
+        """PR-FIX-GHOST-POSITIONS stub: succeeds with predictable TP id."""
+        return type("Order", (), {
+            "binance_order_id": "stub-tp-1",
+            "avg_fill_price": 0.0,
+        })
+
+    async def cancel_order_idempotent(
+        self, *, symbol: str, order_id: str,
+    ) -> bool:
+        return True
+
+    async def close_position(self, *, symbol: str) -> Any:
+        return type("Order", (), {
+            "binance_order_id": "stub-close-1",
+            "avg_fill_price": 80_050.0,
+        })
+
+
+# PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP: _place_live_order opens
+# independent sessions for the pending->open lifecycle. Tests need a
+# session_factory bound to their isolated engine; this holder lets the
+# autouse fixture patch the global lookup to whatever the current test
+# set via `_TEST_ENGINE_HOLDER["engine"] = engine`.
+_TEST_ENGINE_HOLDER: dict[str, Any] = {}
+
+
+def _factory_from_holder() -> Any:
+    """Return a session-factory callable bound to whatever engine the
+    current test stashed in the holder. Falls back to a clear error so
+    tests forgetting to set the holder fail loudly instead of silently
+    talking to the wrong DB."""
+    engine = _TEST_ENGINE_HOLDER.get("engine")
+    if engine is None:
+        raise RuntimeError(
+            "test_dispatcher_e2e: _TEST_ENGINE_HOLDER['engine'] is unset; "
+            "tests exercising _place_live_order must call "
+            "_TEST_ENGINE_HOLDER['engine'] = engine after _mk_engine()"
+        )
+
+    def _f() -> AsyncSession:
+        return AsyncSession(engine)
+    return _f
 
 
 @pytest.fixture(autouse=True)
@@ -124,6 +194,16 @@ def _patch_binance(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         dispatcher_mod, "BinanceLiveClient", _StubBinance,
     )
+    # Patch the global session-factory lookup so _place_live_order's
+    # Phase 1 + Phase 3 sessions hit the test engine instead of the
+    # production async_sessionmaker.
+    monkeypatch.setattr(
+        "app.db.session.get_session_factory",
+        _factory_from_holder,
+    )
+    _TEST_ENGINE_HOLDER.clear()
+    yield
+    _TEST_ENGINE_HOLDER.clear()
 
 
 # ---- Tests ---------------------------------------------------------------

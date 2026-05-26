@@ -83,10 +83,21 @@ def _utc_now() -> datetime:
 async def _list_open_live_trades(
     session: AsyncSession,
 ) -> list[OpenLiveTrade]:
+    """List positions currently in the 'open' state.
+
+    PR-FIX-GHOST-POSITIONS (2026-05-26): we now ALSO filter on
+    status='open' so the monitor doesn't pick up:
+      - pending rows (still mid-placement; reconciler handles them)
+      - failed rows (placement failed; no Binance position to monitor)
+      - backfilled-closed rows from pre-migration history (closed_at
+        IS NULL but status='closed' because the migration didn't
+        backfill closed_at)
+    """
     rows = (await session.execute(sa.text(
         "SELECT id, user_id, symbol, direction, entry_price, "
         "       stop_loss, take_profit, opened_at, mtf_agreement "
-        "FROM live_trades WHERE closed_at IS NULL"
+        "FROM live_trades "
+        "WHERE closed_at IS NULL AND status = 'open'"
     ))).all()
     return [
         OpenLiveTrade(
@@ -100,6 +111,132 @@ async def _list_open_live_trades(
         )
         for r in rows
     ]
+
+
+# ---- PR-FIX-GHOST-POSITIONS reconciliation -------------------------------
+
+
+_PENDING_GRACE_SECONDS: float = 60.0
+
+
+@dataclass(frozen=True)
+class _PendingTrade:
+    """Pre-Binance row that the placement path inserted with status='pending'
+    but never promoted to 'open' (or 'failed'). The reconciler queries
+    Binance to decide which terminal state it belongs in."""
+    trade_id: int
+    user_id: int
+    symbol: str
+    opened_at: datetime
+
+
+async def _list_stale_pending_trades(
+    session: AsyncSession, *, now: datetime,
+) -> list[_PendingTrade]:
+    """Find live_trades stuck at status='pending' for longer than the
+    grace window. These rows were pre-INSERTed by Phase 1 of the
+    placement helper but Phase 3 never ran (process crash, DB blip,
+    Phase 2 swallowed the exception). The reconciler either promotes
+    them to 'open' (Binance has a matching position) or marks them
+    'failed' (Binance doesn't).
+    """
+    cutoff_iso = (now - timedelta(seconds=_PENDING_GRACE_SECONDS)).isoformat()
+    rows = (await session.execute(sa.text(
+        "SELECT id, user_id, symbol, opened_at "
+        "FROM live_trades "
+        "WHERE status = 'pending' AND opened_at < :cutoff"
+    ), {"cutoff": cutoff_iso})).all()
+    return [
+        _PendingTrade(
+            trade_id=int(r.id), user_id=int(r.user_id),
+            symbol=str(r.symbol), opened_at=r.opened_at,
+        )
+        for r in rows
+    ]
+
+
+async def reconcile_stale_pending(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    binance_factory: Callable[[], BinanceLiveClient],
+    now: datetime | None = None,
+) -> int:
+    """Reconcile every stale 'pending' row against the live Binance state.
+
+    For each candidate:
+      - If Binance shows an OPEN position for the symbol → UPDATE
+        live_trades SET status='open' so the regular exit-monitor
+        loop picks it up. Best-effort: we do NOT try to recover
+        sl_order_id / tp_order_id from open-orders queries (out of
+        scope; the operator can manually inspect Binance if the row
+        is missing them). The monitor still has the software SL/TP
+        boundary check as a backup.
+      - Else (Binance has no position): UPDATE status='failed' with
+        failure_reason='reconciler_no_binance_position_after_60s'.
+
+    Returns the count of rows resolved this pass.
+
+    Never raises — a Binance HTTP error / DB blip is logged and the
+    pass continues to the next candidate. The reconciler must NEVER
+    take the exit-monitor down.
+    """
+    n = now or _utc_now()
+    async with session_factory() as scan_session:
+        pendings = await _list_stale_pending_trades(scan_session, now=n)
+    if not pendings:
+        return 0
+
+    log.info(
+        "reconciler: %d stale 'pending' row(s) — querying Binance",
+        len(pendings),
+    )
+    client = binance_factory()
+    resolved = 0
+    try:
+        for p in pendings:
+            binance_sym = p.symbol.replace("/", "")
+            try:
+                pos = await client.get_position(symbol=binance_sym)
+            except BinanceLiveError as e:
+                log.warning(
+                    "reconciler: get_position(%s) failed for trade_id=%d: %s",
+                    binance_sym, p.trade_id, e,
+                )
+                continue
+            new_status = "open" if pos is not None else "failed"
+            failure_reason = (
+                None if pos is not None
+                else "reconciler_no_binance_position_after_60s"
+            )
+            try:
+                async with session_factory() as upd_session:
+                    await upd_session.execute(
+                        sa.text(
+                            "UPDATE live_trades "
+                            "SET status = :s, failure_reason = :fr "
+                            "WHERE id = :tid AND status = 'pending'"
+                        ),
+                        {
+                            "s": new_status, "fr": failure_reason,
+                            "tid": p.trade_id,
+                        },
+                    )
+                    await upd_session.commit()
+                resolved += 1
+                log.warning(
+                    "reconciler: trade_id=%d (%s) -> status=%s (%s)",
+                    p.trade_id, binance_sym, new_status,
+                    "binance_position_found" if pos is not None
+                    else "no_binance_position",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    "reconciler: UPDATE failed for trade_id=%d: %s",
+                    p.trade_id, e,
+                )
+    finally:
+        await client.aclose()
+    return resolved
 
 
 def classify_exit(
@@ -272,6 +409,18 @@ async def run_live_exit_monitor_loop(
 
         try:
             settings = settings_factory()
+
+            # PR-FIX-GHOST-POSITIONS: reconcile stuck 'pending' rows
+            # before the regular exit-monitor pass. Best-effort and
+            # fail-safe — exceptions are swallowed inside the helper.
+            try:
+                await reconcile_stale_pending(
+                    session_factory=session_factory,
+                    binance_factory=binance_factory,
+                )
+            except Exception as e:  # noqa: BLE001 — never crash the loop
+                log.warning("reconcile_stale_pending raised: %s", e)
+
             async with session_factory() as session:
                 positions = await _list_open_live_trades(session)
                 if not positions:

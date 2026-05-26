@@ -175,170 +175,107 @@ async def _auto_skip_expired_signals(
 
 
 # ---- Order placement after Telegram approve ------------------------------
+#
+# PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26) rewrote this from a
+# single Binance-then-INSERT pass into a 3-phase pending->open lifecycle:
+#
+#   Phase 1 (atomic DB): pre-INSERT live_trades(status='pending') with
+#     all hash-payload columns set + binance_order_id NULL. Single
+#     session, single commit. If this fails, no Binance call is made.
+#   Phase 2 (Binance, no DB lock): drift check + place market+SL+TP
+#     atomically via atomic_placement.place_with_sltp. Emergency-closes
+#     on partial failure.
+#   Phase 3 (atomic DB): UPDATE live_trades to status='open' (with the
+#     three Binance order IDs + actual fill price) OR status='failed'
+#     (with the failure_reason string). Stale_price drift rejection
+#     writes 'stale_price' on telegram_signals AND 'failed' on
+#     live_trades atomically in one session.
+#
+# Net effect: a Binance position cannot exist without a corresponding
+# live_trades row reflecting it; if Phase 3 itself crashes,
+# live_exit_monitor's reconciler picks up the stuck 'pending' row and
+# repairs status from the live Binance position.
 
 
-async def _place_approved_order(
-    session: AsyncSession,
-    *,
+async def _read_signal_payload(
+    session_factory: async_sessionmaker[AsyncSession],
     signal_id: str,
-    leverage: int,
-    use_testnet: bool,
-    user_id: int,
-    binance_factory: Callable[[], BinanceLiveClient],
-    now: datetime | None = None,
-) -> str | None:
-    """Read the telegram_signals payload, place the Binance order, write
-    the live_trades row. Returns the binance order id on success.
-
-    Pulled out of the dispatcher so the polling worker can call it
-    without re-running the funding-guard / max-positions checks (those
-    were enforced when the message was first sent).
-    """
-    n = now or datetime.now(timezone.utc)
-    row = (await session.execute(
-        sa.text(
-            "SELECT user_id, symbol, direction, payload "
-            "FROM telegram_signals WHERE id = :id"
-        ),
-        {"id": signal_id},
-    )).first()
+) -> dict[str, Any] | None:
+    """Phase 0a: read the persisted signal payload + owning user_id."""
+    async with session_factory() as session:
+        row = (await session.execute(
+            sa.text(
+                "SELECT user_id, symbol, direction, payload "
+                "FROM telegram_signals WHERE id = :id"
+            ),
+            {"id": signal_id},
+        )).first()
     if row is None:
         log.warning("place_approved_order: signal_id=%s missing", signal_id)
         return None
-
-    payload = (
+    parsed_payload = (
         json.loads(row.payload) if isinstance(row.payload, str) else dict(row.payload)
     )
+    # Attach the owning user_id so downstream phases don't re-query.
+    parsed_payload["__row_user_id__"] = row.user_id
+    return parsed_payload
+
+
+def _coerce_mtf_directions(raw: Any) -> dict[str, int] | None:
+    """Coerce telegram_signals.payload['mtf_directions'] to dict[str,int]|None.
+
+    Bit-identical to the previous inline coercion (PR2 §6.3 R3): allows
+    only int values, rejects floats / strings / lists to keep the
+    auto-path and telegram-approve path symmetric.
+    """
+    if isinstance(raw, dict) and all(isinstance(v, int) for v in raw.values()):
+        return {str(k): int(v) for k, v in raw.items()}
+    if raw is not None and not isinstance(raw, dict):
+        log.warning(
+            "telegram-approve: mtf_directions in payload is %s (not "
+            "dict); persisting live_trades row with mtf_directions_json=NULL",
+            type(raw).__name__,
+        )
+    return None
+
+
+async def _phase1_insert_pending_trade(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    payload: dict[str, Any],
+    signal_id: str,
+    leverage: int,
+    user_id: int,
+    qty: float,
+    now: datetime,
+) -> int | None:
+    """Phase 1: atomic pre-INSERT of live_trades(status='pending').
+
+    Returns the trade_id on success; None on DB error. The row is
+    fully-formed at the audit-chain level — binance_order_id is set to
+    an empty string sentinel (placeholder, replaced post-Binance via
+    UPDATE on the non-hashed column). status='pending' tells
+    live_exit_monitor's reconciler to look up the Binance side after
+    a 60s grace window.
+    """
+    direction = payload["direction"]
+    symbol = payload["symbol"]
     entry_price = float(payload["entry_price"])
     stop_loss = float(payload["stop_loss_price"])
     take_profit = float(payload["take_profit_price"])
     margin_usdt = float(payload["margin_usdt"])
-    direction = payload["direction"]
-    symbol = payload["symbol"]
-    side: Literal["BUY", "SELL"] = "BUY" if direction == "LONG" else "SELL"
-    raw_qty = (margin_usdt * leverage) / entry_price
-
-    # Quantize qty to the symbol's LOT_SIZE.stepSize (same fix as
-    # _place_live_order — Binance rejects raw floats with -1111).
-    binance_native_sym = symbol.replace("/", "")
-    filters = await get_symbol_filters(
-        binance_native_sym, use_testnet=use_testnet,
-    )
-    if filters is None:
-        log.error(
-            "place_approved_order: no Binance filters for %s; cannot place",
-            binance_native_sym,
-        )
-        return None
-    qty = quantize_qty(raw_qty, filters.step_size)
-    if qty < filters.min_qty:
-        log.error(
-            "place_approved_order: quantized qty %s below symbol min %s "
-            "for %s (margin=%s, leverage=%s)",
-            qty, filters.min_qty, binance_native_sym, margin_usdt, leverage,
-        )
-        return None
-    notional = qty * entry_price
-    if filters.min_notional > 0 and notional < filters.min_notional:
-        log.error(
-            "place_approved_order: notional %.2f below symbol min %.2f for %s",
-            notional, filters.min_notional, binance_native_sym,
-        )
-        return None
-
-    client = binance_factory()
-    try:
-        # ----- PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE -----------
-        # Drift guard: reject the approval if the current mark price has
-        # drifted more than APPROVAL_MAX_PRICE_DRIFT_PCT (%) from the
-        # signal's original entry_price. Prevents an approve-after-sleep
-        # scenario where the operator OKs a 10-minute-old signal but the
-        # market has moved well past the original entry zone — the
-        # resulting order would fill at a price the original SL/TP was
-        # never designed for.
-        #
-        # fail-open: when fetch_mark_price returns None (HTTP error,
-        # unknown symbol, parse failure) we DO NOT block — same
-        # philosophy as the funding-rate / borrow lookups. A stuck
-        # ticker should not silently shut down the approve path.
-        from app.config import get_settings as _get_drift_settings
-        _drift_threshold_pct = _get_drift_settings().APPROVAL_MAX_PRICE_DRIFT_PCT
-        current_price = await client.fetch_mark_price(symbol=binance_native_sym)
-        if current_price is not None and entry_price > 0:
-            drift_pct = abs(current_price - entry_price) / entry_price * 100.0
-            if drift_pct > _drift_threshold_pct:
-                # Mark the row stale_price (overwrites the 'approved'
-                # state handle_callback just wrote). Brief flip-flop is
-                # tolerated: caller commits this session right after
-                # this function returns, so the row never publishes a
-                # 'approved' state externally before becoming 'stale_price'.
-                await session.execute(
-                    sa.text(
-                        "UPDATE telegram_signals "
-                        "SET response='stale_price', response_at=:ts "
-                        "WHERE id=:id"
-                    ),
-                    {"ts": n, "id": signal_id},
-                )
-                log.warning(
-                    "dispatch %s -> stale_price: drift=%.3f%% > %.3f%% "
-                    "threshold (entry=%.6f current=%.6f)",
-                    signal_id, drift_pct, _drift_threshold_pct,
-                    entry_price, current_price,
-                )
-                return None
-        # ----- end drift guard ------------------------------------------
-
-        order = await client.place_order(
-            symbol=binance_native_sym,
-            side=side, quantity=qty, leverage=leverage,
-            order_type="MARKET",
-        )
-    except (OrderRejected, BinanceLiveError) as e:
-        log.error("place_approved_order: Binance rejected: %s", e)
-        return None
-    finally:
-        await client.aclose()
-
-    # PR2 §4.4: read MTF state captured at send-time from
-    # telegram_signals.payload (build_signal_payload writes these). The
-    # auto-path and telegram-approve path persist matching mtf_* on
-    # live_trades — symmetric per spec §6.3 R3. mtf_directions in the
-    # JSONB is the parsed dict (or null); we forward it as-is to the
-    # builder, which canonical-serialises it back to JSON for the column.
-    # Float values are rejected (set the whole field None) — matches the
-    # glue._parse_mtf_directions_json fail-open contract, so the live
-    # trade row mirrors the auto-path semantics exactly.
-    _mtf_directions_raw = payload.get("mtf_directions")
-    mtf_directions_dict: dict[str, int] | None
-    if isinstance(_mtf_directions_raw, dict) and all(
-        isinstance(v, int) for v in _mtf_directions_raw.values()
-    ):
-        mtf_directions_dict = {
-            str(k): int(v) for k, v in _mtf_directions_raw.items()
-        }
-    else:
-        mtf_directions_dict = None
-        if _mtf_directions_raw is not None and not isinstance(
-            _mtf_directions_raw, dict,
-        ):
-            log.warning(
-                "telegram-approve: mtf_directions in payload is %s (not "
-                "dict); persisting live_trades row with mtf_directions_json=NULL",
-                type(_mtf_directions_raw).__name__,
-            )
 
     trade_payload = build_live_trade_payload(
-        user_id=row.user_id or user_id,
+        user_id=payload.get("__row_user_id__") or user_id,
         symbol=symbol,
         direction=direction,
         margin_usdt=margin_usdt,
         leverage=leverage,
-        entry_price=float(order.avg_fill_price or entry_price),
+        entry_price=entry_price,  # signal-time price; updated to actual fill at Phase 3
         stop_loss=stop_loss,
         take_profit=take_profit,
-        binance_order_id=order.binance_order_id,
-        opened_at=n,
+        binance_order_id="",  # placeholder; Phase 3 UPDATEs the non-hashed col
+        opened_at=now,
         mode_at_open="telegram-approve",
         approved_via="telegram",
         reasoning_json=json.dumps({
@@ -348,10 +285,270 @@ async def _place_approved_order(
         inputs_hash=payload.get("inputs_hash", ""),
         mtf_agreement=payload.get("mtf_agreement"),
         mtf_dominant_tf=payload.get("mtf_dominant_tf"),
-        mtf_directions=mtf_directions_dict,
+        mtf_directions=_coerce_mtf_directions(payload.get("mtf_directions")),
     )
-    await insert_with_chain(session, "live_trades", trade_payload)
-    return order.binance_order_id
+    try:
+        async with session_factory() as session:
+            await insert_with_chain(session, "live_trades", trade_payload)
+            # Fetch the just-inserted id. Audit-chained INSERT doesn't
+            # return the id directly; lastrowid varies by dialect.
+            # Use a focused SELECT by the unique (user_id, opened_at,
+            # binance_order_id='') tuple — safe because we just wrote
+            # it in this session.
+            row = (await session.execute(
+                sa.text(
+                    "SELECT id FROM live_trades "
+                    "WHERE user_id = :u AND opened_at = :o "
+                    "  AND binance_order_id = '' AND status = 'pending' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"u": trade_payload["user_id"], "o": trade_payload["opened_at"]},
+            )).first()
+            await session.commit()
+        if row is None:
+            log.error(
+                "_phase1: INSERT succeeded but row lookup failed for "
+                "signal_id=%s — unexpected", signal_id,
+            )
+            return None
+        return int(row.id)
+    except Exception as e:  # noqa: BLE001
+        log.error(
+            "_phase1: INSERT live_trades(pending) failed for "
+            "signal_id=%s: %s", signal_id, e,
+        )
+        return None
+
+
+async def _phase3_mark_open(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    trade_id: int,
+    binance_order_id: str,
+    sl_order_id: str,
+    tp_order_id: str,
+    fill_price: float,
+    now: datetime,
+) -> None:
+    """Phase 3 success: promote pending->open with the Binance order IDs."""
+    async with session_factory() as session:
+        await session.execute(
+            sa.text(
+                "UPDATE live_trades SET "
+                "  status='open', "
+                "  binance_order_id=:boid, "
+                "  sl_order_id=:sid, "
+                "  tp_order_id=:tid, "
+                "  entry_price=:ep "
+                "WHERE id=:tid_row"
+            ),
+            {
+                "boid": binance_order_id,
+                "sid": sl_order_id,
+                "tid": tp_order_id,
+                "ep": fill_price,
+                "tid_row": trade_id,
+            },
+        )
+        await session.commit()
+    log.info(
+        "trade %d -> open: binance=%s SL=%s TP=%s fill=%.4f (at %s)",
+        trade_id, binance_order_id, sl_order_id, tp_order_id, fill_price,
+        now.isoformat(),
+    )
+
+
+async def _phase3_mark_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    trade_id: int,
+    failure_reason: str,
+    signal_id: str | None = None,
+    signal_response_override: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Phase 3 failure: mark live_trades.status='failed' with the reason.
+
+    If `signal_response_override` is set (e.g. 'stale_price'), the
+    matching telegram_signals row is UPDATEd in the same session so
+    audit logs see one atomic transition.
+    """
+    n = now or datetime.now(timezone.utc)
+    async with session_factory() as session:
+        await session.execute(
+            sa.text(
+                "UPDATE live_trades SET status='failed', failure_reason=:r "
+                "WHERE id=:tid"
+            ),
+            {"r": failure_reason[:500], "tid": trade_id},
+        )
+        if signal_id and signal_response_override:
+            await session.execute(
+                sa.text(
+                    "UPDATE telegram_signals SET response=:r, response_at=:ts "
+                    "WHERE id=:id"
+                ),
+                {"r": signal_response_override, "ts": n, "id": signal_id},
+            )
+        await session.commit()
+    log.warning(
+        "trade %d -> failed: %s%s",
+        trade_id, failure_reason[:200],
+        f" (signal {signal_id} -> {signal_response_override})"
+        if signal_response_override else "",
+    )
+
+
+async def _place_approved_order(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    signal_id: str,
+    leverage: int,
+    use_testnet: bool,
+    user_id: int,
+    binance_factory: Callable[[], BinanceLiveClient],
+    now: datetime | None = None,
+) -> str | None:
+    """Top-level orchestrator for the telegram-approve placement path.
+
+    See the module-level "Order placement after Telegram approve"
+    comment for the 3-phase contract. Returns the Binance entry-order
+    id on full success; None on any failure (caller can inspect
+    live_trades.status='failed' for the failure_reason).
+
+    Caller is the polling worker; we manage all our own sessions via
+    `session_factory` so no transaction is held across the Binance
+    network call (which can take seconds).
+    """
+    n = now or datetime.now(timezone.utc)
+
+    # ─── Phase 0a: read signal payload ────────────────────────────────
+    payload = await _read_signal_payload(session_factory, signal_id)
+    if payload is None:
+        return None
+
+    entry_price = float(payload["entry_price"])
+    stop_loss = float(payload["stop_loss_price"])
+    take_profit = float(payload["take_profit_price"])
+    margin_usdt = float(payload["margin_usdt"])
+    direction = payload["direction"]
+    symbol = payload["symbol"]
+    side: Literal["BUY", "SELL"] = "BUY" if direction == "LONG" else "SELL"
+    binance_native_sym = symbol.replace("/", "")
+
+    # ─── Phase 0b: pre-validations (no DB writes, no Binance writes) ──
+    filters = await get_symbol_filters(
+        binance_native_sym, use_testnet=use_testnet,
+    )
+    if filters is None:
+        log.error(
+            "place_approved_order: no Binance filters for %s; cannot place "
+            "(signal_id=%s)", binance_native_sym, signal_id,
+        )
+        return None
+    raw_qty = (margin_usdt * leverage) / entry_price
+    qty = quantize_qty(raw_qty, filters.step_size)
+    if qty < filters.min_qty:
+        log.error(
+            "place_approved_order: quantized qty %s below symbol min %s "
+            "for %s (signal_id=%s)",
+            qty, filters.min_qty, binance_native_sym, signal_id,
+        )
+        return None
+    if filters.min_notional > 0 and qty * entry_price < filters.min_notional:
+        log.error(
+            "place_approved_order: notional %.2f below symbol min %.2f for %s "
+            "(signal_id=%s)",
+            qty * entry_price, filters.min_notional, binance_native_sym,
+            signal_id,
+        )
+        return None
+
+    # ─── Phase 1: pre-INSERT live_trades(pending) ─────────────────────
+    trade_id = await _phase1_insert_pending_trade(
+        session_factory,
+        payload=payload, signal_id=signal_id,
+        leverage=leverage, user_id=user_id, qty=qty, now=n,
+    )
+    if trade_id is None:
+        # DB error during pre-insert; no Binance call made.
+        return None
+
+    # ─── Phase 2: Binance (drift + atomic market+SL+TP) ───────────────
+    client = binance_factory()
+    try:
+        # Drift check
+        from app.config import get_settings as _get_drift_settings
+        _drift_threshold_pct = _get_drift_settings().APPROVAL_MAX_PRICE_DRIFT_PCT
+        current_price = await client.fetch_mark_price(symbol=binance_native_sym)
+        if current_price is not None and entry_price > 0:
+            drift_pct = abs(current_price - entry_price) / entry_price * 100.0
+            if drift_pct > _drift_threshold_pct:
+                reason = (
+                    f"stale_price: drift={drift_pct:.3f}% > "
+                    f"{_drift_threshold_pct:.3f}% threshold "
+                    f"(entry={entry_price:.6f} current={current_price:.6f})"
+                )
+                log.warning("dispatch %s -> %s", signal_id, reason)
+                await _phase3_mark_failed(
+                    session_factory,
+                    trade_id=trade_id,
+                    failure_reason=reason,
+                    signal_id=signal_id,
+                    signal_response_override="stale_price",
+                    now=n,
+                )
+                return None
+
+        # Atomic market+SL+TP
+        from app.trading.execution.atomic_placement import (
+            GhostPositionError,
+            place_with_sltp,
+        )
+        try:
+            result = await place_with_sltp(
+                client, symbol=binance_native_sym, side=side,
+                quantity=qty, leverage=leverage,
+                stop_loss_price=stop_loss, take_profit_price=take_profit,
+            )
+        except GhostPositionError as ghost_exc:
+            # CATASTROPHIC: SL/TP failed AND emergency close failed.
+            # Position likely orphan on Binance. live_exit_monitor's
+            # reconciler will see status='failed' + try to read Binance.
+            await _phase3_mark_failed(
+                session_factory,
+                trade_id=trade_id,
+                failure_reason=f"GHOST: {ghost_exc}",
+                now=n,
+            )
+            log.critical(
+                "trade %d signal %s: %s", trade_id, signal_id, ghost_exc,
+            )
+            return None
+        except (OrderRejected, BinanceLiveError) as e:
+            # Binance failure; position is flat (either market entry
+            # rejected, or emergency close succeeded after SL/TP fail).
+            await _phase3_mark_failed(
+                session_factory,
+                trade_id=trade_id,
+                failure_reason=f"binance: {e}",
+                now=n,
+            )
+            return None
+    finally:
+        await client.aclose()
+
+    # ─── Phase 3: success path — promote pending->open ────────────────
+    await _phase3_mark_open(
+        session_factory,
+        trade_id=trade_id,
+        binance_order_id=result.entry_order.binance_order_id,
+        sl_order_id=result.sl_order_id,
+        tp_order_id=result.tp_order_id,
+        fill_price=float(result.entry_order.avg_fill_price or entry_price),
+        now=n,
+    )
+    return result.entry_order.binance_order_id
 
 
 # ---- Update routing ------------------------------------------------------
@@ -415,11 +612,17 @@ async def _route_callback(
         # Single-session txn spans both handle_trade_callback (which writes
         # response='approved' tentatively for the 'approve' branch) and
         # _place_approved_order (which may overwrite to 'stale_price' if
-        # the drift guard rejects the approval). Splitting these across
-        # two sessions previously committed 'approved' first and then
-        # failed the 'stale_price' update against the CHECK constraint,
-        # leaving the row stuck at 'approved' with resulted_in_trade_id
-        # NULL. See PR-FIX-PR264-RESPONSE-CHECK-CONSTRAINT-AND-AUTOSKIP.
+        # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): the
+        # placement path is now multi-session (Phase 1 pre-INSERT, Phase
+        # 2 Binance, Phase 3 UPDATE — see _place_approved_order
+        # docstring). handle_callback's response='approved' UPDATE
+        # commits first; if Phase 1 INSERT fails, we have an "approved
+        # but no trade row" state — strictly better than the pre-fix
+        # "Binance position with no DB row" orphan, and recoverable via
+        # SQL audit. The drift-rejection path explicitly flips
+        # telegram_signals.response='stale_price' AND live_trades.status
+        # ='failed' atomically in a single Phase 3 session, preserving
+        # the response/trade coordination PR-FIX-PR264 introduced.
         order_id: str | None = None
         order_placement_error: Exception | None = None
         async with session_factory() as session:
@@ -427,27 +630,24 @@ async def _route_callback(
                 session, callback_data=data,
                 config=config.trade_config(), http=http,
             )
-            # On approve, fire the live order WITHIN the same session
-            # before commit so any drift-guard rejection of the tentative
-            # 'approved' state becomes 'stale_price' atomically.
-            if (
-                outcome.action == "approve"
-                and outcome.leverage is not None
-                and binance_factory is not None
-            ):
-                try:
-                    order_id = await _place_approved_order(
-                        session, signal_id=outcome.signal_id,
-                        leverage=outcome.leverage, use_testnet=use_testnet,
-                        user_id=user_id, binance_factory=binance_factory,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    # Capture but don't re-raise: we still want to commit
-                    # whatever response state was written (e.g. drift
-                    # guard already updated to 'stale_price', or the
-                    # tentative 'approved' if the failure was upstream).
-                    order_placement_error = e
             await session.commit()
+        if (
+            outcome.action == "approve"
+            and outcome.leverage is not None
+            and binance_factory is not None
+        ):
+            try:
+                order_id = await _place_approved_order(
+                    session_factory,
+                    signal_id=outcome.signal_id,
+                    leverage=outcome.leverage, use_testnet=use_testnet,
+                    user_id=user_id, binance_factory=binance_factory,
+                )
+            except Exception as e:  # noqa: BLE001
+                # Unexpected (non-Binance, non-Ghost) error escaped the
+                # orchestrator. Logged here so the operator sees something
+                # even if Phase 3 itself raised before marking failed.
+                order_placement_error = e
         log.info("trade-callback %s -> %s: %s",
                  outcome.signal_id, outcome.action, outcome.note)
         if order_placement_error is not None:

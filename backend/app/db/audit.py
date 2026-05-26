@@ -36,8 +36,16 @@ HASH_PAYLOAD_COLUMNS: dict[str, frozenset[str]] = {
         "user_id", "symbol", "direction",
         "margin_usdt", "leverage", "position_value_usdt",
         "entry_price", "stop_loss", "take_profit",
-        "binance_order_id", "opened_at",
+        "opened_at",
         "mode_at_open", "approved_via", "reasoning", "inputs_hash",
+        # NOTE: `binance_order_id` was hashed pre-PR-FIX-GHOST-POSITIONS,
+        # but the pending->open lifecycle requires inserting the row
+        # BEFORE the Binance order is placed (so an order placement
+        # failure can't orphan a position). The order id is set
+        # post-insert via UPDATE, which means it can't be a hash-payload
+        # column. Moved to NON_HASHED_ALLOW_LIST below. The 1 existing
+        # production row (id=1, manual_cleanup_stale_row) was inserted
+        # outside insert_with_chain so its hash is unaffected.
     }),
     "paper_trades": frozenset({
         "symbol", "direction",
@@ -112,6 +120,15 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         "binance_position_id", "closed_at", "exit_price", "exit_reason",
         "fees_paid_usdt", "funding_paid_usdt", "liquidation_price",
         "pnl_pct", "pnl_usdt",
+        # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (alembic 0028, 2026-05-26):
+        # pending->open lifecycle. Written by UPDATEs after the Binance
+        # market+SL+TP placement either succeeds or fails. Cannot be in
+        # the hash payload because (a) NULL at INSERT time (b) UPDATEd
+        # post-insert, which would invalidate the chain.
+        "status", "sl_order_id", "tp_order_id", "failure_reason",
+        # `binance_order_id` is now also a post-INSERT field — see
+        # the HASH_PAYLOAD note above.
+        "binance_order_id",
     }),
     "paper_trades": frozenset({
         "id", "prev_hash", "row_hash",
