@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.audit import insert_with_chain
@@ -558,10 +558,24 @@ async def _place_live_order(
     leverage: int,
     margin_usdt: float,
     now: datetime,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[str, str]:
     """Place a real Binance order + write the live_trades row.
 
     Returns (binance_order_id, our_signal_id).
+
+    PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): pending->open
+    lifecycle + atomic Binance market+SL+TP placement (emergency-closes
+    on partial failure). The Phase 1 pre-INSERT and Phase 3 UPDATE
+    happen in independent sessions (NOT the caller's `session`) so
+    no transaction is held across the multi-second Binance round-trip.
+
+    `session_factory` is the source for those independent sessions.
+    When None (production), falls back to `app.db.session.get_session_factory()`.
+    Tests inject a factory bound to their isolated SQLite engine.
+    The `session` parameter is preserved for compatibility with
+    `dispatch()` (which uses it for gate evaluations), but is not used
+    for live_trades writes in the new lifecycle.
     """
     sig_id = "sig_" + secrets.token_hex(8)
     side: Literal["BUY", "SELL"] = (
@@ -598,19 +612,10 @@ async def _place_live_order(
             f"{filters.min_notional:.2f} for {binance_native_sym}",
         )
 
-    client = BinanceLiveClient(
-        api_key=user.binance_api_key,
-        api_secret=user.binance_api_secret,
-        use_testnet=user.use_testnet,
-    )
-    try:
-        order = await client.place_order(
-            symbol=binance_native_sym,
-            side=side, quantity=qty, leverage=leverage,
-            order_type="MARKET",
-        )
-    finally:
-        await client.aclose()
+    # ─── Phase 1: pre-INSERT live_trades(pending) ─────────────────────
+    if session_factory is None:
+        from app.db.session import get_session_factory
+        session_factory = get_session_factory()
 
     payload = build_live_trade_payload(
         user_id=user.user_id,
@@ -618,10 +623,10 @@ async def _place_live_order(
         direction=proposal.direction,
         margin_usdt=margin_usdt,
         leverage=leverage,
-        entry_price=float(order.avg_fill_price or proposal.entry_price),
+        entry_price=proposal.entry_price,  # signal-time; updated post-fill
         stop_loss=proposal.stop_loss_price,
         take_profit=proposal.take_profit_price,
-        binance_order_id=order.binance_order_id,
+        binance_order_id="",  # placeholder; non-hashed, UPDATEd at Phase 3
         opened_at=now,
         mode_at_open=user.mode,
         approved_via="auto",
@@ -631,15 +636,100 @@ async def _place_live_order(
             "signal_id": sig_id,
         }),
         inputs_hash=proposal.inputs_hash,
-        # PR2 §4.4: persist MTF state on live_trades so post-trade
-        # analytics can correlate gate state to outcome. None on PR1
-        # fallback paths.
         mtf_agreement=proposal.mtf_agreement,
         mtf_dominant_tf=proposal.mtf_dominant_tf,
         mtf_directions=proposal.mtf_directions,
     )
-    await insert_with_chain(session, "live_trades", payload)
-    return order.binance_order_id, sig_id
+    async with session_factory() as s1:
+        await insert_with_chain(s1, "live_trades", payload)
+        row = (await s1.execute(
+            sa.text(
+                "SELECT id FROM live_trades "
+                "WHERE user_id = :u AND opened_at = :o "
+                "  AND binance_order_id = '' AND status = 'pending' "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"u": payload["user_id"], "o": payload["opened_at"]},
+        )).first()
+        await s1.commit()
+    if row is None:
+        raise OrderRejected(
+            "_place_live_order: pending live_trades INSERT succeeded but "
+            "row lookup failed — cannot proceed safely without trade_id",
+        )
+    trade_id = int(row.id)
+
+    # ─── Phase 2: Binance (atomic market+SL+TP) ───────────────────────
+    from app.trading.execution.atomic_placement import (
+        GhostPositionError, place_with_sltp,
+    )
+    client = BinanceLiveClient(
+        api_key=user.binance_api_key,
+        api_secret=user.binance_api_secret,
+        use_testnet=user.use_testnet,
+    )
+    try:
+        try:
+            result = await place_with_sltp(
+                client,
+                symbol=binance_native_sym, side=side,
+                quantity=qty, leverage=leverage,
+                stop_loss_price=proposal.stop_loss_price,
+                take_profit_price=proposal.take_profit_price,
+            )
+        except GhostPositionError as ghost_exc:
+            async with session_factory() as s_fail:
+                await s_fail.execute(
+                    sa.text(
+                        "UPDATE live_trades SET status='failed', "
+                        "failure_reason=:r WHERE id=:tid"
+                    ),
+                    {"r": f"GHOST: {ghost_exc}"[:500], "tid": trade_id},
+                )
+                await s_fail.commit()
+            log.critical("trade %d %s: %s", trade_id, sig_id, ghost_exc)
+            raise OrderRejected(f"Ghost position: {ghost_exc}") from ghost_exc
+        except (OrderRejected, BinanceLiveError) as bex:
+            async with session_factory() as s_fail:
+                await s_fail.execute(
+                    sa.text(
+                        "UPDATE live_trades SET status='failed', "
+                        "failure_reason=:r WHERE id=:tid"
+                    ),
+                    {"r": f"binance: {bex}"[:500], "tid": trade_id},
+                )
+                await s_fail.commit()
+            raise
+    finally:
+        await client.aclose()
+
+    # ─── Phase 3: success path — promote pending->open ────────────────
+    async with session_factory() as s3:
+        await s3.execute(
+            sa.text(
+                "UPDATE live_trades SET "
+                "  status='open', "
+                "  binance_order_id=:boid, "
+                "  sl_order_id=:sid, "
+                "  tp_order_id=:tid, "
+                "  entry_price=:ep "
+                "WHERE id=:tid_row"
+            ),
+            {
+                "boid": result.entry_order.binance_order_id,
+                "sid": result.sl_order_id,
+                "tid": result.tp_order_id,
+                "ep": float(result.entry_order.avg_fill_price or proposal.entry_price),
+                "tid_row": trade_id,
+            },
+        )
+        await s3.commit()
+    log.info(
+        "trade %d -> open: binance=%s SL=%s TP=%s",
+        trade_id, result.entry_order.binance_order_id,
+        result.sl_order_id, result.tp_order_id,
+    )
+    return result.entry_order.binance_order_id, sig_id
 
 
 async def dispatch(
@@ -648,10 +738,18 @@ async def dispatch(
     proposal: SignalProposal,
     user: UserContext,
     now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> DispatchResult:
     """Top-level entry point. Calls into the right sub-path per mode.
 
     Caller commits the session.
+
+    `session_factory` is threaded into `_place_live_order` for the
+    pending->open lifecycle's independent sessions
+    (PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP, 2026-05-26). When None,
+    production code paths fall back to
+    `app.db.session.get_session_factory()`. Tests inject a factory
+    bound to their isolated SQLite engine.
     """
     n = now or datetime.now(timezone.utc)
 
@@ -865,6 +963,7 @@ async def dispatch(
                 order_id, sig_id = await _place_live_order(
                     session, user=user, proposal=proposal,
                     leverage=leverage, margin_usdt=margin, now=n,
+                    session_factory=session_factory,
                 )
                 return DispatchResult(
                     outcome="placed_hybrid",
@@ -896,6 +995,7 @@ async def dispatch(
         order_id, sig_id = await _place_live_order(
             session, user=user, proposal=proposal,
             leverage=leverage, margin_usdt=margin, now=n,
+            session_factory=session_factory,
         )
         return DispatchResult(
             outcome="placed",
