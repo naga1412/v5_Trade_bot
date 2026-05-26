@@ -77,11 +77,17 @@ async def _try_insert(
     # the test conflates two failure classes. The values are
     # 64-character hex (matches sha256 output shape); the real chain
     # is irrelevant here — we DELETE before/after.
-    _PLACEHOLDER_HASH = "0" * 64
-    # `binance_order_id` is NOT NULL UNIQUE in prod (migration 0016).
-    # Use the sym_tag to derive a unique per-row id so the multi-row
-    # `test_existing_allowed_values_still_pass` doesn't UniqueViolation
-    # on the second insert. The DELETE-by-symbol fixture cleans up.
+    # Per-row unique placeholders. Both `binance_order_id` AND
+    # `row_hash` carry UNIQUE constraints in prod (migration 0016 +
+    # audit-chain). Reusing the same placeholder across the 3-row
+    # `test_existing_allowed_values_still_pass` test triggered
+    # UniqueViolations that masked the CHECK we're trying to verify.
+    # Hash placeholders are 64-char hex (matches sha256 shape) seeded
+    # from sym_tag so they're deterministic per-row + unique.
+    import hashlib as _h
+    seed = (sym_tag + ":hash").encode()
+    _ROW_HASH = _h.sha256(seed).hexdigest()
+    _PREV_HASH = _h.sha256(seed + b":prev").hexdigest()
     unique_boid = f"_test_boid_{sym_tag.lstrip('_')}"
     async with AsyncSession(engine) as s:
         try:
@@ -100,8 +106,8 @@ async def _try_insert(
                 "sym": _TEST_SYMBOL_PREFIX + sym_tag,
                 "av": approved_via,
                 "boid": unique_boid,
-                "ph": _PLACEHOLDER_HASH,
-                "rh": _PLACEHOLDER_HASH,
+                "ph": _PREV_HASH,
+                "rh": _ROW_HASH,
             })
             await s.commit()
             return True, None
