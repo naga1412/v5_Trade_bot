@@ -91,6 +91,26 @@ def _sign(secret: str, query: str) -> str:
     ).hexdigest()
 
 
+def _format_price(value: float) -> str:
+    """Format a price for the Binance ``stopPrice`` field.
+
+    Binance rejects prices with too many decimals (PRICE_FILTER tickSize),
+    but for STOP_MARKET / TAKE_PROFIT_MARKET we typically have already
+    rounded to the symbol's tickSize at the caller layer (e.g. via
+    quantize_qty's price counterpart, OR the operator's signal-builder
+    rounds to a sensible step). This helper just collapses Python's
+    floating-point repr into a trim string without scientific notation.
+
+    ``f'{value:.10f}'`` is the conservative formatter; ``rstrip('0')``
+    + ``rstrip('.')`` trims trailing zeros that some Binance endpoints
+    still accept but look ugly in logs.
+    """
+    s = f"{value:.10f}".rstrip("0").rstrip(".")
+    # An exact integer like 80000.0 rstrips to "80000"; that's valid for
+    # Binance which accepts integer-like strings.
+    return s or "0"
+
+
 def _build_signed_query(secret: str, params: dict[str, Any]) -> str:
     """Append timestamp + recvWindow + signature; return ready-to-send query."""
     params = dict(params)
@@ -197,13 +217,17 @@ class BinanceLiveClient:
         leverage: int,
         order_type: Literal["MARKET", "LIMIT"] = "MARKET",
         price: float | None = None,
-        stop_loss_price: float | None = None,
-        take_profit_price: float | None = None,
     ) -> OrderResult:
-        """Place a futures order. Sets leverage first if it's not already.
+        """Place a futures entry order. Sets leverage first if it's not already.
 
         Returns the OrderResult on 200; raises OrderRejected on 4xx
         with the response body in the message for the caller's audit.
+
+        Pre-PR-FIX-GHOST-POSITIONS this method exposed dead
+        ``stop_loss_price``/``take_profit_price`` kwargs that were
+        silently ignored (the request body never carried them). Callers
+        now use ``place_stop_loss_close`` / ``place_take_profit_close``
+        explicitly via the atomic_placement helper.
         """
         # 1. Ensure leverage is set on the symbol (idempotent — Binance
         # accepts repeat calls with the same value).
@@ -269,6 +293,134 @@ class BinanceLiveClient:
                 f"{r.status_code}: {r.text[:300]}"
             )
         return r.json()
+
+    async def cancel_order_idempotent(
+        self, *, symbol: str, order_id: str,
+    ) -> bool:
+        """Cancel an open order, swallowing "unknown order" failures.
+
+        Used by the atomic-placement emergency-close path
+        (PR-FIX-GHOST-POSITIONS, 2026-05-26): when a TP placement fails
+        after an SL has been placed, we cancel the SL first. The SL
+        may have already triggered + filled in the same race window,
+        in which case Binance returns -2011 ("Unknown order sent") /
+        -2018 ("Balance is insufficient" if it auto-filled). We must
+        not let those terminate the emergency-close flow.
+
+        Returns True on actual cancel, False when the order was already
+        gone (idempotent no-op). Raises OrderRejected on other 4xx /
+        5xx so a real auth/permission/rate-limit failure still surfaces.
+        """
+        params = {"symbol": symbol, "orderId": order_id}
+        query = _build_signed_query(self._secret, params)
+        r = await self._http.delete(
+            f"{self._base}/fapi/v1/order?{query}",
+            headers=self.headers,
+        )
+        if r.status_code == 200:
+            return True
+        # -2011 "Unknown order sent" is the documented Binance code for
+        # already-cancelled / already-filled orders. -2013 "Order does not
+        # exist" is the same intent under a different code path. Swallow
+        # both — the order is gone, which is what we wanted.
+        body = r.text[:300]
+        if r.status_code == 400 and (
+            "-2011" in body or "-2013" in body or "Unknown order" in body
+        ):
+            log.info(
+                "cancel_order_idempotent(%s, %s): already gone (%s)",
+                symbol, order_id, body[:80],
+            )
+            return False
+        raise OrderRejected(
+            f"cancel_order_idempotent({symbol}, {order_id}) "
+            f"{r.status_code}: {body}"
+        )
+
+    async def place_stop_loss_close(
+        self, *, symbol: str, close_side: Literal["BUY", "SELL"],
+        stop_price: float,
+    ) -> OrderResult:
+        """Place a Binance Futures STOP_MARKET order that closes the
+        full position when ``stop_price`` triggers.
+
+        PR-FIX-GHOST-POSITIONS (2026-05-26): the bot now attaches a
+        native Binance SL to every position. Previously SL was
+        software-monitored via live_exit_monitor; that path was one
+        container crash / network outage away from unbounded loss.
+
+        ``closePosition=true`` makes the order:
+          - Reduce-only by construction (no risk of accidentally
+            opening a counter-position).
+          - Size-agnostic (closes the full position regardless of how
+            much of the original entry filled).
+          - Quantity-less in the request (Binance rejects the
+            combination of closePosition + quantity).
+
+        ``close_side`` is the SIDE THAT CLOSES the position:
+          - LONG entry was BUY → close_side="SELL"
+          - SHORT entry was SELL → close_side="BUY"
+        """
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": close_side,
+            "type": "STOP_MARKET",
+            "stopPrice": _format_price(stop_price),
+            "closePosition": "true",
+        }
+        return await self._post_order(params, "STOP_MARKET")
+
+    async def place_take_profit_close(
+        self, *, symbol: str, close_side: Literal["BUY", "SELL"],
+        stop_price: float,
+    ) -> OrderResult:
+        """Place a Binance Futures TAKE_PROFIT_MARKET order that closes
+        the full position when ``stop_price`` triggers.
+
+        Same shape as ``place_stop_loss_close`` — Binance distinguishes
+        the two ONLY by ``type`` (STOP_MARKET vs TAKE_PROFIT_MARKET);
+        both close the position market-side when triggered. We use
+        distinct methods so the audit log + caller intent is clearer.
+        """
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": close_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": _format_price(stop_price),
+            "closePosition": "true",
+        }
+        return await self._post_order(params, "TAKE_PROFIT_MARKET")
+
+    async def _post_order(
+        self, params: dict[str, Any], label: str,
+    ) -> OrderResult:
+        """Shared POST + parse for stop-loss / take-profit close orders.
+
+        Pulled out of the individual methods so the body parse is
+        consistent and a future workingType=MARK_PRICE refactor only
+        touches one spot.
+        """
+        query = _build_signed_query(self._secret, params)
+        r = await self._http.post(
+            f"{self._base}/fapi/v1/order?{query}",
+            headers=self.headers,
+        )
+        if r.status_code >= 400:
+            raise OrderRejected(
+                f"{label}({params.get('symbol')}, "
+                f"stopPrice={params.get('stopPrice')}) "
+                f"{r.status_code}: {r.text[:300]}"
+            )
+        body = r.json()
+        return OrderResult(
+            binance_order_id=str(body["orderId"]),
+            symbol=body["symbol"],
+            side=body["side"],
+            qty=float(body.get("origQty") or 0),  # closePosition=true → 0
+            avg_fill_price=0.0,                    # not filled yet
+            status=body.get("status", "NEW"),
+            raw=body,
+        )
 
     # ---- Position queries -----------------------------------------------
 

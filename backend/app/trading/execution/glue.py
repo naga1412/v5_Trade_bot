@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.secrets.vault import VaultDecryptError, decrypt_secrets
 from app.trading.execution.dispatcher import (
@@ -306,11 +306,18 @@ async def dispatch_if_eligible(
     use_testnet: bool,
     proposal_kwargs: dict[str, Any],
     now: datetime | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> DispatchResult | None:
     """Build context + proposal, then call dispatcher.dispatch().
 
     Returns None when the vault isn't loaded or the proposal is NEUTRAL/
     invalid. Caller (live worker) logs the DispatchResult.
+
+    `session_factory` is threaded into `dispatch()` for the
+    PR-FIX-GHOST-POSITIONS pending->open lifecycle. Production callers
+    (live worker) pass the global factory so the dispatcher's
+    `_place_live_order` Phase 1 INSERT and Phase 3 UPDATE happen in
+    sessions independent of this caller's session.
     """
     user = await build_user_context(
         session, user_id=user_id, use_testnet=use_testnet,
@@ -320,7 +327,10 @@ async def dispatch_if_eligible(
     proposal = proposal_from_prediction(**proposal_kwargs)
     if proposal is None:
         return None
-    return await dispatch(session, proposal=proposal, user=user, now=now)
+    return await dispatch(
+        session, proposal=proposal, user=user, now=now,
+        session_factory=session_factory,
+    )
 
 
 __all__ = [
