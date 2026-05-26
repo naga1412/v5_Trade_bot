@@ -599,6 +599,10 @@ async def _place_live_order(
         from app.db.session import get_session_factory
         session_factory = get_session_factory()
 
+    # Per-trade unique placeholder for the UNIQUE-constrained
+    # `binance_order_id` column. See _phase1_insert_pending_trade
+    # docstring in telegram_polling.py for context.
+    pending_placeholder = f"pending-{sig_id}"
     payload = build_live_trade_payload(
         user_id=user.user_id,
         symbol=proposal.symbol,
@@ -608,7 +612,7 @@ async def _place_live_order(
         entry_price=proposal.entry_price,  # signal-time; updated post-fill
         stop_loss=proposal.stop_loss_price,
         take_profit=proposal.take_profit_price,
-        binance_order_id="",  # placeholder; non-hashed, UPDATEd at Phase 3
+        binance_order_id=pending_placeholder,
         opened_at=now,
         mode_at_open=user.mode,
         approved_via="auto",
@@ -627,11 +631,9 @@ async def _place_live_order(
         row = (await s1.execute(
             sa.text(
                 "SELECT id FROM live_trades "
-                "WHERE user_id = :u AND opened_at = :o "
-                "  AND binance_order_id = '' AND status = 'pending' "
-                "ORDER BY id DESC LIMIT 1"
+                "WHERE binance_order_id = :ph AND status = 'pending'"
             ),
-            {"u": payload["user_id"], "o": payload["opened_at"]},
+            {"ph": pending_placeholder},
         )).first()
         await s1.commit()
     if row is None:

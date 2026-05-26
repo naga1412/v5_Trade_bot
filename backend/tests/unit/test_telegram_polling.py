@@ -676,7 +676,10 @@ async def test_route_sig_approve_drift_atomic_no_intermediate_approved_commit() 
     assert live.c == 1
     assert live.status == "failed"
     assert "stale_price" in (live.reason or "")
-    assert live.boid == ""  # never updated past the Phase 1 placeholder
+    # Phase 1 placeholder format is now `pending-{signal_id}` (UNIQUE-
+    # constraint-safe; see _phase1_insert_pending_trade docstring).
+    # Drift rejection never reaches Phase 3 so the placeholder remains.
+    assert live.boid == "pending-abc123"
     assert not stub.placed
 
 
