@@ -70,6 +70,14 @@ async def _try_insert(
 ) -> tuple[bool, str | None]:
     """Attempt an INSERT with the given approved_via. Returns
     (succeeded, error_message)."""
+    # `prev_hash` and `row_hash` are NOT NULL in prod (audit-chain
+    # columns). The CHECK constraint we're testing runs AFTER NOT NULL
+    # checks, so we need placeholder values to actually reach the
+    # CHECK — otherwise every INSERT fails NotNullViolation first and
+    # the test conflates two failure classes. The values are
+    # 64-character hex (matches sha256 output shape); the real chain
+    # is irrelevant here — we DELETE before/after.
+    _PLACEHOLDER_HASH = "0" * 64
     async with AsyncSession(engine) as s:
         try:
             await s.execute(sa.text(
@@ -77,14 +85,17 @@ async def _try_insert(
                 "(user_id, symbol, direction, margin_usdt, leverage, "
                 " position_value_usdt, entry_price, stop_loss, take_profit, "
                 " binance_order_id, opened_at, mode_at_open, approved_via, "
-                " reasoning, inputs_hash, status) "
+                " reasoning, inputs_hash, status, prev_hash, row_hash) "
                 "VALUES (:u, :sym, 'LONG', 10.0, 5, 50.0, "
                 "        80000.0, 79600.0, 80400.0, '', NOW(), "
-                "        'manual', :av, '{}', 'abc', 'closed')"
+                "        'manual', :av, '{}', 'abc', 'closed', "
+                "        :ph, :rh)"
             ), {
                 "u": _TEST_USER_ID,
                 "sym": _TEST_SYMBOL_PREFIX + sym_tag,
                 "av": approved_via,
+                "ph": _PLACEHOLDER_HASH,
+                "rh": _PLACEHOLDER_HASH,
             })
             await s.commit()
             return True, None
