@@ -78,6 +78,11 @@ async def _try_insert(
     # 64-character hex (matches sha256 output shape); the real chain
     # is irrelevant here — we DELETE before/after.
     _PLACEHOLDER_HASH = "0" * 64
+    # `binance_order_id` is NOT NULL UNIQUE in prod (migration 0016).
+    # Use the sym_tag to derive a unique per-row id so the multi-row
+    # `test_existing_allowed_values_still_pass` doesn't UniqueViolation
+    # on the second insert. The DELETE-by-symbol fixture cleans up.
+    unique_boid = f"_test_boid_{sym_tag.lstrip('_')}"
     async with AsyncSession(engine) as s:
         try:
             await s.execute(sa.text(
@@ -87,13 +92,14 @@ async def _try_insert(
                 " binance_order_id, opened_at, mode_at_open, approved_via, "
                 " reasoning, inputs_hash, status, prev_hash, row_hash) "
                 "VALUES (:u, :sym, 'LONG', 10.0, 5, 50.0, "
-                "        80000.0, 79600.0, 80400.0, '', NOW(), "
+                "        80000.0, 79600.0, 80400.0, :boid, NOW(), "
                 "        'manual', :av, '{}', 'abc', 'closed', "
                 "        :ph, :rh)"
             ), {
                 "u": _TEST_USER_ID,
                 "sym": _TEST_SYMBOL_PREFIX + sym_tag,
                 "av": approved_via,
+                "boid": unique_boid,
                 "ph": _PLACEHOLDER_HASH,
                 "rh": _PLACEHOLDER_HASH,
             })
