@@ -137,14 +137,16 @@ async def _auto_skip_expired_signals(
     """
     n = now or datetime.now(timezone.utc)
     cutoff = n - timedelta(seconds=timeout_seconds)
-    # Bind cutoff + ts as ISO-T strings so the comparison is dialect-
-    # portable. Production runs Postgres (TIMESTAMPTZ + asyncpg auto-
-    # casts ISO strings); CI tests run SQLite (TEXT column, lex compare
-    # works iff both sides use the same ISO-T format). SQLAlchemy's
-    # default datetime->TEXT stringification for SQLite uses a SPACE
-    # separator ('2026-05-09 13:00:00') which lex-compares incorrectly
-    # against ISO-T inputs (`T` < `space` in ASCII would yield wrong
-    # ordering when one side uses each format).
+    # Bind datetime objects directly. The previous .isoformat() pattern
+    # was based on a wrong assumption that asyncpg auto-casts ISO strings
+    # to TIMESTAMPTZ — it actually rejects them with DataError ("expected
+    # a datetime.date or datetime.datetime instance, got 'str'"), which
+    # was firing every 30s in prod for 6+ hours after PR #264 shipped.
+    # SQLAlchemy passes datetime objects through to asyncpg as typed
+    # parameters; for SQLite tests, both this query and the test row
+    # seeds bind plain datetime objects so the resulting TEXT
+    # stringifications match (format `'YYYY-MM-DD HH:MM:SS+TZ'`) and
+    # lex-comparison in `sent_at < :cutoff` behaves correctly.
     try:
         async with session_factory() as session:
             result = await session.execute(
@@ -153,7 +155,7 @@ async def _auto_skip_expired_signals(
                     "SET response='auto_skipped', response_at=:ts "
                     "WHERE response IS NULL AND sent_at < :cutoff"
                 ),
-                {"ts": n.isoformat(), "cutoff": cutoff.isoformat()},
+                {"ts": n, "cutoff": cutoff},
             )
             await session.commit()
     except Exception as e:  # noqa: BLE001 — never let cleanup kill the poller
@@ -410,41 +412,54 @@ async def _route_callback(
         return
 
     if data.startswith("sig:"):
+        # Single-session txn spans both handle_trade_callback (which writes
+        # response='approved' tentatively for the 'approve' branch) and
+        # _place_approved_order (which may overwrite to 'stale_price' if
+        # the drift guard rejects the approval). Splitting these across
+        # two sessions previously committed 'approved' first and then
+        # failed the 'stale_price' update against the CHECK constraint,
+        # leaving the row stuck at 'approved' with resulted_in_trade_id
+        # NULL. See PR-FIX-PR264-RESPONSE-CHECK-CONSTRAINT-AND-AUTOSKIP.
+        order_id: str | None = None
+        order_placement_error: Exception | None = None
         async with session_factory() as session:
             outcome = await handle_trade_callback(
                 session, callback_data=data,
                 config=config.trade_config(), http=http,
             )
-            await session.commit()
-        log.info("trade-callback %s -> %s: %s",
-                 outcome.signal_id, outcome.action, outcome.note)
-
-        # On approve, also fire the live order. We require a binance
-        # factory (i.e. vault loaded) — without one we mark the row as
-        # 'approved' but the live-trades row never gets written.
-        if (
-            outcome.action == "approve"
-            and outcome.leverage is not None
-            and binance_factory is not None
-        ):
-            try:
-                async with session_factory() as session:
+            # On approve, fire the live order WITHIN the same session
+            # before commit so any drift-guard rejection of the tentative
+            # 'approved' state becomes 'stale_price' atomically.
+            if (
+                outcome.action == "approve"
+                and outcome.leverage is not None
+                and binance_factory is not None
+            ):
+                try:
                     order_id = await _place_approved_order(
                         session, signal_id=outcome.signal_id,
                         leverage=outcome.leverage, use_testnet=use_testnet,
                         user_id=user_id, binance_factory=binance_factory,
                     )
-                    await session.commit()
-                if order_id is not None:
-                    log.info(
-                        "telegram-approve placed order %s for signal %s",
-                        order_id, outcome.signal_id,
-                    )
-            except Exception as e:  # noqa: BLE001
-                log.error(
-                    "telegram-approve order placement failed (%s): %s",
-                    outcome.signal_id, e,
-                )
+                except Exception as e:  # noqa: BLE001
+                    # Capture but don't re-raise: we still want to commit
+                    # whatever response state was written (e.g. drift
+                    # guard already updated to 'stale_price', or the
+                    # tentative 'approved' if the failure was upstream).
+                    order_placement_error = e
+            await session.commit()
+        log.info("trade-callback %s -> %s: %s",
+                 outcome.signal_id, outcome.action, outcome.note)
+        if order_placement_error is not None:
+            log.error(
+                "telegram-approve order placement failed (%s): %s",
+                outcome.signal_id, order_placement_error,
+            )
+        elif order_id is not None:
+            log.info(
+                "telegram-approve placed order %s for signal %s",
+                order_id, outcome.signal_id,
+            )
 
         # Acknowledge the callback so the spinner stops on the operator's
         # phone. Best-effort.

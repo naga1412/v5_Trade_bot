@@ -373,6 +373,36 @@ class Settings(BaseSettings):
     # radius of bad decisions during v1 (id=3 holdout Sharpe = −3.21).
     BRAIN_ACTION_MULTIPLIER_SPREAD: float = 0.15
 
+    # === PR-BOT-INTELLIGENCE-UPGRADE — entry-quality gate extensions ===
+    # All eight flags default OFF / no-op so this PR ships as a zero-
+    # behaviour-change deploy. Each sub-gate is independently flippable
+    # so the operator can A/B compare in shadow before turning any on.
+
+    # CHANGE 1 — bull/bear market regime gate. When True, deny LONG in
+    # confirmed bear regime and SHORT in confirmed bull regime UNLESS
+    # Layer 2 emits a same-direction pattern with confidence ≥
+    # REGIME_OPPOSITE_PATTERN_OVERRIDE.
+    REGIME_GATE_ENABLED: bool = False
+    REGIME_OPPOSITE_PATTERN_OVERRIDE: float = 0.8
+
+    # CHANGE 2 — Layer-2 pattern boost. When True, a LONG signal whose
+    # Layer-2 vote agrees at confidence ≥ MIN_CONFIDENCE gets
+    # +PATTERN_BOOST_AMOUNT added to its entry_score before the
+    # MIN_ENTRY_SCORE_LONG comparison; an opposing high-confidence L2
+    # subtracts PATTERN_PENALTY_AMOUNT. PR-strategy-1 behaviour is
+    # unchanged when this is False (entry_score is compared raw).
+    PATTERN_BOOST_ENABLED: bool = False
+    PATTERN_BOOST_MIN_CONFIDENCE: float = 0.6
+    PATTERN_BOOST_AMOUNT: float = 0.10
+    PATTERN_PENALTY_AMOUNT: float = 0.15
+
+    # CHANGE 3 — Global signal-side ADX trend strength gate. When True,
+    # deny entries whose MTF dominant-TF ADX(14) is below
+    # MIN_ADX_TREND_STRENGTH. Independent of mtf_confluence's internal
+    # per-TF ADX floor (kept at 20.0) which only affects per-TF voting.
+    ADX_GATE_ENABLED: bool = False
+    MIN_ADX_TREND_STRENGTH: float = 25.0
+
 
 @lru_cache
 def get_settings() -> Settings:

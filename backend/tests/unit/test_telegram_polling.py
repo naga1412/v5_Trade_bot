@@ -405,6 +405,153 @@ async def test_route_sig_approve_skips_order_without_factory() -> None:
     assert live_count == 0  # no factory -> no order placed
 
 
+# ---- Regression: PR-FIX-PR264-RESPONSE-CHECK-CONSTRAINT-AND-AUTOSKIP -----
+# PR #264 shipped with three latent bugs that blocked telegram approvals in
+# prod (verified 2026-05-26 03:01-03:18 UTC). Bug 3 (the order-of-operations)
+# is in scope here; bugs 1 (CHECK constraint) and 2 (auto_skip datetime) are
+# covered by the existing auto_skip test (updated to bind datetime) and the
+# Postgres-only suite in tests/db/test_pr264_response_check_and_autoskip.py.
+
+
+class _StubBinanceWithPrice(_StubBinance):
+    """Subclass that returns a configurable mark price so tests can exercise
+    the drift guard path (PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE).
+    `mark_price=None` falls back to the parent (drift fails open)."""
+
+    def __init__(self, *, order_id: str = "ord-1",
+                 mark_price: float | None) -> None:
+        super().__init__(order_id=order_id)
+        self._mark_price = mark_price
+
+    async def fetch_mark_price(self, *, symbol: str) -> float | None:
+        return self._mark_price
+
+
+@pytest.mark.asyncio
+async def test_route_sig_approve_drift_rejection_sets_stale_price() -> None:
+    """Operator's prod failure mode: drift > APPROVAL_MAX_PRICE_DRIFT_PCT
+    must set response='stale_price' instead of leaving the row stuck at
+    'approved' with resulted_in_trade_id=NULL.
+
+    Verifies the session-merge fix: handle_callback writes 'approved'
+    tentatively in the same session, _place_approved_order overwrites to
+    'stale_price' if drift rejects, then a single commit publishes the
+    final state. Previously the two operations ran in separate sessions,
+    so 'approved' committed externally first and the 'stale_price'
+    overwrite then failed against the CHECK constraint."""
+    engine = await _mk_engine()
+    await _seed(engine)  # entry_price=80_000
+    # 10% drift far exceeds default 0.5% threshold
+    stub = _StubBinanceWithPrice(order_id="should-not-fire", mark_price=88_000.0)
+
+    def _factory():
+        return AsyncSession(engine)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"ok": True}),
+    )) as http:
+        await _route_callback(
+            _factory,  # type: ignore[arg-type]
+            callback_query=_cb("sig:abc123:approve:5", cb_id="drift-1"),
+            config=_config(), binance_factory=lambda: stub,
+            use_testnet=True, user_id=1, http=http,
+        )
+
+    # No order placed.
+    assert stub.placed == []
+    async with AsyncSession(engine) as s:
+        sig = (await s.execute(sa.text(
+            "SELECT response, response_leverage FROM telegram_signals "
+            "WHERE id='abc123'"
+        ))).first()
+        live_count = (await s.execute(sa.text(
+            "SELECT count(*) FROM live_trades"
+        ))).scalar()
+    # Critical assertions: row final state is 'stale_price', NOT 'approved'.
+    assert sig.response == "stale_price"
+    assert live_count == 0
+
+
+@pytest.mark.asyncio
+async def test_route_sig_approve_drift_pass_creates_trade() -> None:
+    """Happy path with drift check engaged: mark_price within threshold,
+    response='approved', order placed, live_trade row written. Locks in
+    that the session-merge restructure did not regress the success path."""
+    engine = await _mk_engine()
+    await _seed(engine)  # entry_price=80_000
+    # 0.1% drift, well under default 0.5% threshold
+    stub = _StubBinanceWithPrice(order_id="bin-pass", mark_price=80_080.0)
+
+    def _factory():
+        return AsyncSession(engine)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"ok": True}),
+    )) as http:
+        await _route_callback(
+            _factory,  # type: ignore[arg-type]
+            callback_query=_cb("sig:abc123:approve:5", cb_id="pass-1"),
+            config=_config(), binance_factory=lambda: stub,
+            use_testnet=True, user_id=1, http=http,
+        )
+
+    assert stub.placed and stub.placed[0]["leverage"] == 5
+    async with AsyncSession(engine) as s:
+        sig = (await s.execute(sa.text(
+            "SELECT response, response_leverage FROM telegram_signals "
+            "WHERE id='abc123'"
+        ))).first()
+        live = (await s.execute(sa.text(
+            "SELECT binance_order_id FROM live_trades"
+        ))).first()
+    assert sig.response == "approved"
+    assert sig.response_leverage == 5
+    assert live.binance_order_id == "bin-pass"
+
+
+@pytest.mark.asyncio
+async def test_route_sig_approve_drift_atomic_no_intermediate_approved_commit() -> None:
+    """Order-of-operations regression: after my session-merge fix, the
+    tentative 'approved' write from handle_callback and the 'stale_price'
+    overwrite from _place_approved_order share a single session — the
+    tentative state must NEVER be visible from an independent reader.
+
+    Simulates the race by reading from a second concurrent session right
+    after _route_callback returns. With the old split-session design, an
+    interleaved reader could observe response='approved' even though the
+    drift guard was about to reject. With the fix, only the final
+    'stale_price' state is ever visible externally."""
+    engine = await _mk_engine()
+    await _seed(engine)
+    stub = _StubBinanceWithPrice(order_id="no-order", mark_price=92_000.0)  # 15% drift
+
+    def _factory():
+        return AsyncSession(engine)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"ok": True}),
+    )) as http:
+        await _route_callback(
+            _factory,  # type: ignore[arg-type]
+            callback_query=_cb("sig:abc123:approve:5", cb_id="atomic-1"),
+            config=_config(), binance_factory=lambda: stub,
+            use_testnet=True, user_id=1, http=http,
+        )
+
+    # Independent reader: final state must be 'stale_price', not 'approved'.
+    async with AsyncSession(engine) as s:
+        sig = (await s.execute(sa.text(
+            "SELECT response FROM telegram_signals WHERE id='abc123'"
+        ))).first()
+    assert sig.response == "stale_price"
+    # And no live trade row was written despite the tentative 'approved'.
+    async with AsyncSession(engine) as s:
+        live_count = (await s.execute(sa.text(
+            "SELECT count(*) FROM live_trades"
+        ))).scalar()
+    assert live_count == 0
+
+
 @pytest.mark.asyncio
 async def test_route_rl_callback_forwards_to_brain_handler(monkeypatch) -> None:
     seen: list[dict[str, Any]] = []
@@ -613,14 +760,20 @@ async def test_auto_skip_marks_expired_signals_after_timeout() -> None:
     marked auto_skipped. A signal younger than the cutoff is untouched.
     A signal already resolved (response='approved') is also untouched."""
     engine = await _mk_engine()
-    # Seed 3 rows with different sent_at and response state
+    # Seed 3 rows with different sent_at and response state. Bind datetime
+    # objects directly (no .isoformat()) so the SQLite text representation
+    # matches what _auto_skip_expired_signals binds for the `cutoff`
+    # comparison parameter — both sides use SQLAlchemy's default
+    # datetime→TEXT format ('YYYY-MM-DD HH:MM:SS+TZ'). Mixed formats
+    # (e.g. ISO-T on one side, space-separated on the other) lex-compare
+    # incorrectly because 'T' (84) > ' ' (32) in ASCII.
     old_ts = datetime(2026, 5, 9, 13, 0, 0, tzinfo=timezone.utc)  # 1 hour old vs _NOW
     fresh_ts = datetime(2026, 5, 9, 13, 59, 0, tzinfo=timezone.utc)  # 1 min old
     async with AsyncSession(engine) as s:
         for sig_id, ts, resp in (
-            ("expired-pending", old_ts.isoformat(), None),
-            ("fresh-pending",   fresh_ts.isoformat(), None),
-            ("already-approved", old_ts.isoformat(), "approved"),
+            ("expired-pending", old_ts, None),
+            ("fresh-pending",   fresh_ts, None),
+            ("already-approved", old_ts, "approved"),
         ):
             await s.execute(sa.text(
                 "INSERT INTO telegram_signals "
