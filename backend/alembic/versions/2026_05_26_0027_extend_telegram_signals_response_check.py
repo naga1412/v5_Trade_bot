@@ -14,7 +14,7 @@ This migration drops the auto-named `telegram_signals_response_check`
 constraint and re-creates it with the expanded ARRAY. The new name is
 explicit so the down migration can target it reliably.
 
-Revision ID: 0027_extend_telegram_signals_response_check
+Revision ID: 0027_widen_response_check
 Revises: 0026_symbol_halt_state
 Create Date: 2026-05-26
 """
@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from alembic import op
 
 
-revision: str = "0027_extend_telegram_signals_response_check"
+revision: str = "0027_widen_response_check"
 down_revision: str | None = "0026_symbol_halt_state"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
