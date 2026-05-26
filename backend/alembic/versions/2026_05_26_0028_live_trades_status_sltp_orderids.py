@@ -28,9 +28,11 @@ inputs):
                       explain WHY (Binance error string, emergency-close
                       result, etc.)
 
-Revision ID: 0028_live_trades_status_sltp_orderids
+Revision ID: 0028_live_trades_lifecycle
 Revises: 0027_widen_response_check
 Create Date: 2026-05-26
+
+Revision ID kept ≤ 32 chars (alembic_version.version_num column limit).
 """
 from collections.abc import Sequence
 
@@ -38,7 +40,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "0028_live_trades_status_sltp_orderids"
+revision: str = "0028_live_trades_lifecycle"
 down_revision: str | None = "0027_widen_response_check"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
