@@ -43,7 +43,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import secrets
 import sys
 import time
@@ -52,7 +51,6 @@ from typing import Any
 
 import httpx
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 # Lazy imports — only after the script has confirmed it's running in
