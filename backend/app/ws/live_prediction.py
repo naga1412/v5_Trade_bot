@@ -374,6 +374,13 @@ async def _maybe_dispatch(
                     "layer2_confidence": _l2_confidence,
                     "mtf_adx_by_tf_json": getattr(pred, "mtf_adx_by_tf_json", None),
                 },
+                # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): thread
+                # the live worker's session_factory through so
+                # _place_live_order can open independent sessions for
+                # the pending->open lifecycle (Phase 1 INSERT, Phase 3
+                # UPDATE) without holding `dispatch_session` open across
+                # the multi-second Binance round-trip.
+                session_factory=session_factory,
             )
             await dispatch_session.commit()
         if result is not None:

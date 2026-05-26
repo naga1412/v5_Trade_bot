@@ -79,11 +79,20 @@ async def _mk_session() -> Any:
             "margin_usdt REAL, leverage INTEGER, "
             "position_value_usdt REAL, entry_price REAL, "
             "stop_loss REAL, take_profit REAL, "
-            "binance_order_id TEXT UNIQUE, opened_at TEXT, "
+            # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): the
+            # original UNIQUE on binance_order_id breaks the Phase 1
+            # placeholder ('' empty-string) which the new lifecycle
+            # uses for all pending rows. Dropped the UNIQUE here to
+            # match the production schema after alembic 0028 (audit
+            # `binance_order_id` is now in NON_HASHED_ALLOW_LIST).
+            "binance_order_id TEXT, opened_at TEXT, "
             "mode_at_open TEXT, approved_via TEXT, "
             "reasoning TEXT, inputs_hash TEXT, "
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
             "mtf_directions_json TEXT, "
+            # Lifecycle columns from alembic 0028.
+            "status TEXT NOT NULL DEFAULT 'pending', "
+            "sl_order_id TEXT, tp_order_id TEXT, failure_reason TEXT, "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine
@@ -195,9 +204,26 @@ async def test_fully_auto_places_order_and_writes_live_trade() -> None:
         "status": "FILLED",
     }
 
+    # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): place_with_sltp
+    # now fires 3 sequential Binance orders — MARKET entry, then
+    # STOP_MARKET SL, then TAKE_PROFIT_MARKET TP. The handler returns
+    # distinct orderIds keyed on the `type=` param so the assertion
+    # can check the right id ended up in live_trades.binance_order_id.
+    _order_seq = {"n": 0}
+
     def handler(req: httpx.Request) -> httpx.Response:
-        if "/leverage" in str(req.url):
+        url = str(req.url)
+        if "/leverage" in url:
             return httpx.Response(200, json={"leverage": 10})
+        # Inspect the order type to give it a deterministic id.
+        if "type=STOP_MARKET" in url:
+            return httpx.Response(200, json={
+                **fake_order_response, "orderId": 5555, "type": "STOP_MARKET",
+            })
+        if "type=TAKE_PROFIT_MARKET" in url:
+            return httpx.Response(200, json={
+                **fake_order_response, "orderId": 6666, "type": "TAKE_PROFIT_MARKET",
+            })
         return httpx.Response(200, json=fake_order_response)
 
     fake_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -212,6 +238,13 @@ async def test_fully_auto_places_order_and_writes_live_trade() -> None:
         kwargs["http"] = fake_http
         real_init(self, **kwargs)
 
+    # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP: _place_live_order now opens
+    # independent sessions for the Phase 1 INSERT and Phase 3 UPDATE.
+    # Pass a session_factory bound to the test engine so those sessions
+    # hit SQLite instead of the production async_sessionmaker.
+    def _test_session_factory() -> AsyncSession:
+        return AsyncSession(engine)
+
     with patch.object(bl.BinanceLiveClient, "__init__", patched_init):
         async with AsyncSession(engine) as s:
             await s.execute(sa.text(
@@ -223,6 +256,7 @@ async def test_fully_auto_places_order_and_writes_live_trade() -> None:
                 proposal=_proposal(),
                 user=_user(mode="fully-auto"),
                 now=_NOW,
+                session_factory=_test_session_factory,  # type: ignore[arg-type]
             )
             await s.commit()
 

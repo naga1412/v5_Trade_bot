@@ -63,9 +63,36 @@ def _cb(data: str, *, cb_id: str = "1", chat_id: str = "123456",
 
 
 class _StubBinance:
+    """In-memory BinanceLiveClient stand-in.
+
+    Records every placement call so tests can assert against ``placed``,
+    ``sl_calls``, ``tp_calls``. Sensible defaults so most tests don't
+    need to override:
+      - market order returns ``order_id`` with avg_fill_price=80_100.0
+      - SL/TP placement succeeds with predictable order IDs
+      - get_position returns a stub PositionState (matches the just-
+        placed market order's quantity)
+      - close_position succeeds
+      - cancel_order_idempotent is a no-op returning True
+
+    Subclasses override individual methods to inject failure modes.
+    """
+
     def __init__(self, order_id: str = "ord-1") -> None:
         self._order_id = order_id
         self.placed: list[dict[str, Any]] = []
+        self.sl_calls: list[dict[str, Any]] = []
+        self.tp_calls: list[dict[str, Any]] = []
+        self.cancel_calls: list[dict[str, Any]] = []
+        self.close_calls: list[dict[str, Any]] = []
+        # PR-FIX-GHOST-POSITIONS: subclasses flip these flags to inject
+        # failures into place_stop_loss_close / place_take_profit_close
+        # while leaving the market order working.
+        self.sl_should_fail: bool = False
+        self.tp_should_fail: bool = False
+        self.close_should_fail: bool = False
+        self._next_sl_id: int = 1
+        self._next_tp_id: int = 1
 
     async def place_order(
         self, *, symbol: str, side: str, quantity: float,
@@ -78,6 +105,81 @@ class _StubBinance:
         return type("Order", (), {
             "binance_order_id": self._order_id,
             "avg_fill_price": 80_100.0,
+            "qty": quantity, "symbol": symbol, "side": side,
+            "status": "FILLED", "raw": {},
+        })
+
+    async def place_stop_loss_close(
+        self, *, symbol: str, close_side: str, stop_price: float,
+    ) -> Any:
+        if self.sl_should_fail:
+            from app.exchanges.binance_live import OrderRejected
+            raise OrderRejected(
+                f"STUB sl_should_fail: STOP_MARKET({symbol}) @ {stop_price}"
+            )
+        sl_id = f"sl-{self._next_sl_id}"
+        self._next_sl_id += 1
+        self.sl_calls.append({
+            "symbol": symbol, "close_side": close_side, "stop_price": stop_price,
+            "binance_order_id": sl_id,
+        })
+        return type("Order", (), {
+            "binance_order_id": sl_id, "avg_fill_price": 0.0, "qty": 0.0,
+            "symbol": symbol, "side": close_side, "status": "NEW", "raw": {},
+        })
+
+    async def place_take_profit_close(
+        self, *, symbol: str, close_side: str, stop_price: float,
+    ) -> Any:
+        if self.tp_should_fail:
+            from app.exchanges.binance_live import OrderRejected
+            raise OrderRejected(
+                f"STUB tp_should_fail: TAKE_PROFIT_MARKET({symbol}) @ {stop_price}"
+            )
+        tp_id = f"tp-{self._next_tp_id}"
+        self._next_tp_id += 1
+        self.tp_calls.append({
+            "symbol": symbol, "close_side": close_side, "stop_price": stop_price,
+            "binance_order_id": tp_id,
+        })
+        return type("Order", (), {
+            "binance_order_id": tp_id, "avg_fill_price": 0.0, "qty": 0.0,
+            "symbol": symbol, "side": close_side, "status": "NEW", "raw": {},
+        })
+
+    async def cancel_order_idempotent(
+        self, *, symbol: str, order_id: str,
+    ) -> bool:
+        self.cancel_calls.append({"symbol": symbol, "order_id": order_id})
+        return True
+
+    async def close_position(self, *, symbol: str) -> Any:
+        if self.close_should_fail:
+            from app.exchanges.binance_live import BinanceLiveError
+            raise BinanceLiveError(
+                f"STUB close_should_fail: close_position({symbol})"
+            )
+        self.close_calls.append({"symbol": symbol})
+        return type("Order", (), {
+            "binance_order_id": "close-1", "avg_fill_price": 80_050.0,
+            "qty": 0.001, "symbol": symbol, "side": "SELL",
+            "status": "FILLED", "raw": {},
+        })
+
+    async def get_position(self, *, symbol: str) -> Any:
+        """Return a stub position matching the last `place_order` call.
+
+        Reconciler tests override this to inject specific position
+        states (None = no position).
+        """
+        if not self.placed:
+            return None
+        last = self.placed[-1]
+        amt = last["quantity"] if last["side"] == "BUY" else -last["quantity"]
+        return type("PositionState", (), {
+            "symbol": last["symbol"], "position_amt": amt,
+            "entry_price": 80_100.0, "leverage": last["leverage"],
+            "liquidation_price": 0.0, "unrealized_pnl": 0.0,
         })
 
     async def fetch_mark_price(self, *, symbol: str) -> float | None:
@@ -104,6 +206,12 @@ async def _mk_engine() -> Any:
             "response TEXT, response_at TEXT, response_leverage INTEGER)"
         ))
         # Audit-chain table mirrors live_trades schema with prev_hash/row_hash.
+        # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP columns (alembic 0028, 2026-05-26):
+        # status / sl_order_id / tp_order_id / failure_reason. Default
+        # status='pending' so the Phase 1 INSERT lands as the expected
+        # initial state without requiring the writer to set it explicitly
+        # (matches what the migration's server_default would have done
+        # post-promotion to NOT NULL).
         await conn.execute(sa.text(
             "CREATE TABLE live_trades ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -115,6 +223,8 @@ async def _mk_engine() -> Any:
             "closed_at TEXT, pnl_usdt REAL, "
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
             "mtf_directions_json TEXT, "
+            "status TEXT NOT NULL DEFAULT 'pending', "
+            "sl_order_id TEXT, tp_order_id TEXT, failure_reason TEXT, "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine
@@ -150,7 +260,7 @@ async def test_place_approved_order_writes_live_trade() -> None:
     stub = _StubBinance(order_id="bin-9")
     async with AsyncSession(engine) as s:
         order_id = await _place_approved_order(
-            s, signal_id="abc123", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="abc123", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
@@ -209,7 +319,7 @@ async def test_place_approved_order_persists_mtf_state_from_payload() -> None:
     stub = _StubBinance(order_id="bin-mtf")
     async with AsyncSession(engine) as s:
         await _place_approved_order(
-            s, signal_id="mtf-sig", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="mtf-sig", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
@@ -238,7 +348,7 @@ async def test_place_approved_order_persists_null_mtf_when_payload_lacks_it() ->
     stub = _StubBinance(order_id="bin-no-mtf")
     async with AsyncSession(engine) as s:
         await _place_approved_order(
-            s, signal_id="abc123", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="abc123", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
@@ -284,7 +394,7 @@ async def test_place_approved_order_rejects_float_mtf_directions() -> None:
     stub = _StubBinance(order_id="bin-bad-mtf")
     async with AsyncSession(engine) as s:
         await _place_approved_order(
-            s, signal_id="bad-mtf", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="bad-mtf", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
@@ -306,7 +416,7 @@ async def test_place_approved_order_returns_none_for_unknown_signal() -> None:
     engine = await _mk_engine()
     async with AsyncSession(engine) as s:
         order_id = await _place_approved_order(
-            s, signal_id="ghost", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="ghost", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: _StubBinance(),
         )
     assert order_id is None
@@ -464,12 +574,17 @@ async def test_route_sig_approve_drift_rejection_sets_stale_price() -> None:
             "SELECT response, response_leverage FROM telegram_signals "
             "WHERE id='abc123'"
         ))).first()
-        live_count = (await s.execute(sa.text(
-            "SELECT count(*) FROM live_trades"
-        ))).scalar()
+        live = (await s.execute(sa.text(
+            "SELECT count(*) AS c, MAX(status) AS status "
+            "FROM live_trades"
+        ))).first()
     # Critical assertions: row final state is 'stale_price', NOT 'approved'.
     assert sig.response == "stale_price"
-    assert live_count == 0
+    # PR-FIX-GHOST-POSITIONS: Phase 1 pre-INSERT creates a pending row;
+    # drift rejection in Phase 2 flips it to status='failed' atomically
+    # with the response='stale_price' UPDATE on telegram_signals.
+    assert live.c == 1
+    assert live.status == "failed"
 
 
 @pytest.mark.asyncio
@@ -544,12 +659,25 @@ async def test_route_sig_approve_drift_atomic_no_intermediate_approved_commit() 
             "SELECT response FROM telegram_signals WHERE id='abc123'"
         ))).first()
     assert sig.response == "stale_price"
-    # And no live trade row was written despite the tentative 'approved'.
+    # PR-FIX-GHOST-POSITIONS (2026-05-26): the new lifecycle pre-INSERTs
+    # a `status='pending'` row in Phase 1, then UPDATEs it to
+    # `status='failed'` in Phase 3 on drift rejection. So we DO expect
+    # exactly one live_trades row, marked failed, with a failure_reason
+    # naming the drift. No Binance order placed — drift check fires
+    # before place_with_sltp.
     async with AsyncSession(engine) as s:
-        live_count = (await s.execute(sa.text(
-            "SELECT count(*) FROM live_trades"
-        ))).scalar()
-    assert live_count == 0
+        live = (await s.execute(sa.text(
+            "SELECT count(*) AS c, "
+            "       MAX(status) AS status, "
+            "       MAX(failure_reason) AS reason, "
+            "       MAX(binance_order_id) AS boid "
+            "FROM live_trades"
+        ))).first()
+    assert live.c == 1
+    assert live.status == "failed"
+    assert "stale_price" in (live.reason or "")
+    assert live.boid == ""  # never updated past the Phase 1 placeholder
+    assert not stub.placed
 
 
 @pytest.mark.asyncio
@@ -852,7 +980,7 @@ async def test_approve_with_acceptable_drift_places_order() -> None:
     stub = _StubBinanceWithPrice(order_id="bin-OK", mark_price=80_300.0)
     async with AsyncSession(engine) as s:
         order_id = await _place_approved_order(
-            s, signal_id="drift-ok", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="drift-ok", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
@@ -881,7 +1009,7 @@ async def test_approve_with_excessive_drift_returns_stale_price() -> None:
     stub = _StubBinanceWithPrice(order_id="should-not-place", mark_price=81_000.0)
     async with AsyncSession(engine) as s:
         order_id = await _place_approved_order(
-            s, signal_id="drift-bad", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="drift-bad", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
@@ -906,7 +1034,7 @@ async def test_stale_price_outcome_persists_to_telegram_signals() -> None:
     stub = _StubBinanceWithPrice(order_id="x", mark_price=82_500.0)
     async with AsyncSession(engine) as s:
         await _place_approved_order(
-            s, signal_id="audit-stale", leverage=5, use_testnet=True,
+            lambda: AsyncSession(engine), signal_id="audit-stale", leverage=5, use_testnet=True,
             user_id=1, binance_factory=lambda: stub, now=_NOW,
         )
         await s.commit()
