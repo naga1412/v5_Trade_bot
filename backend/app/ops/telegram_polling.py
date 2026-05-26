@@ -253,10 +253,16 @@ async def _phase1_insert_pending_trade(
 
     Returns the trade_id on success; None on DB error. The row is
     fully-formed at the audit-chain level — binance_order_id is set to
-    an empty string sentinel (placeholder, replaced post-Binance via
-    UPDATE on the non-hashed column). status='pending' tells
-    live_exit_monitor's reconciler to look up the Binance side after
-    a 60s grace window.
+    a UNIQUE per-trade placeholder ``"pending-{signal_id}"`` (replaced
+    post-Binance via UPDATE on the non-hashed column). status='pending'
+    tells live_exit_monitor's reconciler to look up the Binance side
+    after a 60s grace window.
+
+    Per-trade unique placeholders are required because
+    `live_trades.binance_order_id` carries a UNIQUE constraint
+    (migration 0016). A bare ``""`` sentinel would UniqueViolation on
+    the second pending row — observed 2026-05-26 in CI on the test
+    suite that inserts three test rows with the same placeholder.
     """
     direction = payload["direction"]
     symbol = payload["symbol"]
@@ -265,6 +271,7 @@ async def _phase1_insert_pending_trade(
     take_profit = float(payload["take_profit_price"])
     margin_usdt = float(payload["margin_usdt"])
 
+    pending_placeholder = f"pending-{signal_id}"
     trade_payload = build_live_trade_payload(
         user_id=payload.get("__row_user_id__") or user_id,
         symbol=symbol,
@@ -274,7 +281,7 @@ async def _phase1_insert_pending_trade(
         entry_price=entry_price,  # signal-time price; updated to actual fill at Phase 3
         stop_loss=stop_loss,
         take_profit=take_profit,
-        binance_order_id="",  # placeholder; Phase 3 UPDATEs the non-hashed col
+        binance_order_id=pending_placeholder,
         opened_at=now,
         mode_at_open="telegram-approve",
         approved_via="telegram",
@@ -290,19 +297,14 @@ async def _phase1_insert_pending_trade(
     try:
         async with session_factory() as session:
             await insert_with_chain(session, "live_trades", trade_payload)
-            # Fetch the just-inserted id. Audit-chained INSERT doesn't
-            # return the id directly; lastrowid varies by dialect.
-            # Use a focused SELECT by the unique (user_id, opened_at,
-            # binance_order_id='') tuple — safe because we just wrote
-            # it in this session.
+            # Fetch the just-inserted id by the unique placeholder so
+            # concurrent pending inserts don't collide on the lookup.
             row = (await session.execute(
                 sa.text(
                     "SELECT id FROM live_trades "
-                    "WHERE user_id = :u AND opened_at = :o "
-                    "  AND binance_order_id = '' AND status = 'pending' "
-                    "ORDER BY id DESC LIMIT 1"
+                    "WHERE binance_order_id = :ph AND status = 'pending'"
                 ),
-                {"u": trade_payload["user_id"], "o": trade_payload["opened_at"]},
+                {"ph": pending_placeholder},
             )).first()
             await session.commit()
         if row is None:

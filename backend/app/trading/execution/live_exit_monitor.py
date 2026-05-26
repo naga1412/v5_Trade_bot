@@ -140,12 +140,21 @@ async def _list_stale_pending_trades(
     them to 'open' (Binance has a matching position) or marks them
     'failed' (Binance doesn't).
     """
-    cutoff_iso = (now - timedelta(seconds=_PENDING_GRACE_SECONDS)).isoformat()
+    # Bind cutoff as a raw `datetime` object. PR-FIX-PR275-FOLLOWUP
+    # (2026-05-27): the original `.isoformat()` string binding raised
+    # `asyncpg.InvalidArgumentError: expected datetime instance, got 'str'`
+    # in production every 30s because `live_trades.opened_at` is
+    # TIMESTAMPTZ. asyncpg's type-strict parameter binding refuses to
+    # implicit-cast ISO strings to TIMESTAMPTZ for query parameters
+    # (the implicit cast is dialect-level, not param-level). SQLAlchemy
+    # serialises Python datetimes correctly across both asyncpg and
+    # aiosqlite, so the raw object is portable.
+    cutoff = now - timedelta(seconds=_PENDING_GRACE_SECONDS)
     rows = (await session.execute(sa.text(
         "SELECT id, user_id, symbol, opened_at "
         "FROM live_trades "
         "WHERE status = 'pending' AND opened_at < :cutoff"
-    ), {"cutoff": cutoff_iso})).all()
+    ), {"cutoff": cutoff})).all()
     return [
         _PendingTrade(
             trade_id=int(r.id), user_id=int(r.user_id),
