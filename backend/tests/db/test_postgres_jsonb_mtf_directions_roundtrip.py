@@ -72,8 +72,13 @@ pytestmark = pytest.mark.skipif(
 
 
 # Sentinel keys so this test's rows don't collide with any other fixture.
-# DELETE-clause WHERE on these tokens guarantees teardown reaches only us.
-_TEST_USER_ID: int = 9_999_911
+# Uses the bootstrap admin (user_id=1, seeded by migration 0005) because
+# `shadow_open_positions.user_id` carries a FK to `users.id`; a synthetic
+# id like 9_999_911 would violate the constraint on a fresh CI Postgres.
+# The unique constraint on shadow_open_positions is (user_id, symbol,
+# timeframe) so a sentinel SYMBOL is what isolates our rows from any
+# other test's data on user_id=1.
+_TEST_USER_ID: int = 1
 _TEST_SYMBOL: str = "__pr_mtf_jsonb_roundtrip_test__"
 _TEST_SIGNAL_ID: str = "__pr_mtf_jsonb_roundtrip_signal__"
 
