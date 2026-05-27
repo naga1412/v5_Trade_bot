@@ -633,6 +633,11 @@ class TestBuildLiveTradePayload:
             "mtf_agreement": None,
             "mtf_dominant_tf": None,
             "mtf_directions_json": None,
+            # PR-FIX-PR275-PAYLOAD-STATUS (2026-05-27): explicit status
+            # in the output dict to override the migration 0028
+            # server_default='closed'. Default 'pending' matches the
+            # new lifecycle.
+            "status": "pending",
         }
         assert result == expected
 
@@ -643,7 +648,9 @@ class TestBuildLiveTradePayload:
         assert result["position_value_usdt"] == 150.0
         assert result["approved_via"] == "auto"
         assert result["mode_at_open"] == "fully-auto"
-        assert len(result) == 18
+        # PR-FIX-PR275-PAYLOAD-STATUS: 18 + 1 status = 19
+        assert len(result) == 19
+        assert result["status"] == "pending"
 
     def test_telegram_long(self) -> None:
         kwargs = self._telegram_kwargs(direction="LONG")
@@ -672,6 +679,8 @@ class TestBuildLiveTradePayload:
             "mtf_agreement": None,
             "mtf_dominant_tf": None,
             "mtf_directions_json": None,
+            # PR-FIX-PR275-PAYLOAD-STATUS (2026-05-27): see test_auto_long.
+            "status": "pending",
         }
         assert result == expected
 
@@ -681,16 +690,19 @@ class TestBuildLiveTradePayload:
         assert result["direction"] == "SHORT"
         assert result["approved_via"] == "telegram"
         assert result["mode_at_open"] == "telegram-approve"
-        assert len(result) == 18
+        # PR-FIX-PR275-PAYLOAD-STATUS: 18 + 1 status = 19
+        assert len(result) == 19
+        assert result["status"] == "pending"
 
     def test_auto_vs_telegram_divergent_fields(self) -> None:
         """Auto and telegram payloads differ in the 5 divergent fields."""
         auto_result = build_live_trade_payload(**self._auto_kwargs())
         tg_result = build_live_trade_payload(**self._telegram_kwargs())
 
-        # Identical structure — same 18 keys (PR1: 15; PR2: +3 MTF)
+        # Identical structure — same 19 keys (PR1: 15; PR2: +3 MTF;
+        # PR-FIX-PR275-PAYLOAD-STATUS: +1 status)
         assert set(auto_result.keys()) == set(tg_result.keys())
-        assert len(auto_result) == 18
+        assert len(auto_result) == 19
 
         # Divergent: mode_at_open
         assert auto_result["mode_at_open"] == "fully-auto"
@@ -728,9 +740,10 @@ class TestBuildLiveTradePayload:
         assert result["position_value_usdt"] == 500.0  # 50 * 10
 
     def test_15_keys_present(self) -> None:
-        """Output must have exactly 18 keys post-PR2 (15 PR1 + 3 MTF)."""
+        """Output must have exactly 19 keys post-PR-FIX-PR275-PAYLOAD-STATUS
+        (15 PR1 + 3 MTF + 1 status)."""
         result = build_live_trade_payload(**self._auto_kwargs())
-        assert len(result) == 18
+        assert len(result) == 19
 
     def test_reasoning_column_not_reasoning_json(self) -> None:
         """Column name is 'reasoning', NOT 'reasoning_json'."""
