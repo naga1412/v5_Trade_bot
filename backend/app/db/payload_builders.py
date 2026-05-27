@@ -226,6 +226,13 @@ def build_live_trade_payload(
     mtf_agreement: int | None = None,
     mtf_dominant_tf: str | None = None,
     mtf_directions: dict[str, int] | None = None,
+    # PR-FIX-PR275-PAYLOAD-STATUS (2026-05-27): explicit status on every
+    # INSERT so the row never inherits the migration's `server_default
+    # ='closed'` (set for the 0028 backfill — appropriate for legacy
+    # rows, WRONG for the new lifecycle). Default 'pending' matches the
+    # new lifecycle: Phase 1 INSERT → status='pending'; Phase 3 UPDATE
+    # promotes to 'open' / 'failed'; live_exit_monitor moves to 'closed'.
+    status: str = "pending",
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the live_trades table.
 
@@ -273,4 +280,7 @@ def build_live_trade_payload(
             json.dumps(mtf_directions, sort_keys=True, separators=(",", ":"))
             if mtf_directions is not None else None
         ),
+        # PR-FIX-PR275-PAYLOAD-STATUS: explicit pending so we override
+        # the migration's server_default='closed'.
+        "status": status,
     }
