@@ -27,6 +27,19 @@ Safety:
     leaves the position open ONLY if `close_position` itself raises
     (the operator must intervene — message will say so loudly).
 
+SELF-BOOTSTRAP NOTE
+===================
+`_vault_keys` in app/trading/execution/glue.py is a MODULE-LEVEL dict
+populated by `initialize_vault_cache` during the uvicorn lifespan
+(main.py:402). Each `docker compose exec ... python -m ...` spawns
+a FRESH Python process with its own empty `_vault_keys = {}` — the
+uvicorn worker's in-process state is invisible.
+
+The script therefore self-bootstraps: it calls
+`initialize_vault_cache(passphrase, secrets_path)` once before invoking
+`_place_approved_order`. Same call shape uvicorn uses (see main.py:402);
+on failure aborts with `phase="vault_init"` and a clear reason.
+
 ABORT CONDITIONS (script bails out with a clear message)
 ========================================================
 * `HYBRID_AUTO_SCORE_THRESHOLD` < 0.9 (interpreted as: safety freeze is
@@ -35,8 +48,10 @@ ABORT CONDITIONS (script bails out with a clear message)
   `app/config.py` rejects values >= 1.0 or <= 0. Earlier draft of this
   script used `< 90` which can NEVER pass, blocking the safety check
   entirely. Fixed 2026-05-27 per PR-FIX-PR275-FOLLOWUP.
-* Vault keys not loaded (need real Binance creds; testnet won't
-  exercise the real Binance order pipeline)
+* `initialize_vault_cache` returns False (secrets.enc missing, wrong
+  passphrase, missing keys in the decrypted payload).
+* Vault keys not loaded AFTER successful init — sanity check; means the
+  module-level state didn't take, indicates a deeper issue.
 * `_place_approved_order` returns None → indicates Part 1 fix didn't
   land OR there's another bug
 * Binance returns 4xx auth error on any call
@@ -66,13 +81,17 @@ def _safe_import() -> dict[str, Any]:
         from app.db.session import get_session_factory
         from app.exchanges.binance_live import BinanceLiveClient
         from app.ops.telegram_polling import _place_approved_order
-        from app.trading.execution.glue import vault_keys
+        from app.trading.execution.glue import (
+            initialize_vault_cache,
+            vault_keys,
+        )
         return {
             "get_settings": get_settings,
             "get_session_factory": get_session_factory,
             "BinanceLiveClient": BinanceLiveClient,
             "_place_approved_order": _place_approved_order,
             "vault_keys": vault_keys,
+            "initialize_vault_cache": initialize_vault_cache,
         }
     except Exception as e:  # noqa: BLE001
         print(json.dumps({
@@ -80,7 +99,7 @@ def _safe_import() -> dict[str, Any]:
             "phase": "import",
             "error": f"{type(e).__name__}: {e}",
             "hint": "Run from /opt/trading-radar via "
-                    "`docker compose exec backend python -m tools.test_atomic_placement_round_trip`",
+                    "`docker compose exec backend python -m tools.round_trip_test_trade`",
         }, indent=2))
         sys.exit(2)
 
@@ -262,6 +281,7 @@ async def _run() -> dict[str, Any]:
     BinanceLiveClient = deps["BinanceLiveClient"]
     _place_approved_order = deps["_place_approved_order"]
     vault_keys = deps["vault_keys"]
+    initialize_vault_cache = deps["initialize_vault_cache"]
 
     # ─── Safety: only run while HYBRID is frozen ──────────────────────
     # The threshold is on the fraction scale (0, 1) — Pydantic validator
@@ -285,13 +305,61 @@ async def _run() -> dict[str, Any]:
             ),
         }
 
-    # ─── Safety: vault must be loaded (real Binance creds) ───────────
+    # ─── Phase 1.5: self-bootstrap the vault cache ────────────────────
+    # `_vault_keys` in app/trading/execution/glue.py is a module-level
+    # dict populated by `initialize_vault_cache` during the uvicorn
+    # lifespan (main.py:402). This script runs in a SEPARATE Python
+    # process via `docker compose exec ... python -m ...` and gets its
+    # own empty `_vault_keys = {}`. We mirror the uvicorn call shape
+    # exactly here so the dispatcher's vault_keys() lookup downstream
+    # finds the same creds the live worker uses.
+    import os
+    from pathlib import Path
+    try:
+        secrets_path = Path(
+            os.environ.get("VAULT_SECRETS_PATH", "/app/secrets.enc"),
+        )
+        vault_ok = initialize_vault_cache(
+            passphrase=settings.master_passphrase,
+            secrets_path=secrets_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {
+            "status": "abort",
+            "phase": "vault_init",
+            "reason": (
+                f"initialize_vault_cache raised: {type(e).__name__}: {e}"
+            ),
+        }
+    if not vault_ok:
+        return {
+            "status": "abort",
+            "phase": "vault_init",
+            "reason": (
+                "initialize_vault_cache returned False. Common causes: "
+                "secrets.enc missing at VAULT_SECRETS_PATH (default "
+                f"{secrets_path}); wrong MASTER_PASSPHRASE; vault file "
+                "missing binance_api_key or binance_api_secret. Inspect "
+                "backend logs immediately after this abort for the "
+                "specific failure mode (decrypt failed / missing keys)."
+            ),
+        }
+
+    # ─── Sanity: vault_keys() must return populated keys post-bootstrap ─
+    # If vault_ok==True but vault_keys() returns None we have a deeper
+    # issue (module reload between init and read, etc.) — abort
+    # distinctly so the operator can diagnose.
     keys = vault_keys()
     if keys is None:
         return {
             "status": "abort",
             "phase": "vault",
-            "reason": "vault_keys() returned None — Binance creds not loaded",
+            "reason": (
+                "initialize_vault_cache returned True but vault_keys() "
+                "returned None — module-level cache not visible. "
+                "Possible cause: glue.py module re-imported under a "
+                "different name. Re-run; if persistent, file a bug."
+            ),
         }
 
     # ─── Step 1: fetch live BTC mid price ────────────────────────────
