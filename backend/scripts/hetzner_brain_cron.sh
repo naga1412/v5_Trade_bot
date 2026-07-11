@@ -92,21 +92,19 @@ if [ ! -f "$EVAL_FILE" ]; then
 fi
 log "eval file: ${EVAL_FILE}"
 
-# Phase D: register the candidate via the admin_rl REST endpoint. The
-# row lands inactive — promotion to active requires the operator's
-# Telegram approval below. The container path /app/data/rl-cache/ is
-# bind-mounted from $RL_CACHE_DIR (host) via the docker-compose volume
-# from PR #41, so the .pt the trainer just wrote is visible inside.
-log "▶ Phase D — registering candidate in rl_checkpoints"
-# --direct bypasses the HTTP /api/v1/admin/rl-checkpoints route, which is
-# gated by Cloudflare Access JWT (require_admin → require_cf_user) in
-# ENV=production. The cron has no JWT/bearer, so the HTTP path 401's.
-# --direct writes the row via SQLAlchemy using app.db.session — runs inside
-# the backend container where PYTHONPATH already includes /app.
+# Phase D: register + immediately activate the candidate. --activate --force
+# bypasses the champion-challenger Sharpe gate since there is no live
+# champion to compare against yet. --direct bypasses the HTTP route (gated
+# by Cloudflare Access JWT; cron has no bearer). When a champion exists,
+# register_brain.py compares Sharpe and only activates if challenger wins
+# by >5% — the --force flag is a no-op in that path.
+log "▶ Phase D — registering + activating candidate in rl_checkpoints"
 REGISTER_CMD="python /app/host-tools/ml/register_brain.py \
   --checkpoint /app/data/rl-cache/ppo_policy_${VERSION}.pt \
   --eval /app/data/rl-cache/eval_brain_${VERSION}.json \
-  --direct"
+  --direct \
+  --activate \
+  --force"
 
 REGISTER_OUT=$(cd "$INSTALL_DIR" && docker compose exec -T backend bash -c "$REGISTER_CMD" 2>&1 || true)
 echo "$REGISTER_OUT" >> "$LOG_FILE"

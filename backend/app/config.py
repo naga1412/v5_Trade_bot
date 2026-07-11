@@ -217,6 +217,11 @@ class Settings(BaseSettings):
     # entry was correct at the time but is now stale.
     SHADOW_SPOT_BLACKLIST: list[str] = [
         "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT",
+        # 2026-07-11: new stablecoins/pegged tokens that entered SPOT top-30
+        # but have no Binance Futures perpetual — caused ~100 premiumIndex
+        # 400 Bad Request errors/hour in the intermarket worker.
+        "RLUSDUSDT", "USD1USDT", "USDEUSDT", "SPCXBUSDT",
+        "EURUSDT", "FDUSDUSDT", "SNDKBUSDT",
     ]
 
     # --- PR-strategy-1: entry-quality gate -------------------------------
