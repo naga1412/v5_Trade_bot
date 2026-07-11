@@ -40,6 +40,7 @@ on:
           - brain-holdout-labels # READ-ONLY: label-side audit of the 59 backtest holdout trades (2026-05-19 → 2026-05-22). Reports trade dump + by-direction + by-hour + top-15 by-symbol — informs misclass analysis without needing brain decisions.
           - brain-reeval-checkpoints # READ-ONLY: re-evaluates each .pt in _predegenerate/ against current buffer state using PR-BRAIN-CORRECTNESS-METRIC. Outputs a comparison table with brain_correctness, sharpe, cumulative_reward — lets us judge old checkpoints by the new (non-invariant) metric without retraining.
           - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe
+          - perf-by-symbol # READ-ONLY: 30-day per-symbol breakdown — trades, WR%, avg P&L, total P&L, TP/SL split — sorted by worst total P&L. Identifies which symbols are dragging down overall win rate.
           - brain-activate # WRITE: list rl-cache .pt files + cron log + activate latest rl_checkpoint (is_active=true) + restart backend. Use when brain has been training nightly but never activated.
 
 jobs:
@@ -726,6 +727,34 @@ jobs:
                     round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
                     FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '14 days' \
                     GROUP BY DATE(closed_at) ORDER BY day;\""
+              ;;
+            perf-by-symbol)
+              # Per-symbol performance breakdown over the last 30 days.
+              # Sorted by worst total P&L — shows which symbols are dragging
+              # down the system's overall win rate. TP/SL exit reason split
+              # helps distinguish "bad signals" from "bad SL sizing".
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
+                 psql -U postgres -d trading_radar -c \
+                 \"SELECT symbol, count(*) AS trades, \
+                    sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins, \
+                    round((100.0*sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END)/nullif(count(*), 0))::numeric, 1) AS wr_pct, \
+                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct, \
+                    round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
+                    count(*) FILTER (WHERE exit_reason = 'TAKE_PROFIT') AS tp_count, \
+                    count(*) FILTER (WHERE exit_reason = 'STOP_LOSS') AS sl_count \
+                    FROM shadow_trades \
+                    WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '30 days' \
+                    GROUP BY symbol ORDER BY total_pnl_usdt ASC;\" -c \
+                 \"SELECT 'TOTAL' AS symbol, count(*) AS trades, \
+                    sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins, \
+                    round((100.0*sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END)/nullif(count(*), 0))::numeric, 1) AS wr_pct, \
+                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct, \
+                    round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
+                    count(*) FILTER (WHERE exit_reason = 'TAKE_PROFIT') AS tp_count, \
+                    count(*) FILTER (WHERE exit_reason = 'STOP_LOSS') AS sl_count \
+                    FROM shadow_trades \
+                    WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '30 days';\""
               ;;
             brain-activate)
               # Operator-triggered one-shot: inspects rl-cache + cron log, then
