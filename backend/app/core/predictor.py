@@ -329,6 +329,7 @@ async def _compute_aggregator_hook_fields(
     float | None,  # realized_vol_20d
     float | None,  # funding_directional_adj
     float | None,  # funding_rate (per-8h, raw from Binance) — PR-PLUMBING-1
+    str | None,    # mtf_adx_by_tf_json — PR-BOT-INTELLIGENCE-UPGRADE C3
 ]:
     """Compute the 7 PR1 record-only analytics fields.
 
@@ -396,6 +397,7 @@ async def _compute_aggregator_hook_fields(
     mtf_agreement_val: int | None = None
     mtf_dominant_tf_val: str | None = None
     mtf_directions_json_val: str | None = None
+    mtf_adx_by_tf_json_val: str | None = None
     if mtf is not None:
         mtf_agreement_val = mtf.agreement
         mtf_dominant_tf_val = mtf.dominant_tf
@@ -414,6 +416,19 @@ async def _compute_aggregator_hook_fields(
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("aggregator_hook: mtf.directions json.dumps failed: %s", exc)
+        # PR-BOT-INTELLIGENCE-UPGRADE C3: serialize per-TF ADX alongside
+        # directions. In-memory only (no DB column); the dispatcher's
+        # open_position_gate parses it back when ADX_GATE_ENABLED.
+        # `getattr` default keeps test stubs that pre-date the C3 field
+        # (e.g. SimpleNamespace fakes) silent — they'll get an empty {}
+        # which serializes cleanly, no warning noise.
+        _adx_by_tf = getattr(mtf, "adx_by_tf", None) or {}
+        try:
+            mtf_adx_by_tf_json_val = json.dumps(
+                _adx_by_tf, sort_keys=True, separators=(",", ":"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("aggregator_hook: mtf.adx_by_tf json.dumps failed: %s", exc)
 
     log.info(
         "aggregator_hook %s/%s: mtf_attached=%s p_win=%s effective_score=%s funding_adj=%s",
@@ -437,6 +452,8 @@ async def _compute_aggregator_hook_fields(
         # LivePredictionOut.funding_rate_daily for the dispatcher's
         # funding-rate kill-switch.
         funding_rate,
+        # PR-BOT-INTELLIGENCE-UPGRADE C3: serialized per-TF ADX JSON.
+        mtf_adx_by_tf_json_val,
     )
 
 
@@ -613,6 +630,7 @@ async def build_prediction(
         _realized_vol_20d,
         _funding_directional_adj,
         _funding_rate_per_8h,
+        _mtf_adx_by_tf_json,
     ) = await _compute_aggregator_hook_fields(
         symbol=symbol,
         timeframe=timeframe,
@@ -658,6 +676,10 @@ async def build_prediction(
         # PR-PLUMBING-1 Fix 1: raw daily funding rate for the dispatcher
         # kill-switch (None = lookup failed / no session — gate falls open).
         funding_rate_daily=_funding_rate_daily,
+        # PR-BOT-INTELLIGENCE-UPGRADE C3: serialized per-TF ADX dict (in-memory
+        # only — the entry-quality gate reads dominant_tf's ADX for its global
+        # trend-strength check). None when MTF compute itself returned None.
+        mtf_adx_by_tf_json=_mtf_adx_by_tf_json,
     )
 
 

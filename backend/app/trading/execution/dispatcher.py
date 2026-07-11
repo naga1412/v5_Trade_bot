@@ -121,6 +121,17 @@ class SignalProposal:
     # score available" → allow (operator-driven manual entry should not
     # be blocked by a flag the operator hasn't opted into).
     entry_score: float | None = None
+    # PR-BOT-INTELLIGENCE-UPGRADE: per-signal context for the extended
+    # entry-quality gate. All three default None so existing callers
+    # (admin_test_trade, ad-hoc) keep working unchanged and the gate's
+    # corresponding sub-checks short-circuit to "no opinion → allow"
+    # when their flag is off OR the data wasn't threaded.
+    #   layer2_direction: "LONG"|"SHORT"|"NEUTRAL" — Layer-2 pattern vote
+    #   layer2_confidence: meta-confidence on the L2 score (0..1)
+    #   mtf_adx_by_tf: {"5m": 18.3, "1h": 31.2, ...} from MtfConfluence
+    layer2_direction: str | None = None
+    layer2_confidence: float | None = None
+    mtf_adx_by_tf: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +170,13 @@ DispatchOutcome = Literal[
     "blocked_low_sharpe",
     # PR-strategy-1 — entry-quality gate
     "blocked_entry_quality",
+    # PR-BOT-INTELLIGENCE-UPGRADE — new entry-quality sub-reasons emitted by
+    # the extended `open_position_gate`. They surface inside the
+    # `blocked_entry_quality` outcome's detail string; declared as distinct
+    # literals so the metrics/dispatch_logs split can count them separately
+    # if/when the operator wants per-reason dashboards.
+    "blocked_wrong_regime",
+    "blocked_low_trend_strength",
     # PR-HYBRID-CONFIDENCE-ROUTING — auto-executed under telegram-approve
     # mode when |entry_score| >= HYBRID_AUTO_SCORE_THRESHOLD. Distinct
     # from `placed` (fully-auto) so dispatch logs / counters / dashboards
@@ -765,14 +783,29 @@ async def dispatch(
     # ---- end PR10 ------------------------------------------------------
 
     # ---- PR-strategy-1 entry-quality gate ------------------------------
-    # Both flags default OFF (MIN_ENTRY_SCORE_LONG=None, DISABLE_SHORT_
-    # SIGNALS=False) — when off, `open_position_gate` short-circuits to
-    # allow without touching the DB. The gate reads `proposal.entry_score`
-    # (threaded from `pred.final.score` via `proposal_from_prediction`).
+    # PR-BOT-INTELLIGENCE-UPGRADE extension: the gate now also evaluates
+    # bull/bear market regime (CHANGE 1), Layer-2 pattern boost / penalty
+    # (CHANGE 2), and dominant-TF ADX trend strength (CHANGE 3). Each
+    # sub-gate is independently flag-gated and defaults OFF — the legacy
+    # `DISABLE_SHORT_SIGNALS` + `MIN_ENTRY_SCORE_LONG` checks are unchanged
+    # when the new flags are off.
     from app.config import get_settings as _get_entry_quality_settings
     from app.core.gates.entry_quality import open_position_gate
+    _eq_settings = _get_entry_quality_settings()
+    # CHANGE 1: fetch (cached) market regime only when the flag is on so
+    # the network round-trip is paid for at most once / 24h, and zero
+    # times when the operator hasn't opted in. `get_cached_market_regime`
+    # itself is fail-open — returns None on fetch failure → gate treats
+    # None as "no opinion, don't block".
+    _market_regime: str | None = None
+    if getattr(_eq_settings, "REGIME_GATE_ENABLED", False):
+        try:
+            from app.core.regime import get_cached_market_regime
+            _market_regime = await get_cached_market_regime()
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            log.warning("market_regime fetch unexpected exception: %s", exc)
     _eq_decision = open_position_gate(
-        proposal, _get_entry_quality_settings(),
+        proposal, _eq_settings, market_regime=_market_regime,
     )
     if not _eq_decision.allow:
         return DispatchResult(

@@ -323,6 +323,15 @@ async def _maybe_dispatch(
     ts = pred.trade_setup
     if ts is None or ts.entry is None or ts.stop_loss is None or ts.take_profit is None:
         return
+    # PR-BOT-INTELLIGENCE-UPGRADE: extract Layer-2 pattern data from
+    # pred.layer_scores so the dispatcher's entry-quality gate can apply
+    # the pattern boost/penalty. Key shape is `str(int)` (see
+    # `predictor.build_prediction` — `{str(i): _layer_to_out(s) ...}`).
+    # None-safe — if L2 abstained (slot missing or value None), both
+    # extracted fields stay None and the gate's pattern check is a no-op.
+    _l2 = getattr(pred, "layer_scores", {}).get("2") if hasattr(pred, "layer_scores") else None
+    _l2_direction: str | None = getattr(_l2, "direction", None) if _l2 is not None else None
+    _l2_confidence: float | None = getattr(_l2, "confidence", None) if _l2 is not None else None
     try:
         async with session_factory() as dispatch_session:
             result = await dispatch_if_eligible(
@@ -357,6 +366,13 @@ async def _maybe_dispatch(
                     # None when the predictor's intermarket lookup failed —
                     # glue's `or 0.0` collapse keeps the gate fail-open.
                     "pred_funding_rate_daily": pred.funding_rate_daily,
+                    # PR-BOT-INTELLIGENCE-UPGRADE: thread pattern + ADX
+                    # context for the extended entry-quality gate. All
+                    # three are Optional — the gate sub-checks are flag-
+                    # gated and short-circuit when their flag is off.
+                    "layer2_direction": _l2_direction,
+                    "layer2_confidence": _l2_confidence,
+                    "mtf_adx_by_tf_json": getattr(pred, "mtf_adx_by_tf_json", None),
                 },
                 # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): thread
                 # the live worker's session_factory through so
