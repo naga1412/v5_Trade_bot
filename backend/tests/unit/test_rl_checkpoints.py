@@ -104,16 +104,29 @@ async def test_load_returns_none_when_factory_missing(session: AsyncSession) -> 
 async def test_load_round_trips_local_file_checkpoint(
     session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Save a state_dict to disk, register it, load it, verify weights match."""
+    """Save a checkpoint in production format, register it, load it, verify weights.
+
+    Production format (from train_brain.py save_checkpoint):
+        {"policy": policy.state_dict(), "asset_table": asset_table.state_dict()}
+
+    The loader must extract state["policy"] — NOT load the whole dict.
+    Regression: original loader did model.load_state_dict(state) which would
+    fail with unexpected key(s) 'policy', 'asset_table'.
+    """
     monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
 
-    # 1) Train a tiny policy with known weights, save to disk.
+    # 1) Train a tiny policy with known weights, save in production format.
     src = _TinyPolicy()
     with torch.no_grad():
         src.fc.weight.fill_(0.42)
         src.fc.bias.fill_(-0.1)
     ckpt_path = tmp_path / "ppo_policy_v1.pt"
-    torch.save(src.state_dict(), ckpt_path)
+    # Mirror train_brain.py save_checkpoint: wrap policy state_dict in {"policy": ...}
+    asset_table_stub = nn.Embedding(1, 4)  # minimal stand-in for AssetEmbeddingTable
+    torch.save(
+        {"policy": src.state_dict(), "asset_table": asset_table_stub.state_dict()},
+        ckpt_path,
+    )
     sha = hashlib.sha256(ckpt_path.read_bytes()).hexdigest()
 
     # 2) Register it as active in the DB.
@@ -143,13 +156,43 @@ async def test_load_round_trips_local_file_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_load_rejects_flat_state_dict_format(
+    session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If someone saves a bare state_dict (pre-train_brain.py format) the loader
+    must fail gracefully — not silently load garbage weights."""
+    monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
+
+    src = _TinyPolicy()
+    ckpt_path = tmp_path / "ppo_policy_v1_flat.pt"
+    # OLD (wrong) format — flat state dict, no "policy" key wrapper
+    torch.save(src.state_dict(), ckpt_path)
+    sha = hashlib.sha256(ckpt_path.read_bytes()).hexdigest()
+
+    file_uri = ckpt_path.resolve().as_uri()
+    await session.execute(sa.text("""
+        INSERT INTO rl_checkpoints
+        (model_name, version, checkpoint_uri, sha256, trained_at,
+         train_data_window, eval_results, is_active)
+        VALUES ('ppo_policy_v1', 'v1-flat', :u, :h,
+                '2026-07-12T00:00:00+00:00', 'window', '{}', 1)
+    """), {"u": file_uri, "h": sha})
+    await session.commit()
+
+    # Loader must return None (torch load failed / key error) instead of
+    # silently loading the flat dict as if it were a wrapped checkpoint.
+    out = await load_active_checkpoint(session, model_factory=_TinyPolicy)
+    assert out is None
+
+
+@pytest.mark.asyncio
 async def test_load_returns_none_on_sha_mismatch(
     session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
     src = _TinyPolicy()
     ckpt_path = tmp_path / "ppo_policy_v1.pt"
-    torch.save(src.state_dict(), ckpt_path)
+    torch.save({"policy": src.state_dict(), "asset_table": {}}, ckpt_path)
 
     file_uri = ckpt_path.resolve().as_uri()
     bad_sha = "f" * 64  # deliberately wrong

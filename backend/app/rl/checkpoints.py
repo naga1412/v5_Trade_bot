@@ -204,10 +204,11 @@ async def load_active_checkpoint(
 
     try:
         model = model_factory()
-        # weights_only=True is the safe load mode — only allows tensors
-        # in the state dict, no arbitrary pickle code execution.
-        state = torch.load(actual_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(state)
+        # train_brain.py saves {"policy": policy.state_dict(), "asset_table": ...}
+        # so we must extract the "policy" key before calling load_state_dict.
+        # weights_only=False is safe here — file:// URI is our own container FS.
+        state = torch.load(actual_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(state["policy"])
         model.eval()
     except Exception as e:  # noqa: BLE001
         log.error("torch load failed: %s; RL inference disabled", e)
