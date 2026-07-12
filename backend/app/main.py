@@ -44,6 +44,7 @@ from app.data.universe_sync import start_universe_sync_task
 from app.shadow.universe_refresh import start_universe_refresh_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
+from app.rl.checkpoints import load_active_checkpoint as load_rl_active_checkpoint
 from app.news.ingest_worker import (
     start_news_cleanup_task,
     start_news_ingest_task,
@@ -161,6 +162,16 @@ async def lifespan(_app: FastAPI):
                 await load_active_checkpoint(session)
         except Exception as e:  # noqa: BLE001
             log.warning("load_active_checkpoint failed at startup: %s", e)
+
+        # SP-4 §6.1: load the active RL brain checkpoint (L10 PPO policy).
+        # No active row → log warning and continue (predictor falls back to
+        # brain_adjust=1.0 equal-weight mode automatically).
+        try:
+            from app.rl.policy import PolicyNetwork
+            async with session_factory() as session:
+                await load_rl_active_checkpoint(session, model_factory=PolicyNetwork)
+        except Exception as e:  # noqa: BLE001
+            log.warning("load_rl_active_checkpoint failed at startup: %s", e)
         live_worker = start_background_worker()
         shadow_worker = start_shadow_worker()
         # SP-3.5 / shadow: daily 00:00 UTC asset_universe refresh — top-30
