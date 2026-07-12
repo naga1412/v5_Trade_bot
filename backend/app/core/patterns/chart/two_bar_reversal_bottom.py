@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import recent_atr
+from app.core.patterns.chart._helpers import recent_atr, volume_climax_at_point
 
 
 class TwoBarReversalBottomPattern:
@@ -28,14 +28,19 @@ class TwoBarReversalBottomPattern:
             return None
         if abs(prev_body + cur_body) > 0.3 * atr:
             return None
+        _vol_cur  = float(bars["volume"].iloc[current_idx])
+        _vol_avg  = float(bars["volume"].iloc[max(0, current_idx - 10):current_idx].mean())
+        vol_climax = _vol_avg > 0 and _vol_cur > _vol_avg * 1.3
+        confidence = 0.72 if vol_climax else 0.50
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="LONG",
             strength=0.7,
-            confidence=0.6,
+            confidence=confidence,
             evidence={
                 "prev_body": prev_body,
                 "cur_body": cur_body,
                 "atr": atr,
+                "vol_climax": vol_climax,
             },
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
+from app.core.patterns.chart._helpers import volume_climax_at_point
 
 
 class IslandReversalTopPattern:
@@ -17,6 +18,7 @@ class IslandReversalTopPattern:
         if current_idx < self.LOOKBACK:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
+        volumes = win["volume"].to_numpy(dtype=float)
         # Find a gap-up bar followed by an island then a gap-down bar
         opens = win["open"].to_numpy(dtype=float)
         highs = win["high"].to_numpy(dtype=float)
@@ -32,15 +34,18 @@ class IslandReversalTopPattern:
                     continue
                 # Island lows must all be above prior bar's high (the gap)
                 if (island_lows > highs[k - 1]).all():
+                    vol_climax = volume_climax_at_point(volumes, idx=len(volumes)-1)
+                    confidence = 0.72 if vol_climax else 0.50
                     return PatternFire(
                         pattern_id=self.pattern_id,
                         direction="SHORT",
                         strength=0.7,
-                        confidence=0.65,
+                        confidence=confidence,
                         evidence={
                             "gap_up_idx": int(k),
                             "gap_down_idx": int(len(win) - 1),
                             "island_size": int(len(win) - 1 - k),
+                            "vol_climax": vol_climax,
                         },
                     )
         return None

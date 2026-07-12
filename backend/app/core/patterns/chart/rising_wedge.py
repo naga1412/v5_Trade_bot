@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
+from app.core.patterns.chart._helpers import (
+    find_swing_highs,
+    find_swing_lows,
+    volume_contracts_second_half,
+)
 
 
 class RisingWedgePattern:
@@ -32,13 +36,17 @@ class RisingWedgePattern:
         # Both rising, support steeper than resistance
         if s_h <= 0 or s_l <= 0 or s_l <= s_h:
             return None
+        volumes = win["volume"].to_numpy(dtype=float)
+        vol_contracting = volume_contracts_second_half(volumes)
+        confidence = 0.68 if vol_contracting else 0.48
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
             strength=0.7,
-            confidence=0.6,
+            confidence=confidence,
             evidence={
                 "high_slope": float(s_h),
                 "low_slope": float(s_l),
+                "vol_contracting": vol_contracting,
             },
         )

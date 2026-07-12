@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import find_swing_highs
+from app.core.patterns.chart._helpers import find_swing_highs, volume_diverges_at_points
 
 
 class TripleTopPattern:
@@ -19,6 +19,7 @@ class TripleTopPattern:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
         highs = win["high"].to_numpy(dtype=float)
+        volumes = win["volume"].to_numpy(dtype=float)
         prom = max(highs.std() * 0.3, 0.01)
         peaks = find_swing_highs(highs, prominence=prom, distance=5)
         if len(peaks) < 3:
@@ -35,14 +36,19 @@ class TripleTopPattern:
                     h = [float(highs[a]), float(highs[b]), float(highs[c])]
                     if (max(h) - min(h)) / max(h) > 0.015:
                         continue
+                    vol_divergence = volume_diverges_at_points(volumes, idx1=a, idx2=c)
+                    confidence = 0.80 if vol_divergence else 0.55
                     return PatternFire(
                         pattern_id=self.pattern_id,
                         direction="SHORT",
                         strength=0.75,
-                        confidence=0.65,
+                        confidence=confidence,
                         evidence={
                             "peak_indices": [int(a), int(b), int(c)],
                             "peak_heights": h,
+                            "vol_p1": round(float(volumes[a]), 2),
+                            "vol_p3": round(float(volumes[c]), 2),
+                            "vol_divergence": vol_divergence,
                         },
                     )
         return None

@@ -34,14 +34,22 @@ class DescendingTrianglePattern:
         slope, _ = np.polyfit(np.array(peaks, dtype=float), peak_vals, 1)
         if slope >= 0:
             return None
+        # Entry trigger: close must break BELOW the flat support.
+        support = float(trough_vals.mean())
+        close = float(win["close"].iloc[-1])
+        if close >= support:
+            return None
+        breakdown_pct = (support - close) / support
+        strength = round(min(0.95, 0.65 + breakdown_pct * 20.0), 2)
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
-            strength=0.7,
-            confidence=0.6,
+            strength=strength,
+            confidence=0.65,
             evidence={
-                "support_level": float(trough_vals.mean()),
+                "support_level": support,
                 "resistance_slope": float(slope),
+                "breakdown_pct": round(breakdown_pct * 100, 2),
                 "n_peaks": len(peaks),
                 "n_troughs": len(troughs),
             },

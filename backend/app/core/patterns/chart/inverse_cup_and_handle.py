@@ -33,17 +33,26 @@ class InverseCupAndHandlePattern:
         handle_range = float(handle_closes.max() - handle_closes.min())
         if handle_range > (peak - rim) * 0.5:
             return None
-        if handle_closes[-1] <= handle_closes[0]:
+        # Handle must have risen above its start — validates the bearish re-test.
+        if float(handle_closes.max()) <= float(handle_closes[0]):
             return None
+        # Entry trigger: close must break DOWN through the cup rim.
+        # Firing while the handle is still rising (old behaviour) is a pre-breakdown entry.
+        close = float(handle_closes[-1])
+        if close >= rim:
+            return None
+        breakdown_pct = (rim - close) / rim
+        strength = round(min(0.95, 0.70 + breakdown_pct * 25.0), 2)
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
-            strength=0.7,
-            confidence=0.6,
+            strength=strength,
+            confidence=0.75,
             evidence={
                 "cup_curvature": float(a),
                 "rim": float(rim),
                 "peak": peak,
                 "handle_range": handle_range,
+                "breakdown_pct": round(breakdown_pct * 100, 2),
             },
         )

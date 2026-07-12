@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
+from app.core.patterns.chart._helpers import volume_climax_at_point
 
 
 class KeyReversalHighPattern:
@@ -25,15 +26,20 @@ class KeyReversalHighPattern:
             return None
         if float(cur["close"]) >= float(prior["low"]):
             return None
+        _vol_cur  = float(bars["volume"].iloc[current_idx])
+        _vol_avg  = float(bars["volume"].iloc[max(0, current_idx - 10):current_idx].mean())
+        vol_climax = _vol_avg > 0 and _vol_cur > _vol_avg * 1.3
+        confidence = 0.72 if vol_climax else 0.50
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
             strength=0.7,
-            confidence=0.65,
+            confidence=confidence,
             evidence={
                 "current_high": float(cur["high"]),
                 "prev_window_high": prev_window_high,
                 "close": float(cur["close"]),
                 "prior_low": float(prior["low"]),
+                "vol_climax": vol_climax,
             },
         )
