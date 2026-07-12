@@ -73,10 +73,14 @@ async def test_build_trap_context_populates_from_session(session: AsyncSession) 
 
 @pytest.mark.asyncio
 async def test_build_trap_context_preserves_bar_derived_fields(session: AsyncSession) -> None:
-    """Friday-close + weekly_bias + btc_atr_pct still populated."""
+    """Friday-close + weekly_bias still populated; btc_atr_pct disabled.
+
+    btc_atr_pct is intentionally None: the old implementation passed the
+    *current symbol's* ATR%, not BTC's, triggering AltBtcIndecisionTrap on
+    every non-BTC bar.  Disabled until a real BTC-bar fetch is wired.
+    """
     ctx = await _build_trap_context(
         symbol="BTC/USDT", timeframe="1h", bars=_bars(), session=session,
     )
-    # bars are flat → ATR % near 0; weekly_bias is computable; is_friday_close depends on index.
-    assert ctx.btc_atr_pct is not None
+    assert ctx.btc_atr_pct is None   # disabled — wrong-data double bug
     assert ctx.is_friday_close in {True, False}
