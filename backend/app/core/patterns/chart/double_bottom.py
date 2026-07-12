@@ -20,6 +20,7 @@ class DoubleBottomPattern:
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
         highs = win["high"].to_numpy(dtype=float)
         lows = win["low"].to_numpy(dtype=float)
+        volumes = win["volume"].to_numpy(dtype=float)
         prom = max(lows.std() * 0.3, 0.01)
         troughs = find_swing_lows(lows, prominence=prom, distance=5)
         if len(troughs) < 2:
@@ -37,17 +38,25 @@ class DoubleBottomPattern:
                 close = float(win["close"].iloc[-1])
                 if close <= peak:
                     continue
+                # Volume divergence: second trough quieter = accumulation, not panic.
+                v1, v2 = float(volumes[a]), float(volumes[b])
+                vol_divergence = v2 < v1 * 0.85 if v1 > 0 else False
+                # High confidence when volume confirms accumulation; moderate otherwise.
+                confidence = 0.80 if vol_divergence else 0.55
                 return PatternFire(
                     pattern_id=self.pattern_id,
                     direction="LONG",
                     strength=0.7,
-                    confidence=0.6,
+                    confidence=confidence,
                     evidence={
                         "trough1_idx": int(a),
                         "trough2_idx": int(b),
                         "trough1_low": l1,
                         "trough2_low": l2,
                         "peak": peak,
+                        "vol_t1": round(v1, 2),
+                        "vol_t2": round(v2, 2),
+                        "vol_divergence": vol_divergence,
                     },
                 )
         return None

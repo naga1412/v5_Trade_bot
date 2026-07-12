@@ -23,6 +23,12 @@ from app.core.patterns import ALL_PATTERNS
 from app.core.patterns.base import PatternFire
 from app.core.scoring.types import Direction, LayerScore
 
+# Built once at import time — avoids per-call type checks on the hot path.
+# Pattern.pattern_type is "chart" | "candle" per base.PatternType.
+_CHART_PATTERN_IDS: frozenset[str] = frozenset(
+    p.pattern_id for p in ALL_PATTERNS if p.pattern_type == "chart"
+)
+
 PRIOR_ACCURACY: float = 0.5
 """Default accuracy when pattern_stats has no warm row for a pattern."""
 
@@ -136,7 +142,7 @@ def score(
         direction = Direction.SHORT
         strength = -squashed
 
-    confidence = min(1.0, len(fires) / 10.0)
+    confidence = _compute_layer_confidence(fires)
     notes = _build_notes(fires)
 
     return LayerScore(
@@ -145,6 +151,39 @@ def score(
         confidence=confidence,
         notes=notes,
     )
+
+
+def _compute_layer_confidence(fires: list[PatternFire]) -> float:
+    """How confident are we that L2's direction call is reliable?
+
+    Chart patterns (multi-bar structural setups) earn meaningful confidence
+    from a single fire because their detection already requires a sustained
+    formation.  Candle patterns are single-bar and need a plurality to be
+    reliable — the original len/10 formula is kept for them.
+
+    Chart: conf = avg(strength × per-fire-confidence) + count_bonus
+      1 fire at quality 0.72 → 0.72; 2 fires → 0.87; 3+ fires → 0.95
+    Candle: conf = min(0.80, n / 10) — unchanged semantics, max capped at 0.80
+    Layer confidence = max(chart_conf, candle_conf)
+    """
+    if not fires:
+        return 0.0
+
+    chart_fires = [f for f in fires if f.pattern_id in _CHART_PATTERN_IDS]
+    candle_fires = [f for f in fires if f.pattern_id not in _CHART_PATTERN_IDS]
+
+    chart_conf = 0.0
+    if chart_fires:
+        avg_quality = (
+            sum(f.strength * f.confidence for f in chart_fires) / len(chart_fires)
+        )
+        # Each additional chart fire adds 0.15, saturating at +0.30 for 3+.
+        count_bonus = min(0.30, (len(chart_fires) - 1) * 0.15)
+        chart_conf = min(0.95, avg_quality + count_bonus)
+
+    candle_conf = min(0.80, len(candle_fires) / 10.0) if candle_fires else 0.0
+
+    return max(chart_conf, candle_conf)
 
 
 def _build_notes(fires: list[PatternFire]) -> str:
