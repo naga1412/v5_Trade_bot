@@ -41,6 +41,8 @@ def test_at_fires_on_synthetic() -> None:
         op = (lo + hi) / 2
         cl = op + 0.1 * float(np.sin(i))
         rows.append((op, hi, lo, cl, 1000.0))
+    # Add a breakout bar: close above resistance (110.0) to trigger the signal
+    rows.append((110.5, 111.0, 110.0, 111.0, 1500.0))
     bars = from_ohlcv(rows)
     fire = AscendingTrianglePattern().detect(bars, current_idx=len(bars) - 1)
     assert fire is not None

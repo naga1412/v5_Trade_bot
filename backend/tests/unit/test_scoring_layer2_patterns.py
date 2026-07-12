@@ -176,7 +176,8 @@ def test_confidence_caps_at_one_when_many_patterns_fire(
         by_pattern={f"p{i}": 0.5 for i in range(15)},
     )
     score = layer2_patterns.score(_bars(), current_idx=99, stats=stats)
-    assert score.confidence == pytest.approx(1.0)
+    # 15 candle fires (stub ids not in _CHART_PATTERN_IDS) → candle_conf = min(0.80, 15/10) = 0.80
+    assert score.confidence == pytest.approx(0.80)
 
 
 def test_notes_summarises_fire_count(monkeypatch: pytest.MonkeyPatch) -> None:
