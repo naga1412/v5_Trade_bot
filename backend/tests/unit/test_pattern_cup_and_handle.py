@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from app.core.patterns.chart.cup_and_handle import CupAndHandlePattern
 

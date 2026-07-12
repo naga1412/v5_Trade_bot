@@ -4,7 +4,6 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import volume_climax_at_point
 
 
 class KeyReversalLowPattern:
