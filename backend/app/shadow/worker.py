@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 
 # §5.1 spec constants.
 SHADOW_POSITION_SIZE_USDT: float = 30.0
-COOLDOWN_MINUTES: int = 30
+COOLDOWN_MINUTES: int = 240  # 4 h — prevents repeat stop-outs on the same choppy signal
 HISTORY_BARS: int = 300
 MAX_BUFFERED_BARS: int = 1000
 SHADOW_TIMEFRAME: str = "1h"
