@@ -41,6 +41,7 @@ on:
           - brain-reeval-checkpoints # READ-ONLY: re-evaluates each .pt in _predegenerate/ against current buffer state using PR-BRAIN-CORRECTNESS-METRIC. Outputs a comparison table with brain_correctness, sharpe, cumulative_reward — lets us judge old checkpoints by the new (non-invariant) metric without retraining.
           - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe
           - brain-activate # WRITE: list rl-cache .pt files + cron log + activate latest rl_checkpoint (is_active=true) + restart backend. Use when brain has been training nightly but never activated.
+          - soak-verify # Phase 1+2 soak check: cooldown=4h, brain_decisions rows, pattern confidence in notes, 7d shadow win rate + exit reasons
 
 jobs:
   probe:
@@ -755,5 +756,46 @@ jobs:
                  echo '=== restarting backend ===' && \
                  docker compose restart backend && \
                  echo '=== done — verify with checkpoints probe after 30s ==='"
+              ;;
+            soak-verify)
+              # Phase 1+2 soak verification: checks cooldown=4h, brain_decisions,
+              # pattern confidence in notes, and 7d shadow trade win rate + exit reasons.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== 1. Cooldown windows (should be ~4h from opened_at) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT symbol, cooldown_until, \
+                       ROUND(EXTRACT(EPOCH FROM (cooldown_until - opened_at)) / 3600, 2) AS cooldown_hours \
+                     FROM shadow_cooldowns \
+                     ORDER BY cooldown_until DESC LIMIT 10;\" && \
+                 echo '=== 2. brain_decisions rows (last 12h; expect >0 after #288 deploy) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT COUNT(*) AS brain_decisions_12h, \
+                       MIN(created_at) AS earliest, MAX(created_at) AS latest \
+                     FROM brain_decisions WHERE created_at > NOW() - INTERVAL '12h';\" && \
+                 echo '=== 3. Pattern confidence in recent predictions (last 6h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT ts, symbol, direction, \
+                       ROUND(confidence::numeric, 3) AS conf, \
+                       LEFT(notes, 200) AS notes_preview \
+                     FROM predictions \
+                     WHERE ts > NOW() - INTERVAL '6h' \
+                     ORDER BY ts DESC LIMIT 10;\" && \
+                 echo '=== 4. Shadow trade win rate (7d) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT direction, COUNT(*) AS trades, \
+                       SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins, \
+                       ROUND(100.0 * SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS wr_pct, \
+                       ROUND(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct \
+                     FROM shadow_trades \
+                     WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
+                     GROUP BY direction ORDER BY direction;\" && \
+                 echo '=== 5. Exit reason breakdown (7d; TIMEOUT should not dominate SL) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT exit_reason, COUNT(*) AS n, \
+                       ROUND(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct \
+                     FROM shadow_trades \
+                     WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
+                     GROUP BY exit_reason ORDER BY n DESC;\""
               ;;
           esac
