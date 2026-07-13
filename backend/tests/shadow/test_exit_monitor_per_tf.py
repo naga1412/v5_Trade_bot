@@ -88,17 +88,41 @@ def test_unknown_tf_raises_keyerror() -> None:
         check_exit(p, bar_high=99.5, bar_low=99.0, bar_close=99.2)
 
 
-def test_sl_still_fires_before_timeout_1h() -> None:
-    """Regression guard: SL/TP detection runs BEFORE timeout — so a 1h
-    position at 24 bars that hits SL exits with STOP_LOSS, not TIMEOUT."""
+def test_sl_takes_priority_over_timeout_on_timeout_bar() -> None:
+    """CRITICAL: SL must be honoured even on the timeout bar.
+
+    Previously TIMEOUT was checked first, so a bar that crashed through the
+    stop exited at bar_close (worse than the stop) instead of pos.stop_loss.
+    This caused losses beyond the declared SL on timeout bars.
+
+    Fix: SL/TP checks run before TIMEOUT on every bar.
+    """
     p = _pos(timeframe="1h", bars_held=24)
-    # LONG SL at 98.0; bar low touches it
+    # LONG SL at 98.0; bar low crashes to 97.0 on the timeout bar
     decision = check_exit(p, bar_high=99.5, bar_low=97.0, bar_close=98.5)
     assert decision is not None
-    # Per the existing semantics: TIMEOUT fires regardless of SL/TP at the
-    # bars_held check, BEFORE the SL hit check. Existing behavior preserved.
-    # Test locks this in — if a future refactor swaps the order, this fails.
+    assert decision.reason == ExitReason.STOP_LOSS   # not TIMEOUT
+    assert decision.exit_price == 98.0               # stop price, not bar_close
+
+
+def test_tp_takes_priority_over_timeout_on_timeout_bar() -> None:
+    """TP on the timeout bar must exit at pos.take_profit, not bar_close."""
+    p = _pos(timeframe="1h", bars_held=24)
+    # LONG TP at 104.0; bar high exceeds it on the timeout bar
+    decision = check_exit(p, bar_high=105.0, bar_low=99.0, bar_close=104.5)
+    assert decision is not None
+    assert decision.reason == ExitReason.TAKE_PROFIT
+    assert decision.exit_price == 104.0
+
+
+def test_timeout_fires_when_no_sl_tp_on_timeout_bar() -> None:
+    """When neither SL nor TP is crossed on the timeout bar, TIMEOUT fires."""
+    p = _pos(timeframe="1h", bars_held=24)
+    # Bar stays inside SL=98.0 and TP=104.0
+    decision = check_exit(p, bar_high=103.5, bar_low=98.5, bar_close=101.0)
+    assert decision is not None
     assert decision.reason == ExitReason.TIMEOUT
+    assert decision.exit_price == 101.0  # bar_close when no SL/TP hit
 
 
 def test_g1_position_with_explicit_timeout_bars_overrides_per_tf_default() -> None:

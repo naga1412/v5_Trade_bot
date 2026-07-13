@@ -154,7 +154,11 @@ class SignalEvaluator:
             return None  # can't compute SL/TP
 
         if score > self.long_threshold:
-            sl = last_close - self.sl_atr_mult * atr
+            # Cap SL at 5 % below entry: on high-vol small-caps ATR can be
+            # 8-13 % of price, so 1.5×ATR would allow a 20 %+ stop — way
+            # beyond acceptable position risk.  5 % cap limits max loss per
+            # trade regardless of ATR magnitude.
+            sl = max(last_close - self.sl_atr_mult * atr, last_close * 0.95)
             tp = last_close + self.tp_atr_mult * atr
             return ShadowSignal(
                 symbol=symbol, direction=Direction.LONG,
@@ -163,7 +167,8 @@ class SignalEvaluator:
                 atr=atr, layer_scores=layer_scores, ts=ts,
             )
         if score < self.short_threshold:
-            sl = last_close + self.sl_atr_mult * atr
+            # Symmetric 5 % cap above entry for SHORT stops.
+            sl = min(last_close + self.sl_atr_mult * atr, last_close * 1.05)
             tp = last_close - self.tp_atr_mult * atr
             return ShadowSignal(
                 symbol=symbol, direction=Direction.SHORT,

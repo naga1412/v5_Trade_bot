@@ -28,10 +28,9 @@ def test_shadow_prewarm_bars_default_200() -> None:
 
 
 def test_shadow_cooldown_hours_default_dict() -> None:
-    """Both TFs default to 30 min (0.5h) — matches the pre-PR3 module
-    constant COOLDOWN_MINUTES=30. Dict shape future-proofs asymmetric."""
+    """Both TFs default to 4h — prevents re-entry on the same choppy signal."""
     s = _s()
-    assert s.SHADOW_COOLDOWN_HOURS == {"1h": 0.5, "15m": 0.5}
+    assert s.SHADOW_COOLDOWN_HOURS == {"1h": 4.0, "15m": 4.0}
 
 
 def test_shadow_narrow_universe_default_empty() -> None:
