@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import recent_atr
+from app.core.patterns.chart._helpers import recent_atr, volume_climax_at_point
 
 
 class VTopPattern:
@@ -35,16 +35,20 @@ class VTopPattern:
         fall = (after[-1] - after[0]) / max(len(after) - 1, 1)
         if rise < 0.5 * atr or fall > -0.5 * atr:
             return None
+        volumes = win["volume"].to_numpy(dtype=float)
+        vol_climax = volume_climax_at_point(volumes, idx=peak_idx)
+        confidence = 0.68 if vol_climax else 0.45
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
             strength=0.7,
-            confidence=0.55,
+            confidence=confidence,
             evidence={
                 "peak_idx": peak_idx,
                 "peak_high": float(highs[peak_idx]),
                 "rise_per_bar": float(rise),
                 "fall_per_bar": float(fall),
                 "atr": atr,
+                "vol_climax": vol_climax,
             },
         )

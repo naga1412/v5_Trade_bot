@@ -36,14 +36,23 @@ class AscendingTrianglePattern:
         slope, _ = np.polyfit(np.array(troughs, dtype=float), trough_vals, 1)
         if slope <= 0:
             return None
+        # Entry trigger: close must break ABOVE the flat resistance.
+        # Firing during consolidation (old behaviour) is pre-breakout entry.
+        resistance = float(peak_vals.mean())
+        close = float(win["close"].iloc[-1])
+        if close <= resistance:
+            return None
+        breakout_pct = (close - resistance) / resistance
+        strength = round(min(0.95, 0.65 + breakout_pct * 20.0), 2)
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="LONG",
-            strength=0.7,
-            confidence=0.6,
+            strength=strength,
+            confidence=0.65,
             evidence={
-                "resistance_level": float(peak_vals.mean()),
+                "resistance_level": resistance,
                 "support_slope": float(slope),
+                "breakout_pct": round(breakout_pct * 100, 2),
                 "n_peaks": len(peaks),
                 "n_troughs": len(troughs),
             },

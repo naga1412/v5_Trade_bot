@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
+from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows, volume_contracts_second_half
 
 
 class EndingDiagonalTopPattern:
@@ -19,6 +19,7 @@ class EndingDiagonalTopPattern:
         if current_idx < self.LOOKBACK:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
+        volumes = win["volume"].to_numpy(dtype=float)
         highs = win["high"].to_numpy(dtype=float)
         lows = win["low"].to_numpy(dtype=float)
         prom_h = max(float(highs.std()) * 0.15, 0.5)
@@ -35,14 +36,17 @@ class EndingDiagonalTopPattern:
         # 5-wave-like: at least 3 distinct higher highs
         if len(peaks) < 3 or not (highs[peaks[0]] < highs[peaks[1]] < highs[peaks[-1]]):
             return None
+        vol_contracting = volume_contracts_second_half(volumes)
+        confidence = 0.68 if vol_contracting else 0.48
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
             strength=0.65,
-            confidence=0.55,
+            confidence=confidence,
             evidence={
                 "high_slope": float(s_h),
                 "low_slope": float(s_l),
                 "n_peaks": len(peaks),
+                "vol_contracting": vol_contracting,
             },
         )

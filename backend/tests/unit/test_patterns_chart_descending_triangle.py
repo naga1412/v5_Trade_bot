@@ -39,6 +39,8 @@ def test_dt_fires_on_synthetic() -> None:
         op = (lo + hi) / 2
         cl = op + 0.1 * float(np.sin(i))
         rows.append((op, hi, lo, cl, 1000.0))
+    # Add a breakdown bar: close below support (90.0) to trigger the signal
+    rows.append((89.5, 90.0, 88.5, 89.0, 1500.0))
     bars = from_ohlcv(rows)
     fire = DescendingTrianglePattern().detect(bars, current_idx=len(bars) - 1)
     assert fire is not None

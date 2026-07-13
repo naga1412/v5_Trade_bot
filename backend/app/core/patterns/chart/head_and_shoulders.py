@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import find_swing_highs
+from app.core.patterns.chart._helpers import find_swing_highs, volume_diverges_at_points
 
 
 class HeadAndShouldersPattern:
@@ -19,6 +19,7 @@ class HeadAndShouldersPattern:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
         highs = win["high"].to_numpy(dtype=float)
+        volumes = win["volume"].to_numpy(dtype=float)
         prom = max(highs.std() * 0.3, 0.01)
         peaks = find_swing_highs(highs, prominence=prom, distance=5)
         if len(peaks) < 3:
@@ -34,11 +35,14 @@ class HeadAndShouldersPattern:
             # Shoulders within 2% of each other
             if abs(ls_h - rs_h) / max(ls_h, rs_h) > 0.02:
                 continue
+            # Right shoulder should form on lower volume than left — distribution exhausting.
+            vol_divergence = volume_diverges_at_points(volumes, idx1=ls, idx2=rs)
+            confidence = 0.82 if vol_divergence else 0.58
             return PatternFire(
                 pattern_id=self.pattern_id,
                 direction="SHORT",
                 strength=0.8,
-                confidence=0.7,
+                confidence=confidence,
                 evidence={
                     "left_shoulder_idx": int(ls),
                     "head_idx": int(head),
@@ -46,6 +50,9 @@ class HeadAndShouldersPattern:
                     "left_shoulder_high": ls_h,
                     "head_high": head_h,
                     "right_shoulder_high": rs_h,
+                    "vol_ls": round(float(volumes[ls]), 2),
+                    "vol_rs": round(float(volumes[rs]), 2),
+                    "vol_divergence": vol_divergence,
                 },
             )
         return None
