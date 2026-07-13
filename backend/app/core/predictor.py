@@ -735,6 +735,14 @@ async def _build_trap_context(
     ``borrow_rate_pct`` is permanently None (spec §6 row 2).
     ``next_news_event_minutes_until`` is None until the news-calendar
     follow-up wires it (SP-9.5).
+
+    ``btc_atr_pct`` is always None: ``_btc_atr_pct(bars)`` computed the
+    *current symbol's* ATR%, not BTC's, so alt-coin predictions received
+    ETH/SOL/etc ATR as ``btc_atr_pct`` — a double bug (wrong data + wrong
+    units vs the 0.5 threshold in ``AltBtcIndecisionTrap``).  Net effect
+    was the trap firing on every non-BTC bar, permanently occupying one of
+    the four trap-cap slots and adding noise.  Set to None until a real
+    BTC-bar fetch is wired for non-BTC predictions.
     """
     funding, oi_delta = (None, None)
     if session is not None:
@@ -743,7 +751,7 @@ async def _build_trap_context(
         next_news_event_minutes_until=None,
         is_friday_close=_is_friday_close(bars),
         weekly_bias=_weekly_bias(bars),
-        btc_atr_pct=_btc_atr_pct(bars),
+        btc_atr_pct=None,  # disabled — see docstring above
         funding_rate=funding,
         open_interest_delta_24h=oi_delta,
         borrow_rate_pct=None,
