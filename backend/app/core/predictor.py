@@ -530,12 +530,20 @@ async def build_prediction(
     # SP-4 Phase C — brain hook. Returns brain_adjust=1.0 (no-op) when no
     # checkpoint is loaded, so the pre-SP-4 equal-weight behaviour is
     # bit-identical until the first PPO policy is activated.
-    def _layer_signed(i: int) -> float:
+    #
+    # Train/serve alignment: layer obs scores must match the formula used in
+    # shadow/worker.py when capturing shadow_observations for training:
+    #   sign * strength * confidence  ==  signed_strength * confidence
+    def _layer_obs_score(i: int) -> float:
         ls = layer_results[i]
-        return ls.signed_strength if ls is not None else 0.0
-    brain_layers = tuple(_layer_signed(i) for i in range(1, 10))
+        return ls.signed_strength * ls.confidence if ls is not None else 0.0
+    brain_layers = tuple(_layer_obs_score(i) for i in range(1, 10))
+    # atr_pct: use the symbol's own ATR from bars (btc_atr_pct was disabled —
+    # see _build_trap_context docstring).  _btc_atr_pct(bars) computes
+    # ATR14 / last_close for whatever bars are passed in, which is exactly the
+    # formula the training snapshot uses (observation.py line 132).
     brain_market = MarketFeatures(
-        atr_pct=context.btc_atr_pct or 0.0,
+        atr_pct=_btc_atr_pct(bars) or 0.0,
         funding_rate=context.funding_rate or 0.0,
         oi_delta_24h=context.open_interest_delta_24h or 0.0,
         dxy_corr_30d=0.0,
@@ -545,11 +553,18 @@ async def build_prediction(
     brain_position = PositionState(
         cur_position=0, unrealized_pnl_R=0.0, bars_in_position=0,
     )
+    # weekend / asia_open: derive from candle timestamp to match training
+    # (shadow/observation.py _macro_from_ts uses the same UTC weekday/hour).
+    _candle_ts = bars.index[-1]
+    _weekday = int(_candle_ts.weekday())
+    _hour = int(_candle_ts.hour)
     brain_macro = MacroFeatures(
         hours_to_next_high_impact=float(
             context.next_news_event_minutes_until or 60 * 24
         ) / 60.0,
-        fomc_window=False, weekend=False, asia_open=False,
+        fomc_window=False,
+        weekend=_weekday >= 5,
+        asia_open=0 <= _hour < 8,
     )
     brain_hook = await compute_brain_adjust_and_persist(
         symbol=symbol,
