@@ -762,10 +762,10 @@ jobs:
               # pattern confidence in notes, and 7d shadow trade win rate + exit reasons.
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && \
-                 echo '=== 1. Cooldown windows (should be ~4h from opened_at) ===' && \
+                 echo '=== 1. Cooldown windows (hours_remaining from NOW; ~0-4 = normal, >0 = still active) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT symbol, cooldown_until, \
-                       ROUND(EXTRACT(EPOCH FROM (cooldown_until - opened_at)) / 3600, 2) AS cooldown_hours \
+                   \"SELECT symbol, timeframe, cooldown_until, \
+                       ROUND(EXTRACT(EPOCH FROM (cooldown_until - NOW())) / 3600, 2) AS hours_remaining \
                      FROM shadow_cooldowns \
                      ORDER BY cooldown_until DESC LIMIT 10;\" && \
                  echo '=== 2. brain_decisions rows (last 12h; expect >0 after #288 deploy) ===' && \
