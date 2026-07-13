@@ -14,6 +14,7 @@ from torch import nn
 from app.rl.checkpoints import (
     ActiveRlCheckpoint,
     clear_active,
+    get_active_asset_table_state,
     get_active_policy_and_checkpoint,
     load_active_checkpoint,
     set_active,
@@ -42,6 +43,16 @@ class _TinyPolicy(nn.Module):
         return self.fc(x)
 
 
+def _save_production_format(path: Path, policy: nn.Module, *, asset_table_state: dict | None = None) -> str:
+    """Save checkpoint in train_brain.py production format; return sha256."""
+    payload = {
+        "policy": policy.state_dict(),
+        "asset_table": asset_table_state or {},
+    }
+    torch.save(payload, path)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @pytest_asyncio.fixture
 async def session() -> AsyncSession:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -61,6 +72,7 @@ def _clear_module_state() -> None:
 
 def test_module_state_starts_empty() -> None:
     assert get_active_policy_and_checkpoint() is None
+    assert get_active_asset_table_state() is None
 
 
 def test_set_and_get_active() -> None:
@@ -76,7 +88,8 @@ def test_set_and_get_active() -> None:
     assert got[1] is ck
 
 
-def test_clear_active_resets_state() -> None:
+def test_clear_active_resets_all_state() -> None:
+    """clear_active must also clear _active_asset_table_state."""
     model = _TinyPolicy()
     ck = ActiveRlCheckpoint(
         id=1, model_name="ppo_policy_v1", version="v",
@@ -85,6 +98,7 @@ def test_clear_active_resets_state() -> None:
     set_active(model, ck)
     clear_active()
     assert get_active_policy_and_checkpoint() is None
+    assert get_active_asset_table_state() is None
 
 
 @pytest.mark.asyncio
@@ -104,17 +118,25 @@ async def test_load_returns_none_when_factory_missing(session: AsyncSession) -> 
 async def test_load_round_trips_local_file_checkpoint(
     session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Save a state_dict to disk, register it, load it, verify weights match."""
+    """Save a checkpoint in production format, register it, load it, verify weights.
+
+    Production format (from train_brain.py save_checkpoint):
+        {"policy": policy.state_dict(), "asset_table": asset_table.state_dict()}
+
+    The loader must extract state["policy"] — NOT load the whole dict.
+    Regression guard: the original loader did model.load_state_dict(state) which
+    would fail with unexpected key(s) 'policy', 'asset_table'.
+    """
     monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
 
-    # 1) Train a tiny policy with known weights, save to disk.
+    # 1) Build a tiny policy with known weights, save in production format.
     src = _TinyPolicy()
     with torch.no_grad():
         src.fc.weight.fill_(0.42)
         src.fc.bias.fill_(-0.1)
     ckpt_path = tmp_path / "ppo_policy_v1.pt"
-    torch.save(src.state_dict(), ckpt_path)
-    sha = hashlib.sha256(ckpt_path.read_bytes()).hexdigest()
+    asset_table_stub = nn.Embedding(1, 4)  # minimal stand-in for AssetEmbeddingTable
+    sha = _save_production_format(ckpt_path, src, asset_table_state=asset_table_stub.state_dict())
 
     # 2) Register it as active in the DB.
     file_uri = ckpt_path.resolve().as_uri()
@@ -141,6 +163,42 @@ async def test_load_round_trips_local_file_checkpoint(
     assert pinned is not None
     assert pinned[0] is model
 
+    # 5) Asset table state was stored for predictor_glue to restore.
+    asset_state = get_active_asset_table_state()
+    assert asset_state is not None
+    assert "weight" in asset_state  # nn.Embedding state_dict has 'weight'
+
+
+@pytest.mark.asyncio
+async def test_load_rejects_flat_state_dict_format(
+    session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flat state_dict (pre-train_brain.py format) must be rejected gracefully.
+
+    If someone saves a bare state_dict with no 'policy' key, the loader must
+    return None rather than silently loading garbage weights or raising.
+    """
+    monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
+
+    src = _TinyPolicy()
+    ckpt_path = tmp_path / "ppo_policy_v1_flat.pt"
+    # OLD (wrong) format — flat state dict, no "policy" key wrapper
+    torch.save(src.state_dict(), ckpt_path)
+    sha = hashlib.sha256(ckpt_path.read_bytes()).hexdigest()
+
+    file_uri = ckpt_path.resolve().as_uri()
+    await session.execute(sa.text("""
+        INSERT INTO rl_checkpoints
+        (model_name, version, checkpoint_uri, sha256, trained_at,
+         train_data_window, eval_results, is_active)
+        VALUES ('ppo_policy_v1', 'v1-flat', :u, :h,
+                '2026-07-12T00:00:00+00:00', 'window', '{}', 1)
+    """), {"u": file_uri, "h": sha})
+    await session.commit()
+
+    out = await load_active_checkpoint(session, model_factory=_TinyPolicy)
+    assert out is None
+
 
 @pytest.mark.asyncio
 async def test_load_returns_none_on_sha_mismatch(
@@ -149,7 +207,7 @@ async def test_load_returns_none_on_sha_mismatch(
     monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
     src = _TinyPolicy()
     ckpt_path = tmp_path / "ppo_policy_v1.pt"
-    torch.save(src.state_dict(), ckpt_path)
+    _save_production_format(ckpt_path, src)
 
     file_uri = ckpt_path.resolve().as_uri()
     bad_sha = "f" * 64  # deliberately wrong

@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 _active_policy: Any = None  # nn.Module — left untyped here so this module
                             # doesn't import the (Phase B) PolicyNetwork
 _active_checkpoint: "ActiveRlCheckpoint | None" = None
+# Holds state["asset_table"] from the last successful load so predictor_glue
+# can restore it into AssetEmbeddingTable without importing torch here.
+_active_asset_table_state: "dict | None" = None
 
 
 @dataclass(frozen=True)
@@ -65,9 +68,21 @@ def set_active(model: Any, checkpoint: ActiveRlCheckpoint) -> None:
 
 def clear_active() -> None:
     """Reset module state to empty. Used by tests + on hot-reload errors."""
-    global _active_policy, _active_checkpoint
+    global _active_policy, _active_checkpoint, _active_asset_table_state
     _active_policy = None
     _active_checkpoint = None
+    _active_asset_table_state = None
+
+
+def get_active_asset_table_state() -> "dict | None":
+    """Return the asset_table state_dict from the last successful checkpoint load.
+
+    Used by :mod:`app.rl.predictor_glue` to restore trained per-symbol
+    embeddings into the module-scope AssetEmbeddingTable on first use.
+    Returns None if no checkpoint has been loaded or the file had no
+    ``asset_table`` key.
+    """
+    return _active_asset_table_state
 
 
 def get_active_policy_and_checkpoint() -> tuple[Any, ActiveRlCheckpoint] | None:
@@ -204,14 +219,26 @@ async def load_active_checkpoint(
 
     try:
         model = model_factory()
-        # weights_only=True is the safe load mode — only allows tensors
-        # in the state dict, no arbitrary pickle code execution.
-        state = torch.load(actual_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(state)
+        # train_brain.py saves {"policy": policy.state_dict(), "asset_table": ...}
+        # so we must extract the "policy" key before calling load_state_dict.
+        # weights_only=False is required because the checkpoint dict contains
+        # non-tensor values; file:// URI is our own container FS so it is safe.
+        state = torch.load(actual_path, map_location="cpu", weights_only=False)
+        if not isinstance(state, dict) or "policy" not in state:
+            log.error(
+                "checkpoint %s is not in production format (expected dict with "
+                "'policy' key); RL inference disabled",
+                ck.checkpoint_uri,
+            )
+            return None
+        model.load_state_dict(state["policy"])
         model.eval()
     except Exception as e:  # noqa: BLE001
         log.error("torch load failed: %s; RL inference disabled", e)
         return None
+
+    global _active_asset_table_state
+    _active_asset_table_state = state.get("asset_table")
 
     set_active(model, ck)
     log.info("loaded active RL checkpoint %s v%s", ck.model_name, ck.version)
@@ -221,6 +248,7 @@ async def load_active_checkpoint(
 __all__ = [
     "ActiveRlCheckpoint",
     "clear_active",
+    "get_active_asset_table_state",
     "get_active_policy_and_checkpoint",
     "load_active_checkpoint",
     "set_active",
