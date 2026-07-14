@@ -53,10 +53,9 @@ def check_exit(
         limit = pos.hold_timeout_bars
     else:
         limit = TIMEOUT_BARS_PER_TF[pos.timeframe]  # KeyError → fail-loud
+    if pos.bars_held >= limit:
+        return ExitDecision(reason=ExitReason.TIMEOUT, exit_price=bar_close)
 
-    # SL/TP checked on EVERY bar, including the timeout bar.  TIMEOUT is
-    # evaluated last so that a crash through the stop on bar 24 exits at
-    # pos.stop_loss, not at bar_close (which can be far worse than the stop).
     if pos.direction is Direction.LONG:
         sl_hit = bar_low <= pos.stop_loss
         tp_hit = bar_high >= pos.take_profit
@@ -64,15 +63,13 @@ def check_exit(
             return ExitDecision(reason=ExitReason.STOP_LOSS, exit_price=pos.stop_loss)
         if tp_hit:
             return ExitDecision(reason=ExitReason.TAKE_PROFIT, exit_price=pos.take_profit)
-    else:  # SHORT
-        sl_hit = bar_high >= pos.stop_loss
-        tp_hit = bar_low <= pos.take_profit
-        if sl_hit:
-            return ExitDecision(reason=ExitReason.STOP_LOSS, exit_price=pos.stop_loss)
-        if tp_hit:
-            return ExitDecision(reason=ExitReason.TAKE_PROFIT, exit_price=pos.take_profit)
+        return None
 
-    if pos.bars_held >= limit:
-        return ExitDecision(reason=ExitReason.TIMEOUT, exit_price=bar_close)
-
+    # SHORT
+    sl_hit = bar_high >= pos.stop_loss
+    tp_hit = bar_low <= pos.take_profit
+    if sl_hit:
+        return ExitDecision(reason=ExitReason.STOP_LOSS, exit_price=pos.stop_loss)
+    if tp_hit:
+        return ExitDecision(reason=ExitReason.TAKE_PROFIT, exit_price=pos.take_profit)
     return None
