@@ -79,9 +79,10 @@ class Settings(BaseSettings):
     # flip from PR2's effective ["1h"]. Rollback: set ["1h"] in env (spec §8).
     SHADOW_TIMEFRAMES: list[str] = ["1h", "15m"]
     SHADOW_PREWARM_BARS: int = 200  # matches MTF cache cap; setup() reuses cache
-    # Per-TF cooldown in hours. 4h prevents re-entry on the same choppy signal
-    # within the same trading session.
-    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 4.0, "15m": 4.0}
+    # Per-TF cooldown in hours. Both default 0.5h (30 min) — matches the
+    # pre-PR3 COOLDOWN_MINUTES=30 module constant. Dict shape future-proofs
+    # asymmetric values without API churn.
+    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 0.5, "15m": 0.5}
     # Non-empty list = intersect with top-30 universe. Empty = full top-30.
     # Empty intersection logs WARN and falls back to full (fail-loud-then-open).
     SHADOW_NARROW_UNIVERSE: list[str] = []
@@ -216,11 +217,6 @@ class Settings(BaseSettings):
     # entry was correct at the time but is now stale.
     SHADOW_SPOT_BLACKLIST: list[str] = [
         "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT",
-        # 2026-07-11: new stablecoins/pegged tokens that entered SPOT top-30
-        # but have no Binance Futures perpetual — caused ~100 premiumIndex
-        # 400 Bad Request errors/hour in the intermarket worker.
-        "RLUSDUSDT", "USD1USDT", "USDEUSDT", "SPCXBUSDT",
-        "EURUSDT", "FDUSDUSDT", "SNDKBUSDT",
     ]
 
     # --- PR-strategy-1: entry-quality gate -------------------------------
