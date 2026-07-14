@@ -40,6 +40,16 @@ from app.core.scoring.run_traps import check_all_traps
 from app.core.scoring.tiers import classify_tier
 from app.core.scoring.traps.base import TrapContext
 from app.core.scoring.types import Direction, LayerScore
+from app.core.regime.market_regime import get_cached_market_regime
+
+# Maps the 3-class market_regime classifier output to the 5-class obs regime
+# string. Must stay in sync with shadow/observation.py REGIME_MAPPING.
+_REGIME_MAP: dict[str | None, str] = {
+    "bull": "bull_breakout",
+    "bear": "bear_crash",
+    "neutral": "sideways_grind",
+    None: "sideways_grind",
+}
 
 log = logging.getLogger(__name__)
 
@@ -548,7 +558,7 @@ async def build_prediction(
         oi_delta_24h=context.open_interest_delta_24h or 0.0,
         dxy_corr_30d=0.0,
         gold_corr_30d=0.0,
-        regime="sideways_grind",  # SP-4 Phase D wires real regime detection
+        regime=_REGIME_MAP[await get_cached_market_regime()],
     )
     brain_position = PositionState(
         cur_position=0, unrealized_pnl_R=0.0, bars_in_position=0,
