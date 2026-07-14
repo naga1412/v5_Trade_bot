@@ -1,12 +1,12 @@
 """Unit tests for the Sharpe gate in register_brain._direct_db_register_and_activate.
 
-The gate logic lives in tools/ml/register_brain.py. These tests mock the
-SQLAlchemy async session so no real DB is required.
+The gate logic lives in tools/ml/register_brain.py and delegates the
+threshold comparison to app.ml.champion_challenger.sharpe_passes.
 
 Gate branches:
   bootstrap      — no active champion → register + activate unconditionally
-  gate_passed    — challenger_sharpe > champion_sharpe * 1.05 → activate
-  gate_held      — challenger_sharpe <= champion_sharpe * 1.05 → register-only
+  gate_passed    — sharpe_passes(challenger, champion) → activate
+  gate_held      — sharpe_passes returns False → register-only
   gate_undecidable — champion has no Sharpe in eval_results → register-only
   force          — --force=True bypasses all gate logic → activate unconditionally
 """
@@ -83,7 +83,12 @@ def _make_factory(session):
 
 
 def _call_direct(payload=None, *, activate=True, force=False, execute_returns):
-    """Invoke _direct_db_register_and_activate with a mocked session."""
+    """Invoke _direct_db_register_and_activate with a mocked session.
+
+    The real app.ml.champion_challenger.sharpe_passes is imported by _go() at
+    call time (inside the nested function), so no separate mock is required —
+    the backend app package is on sys.path in the pytest environment.
+    """
     payload = payload or _BASE_PAYLOAD.copy()
     session = _make_session(execute_returns)
     factory = _make_factory(session)
@@ -193,6 +198,50 @@ def test_force_bypasses_gate_and_activates():
     assert result["champion_sharpe"] is None
 
 
+def test_gate_held_negative_champion_additive_floor():
+    """Regression: with negative champion, multiplicative bar inverts and lets worse challengers pass.
+
+    champion=-2.0 → multiplicative threshold = -2.0 * 1.05 = -2.1.
+    Without additive floor challenger=-2.05 would satisfy -2.05 > -2.1 (bug).
+    With additive floor: max(-2.1, -2.0+0.05=-1.95) = -1.95; -2.05 > -1.95 is False → gate_held.
+    """
+    worse_challenger_payload = {**_BASE_PAYLOAD, "eval_results": {"sharpe": -2.05}}
+    champion_row = _fake_row(id=10, sharpe="-2.0")
+    insert_row = _fake_row(id=42, is_active=False)
+    result = _call_direct(
+        payload=worse_challenger_payload,
+        execute_returns=[
+            champion_row,  # SELECT champion
+            insert_row,    # INSERT RETURNING
+        ],
+    )
+
+    assert result["gate_outcome"] == "gate_held", (
+        "A challenger with Sharpe -2.05 must NOT beat a champion at -2.0 "
+        "(challenger is worse in absolute terms). Check additive floor in sharpe_passes()."
+    )
+    assert result["is_active"] is False
+
+
+def test_gate_passed_negative_champion_genuinely_better():
+    """Challenger that meaningfully beats a negative champion passes the gate."""
+    better_challenger_payload = {**_BASE_PAYLOAD, "eval_results": {"sharpe": -1.9}}
+    champion_row = _fake_row(id=10, sharpe="-2.0")
+    insert_row = _fake_row(id=42, is_active=True)
+    result = _call_direct(
+        payload=better_challenger_payload,
+        execute_returns=[
+            champion_row,  # SELECT champion
+            None,          # UPDATE (deactivate old champion)
+            insert_row,    # INSERT RETURNING
+        ],
+    )
+
+    # -1.9 > max(-2.1, -1.95) = -1.95 → True (challenger improved by 0.1)
+    assert result["gate_outcome"] == "gate_passed"
+    assert result["is_active"] is True
+
+
 def test_cron_register_cmd_no_force():
     """Regression: REGISTER_CMD in hetzner_brain_cron.sh must NOT contain --force."""
     import re
@@ -209,4 +258,22 @@ def test_cron_register_cmd_no_force():
     assert "--force" not in register_cmd, (
         "REGISTER_CMD must not contain --force — that flag bypasses the Sharpe "
         "gate and unconditionally replaces the champion on every nightly cron run."
+    )
+
+
+def test_cron_has_backend_restart_on_activation():
+    """Regression: cron must restart the backend when a checkpoint is activated.
+
+    is_active flips in DB at registration time but the running backend only
+    loads the policy at startup — without a restart the promotion is a no-op
+    until someone manually restarts the container.
+    """
+    cron_path = (
+        Path(__file__).resolve().parents[2] / "scripts" / "hetzner_brain_cron.sh"
+    )
+    text = cron_path.read_text(encoding="utf-8")
+    assert "docker compose restart backend" in text, (
+        "hetzner_brain_cron.sh must call 'docker compose restart backend' after "
+        "activation so the newly-promoted checkpoint is loaded into memory. "
+        "Without this, every nightly promotion is silently a no-op."
     )
