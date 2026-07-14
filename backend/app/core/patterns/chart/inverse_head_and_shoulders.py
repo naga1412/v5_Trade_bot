@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import find_swing_lows
+from app.core.patterns.chart._helpers import find_swing_lows, volume_diverges_at_points
 
 
 class InverseHeadAndShouldersPattern:
@@ -19,6 +19,7 @@ class InverseHeadAndShouldersPattern:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
         lows = win["low"].to_numpy(dtype=float)
+        volumes = win["volume"].to_numpy(dtype=float)
         prom = max(lows.std() * 0.3, 0.01)
         troughs = find_swing_lows(lows, prominence=prom, distance=5)
         if len(troughs) < 3:
@@ -32,11 +33,14 @@ class InverseHeadAndShouldersPattern:
                 continue
             if abs(ls_l - rs_l) / max(ls_l, rs_l) > 0.02:
                 continue
+            # Right shoulder quieter than left — selling exhaustion on the re-test.
+            vol_divergence = volume_diverges_at_points(volumes, idx1=ls, idx2=rs)
+            confidence = 0.82 if vol_divergence else 0.58
             return PatternFire(
                 pattern_id=self.pattern_id,
                 direction="LONG",
                 strength=0.8,
-                confidence=0.7,
+                confidence=confidence,
                 evidence={
                     "left_shoulder_idx": int(ls),
                     "head_idx": int(head),
@@ -44,6 +48,9 @@ class InverseHeadAndShouldersPattern:
                     "left_shoulder_low": ls_l,
                     "head_low": head_l,
                     "right_shoulder_low": rs_l,
+                    "vol_ls": round(float(volumes[ls]), 2),
+                    "vol_rs": round(float(volumes[rs]), 2),
+                    "vol_divergence": vol_divergence,
                 },
             )
         return None

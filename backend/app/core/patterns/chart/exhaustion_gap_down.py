@@ -30,14 +30,19 @@ class ExhaustionGapDownPattern:
             return None
         if cur_close <= cur_open:
             return None
+        _vol_cur  = float(bars["volume"].iloc[current_idx])
+        _vol_avg  = float(bars["volume"].iloc[max(0, current_idx - 10):current_idx].mean())
+        vol_climax = _vol_avg > 0 and _vol_cur > _vol_avg * 1.3
+        confidence = 0.72 if vol_climax else 0.50
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="LONG",
             strength=0.7,
-            confidence=0.55,
+            confidence=confidence,
             evidence={
                 "gap_size": prior_low - cur_open,
                 "trend_loss": prior_close - prior_low,
                 "atr": atr,
+                "vol_climax": vol_climax,
             },
         )

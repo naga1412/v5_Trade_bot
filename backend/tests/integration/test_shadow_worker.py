@@ -306,14 +306,17 @@ async def test_take_profit_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert t.pnl_usdt > 0
     assert t.signal_id == "seedsig0"
     assert t.bars_held == 1
-    # Cooldown set to candle.ts + 30min. SP-1.1 hotfix: SQL persistence
-    # now passes raw datetime (Postgres TIMESTAMPTZ requires it). SQLite
-    # serializes via str(dt) which uses a SPACE not 'T'. Compare by
-    # parsing both sides to normalize.
+    # Cooldown set to candle.ts + SHADOW_COOLDOWN_HOURS["1h"] (0.5h = 30min by
+    # default). COOLDOWN_MINUTES is the fallback for TFs not in the table.
+    # SP-1.1 hotfix: SQL persistence now passes raw datetime (Postgres
+    # TIMESTAMPTZ requires it). SQLite serializes via str(dt) which uses a
+    # SPACE not 'T'. Compare by parsing both sides to normalize.
+    from app.config import get_settings as _get_cfg
     from datetime import datetime as _dt
+    _cd_hours = _get_cfg().SHADOW_COOLDOWN_HOURS.get("1h", COOLDOWN_MINUTES / 60.0)
     assert len(cools) == 1
     assert cools[0].symbol == SYMBOL
-    expected_cd = candle.ts + timedelta(minutes=COOLDOWN_MINUTES)
+    expected_cd = candle.ts + timedelta(hours=_cd_hours)
     actual_raw = cools[0].cooldown_until
     if isinstance(actual_raw, str):
         actual_raw = _dt.fromisoformat(actual_raw.replace(" ", "T"))

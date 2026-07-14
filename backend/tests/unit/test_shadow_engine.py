@@ -164,3 +164,55 @@ def test_position_gate_blocks_during_cooldown() -> None:
 def test_position_gate_allows_when_clear() -> None:
     gate = PositionGate(open_symbols=set(), cooldowns={})
     assert gate.is_blocked("BTCUSDT", now=datetime.now(timezone.utc)) is False
+
+
+# --- SL 5 % cap tests ---
+
+def test_long_sl_capped_at_5pct_when_atr_is_large() -> None:
+    """On a high-vol small-cap, 1.5×ATR can exceed 5 % — the cap must kick in."""
+    ev = make_evaluator()
+    # ATR = 8 % of price → raw SL would be 15 % below entry (way too wide)
+    sig = ev.evaluate(
+        symbol="XYZUSDT", score=0.45, confidence=0.70,
+        last_close=100.0, atr=8.0,   # 8 % ATR
+        layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is not None
+    # raw would be 100 - 1.5*8 = 88 (12 % below entry); cap clamps to 95 (5 %)
+    assert sig.stop_loss == pytest.approx(95.0)
+
+
+def test_long_sl_not_capped_when_atr_is_normal() -> None:
+    """Normal ATR (< 3.3 % of price) doesn't trigger the cap."""
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="BTCUSDT", score=0.45, confidence=0.70,
+        last_close=100.0, atr=2.0,   # 2 % ATR → raw SL = 97.0 (above 95.0 cap)
+        layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is not None
+    assert sig.stop_loss == pytest.approx(97.0)  # 100 - 1.5*2
+
+
+def test_short_sl_capped_at_5pct_when_atr_is_large() -> None:
+    """SHORT SL cap: 1.05 × entry when 1.5×ATR exceeds 5 %."""
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="XYZUSDT", score=-0.45, confidence=0.70,
+        last_close=100.0, atr=8.0,
+        layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is not None
+    # raw would be 100 + 1.5*8 = 112 (12 % above entry); cap clamps to 105 (5 %)
+    assert sig.stop_loss == pytest.approx(105.0)
+
+
+def test_short_sl_not_capped_when_atr_is_normal() -> None:
+    ev = make_evaluator()
+    sig = ev.evaluate(
+        symbol="ETHUSDT", score=-0.45, confidence=0.70,
+        last_close=100.0, atr=2.0,
+        layer_scores={}, ts=datetime.now(timezone.utc),
+    )
+    assert sig is not None
+    assert sig.stop_loss == pytest.approx(103.0)  # 100 + 1.5*2

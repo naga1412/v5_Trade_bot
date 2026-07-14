@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import fit_trend_line
+from app.core.patterns.chart._helpers import fit_trend_line, volume_contracts_second_half
 
 
 class BumpAndRunBottomPattern:
@@ -19,6 +19,7 @@ class BumpAndRunBottomPattern:
         if current_idx < self.LOOKBACK:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
+        volumes = win["volume"].to_numpy(dtype=float)
         lows = win["low"].to_numpy(dtype=float)
         n = len(win)
         xs1 = np.arange(n // 2, dtype=float)
@@ -33,15 +34,18 @@ class BumpAndRunBottomPattern:
         cur_close = float(win["close"].iloc[-1])
         if cur_close <= bump_low * 1.05:
             return None
+        vol_contracting = volume_contracts_second_half(volumes)
+        confidence = 0.68 if vol_contracting else 0.48
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="LONG",
             strength=0.7,
-            confidence=0.5,
+            confidence=confidence,
             evidence={
                 "lead_slope": s1,
                 "bump_slope": s2,
                 "bump_low": bump_low,
                 "current_close": cur_close,
+                "vol_contracting": vol_contracting,
             },
         )

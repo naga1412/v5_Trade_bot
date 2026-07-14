@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.patterns.base import PatternFire, PatternType
-from app.core.patterns.chart._helpers import fit_trend_line
+from app.core.patterns.chart._helpers import fit_trend_line, volume_contracts_second_half
 
 
 class BumpAndRunTopPattern:
@@ -19,6 +19,7 @@ class BumpAndRunTopPattern:
         if current_idx < self.LOOKBACK:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
+        volumes = win["volume"].to_numpy(dtype=float)
         highs = win["high"].to_numpy(dtype=float)
         n = len(win)
         # Lead-in: first half slope; bump: second half slope (must be ≥ 2x)
@@ -36,15 +37,18 @@ class BumpAndRunTopPattern:
         # Threshold: current close must be at least 5% below bump_high
         if cur_close >= bump_high * 0.95:
             return None
+        vol_contracting = volume_contracts_second_half(volumes)
+        confidence = 0.68 if vol_contracting else 0.48
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="SHORT",
             strength=0.7,
-            confidence=0.5,
+            confidence=confidence,
             evidence={
                 "lead_slope": s1,
                 "bump_slope": s2,
                 "bump_high": bump_high,
                 "current_close": cur_close,
+                "vol_contracting": vol_contracting,
             },
         )

@@ -54,6 +54,10 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Mirrors champion_challenger.SHARPE_IMPROVEMENT_BAR — challenger must beat
+# champion by at least 5% Sharpe (higher is better for RL).
+_SHARPE_IMPROVEMENT_BAR: float = 1.05
+
 
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
@@ -134,6 +138,23 @@ def _direct_db_register_and_activate(
 
     Run inside the backend container with PYTHONPATH=/app. Skips
     Cloudflare Access auth that the HTTP route requires in production.
+
+    When ``activate_flag=True`` and ``force=False``, applies the same
+    champion-challenger Sharpe gate as the HTTP PATCH route
+    (``admin_rl.py``): the challenger must exceed the champion's Sharpe
+    by at least 5% (``challenger > champion * 1.05``).
+
+    Outcomes when ``activate_flag=True, force=False``:
+    * No active champion → ``bootstrap``: register + activate.
+    * Champion has no Sharpe → ``gate_undecidable``: register-only, log
+      ``gate_undecidable: champion has no sharpe; manual review required``.
+    * Challenger beats threshold → ``gate_passed``: deactivate champion,
+      register + activate.
+    * Otherwise → ``gate_held``: register-only (``is_active=False``),
+      log ``gate_held: champion retained``.
+
+    Returns a dict with keys: ``id``, ``version``, ``is_active``,
+    ``gate_outcome``, ``champion_sharpe``, ``challenger_sharpe``.
     """
     import asyncio
     from sqlalchemy import text
@@ -143,7 +164,13 @@ def _direct_db_register_and_activate(
     async def _go() -> dict:
         sf = get_session_factory()
         async with sf() as s:
+            should_activate = activate_flag
+            gate_outcome: str | None = None
+            champion_sharpe: float | None = None
+            challenger_sharpe: float | None = None
+
             if activate_flag and force:
+                # --force: unconditional swap, no gate check.
                 await s.execute(
                     text(
                         "UPDATE rl_checkpoints SET is_active=FALSE, "
@@ -152,6 +179,61 @@ def _direct_db_register_and_activate(
                     ),
                     {"m": payload["model_name"]},
                 )
+                gate_outcome = "force"
+
+            elif activate_flag:
+                # Sharpe gate: challenger must beat champion by > 5%.
+                eval_results = payload.get("eval_results") or {}
+                raw_challenger = (
+                    eval_results.get("sharpe")
+                    if isinstance(eval_results, dict)
+                    else None
+                )
+                try:
+                    challenger_sharpe = (
+                        float(raw_challenger) if raw_challenger is not None else None
+                    )
+                except (TypeError, ValueError):
+                    challenger_sharpe = None
+
+                champ_row = (await s.execute(
+                    text(
+                        "SELECT id, eval_results->>'sharpe' AS sharpe "
+                        "FROM rl_checkpoints "
+                        "WHERE model_name=:m AND is_active=TRUE "
+                        "LIMIT 1"
+                    ),
+                    {"m": payload["model_name"]},
+                )).first()
+
+                if champ_row is None:
+                    # Bootstrap: no incumbent — activate unconditionally.
+                    gate_outcome = "bootstrap"
+                else:
+                    raw_champ = champ_row.sharpe
+                    try:
+                        champion_sharpe = (
+                            float(raw_champ) if raw_champ is not None else None
+                        )
+                    except (TypeError, ValueError):
+                        champion_sharpe = None
+
+                    if champion_sharpe is None or challenger_sharpe is None:
+                        gate_outcome = "gate_undecidable"
+                        should_activate = False
+                    elif challenger_sharpe > champion_sharpe * _SHARPE_IMPROVEMENT_BAR:
+                        gate_outcome = "gate_passed"
+                        await s.execute(
+                            text(
+                                "UPDATE rl_checkpoints SET is_active=FALSE, "
+                                "deactivated_at=NOW() "
+                                "WHERE model_name=:m AND is_active=TRUE"
+                            ),
+                            {"m": payload["model_name"]},
+                        )
+                    else:
+                        gate_outcome = "gate_held"
+                        should_activate = False
 
             trained_at_raw = payload.get("trained_at")
             if isinstance(trained_at_raw, str):
@@ -177,7 +259,7 @@ def _direct_db_register_and_activate(
                     "t": trained_at,
                     "w": payload["train_data_window"],
                     "e": json.dumps(payload.get("eval_results", {})),
-                    "a": activate_flag,
+                    "a": should_activate,
                     "n": payload.get("notes")
                     or "registered via tools.ml.register_brain --direct",
                 },
@@ -188,6 +270,9 @@ def _direct_db_register_and_activate(
                 "id": row.id,
                 "version": payload["version"],
                 "is_active": row.is_active,
+                "gate_outcome": gate_outcome,
+                "champion_sharpe": champion_sharpe,
+                "challenger_sharpe": challenger_sharpe,
             }
 
     return asyncio.run(_go())
@@ -277,15 +362,39 @@ def main(argv: list[str] | None = None) -> int:
             payload=payload,
             activate_flag=args.activate, force=args.force,
         )
-        log.info(
-            "[direct] registered+activated RL id=%s version=%s is_active=%s",
-            result["id"], result["version"], result["is_active"],
-        )
-        log.info(
-            "Restart backend container so the new checkpoint loads:\n"
-            "    docker compose -f /opt/trading-radar/docker-compose.yml "
-            "restart backend"
-        )
+        gate = result.get("gate_outcome")
+        rl_id = result["id"]
+        ver = result["version"]
+        if gate in ("force", "bootstrap", "gate_passed"):
+            log.info(
+                "[direct] registered+activated RL id=%s version=%s is_active=True",
+                rl_id, ver,
+            )
+            log.info(
+                "Restart backend container so the new checkpoint loads:\n"
+                "    docker compose -f /opt/trading-radar/docker-compose.yml "
+                "restart backend"
+            )
+        elif gate == "gate_held":
+            log.info(
+                "[direct] registered RL id=%s version=%s is_active=False "
+                "gate_held: champion retained "
+                "champion_sharpe=%.4f challenger_sharpe=%.4f",
+                rl_id, ver,
+                result.get("champion_sharpe") or 0.0,
+                result.get("challenger_sharpe") or 0.0,
+            )
+        elif gate == "gate_undecidable":
+            log.info(
+                "[direct] registered RL id=%s version=%s is_active=False "
+                "gate_undecidable: champion has no sharpe; manual review required",
+                rl_id, ver,
+            )
+        else:
+            log.info(
+                "[direct] registered RL id=%s version=%s is_active=%s",
+                rl_id, ver, result["is_active"],
+            )
         return 0
 
     sess = requests.Session()

@@ -69,6 +69,50 @@ def bar_total_range(bars: pd.DataFrame, idx: int) -> float:
     return float(bars["high"].iloc[idx] - bars["low"].iloc[idx])
 
 
+def volume_diverges_at_points(
+    volumes: "np.ndarray",
+    *,
+    idx1: int,
+    idx2: int,
+    threshold: float = 0.85,
+) -> bool:
+    """True when vol[idx2] < vol[idx1] * threshold (exhaustion / accumulation).
+
+    Used by double_top/bottom, triple patterns, H&S shoulders.
+    """
+    v1 = float(volumes[idx1])
+    return v1 > 0 and float(volumes[idx2]) < v1 * threshold
+
+
+def volume_contracts_second_half(
+    volumes: "np.ndarray",
+    *,
+    threshold: float = 0.85,
+) -> bool:
+    """True when the second half of the window is quieter than the first.
+
+    Used by wedge and diagonal patterns — waning participation into apex.
+    """
+    mid = len(volumes) // 2
+    first = float(volumes[:mid].mean()) if mid > 0 else 0.0
+    second = float(volumes[mid:].mean()) if len(volumes) > mid else 0.0
+    return first > 0 and second < first * threshold
+
+
+def volume_climax_at_point(
+    volumes: "np.ndarray",
+    *,
+    idx: int,
+    multiplier: float = 1.3,
+) -> bool:
+    """True when volume at ``idx`` is significantly above the window average.
+
+    Used by V-reversal patterns — the extreme bar should be a climax.
+    """
+    mean_vol = float(volumes.mean())
+    return mean_vol > 0 and float(volumes[idx]) > mean_vol * multiplier
+
+
 def recent_atr(bars: pd.DataFrame, idx: int, period: int = 14) -> float:
     """Mean true range over the trailing ``period`` bars ending at ``idx``.
 

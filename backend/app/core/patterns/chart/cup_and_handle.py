@@ -33,21 +33,32 @@ class CupAndHandlePattern:
         bottom = float(cup_closes.min())
         if (rim - bottom) / rim < 0.05:
             return None
-        # Handle: gentle downward drift, smaller than cup depth
+        # Handle: gentle consolidation, smaller than cup depth
         handle_range = float(handle_closes.max() - handle_closes.min())
         if handle_range > (rim - bottom) * 0.5:
             return None
-        if handle_closes[-1] >= handle_closes[0]:
+        # Handle must have dipped below its starting point — confirms consolidation formed.
+        if float(handle_closes.min()) >= float(handle_closes[0]):
             return None
+        # Entry trigger: current close must break OUT above the cup rim.
+        # Firing during the handle decline (old behaviour) is a top-chasing entry;
+        # firing at rim breakout is the textbook signal.
+        close = float(handle_closes[-1])
+        if close <= rim:
+            return None
+        # Strength scales with breakout magnitude: base 0.70, +0.25 per 1% above rim.
+        breakout_pct = (close - rim) / rim
+        strength = round(min(0.95, 0.70 + breakout_pct * 25.0), 2)
         return PatternFire(
             pattern_id=self.pattern_id,
             direction="LONG",
-            strength=0.7,
-            confidence=0.6,
+            strength=strength,
+            confidence=0.75,
             evidence={
                 "cup_curvature": float(a),
                 "rim": float(rim),
                 "bottom": bottom,
                 "handle_range": handle_range,
+                "breakout_pct": round(breakout_pct * 100, 2),
             },
         )

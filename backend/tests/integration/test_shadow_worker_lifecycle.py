@@ -449,7 +449,7 @@ async def test_cooldown_blocks_reentry_in_pipeline(
     assert len(trades) == 0
 
 
-EXPECTED_COOLDOWN_MINUTES: int = 30
+EXPECTED_COOLDOWN_MINUTES: int = 240
 EXPECTED_TIMEOUT_BARS: int = 24
 
 

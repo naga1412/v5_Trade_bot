@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.rl.adapter import AssetEmbeddingTable
 from app.rl.audit import record_brain_decision
-from app.rl.checkpoints import get_active_policy_and_checkpoint
+from app.rl.checkpoints import get_active_asset_table_state, get_active_policy_and_checkpoint
 from app.rl.inference import (
     BrainDecision,
     action_to_brain_adjust,
@@ -52,13 +52,25 @@ def _get_asset_table() -> AssetEmbeddingTable:
     """Lazy-init the per-process AssetEmbeddingTable.
 
     Held at module scope so the predictor (which has no instance state)
-    can call this on every tick without allocating. The table starts
-    empty; symbols register on first decide_action() call per spec sec
-    Q5 cold-start blending.
+    can call this on every tick without allocating.  On first call, if a
+    checkpoint is already loaded (``get_active_asset_table_state()`` is not
+    None), restore trained embeddings from it so inference uses the trained
+    per-symbol vectors instead of random-Gaussian noise.
     """
     global _asset_table
     if _asset_table is None:
         _asset_table = AssetEmbeddingTable()
+        table_state = get_active_asset_table_state()
+        if table_state is not None:
+            try:
+                _asset_table.load_state_dict(table_state)
+                log.info("brain_glue: restored asset embeddings from checkpoint")
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "brain_glue: asset_table state_dict restore failed; "
+                    "using random-init embeddings",
+                    exc_info=True,
+                )
     return _asset_table
 
 

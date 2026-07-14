@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.patterns.base import Direction, PatternFire, PatternType
-from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows
+from app.core.patterns.chart._helpers import find_swing_highs, find_swing_lows, volume_contracts_second_half
 
 
 class ExpandingTrianglePattern:
@@ -18,6 +18,7 @@ class ExpandingTrianglePattern:
         if current_idx < self.LOOKBACK:
             return None
         win = bars.iloc[current_idx - self.LOOKBACK : current_idx + 1]
+        volumes = win["volume"].to_numpy(dtype=float)
         highs = win["high"].to_numpy(dtype=float)
         lows = win["low"].to_numpy(dtype=float)
         prom_h = max(float(highs.std()) * 0.2, 0.5)
@@ -36,14 +37,17 @@ class ExpandingTrianglePattern:
         cur_close = float(win["close"].iloc[-1])
         mid = float((peak_vals.mean() + trough_vals.mean()) / 2)
         direction: Direction = "LONG" if cur_close > mid else "SHORT"
+        vol_contracting = volume_contracts_second_half(volumes)
+        confidence = 0.68 if vol_contracting else 0.48
         return PatternFire(
             pattern_id=self.pattern_id,
             direction=direction,
             strength=0.6,
-            confidence=0.5,
+            confidence=confidence,
             evidence={
                 "peaks": [float(v) for v in peak_vals],
                 "troughs": [float(v) for v in trough_vals],
                 "current_close": cur_close,
+                "vol_contracting": vol_contracting,
             },
         )
