@@ -1,7 +1,7 @@
 """Unit tests for the Sharpe gate in register_brain._direct_db_register_and_activate.
 
 The gate logic lives in tools/ml/register_brain.py. These tests mock the
-SQLAlchemy async session so no real DB is required.
+SQLAlchemy async session so no real DB is required.  # noqa: E501 (ci retrigger)
 
 Gate branches:
   bootstrap      — no active champion → register + activate unconditionally
