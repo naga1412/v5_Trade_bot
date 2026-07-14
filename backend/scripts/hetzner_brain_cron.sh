@@ -92,19 +92,19 @@ if [ ! -f "$EVAL_FILE" ]; then
 fi
 log "eval file: ${EVAL_FILE}"
 
-# Phase D: register + immediately activate the candidate. --activate --force
-# bypasses the champion-challenger Sharpe gate since there is no live
-# champion to compare against yet. --direct bypasses the HTTP route (gated
-# by Cloudflare Access JWT; cron has no bearer). When a champion exists,
-# register_brain.py compares Sharpe and only activates if challenger wins
-# by >5% — the --force flag is a no-op in that path.
-log "▶ Phase D — registering + activating candidate in rl_checkpoints"
+# Phase D: register the candidate and run the Sharpe gate. --activate
+# triggers champion-challenger logic in register_brain.py: if no champion
+# exists (bootstrap), the new checkpoint activates immediately. If a
+# champion exists, the challenger must exceed champion_sharpe * 1.05 to
+# swap in; otherwise it registers as is_active=False with a "gate_held"
+# marker. --direct bypasses the HTTP route (gated by Cloudflare Access
+# JWT; the cron has no bearer token).
+log "▶ Phase D — registering candidate in rl_checkpoints (Sharpe gate)"
 REGISTER_CMD="python /app/host-tools/ml/register_brain.py \
   --checkpoint /app/data/rl-cache/ppo_policy_${VERSION}.pt \
   --eval /app/data/rl-cache/eval_brain_${VERSION}.json \
   --direct \
-  --activate \
-  --force"
+  --activate"
 
 REGISTER_OUT=$(cd "$INSTALL_DIR" && docker compose exec -T backend bash -c "$REGISTER_CMD" 2>&1 || true)
 echo "$REGISTER_OUT" >> "$LOG_FILE"
@@ -116,14 +116,15 @@ if [ -z "$CKPT_ID" ]; then
 fi
 log "✓ registered as rl_checkpoints.id=${CKPT_ID}"
 
-# Phase E: send the Telegram inline-button approval message via the
-# new /api/v1/admin/rl-checkpoints/{id}/request-approval helper (added
-# in Phase E.next once the polling worker lands). For Phase E v1 we
-# fall back to the simple notify() sendMessage above — the operator
-# will start seeing inline-button messages once the backend boots
-# the polling task in app/main:lifespan.
-log "▶ Phase E — Telegram approval pending"
-notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) ready for review. Approve via Telegram inline button or curl PATCH."
+# Phase E: notify operator of gate outcome.
+log "▶ Phase E — Telegram notification"
+if echo "$REGISTER_OUT" | grep -q 'gate_held:'; then
+  notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) registered but gate_held: Sharpe did not beat champion by >5%%. Manual PATCH to activate if desired."
+elif echo "$REGISTER_OUT" | grep -q 'gate_undecidable:'; then
+  notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) registered but gate_undecidable: champion Sharpe missing; manual review required."
+else
+  notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) activated (Sharpe gate passed or bootstrap). Restart backend to load: docker compose restart backend"
+fi
 
 log "▶ done"
 exit 0
