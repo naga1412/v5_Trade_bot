@@ -32,8 +32,12 @@ if TYPE_CHECKING:
 
 # A challenger must improve on the champion's MAE by at least 5% to win.
 IMPROVEMENT_BAR: float = 0.95
-# Sharpe equivalent: challenger > champion * SHARPE_IMPROVEMENT_BAR (1.05)
+# Multiplicative Sharpe improvement bar: challenger > champion * 1.05.
 SHARPE_IMPROVEMENT_BAR: float = 1.0 + (1.0 - IMPROVEMENT_BAR)  # 1.05
+# Additive Sharpe floor: applied when the multiplicative bar would invert for
+# non-positive champion Sharpe (e.g. champion=-2.0 → bar=-2.1, which lets
+# a worse challenger pass). challenger must also exceed champion + this delta.
+SHARPE_MIN_DELTA: float = 0.05
 # Held-out window length used by ``_evaluate_mae``. Currently 30 days
 # preceding "now"; in production we should pull this from a configurable
 # knob so we can replay the same window across multiple promotions.
@@ -41,6 +45,23 @@ HELD_OUT_DAYS: int = 30
 
 Metric = Literal["mae", "sharpe"]
 Table = Literal["ml_checkpoints", "rl_checkpoints"]
+
+
+def sharpe_passes(challenger: float, champion: float) -> bool:
+    """Return True iff challenger clears the Sharpe improvement bar.
+
+    Uses ``max(champion * SHARPE_IMPROVEMENT_BAR, champion + SHARPE_MIN_DELTA)``
+    so the bar is always an additive improvement even when champion <= 0.
+    Without the additive floor a negative champion (-2.0) sets the
+    multiplicative threshold at -2.1, which lets a *worse* challenger
+    (-2.05) pass the gate.
+
+    Called by both the HTTP PATCH route (via ``evaluate_challenger``) and
+    ``tools/ml/register_brain.py``'s ``--direct`` DB path so the two code
+    paths stay in sync.
+    """
+    threshold = max(champion * SHARPE_IMPROVEMENT_BAR, champion + SHARPE_MIN_DELTA)
+    return challenger > threshold
 
 
 @dataclass(frozen=True)
@@ -146,7 +167,7 @@ async def evaluate_challenger(
 
     if metric == "sharpe":
         champion_value = await _evaluate_sharpe(session, int(champion_row.id))
-        challenger_wins = challenger_value > champion_value * SHARPE_IMPROVEMENT_BAR
+        challenger_wins = sharpe_passes(challenger_value, champion_value)
     else:
         champion_value = await _evaluate_mae(session, int(champion_row.id))
         challenger_wins = challenger_value < champion_value * IMPROVEMENT_BAR
