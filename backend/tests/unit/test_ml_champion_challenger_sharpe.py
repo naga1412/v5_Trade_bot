@@ -164,6 +164,46 @@ async def test_sharpe_unknown_challenger_raises(session) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# sharpe_passes() unit tests — additive-floor semantics
+# ---------------------------------------------------------------------------
+
+
+def test_sharpe_passes_positive_champion_multiplicative_wins():
+    """Positive champion: multiplicative bar wins when large enough."""
+    from app.ml.champion_challenger import sharpe_passes
+    # champion=2.0 → max(2.0*1.05, 2.0+0.05) = max(2.1, 2.05) = 2.1
+    assert sharpe_passes(2.11, 2.0) is True
+    assert sharpe_passes(2.1, 2.0) is False   # not strictly greater
+
+
+def test_sharpe_passes_positive_champion_additive_floor_wins():
+    """Small positive champion: additive floor is stricter than multiplicative."""
+    from app.ml.champion_challenger import sharpe_passes
+    # champion=0.5 → max(0.5*1.05, 0.5+0.05) = max(0.525, 0.55) = 0.55
+    assert sharpe_passes(0.56, 0.5) is True
+    assert sharpe_passes(0.53, 0.5) is False   # beats multiplicative but not additive
+
+
+def test_sharpe_passes_negative_champion_additive_floor_prevents_inversion():
+    """Negative champion: additive floor prevents inverted bar from accepting worse Sharpe."""
+    from app.ml.champion_challenger import sharpe_passes
+    # Bug scenario: champion=-2.0 → multiplicative threshold=-2.1
+    # Without fix: challenger=-2.05 > -2.1 → passes (but -2.05 < -2.0, i.e. worse!)
+    # With fix:    max(-2.1, -1.95) = -1.95 → challenger must be > -1.95
+    assert sharpe_passes(-2.05, -2.0) is False   # worse Sharpe: must NOT pass
+    assert sharpe_passes(-1.9, -2.0) is True     # genuinely better Sharpe: passes
+
+
+def test_sharpe_passes_zero_champion():
+    """Zero champion: additive floor ensures positive improvement required."""
+    from app.ml.champion_challenger import sharpe_passes
+    # champion=0.0 → max(0.0, 0.05) = 0.05
+    assert sharpe_passes(0.06, 0.0) is True
+    assert sharpe_passes(0.04, 0.0) is False
+    assert sharpe_passes(0.0, 0.0) is False
+
+
 @pytest.mark.asyncio
 async def test_default_metric_still_mae_for_backward_compat(
     session, monkeypatch,

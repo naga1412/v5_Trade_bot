@@ -54,11 +54,6 @@ import requests
 
 log = logging.getLogger(__name__)
 
-# Mirrors champion_challenger.SHARPE_IMPROVEMENT_BAR — challenger must beat
-# champion by at least 5% Sharpe (higher is better for RL).
-_SHARPE_IMPROVEMENT_BAR: float = 1.05
-
-
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -160,6 +155,7 @@ def _direct_db_register_and_activate(
     from sqlalchemy import text
 
     from app.db.session import get_session_factory  # type: ignore[import-not-found]
+    from app.ml.champion_challenger import sharpe_passes  # type: ignore[import-not-found]
 
     async def _go() -> dict:
         sf = get_session_factory()
@@ -221,7 +217,7 @@ def _direct_db_register_and_activate(
                     if champion_sharpe is None or challenger_sharpe is None:
                         gate_outcome = "gate_undecidable"
                         should_activate = False
-                    elif challenger_sharpe > champion_sharpe * _SHARPE_IMPROVEMENT_BAR:
+                    elif sharpe_passes(challenger_sharpe, champion_sharpe):
                         gate_outcome = "gate_passed"
                         await s.execute(
                             text(

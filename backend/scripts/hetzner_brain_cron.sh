@@ -116,14 +116,23 @@ if [ -z "$CKPT_ID" ]; then
 fi
 log "✓ registered as rl_checkpoints.id=${CKPT_ID}"
 
-# Phase E: notify operator of gate outcome.
+# Phase E: notify operator of gate outcome and restart backend if activated.
 log "▶ Phase E — Telegram notification"
 if echo "$REGISTER_OUT" | grep -q 'gate_held:'; then
-  notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) registered but gate_held: Sharpe did not beat champion by >5%%. Manual PATCH to activate if desired."
+  notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) registered but gate_held: Sharpe did not beat champion by >5%. Manual PATCH to activate if desired."
 elif echo "$REGISTER_OUT" | grep -q 'gate_undecidable:'; then
   notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) registered but gate_undecidable: champion Sharpe missing; manual review required."
 else
-  notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) activated (Sharpe gate passed or bootstrap). Restart backend to load: docker compose restart backend"
+  # Checkpoint was activated (bootstrap or gate_passed). Restart backend so
+  # the new policy loads from DB on the next startup.
+  log "▶ restarting backend to load id=${CKPT_ID}"
+  if cd "$INSTALL_DIR" && docker compose restart backend >>"$LOG_FILE" 2>&1; then
+    log "✓ backend restarted — id=${CKPT_ID} active on next prediction"
+    notify "🧠" "candidate ${VERSION} (id=${CKPT_ID}) activated + backend restarted. Brain is live."
+  else
+    log "✗ backend restart failed; manual restart required"
+    notify "⚠️" "candidate ${VERSION} (id=${CKPT_ID}) activated but backend restart FAILED. Run: docker compose restart backend"
+  fi
 fi
 
 log "▶ done"
