@@ -776,8 +776,8 @@ jobs:
                  echo '=== 3. Pattern confidence in recent predictions (last 6h) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT ts, symbol, direction, \
-                       ROUND(confidence::numeric, 3) AS conf, \
-                       LEFT(notes, 200) AS notes_preview \
+                       ROUND(final_score::numeric, 3) AS final_score, \
+                       ROUND(confidence::numeric, 3) AS conf \
                      FROM predictions \
                      WHERE ts > NOW() - INTERVAL '6h' \
                      ORDER BY ts DESC LIMIT 10;\" && \
