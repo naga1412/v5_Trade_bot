@@ -15,6 +15,8 @@ from app.rl.replay_buffer import (
     ACTION_SHORT_FULL,
     ALL_ACTIONS,
     Transition,
+    _layer_scores_to_tuple,
+    _macro_from_ts_iso,
     load_from_shadow_trades,
 )
 
@@ -418,3 +420,151 @@ async def test_partial_components_handled_safely(
     assert len(out) == 1
     # Should not crash. Obs is correct shape.
     assert out[0].obs.shape == (OBS_DIM,)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3C — legacy replay_buffer fixes
+# (1) _layer_scores_to_tuple: handle "1".."9" keys + dict values
+# (2) _macro_from_ts_iso: derive weekend/asia_open from timestamp
+
+
+def test_layer_scores_to_tuple_l_prefix_keys() -> None:
+    """Legacy 'L1'..'L9' key format returns correct floats."""
+    d = {f"L{i}": float(i) * 0.1 for i in range(1, 10)}
+    result = _layer_scores_to_tuple(d)
+    assert len(result) == 9
+    assert result[0] == pytest.approx(0.1)
+    assert result[8] == pytest.approx(0.9)
+
+
+def test_layer_scores_to_tuple_string_int_keys() -> None:
+    """Current shadow worker format uses '1'..'9' (stringified ints, no prefix)."""
+    d = {str(i): float(i) * 0.1 for i in range(1, 10)}
+    result = _layer_scores_to_tuple(d)
+    assert len(result) == 9
+    assert result[0] == pytest.approx(0.1)
+    assert result[8] == pytest.approx(0.9)
+
+
+def test_layer_scores_to_tuple_dict_values_long() -> None:
+    """Dict values (LayerScoreOut.model_dump()) for LONG = +strength*confidence."""
+    d = {"1": {"direction": "LONG", "strength": 0.6, "confidence": 0.8, "notes": ""}}
+    result = _layer_scores_to_tuple(d)
+    assert result[0] == pytest.approx(0.6 * 0.8)
+    assert result[1] == pytest.approx(0.0)   # missing → 0
+
+
+def test_layer_scores_to_tuple_dict_values_short() -> None:
+    """Dict values for SHORT direction produce negative signed score."""
+    d = {"L3": {"direction": "SHORT", "strength": 0.5, "confidence": 0.9, "notes": ""}}
+    result = _layer_scores_to_tuple(d)
+    assert result[2] == pytest.approx(-0.5 * 0.9)
+
+
+def test_layer_scores_to_tuple_dict_values_neutral() -> None:
+    """NEUTRAL direction produces 0.0 regardless of strength."""
+    d = {"2": {"direction": "NEUTRAL", "strength": 0.9, "confidence": 1.0, "notes": ""}}
+    result = _layer_scores_to_tuple(d)
+    assert result[1] == pytest.approx(0.0)
+
+
+def test_layer_scores_to_tuple_l_prefix_takes_priority_over_str_int() -> None:
+    """When both 'L1' and '1' are present, 'L1' wins (legacy compatibility)."""
+    d = {"L1": 0.7, "1": 0.3}
+    result = _layer_scores_to_tuple(d)
+    assert result[0] == pytest.approx(0.7)
+
+
+def test_layer_scores_to_tuple_missing_keys_default_to_zero() -> None:
+    """Keys missing from both formats silently default to 0.0."""
+    result = _layer_scores_to_tuple({})
+    assert result == tuple([0.0] * 9)
+
+
+def test_macro_from_ts_iso_weekend_saturday() -> None:
+    """2024-04-06 is a Saturday — weekend=True."""
+    macro = _macro_from_ts_iso("2024-04-06T10:00:00+00:00")
+    assert macro.weekend is True
+
+
+def test_macro_from_ts_iso_weekday_monday() -> None:
+    """2024-04-01 is a Monday — weekend=False."""
+    macro = _macro_from_ts_iso("2024-04-01T10:00:00+00:00")
+    assert macro.weekend is False
+
+
+def test_macro_from_ts_iso_asia_open_hour_3() -> None:
+    """Hour 03:00 UTC is inside asia_open window (00:00-08:00)."""
+    macro = _macro_from_ts_iso("2024-04-01T03:00:00+00:00")
+    assert macro.asia_open is True
+
+
+def test_macro_from_ts_iso_asia_open_hour_12() -> None:
+    """Hour 12:00 UTC is outside asia_open window."""
+    macro = _macro_from_ts_iso("2024-04-01T12:00:00+00:00")
+    assert macro.asia_open is False
+
+
+def test_macro_from_ts_iso_asia_open_boundary_hour_8() -> None:
+    """Hour 08:00 UTC is NOT in asia_open (window is 00:00 <= h < 8)."""
+    macro = _macro_from_ts_iso("2024-04-01T08:00:00+00:00")
+    assert macro.asia_open is False
+
+
+def test_macro_from_ts_iso_invalid_ts_falls_back_to_defaults() -> None:
+    """Malformed timestamp must not crash; returns safe defaults."""
+    macro = _macro_from_ts_iso("not-a-date")
+    assert macro.weekend is False
+    assert macro.asia_open is False
+    assert macro.hours_to_next_high_impact == pytest.approx(24.0)
+
+
+@pytest.mark.asyncio
+async def test_legacy_trade_macro_derives_weekend_from_opened_at(
+    session: AsyncSession,
+) -> None:
+    """End-to-end: legacy trade opened on a Saturday gets weekend=True in obs.
+
+    obs layout: emb(32) + ls(9) + market(5) + regime(5) + position(3) + macro(4)
+    macro slot order: hours_to_next_high_impact, fomc_window, weekend, asia_open
+    """
+    # 2024-04-06 is a Saturday; hour=10 is not asia_open
+    await _insert_trade(
+        session, sid="sig-sat-1", opened_at="2024-04-06T10:00:00+00:00",
+    )
+    out = await load_from_shadow_trades(session, window_days=365)
+    assert len(out) == 1
+    obs = out[0].obs
+    macro_base = 32 + 9 + 5 + 5 + 3   # emb + ls + market + regime + position
+    # macro slot 2 = weekend (0-indexed: hours=0, fomc=1, weekend=2, asia=3)
+    assert obs[macro_base + 2] == pytest.approx(1.0)   # weekend=True → 1.0
+    assert obs[macro_base + 3] == pytest.approx(0.0)   # asia_open=False → 0.0
+
+
+@pytest.mark.asyncio
+async def test_legacy_trade_string_int_layer_keys_produce_nonzero_obs(
+    session: AsyncSession,
+) -> None:
+    """Pre-fix legacy path used 'L1' lookup on '1'-keyed data → all zeros.
+
+    After fix, '1'-keyed layer_scores must land correctly in obs[32:41].
+    """
+    # Insert a trade whose layer_scores use '1'..'9' (current shadow worker format)
+    await session.execute(sa.text("""
+        INSERT INTO shadow_trades
+        (symbol, direction, entry_price, stop_loss, take_profit,
+         position_size_usdt, entry_score, entry_confidence,
+         layer_scores, entry_atr, exit_price, exit_reason, pnl_pct, pnl_usdt,
+         bars_held, opened_at, closed_at, inputs_hash, signal_id,
+         prev_hash, row_hash)
+        VALUES ('ETH/USDT', 'LONG', 3000, 2970, 3060, 1000, 0.7, 0.8,
+                :ls, 30, 3030, 'TAKE_PROFIT', 1.0, 100, 6,
+                '2024-04-01T12:00:00+00:00', '2024-04-01T18:00:00+00:00',
+                'h', 'sig-strkey-1', '00', 'rh-strkey-1')
+    """), {"ls": json.dumps({str(i): 0.5 for i in range(1, 10)})})
+    await session.commit()
+    out = await load_from_shadow_trades(session, window_days=365)
+    assert len(out) == 1
+    layer_slice = out[0].obs[32:41]
+    # After fix all 9 slots must be 0.5; before fix they were all 0.0.
+    assert np.allclose(layer_slice, 0.5)
