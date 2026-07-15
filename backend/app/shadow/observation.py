@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import sqlalchemy as sa
@@ -89,7 +89,13 @@ def _macro_from_ts(ts: datetime) -> dict[str, Any]:
 async def _latest_intermarket_snapshot(
     session: AsyncSession, symbol: str,
 ) -> dict[str, Any] | None:
-    """Return the most recent intermarket_snapshots row for ``symbol``, or None."""
+    """Return the most recent intermarket_snapshots row for ``symbol``, or None.
+
+    Also computes oi_delta_24h using the same formula as
+    predictor._intermarket_snapshot_for: (latest_OI - baseline_OI) / baseline_OI,
+    where baseline is the latest row at-or-before captured_at - 24h.
+    Returns None for oi_delta_24h when baseline is missing or OI is zero.
+    """
     try:
         result = await session.execute(
             sa.text(
@@ -103,6 +109,32 @@ async def _latest_intermarket_snapshot(
         row = result.first()
         if row is None:
             return None
+
+        oi_delta: float | None = None
+        if row.open_interest is not None:
+            # row.captured_at is a datetime in Postgres but a str in SQLite tests.
+            cap_ts = row.captured_at
+            if isinstance(cap_ts, str):
+                cap_ts = datetime.fromisoformat(cap_ts.replace("Z", "+00:00"))
+            baseline_ts = cap_ts - timedelta(hours=24)
+            baseline_result = await session.execute(
+                sa.text(
+                    "SELECT open_interest FROM intermarket_snapshots "
+                    "WHERE symbol = :s AND captured_at <= :ts "
+                    "ORDER BY captured_at DESC LIMIT 1"
+                ),
+                {"s": symbol, "ts": baseline_ts},
+            )
+            baseline_row = baseline_result.first()
+            if (
+                baseline_row is not None
+                and baseline_row.open_interest is not None
+                and float(baseline_row.open_interest) > 0
+            ):
+                oi_delta = (
+                    float(row.open_interest) - float(baseline_row.open_interest)
+                ) / float(baseline_row.open_interest)
+
         return {
             "funding_rate": (
                 float(row.funding_rate) if row.funding_rate is not None else None
@@ -113,6 +145,7 @@ async def _latest_intermarket_snapshot(
             "open_interest": (
                 float(row.open_interest) if row.open_interest is not None else None
             ),
+            "oi_delta_24h": oi_delta,
         }
     except Exception as e:  # noqa: BLE001 — observation capture is best-effort
         log.warning("_latest_intermarket_snapshot failed for %s: %s", symbol, e)
@@ -143,10 +176,7 @@ def _build_components(
             "atr_pct": atr_pct,
             "funding_rate": funding,
             "open_interest": open_interest,
-            # Placeholders — real values will arrive once their feature
-            # workers start populating dedicated tables. Loader at
-            # training time falls back to the same lookups for these.
-            "oi_delta_24h": 0.0,
+            "oi_delta_24h": intermarket.get("oi_delta_24h") if intermarket else None,
             "dxy_corr_30d": 0.0,
             "gold_corr_30d": 0.0,
             # Regime classifier integration is a follow-up — for now we
