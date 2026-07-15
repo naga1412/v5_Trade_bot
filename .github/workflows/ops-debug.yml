@@ -35,6 +35,7 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
+          - pwin-calibration-report # fit isotonic p_win model on shadow_trades + show decile calibration table on newest-20% val window (per direction)
           - brain-cron-trigger # WRITE: post-deploy verify of PR-BRAIN-BOOTSTRAP-FIX. Verifies the 3 fixes on disk, manually fires hetzner_brain_cron.sh, tails the resulting log, reports rl_checkpoints + rl-cache. Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint (is_active stays False).
           - brain-rl-cache-archive # WRITE: mv all *.pt + eval_brain_*.json files from rl-cache into rl-cache/_predegenerate/. Idempotent. Forces next cron to cold-start. Does NOT touch rl_checkpoints DB rows.
           - brain-holdout-labels # READ-ONLY: label-side audit of the 59 backtest holdout trades (2026-05-19 → 2026-05-22). Reports trade dump + by-direction + by-hour + top-15 by-symbol — informs misclass analysis without needing brain decisions.
@@ -704,5 +705,9 @@ jobs:
                  echo '=== running reeval against rl-cache/ (post-archive newer checkpoints) ===' && \
                  docker compose exec -T backend python /app/host-tools/ml/reeval_checkpoints.py \
                    --pt-glob '/app/data/rl-cache/ppo_policy_v*.pt' || true"
+              ;;
+            pwin-calibration-report)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/pwin_calibration_report.py"
               ;;
           esac
