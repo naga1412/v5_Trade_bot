@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import dataclasses
 
-import pytest
-
 from app.config import Settings
 from app.core.gates.entry_quality import AllowDecision, open_position_gate
 
