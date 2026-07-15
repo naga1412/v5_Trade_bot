@@ -804,27 +804,34 @@ jobs:
               # brain_adjust is stored in predictions.layer_scores JSONB — there is
               # no separate brain_decisions.brain_adjust column (that table stores
               # action/smoothed_action/value_estimate instead).
-              # PASS: non_1_0_count > 0 AND stuck_1_0_count == 0
-              # FAIL: all values are 1.0 (fix not deployed) or no rows (brain not running)
+              # PASS: non_1_0 > 0  (brain is adjusting scores)
+              # FAIL A: has_key=0  (key absent — _build_extras not writing it, or
+              #                      prediction_extras=None so live_prediction.py
+              #                      update() never fires; old code path)
+              # FAIL B: all_1_0   (fix not deployed / brain returning constant)
+              # Note: uses the ? operator (key-exists) NOT IS NOT NULL so total_3h
+              # reflects ALL predictions regardless of key presence.
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && \
-                 echo '=== recent predictions with brain_adjust (last 3h) ===' && \
+                 echo '=== key-existence breakdown (last 3h) — use ? not IS NOT NULL ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT \
+                     COUNT(*) AS total_3h, \
+                     COUNT(*) FILTER (WHERE layer_scores ? 'brain_adjust') AS has_key, \
+                     COUNT(*) FILTER (WHERE NOT (layer_scores ? 'brain_adjust')) AS no_key, \
+                     COUNT(*) FILTER (WHERE layer_scores->>'brain_adjust' = '1.0') AS value_1_0, \
+                     COUNT(*) FILTER (WHERE layer_scores ? 'brain_adjust' \
+                       AND (layer_scores->>'brain_adjust')::float != 1.0) AS non_1_0 \
+                   FROM predictions \
+                   WHERE ts > NOW() - INTERVAL '3 hours';\" && \
+                 echo '=== sample rows WITH brain_adjust key (last 3h, up to 5) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                  \"SELECT ts, symbol, \
                      layer_scores->>'brain_adjust' AS recorded_adjust \
                    FROM predictions \
                    WHERE ts > NOW() - INTERVAL '3 hours' \
-                     AND layer_scores->>'brain_adjust' IS NOT NULL \
-                   ORDER BY ts DESC LIMIT 10;\" && \
-                 echo '=== summary: how many are stuck at 1.0? ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                 \"SELECT \
-                     COUNT(*) AS predictions_3h, \
-                     COUNT(*) FILTER (WHERE (layer_scores->>'brain_adjust')::float != 1.0) AS non_1_0_count, \
-                     COUNT(*) FILTER (WHERE (layer_scores->>'brain_adjust')::float = 1.0) AS stuck_1_0_count \
-                   FROM predictions \
-                   WHERE ts > NOW() - INTERVAL '3 hours' \
-                     AND layer_scores->>'brain_adjust' IS NOT NULL;\" && \
+                     AND layer_scores ? 'brain_adjust' \
+                   ORDER BY ts DESC LIMIT 5;\" && \
                  echo '=== recent brain_decisions (confirms brain is running) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                  \"SELECT ts, symbol, action, smoothed_action, \
