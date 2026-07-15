@@ -232,6 +232,7 @@ class Settings(BaseSettings):
     # the model's score distribution lacks a high-conviction SHORT tail.
     MIN_ENTRY_SCORE_LONG: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
+    SHADOW_ALLOW_SHORTS: bool = False
 
     # --- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) -----------------------
     # Confidence-tiered routing modifier on the existing telegram-approve
