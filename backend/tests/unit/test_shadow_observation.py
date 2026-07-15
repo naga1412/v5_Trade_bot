@@ -143,6 +143,38 @@ def test_components_no_intermarket_yields_none_funding() -> None:
     assert comp["market"]["open_interest"] is None
 
 
+def test_components_oi_delta_propagates_from_intermarket() -> None:
+    """oi_delta_24h from intermarket dict is stored in output unchanged."""
+    comp = _build_components(
+        symbol="X", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1.0, last_close=100.0,
+        layer_scores_array=[0.0] * 9,
+        intermarket={"funding_rate": 0.0001, "open_interest": 1.0e9, "oi_delta_24h": 0.15},
+    )
+    assert comp["market"]["oi_delta_24h"] == pytest.approx(0.15)
+
+
+def test_components_oi_delta_none_when_intermarket_absent() -> None:
+    """oi_delta_24h is None when no intermarket row exists."""
+    comp = _build_components(
+        symbol="X", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1.0, last_close=100.0,
+        layer_scores_array=[0.0] * 9, intermarket=None,
+    )
+    assert comp["market"]["oi_delta_24h"] is None
+
+
+def test_components_oi_delta_none_when_not_in_intermarket_dict() -> None:
+    """oi_delta_24h is None when intermarket exists but has no oi_delta_24h key."""
+    comp = _build_components(
+        symbol="X", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1.0, last_close=100.0,
+        layer_scores_array=[0.0] * 9,
+        intermarket={"funding_rate": 0.0001, "open_interest": 1.0e9},
+    )
+    assert comp["market"]["oi_delta_24h"] is None
+
+
 def test_components_position_state_zeros_at_open() -> None:
     comp = _build_components(
         symbol="X", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
@@ -198,6 +230,63 @@ async def test_build_obs_components_no_intermarket_row_safe(
         layer_scores_array=[0.0] * 9,
     )
     assert comp["market"]["funding_rate"] is None
+
+
+@pytest.mark.asyncio
+async def test_oi_delta_24h_computed_from_25h_apart_rows(
+    session: AsyncSession,
+) -> None:
+    """oi_delta_24h matches predictor formula: (latest_OI - baseline_OI) / baseline_OI.
+
+    Uses bound-parameter INSERTs so SQLite stores datetimes in a format
+    consistent with the baseline-query binding.
+    """
+    baseline_ts = datetime(2026, 5, 13, 6, 0, tzinfo=timezone.utc)
+    latest_ts = datetime(2026, 5, 14, 7, 0, tzinfo=timezone.utc)  # 25h later
+    insert_sql = sa.text(
+        "INSERT INTO intermarket_snapshots "
+        "(symbol, captured_at, funding_rate, open_interest, source) "
+        "VALUES (:sym, :ts, :fr, :oi, 'test')"
+    )
+    await session.execute(insert_sql, {"sym": "SOLUSDT", "ts": baseline_ts, "fr": 0.0001, "oi": 1.0e9})
+    await session.execute(insert_sql, {"sym": "SOLUSDT", "ts": latest_ts, "fr": 0.0002, "oi": 1.2e9})
+    await session.commit()
+
+    comp = await build_obs_components(
+        session,
+        symbol="SOLUSDT",
+        captured_at=latest_ts,
+        atr=1.0, last_close=100.0,
+        layer_scores_array=[0.0] * 9,
+    )
+    expected_delta = (1.2e9 - 1.0e9) / 1.0e9  # 0.2
+    assert comp["market"]["oi_delta_24h"] == pytest.approx(expected_delta)
+
+
+@pytest.mark.asyncio
+async def test_oi_delta_24h_none_when_no_baseline_row(
+    session: AsyncSession,
+) -> None:
+    """oi_delta_24h is None when no intermarket row exists 24h before the latest."""
+    single_ts = datetime(2026, 5, 14, 7, 0, tzinfo=timezone.utc)
+    await session.execute(
+        sa.text(
+            "INSERT INTO intermarket_snapshots "
+            "(symbol, captured_at, funding_rate, open_interest, source) "
+            "VALUES (:sym, :ts, :fr, :oi, 'test')"
+        ),
+        {"sym": "AVAXUSDT", "ts": single_ts, "fr": 0.0003, "oi": 5.0e8},
+    )
+    await session.commit()
+
+    comp = await build_obs_components(
+        session,
+        symbol="AVAXUSDT",
+        captured_at=single_ts,
+        atr=1.0, last_close=50.0,
+        layer_scores_array=[0.0] * 9,
+    )
+    assert comp["market"]["oi_delta_24h"] is None
 
 
 # ---------------------------------------------------------------------------

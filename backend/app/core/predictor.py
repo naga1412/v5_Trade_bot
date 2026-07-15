@@ -613,7 +613,7 @@ async def build_prediction(
     trade_setup = _build_trade_setup(final.direction, float(closes[-1]), _atr(bars))
     extras = _build_extras(
         static_score=static_score,
-        brain_adjust=1.0,
+        brain_adjust=brain_hook.brain_adjust,
         trap_count=len(fires),
         news_multiplier=1.0,
         final_score=final.score,

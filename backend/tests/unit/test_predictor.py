@@ -105,7 +105,7 @@ async def test_build_prediction_exposes_extras_payload_for_persistence() -> None
     assert "traps_fired" in extras
     assert isinstance(extras["traps_fired"], list)
     assert "static_score" in extras
-    assert "brain_adjust" in extras and extras["brain_adjust"] == 1.0
+    assert "brain_adjust" in extras and isinstance(extras["brain_adjust"], float)
     assert "trap_factor" in extras and 0.0 < extras["trap_factor"] <= 1.0
     assert "news_multiplier" in extras and extras["news_multiplier"] == 1.0
     assert "direction_penalty" in extras

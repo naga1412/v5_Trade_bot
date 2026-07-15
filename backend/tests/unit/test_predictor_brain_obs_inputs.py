@@ -88,6 +88,27 @@ async def test_brain_asia_open_false_at_utc_14(monkeypatch: pytest.MonkeyPatch) 
     assert captured["macro"].asia_open is False
 
 
+async def test_brain_adjust_propagates_to_prediction_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """brain_hook.brain_adjust must appear in prediction_extras, not hardcoded 1.0.
+
+    Regression for: _build_extras was called with brain_adjust=1.0 even when
+    compute_brain_adjust_and_persist returned a different value.
+    """
+    async def fake_hook(**kwargs):
+        return BrainHookResult(brain_adjust=1.5, decision=None)
+
+    monkeypatch.setattr(
+        "app.core.predictor.compute_brain_adjust_and_persist",
+        fake_hook,
+    )
+    from app.core.predictor import build_prediction
+    result = await build_prediction(symbol="BTCUSDT", timeframe="1h", bars=_bars())
+    assert result is not None
+    assert result.prediction_extras["brain_adjust"] == pytest.approx(1.5)
+
+
 async def test_brain_regime_maps_bull_to_bull_breakout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regime classifier 'bull' must map to 'bull_breakout' in MarketFeatures."""
     async def _bull():
