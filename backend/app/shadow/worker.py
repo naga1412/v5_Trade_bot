@@ -28,7 +28,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.routes.ws import manager
-from app.core.gates.entry_quality import open_position_gate
+from app.core.gates.entry_quality import AllowDecision, open_position_gate
 from app.core.predictor import _atr, build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.data.adapters.binance import BinanceClient
@@ -638,12 +638,20 @@ class ShadowWorker:
         # `.direction` + `.entry_score`; ShadowSignal carries `.score`, so
         # we feed it through a tiny shim that maps `.score → .entry_score`.
         from app.config import get_settings as _get_entry_quality_settings
+        _eq_settings = _get_entry_quality_settings()
         _eq_signal = _EntryQualitySignal(
             direction=signal.direction.value, entry_score=signal.score,
         )
-        _eq_decision = open_position_gate(
-            _eq_signal, _get_entry_quality_settings(),
-        )
+        _eq_decision = open_position_gate(_eq_signal, _eq_settings)
+        # SHADOW_ALLOW_SHORTS: let shadow trades take short positions while
+        # live shorts remain off. Only the short_disabled denial is skipped;
+        # score-threshold, regime, and ADX gate reasons still block entry.
+        if (
+            not _eq_decision.allow
+            and _eq_decision.reason == "short_disabled"
+            and _eq_settings.SHADOW_ALLOW_SHORTS
+        ):
+            _eq_decision = AllowDecision(allow=True, reason=None)
         if not _eq_decision.allow:
             log.info(
                 "shadow_worker: %s/%s GATE_DENIED %s score=%.3f",
