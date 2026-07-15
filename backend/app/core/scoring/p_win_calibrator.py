@@ -36,22 +36,81 @@ P_WIN_MODEL_PATH_SHORT: Path = P_WIN_MODEL_DIR / "short.pkl"
 
 
 async def fit_p_win_models(session: Any) -> None:
-    """PR1: NOOP. PR5 will populate this.
+    """Fit per-direction IsotonicRegression models on closed shadow_trades.
 
-    Async signature is locked NOW (PR1) even though the body doesn't
-    await — PR5 will need `await session.execute(...)` against an
-    AsyncSession to fetch closed shadow_trades for isotonic fitting.
-    Declaring async here means PR5 ships without a breaking signature
-    change at every caller.
+    Walk-forward split: train on oldest 80% so the validation window
+    (newest 20%) is a clean holdout for the ops-debug calibration report.
+    Models are pickled to P_WIN_MODEL_PATH_{LONG,SHORT} and cached in
+    _LOADED_MODELS.
 
     Args:
-        session: AsyncSession or similar (unused in PR1; accepted so the
-            PR5 worker can call without a signature change).
+        session: AsyncSession — used to SELECT from shadow_trades.
     """
+    try:
+        from sklearn.isotonic import IsotonicRegression
+    except ImportError:
+        log.warning("p_win_calibrator: sklearn unavailable; skipping fit")
+        return
+    import pickle
+    from sqlalchemy import text
+
+    rows = (
+        await session.execute(
+            text(
+                "SELECT entry_score, direction,"
+                " CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END AS won"
+                " FROM shadow_trades"
+                " WHERE closed_at IS NOT NULL"
+                " ORDER BY closed_at ASC"
+            )
+        )
+    ).fetchall()
+
+    if len(rows) < 50:
+        log.info(
+            "p_win_calibrator: only %d closed trades (need ≥50); skipping fit",
+            len(rows),
+        )
+        return
+
+    split = int(len(rows) * 0.8)
+    train_rows = rows[:split]
     log.info(
-        "p_win_calibrator: fit_p_win_models called; "
-        "fit not implemented until PR5 (returning NOOP)",
+        "p_win_calibrator: fitting on %d train rows (%d total, %d val holdout)",
+        split, len(rows), len(rows) - split,
     )
+
+    P_WIN_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+    for direction, path in [
+        (Direction.LONG, P_WIN_MODEL_PATH_LONG),
+        (Direction.SHORT, P_WIN_MODEL_PATH_SHORT),
+    ]:
+        d_rows = [
+            (r.entry_score, r.won)
+            for r in train_rows
+            if r.direction == direction
+        ]
+        if len(d_rows) < 20:
+            log.info(
+                "p_win_calibrator: only %d %s training rows (need ≥20); skipping",
+                len(d_rows), direction,
+            )
+            continue
+        scores, labels = zip(*d_rows)
+        # abs(entry_score): both LONG (positive) and SHORT (negative) are
+        # monotone-increasing with signal strength after abs — stronger signal
+        # should map to higher p_win.
+        x = [abs(s) for s in scores]
+        ir = IsotonicRegression(y_min=0.0, y_max=1.0, increasing=True, out_of_bounds="clip")
+        ir.fit(x, labels)
+        with open(path, "wb") as f:
+            pickle.dump(ir, f)
+        _LOADED_MODELS[direction] = ir
+        log.info(
+            "p_win_calibrator: fitted %s model on %d rows → %s",
+            direction, len(d_rows), path,
+        )
 
 
 async def predict_p_win(

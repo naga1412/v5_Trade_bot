@@ -1,8 +1,8 @@
-"""Tests for p_win_calibrator — PR1 stub.
+"""Tests for p_win_calibrator — PR5 isotonic implementation.
 
-All tests verify the PR1 contract:
-  - predict_p_win always returns None for any direction / score.
-  - fit_p_win_models is a callable NOOP that logs a PR5 intent message.
+Contracts:
+  - predict_p_win always returns None (deferred until threshold chosen).
+  - fit_p_win_models returns None and logs gracefully when too few rows.
   - Path constants are correctly constructed.
   - sklearn lazy-import: module imports cleanly even if sklearn is broken
     (cold-start safety).
@@ -12,10 +12,19 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
+from unittest import mock
 
 import pytest
 
 from app.core.scoring.types import Direction
+
+
+def _mock_session(rows: list) -> mock.AsyncMock:
+    result = mock.MagicMock()
+    result.fetchall.return_value = rows
+    session = mock.AsyncMock()
+    session.execute = mock.AsyncMock(return_value=result)
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -64,27 +73,29 @@ async def test_predict_p_win_returns_none_for_extreme_scores() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_fit_p_win_models_is_noop() -> None:
-    """fit_p_win_models(None) must not raise and must return None (async)."""
+async def test_fit_p_win_models_skips_gracefully_with_zero_rows() -> None:
+    """fit_p_win_models with 0 rows must not raise and must return None."""
     from app.core.scoring.p_win_calibrator import fit_p_win_models
 
-    result = await fit_p_win_models(None)
+    result = await fit_p_win_models(_mock_session([]))
     assert result is None
 
 
-async def test_fit_p_win_models_logs_intent(caplog: pytest.LogCaptureFixture) -> None:
-    """fit_p_win_models must log an INFO message referencing PR5 (async)."""
+async def test_fit_p_win_models_logs_skip_when_too_few_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """fit_p_win_models must log an INFO message about skipping when < 50 rows."""
     from app.core.scoring.p_win_calibrator import fit_p_win_models
 
     with caplog.at_level(logging.INFO, logger="app.core.scoring.p_win_calibrator"):
-        await fit_p_win_models(None)
+        await fit_p_win_models(_mock_session([]))
 
     assert any(
-        "PR5" in record.message
+        "skipping fit" in record.message
         for record in caplog.records
         if record.name == "app.core.scoring.p_win_calibrator"
     ), (
-        "Expected an INFO log referencing 'PR5' from p_win_calibrator; "
+        "Expected an INFO log containing 'skipping fit' from p_win_calibrator; "
         f"got records: {[r.message for r in caplog.records]}"
     )
 
