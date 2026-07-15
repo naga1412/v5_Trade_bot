@@ -42,6 +42,7 @@ on:
           - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe
           - brain-activate # WRITE: list rl-cache .pt files + cron log + activate latest rl_checkpoint (is_active=true) + restart backend. Use when brain has been training nightly but never activated.
           - soak-verify # Phase 1+2 soak check: cooldown=4h, brain_decisions rows, pattern confidence in notes, 7d shadow win rate + exit reasons
+          - brain-adjust-verify # READ-ONLY: PR #298 post-deploy check — confirms predictions.layer_scores brain_adjust is NOT stuck at hardcoded 1.0; also shows recent brain_decisions to confirm brain is running
 
 jobs:
   probe:
@@ -797,5 +798,39 @@ jobs:
                      FROM shadow_trades \
                      WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
                      GROUP BY exit_reason ORDER BY n DESC;\""
+              ;;
+            brain-adjust-verify)
+              # READ-ONLY: PR #298 post-deploy check.
+              # brain_adjust is stored in predictions.layer_scores JSONB — there is
+              # no separate brain_decisions.brain_adjust column (that table stores
+              # action/smoothed_action/value_estimate instead).
+              # PASS: non_1_0_count > 0 AND stuck_1_0_count == 0
+              # FAIL: all values are 1.0 (fix not deployed) or no rows (brain not running)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== recent predictions with brain_adjust (last 3h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT ts, symbol, \
+                     layer_scores->>'brain_adjust' AS recorded_adjust \
+                   FROM predictions \
+                   WHERE ts > NOW() - INTERVAL '3 hours' \
+                     AND layer_scores->>'brain_adjust' IS NOT NULL \
+                   ORDER BY ts DESC LIMIT 10;\" && \
+                 echo '=== summary: how many are stuck at 1.0? ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT \
+                     COUNT(*) AS predictions_3h, \
+                     COUNT(*) FILTER (WHERE (layer_scores->>'brain_adjust')::float != 1.0) AS non_1_0_count, \
+                     COUNT(*) FILTER (WHERE (layer_scores->>'brain_adjust')::float = 1.0) AS stuck_1_0_count \
+                   FROM predictions \
+                   WHERE ts > NOW() - INTERVAL '3 hours' \
+                     AND layer_scores->>'brain_adjust' IS NOT NULL;\" && \
+                 echo '=== recent brain_decisions (confirms brain is running) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT ts, symbol, action, smoothed_action, \
+                     ROUND(value_estimate::numeric, 4) AS value_estimate \
+                   FROM brain_decisions \
+                   WHERE ts > NOW() - INTERVAL '3 hours' \
+                   ORDER BY ts DESC LIMIT 10;\""
               ;;
           esac
