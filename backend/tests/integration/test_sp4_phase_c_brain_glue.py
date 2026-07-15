@@ -240,3 +240,27 @@ async def test_session_none_skips_persistence(session: AsyncSession) -> None:
         "SELECT count(*) AS n FROM brain_decisions"
     ))).first()
     assert rows.n == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_brain_decision_committed_without_caller_commit(
+    session: AsyncSession,
+) -> None:
+    """Regression: the glue commits the session itself; production callers
+    (l9_session context managers) never call commit() explicitly."""
+    _activate_long_full_policy()
+    await compute_brain_adjust_and_persist(
+        symbol="BTC/USDT",
+        proposed_direction="LONG",
+        layer_scores=_layers(),
+        market=_market(),
+        position=_position(),
+        macro=_macro(),
+        session=session,
+    )
+    # Deliberately do NOT call session.commit() — the glue must have committed.
+    rows = (await session.execute(sa.text(
+        "SELECT count(*) AS n FROM brain_decisions"
+    ))).first()
+    assert rows.n == 1, "brain_decisions row missing; glue did not commit the session"
