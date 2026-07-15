@@ -248,9 +248,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     #                          (warm-start case: new symbols entered universe
     #                          since prior training). Uses the median-seed
     #                          register_asset since these are truly new.
-    warm_start_path = (
-        Path(args.warm_start) if args.warm_start else None
-    )
+    warm_start_path = args.warm_start  # already Path | None from _build_arg_parser
     warm_started = maybe_warm_start(policy, asset_table, warm_start_path)
 
     if not warm_started:
@@ -293,11 +291,9 @@ async def _async_main(args: argparse.Namespace) -> int:
         device=device,
     )
 
-    out_dir = Path(args.out_dir)
+    out_dir = args.out_dir  # already Path from _build_arg_parser
     out_dir.mkdir(parents=True, exist_ok=True)
-    version = args.version_tag or datetime.now(timezone.utc).strftime(
-        "v1-%Y%m%d-%H%M%S",
-    )
+    version = args.version_tag
     ckpt_path = out_dir / f"ppo_policy_{version}.pt"
     eval_path = out_dir / f"eval_brain_{version}.json"
     # PR-BRAIN-COLD-START-PROBE: per-trade audit sidecar for misclass analysis.
@@ -336,7 +332,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tools.ml.train_brain")
     p.add_argument(
         "--db-url",
@@ -346,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         help="async SQLAlchemy URL for the backend DB",
     )
     p.add_argument("--window-days", type=int, default=365)
-    p.add_argument("--out-dir", required=True)
+    p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--seed", type=int, default=42)
@@ -354,12 +350,16 @@ def main(argv: list[str] | None = None) -> int:
         "--device", default="auto", choices=["auto", "cpu", "cuda"],
     )
     p.add_argument(
-        "--warm-start", default=None,
+        "--warm-start", default=None, type=Path,
         help="optional prior checkpoint .pt for warm-start fine-tuning",
     )
-    p.add_argument("--version-tag", default=None)
+    p.add_argument("--version-tag", required=True)
     p.add_argument("--log-level", default="INFO")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_arg_parser().parse_args(argv)
     return asyncio.run(_async_main(args))
 
 

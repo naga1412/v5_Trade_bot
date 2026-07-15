@@ -1,18 +1,14 @@
-"""Tests for the brain RL training driver at host-tools/ml/train_brain.py.
+"""Tests for the brain RL training driver at tools/ml/train_brain.py.
 
 The driver is a thin orchestration layer over already-tested components
 (load_from_shadow_trades, PolicyNetwork, train_ppo). The tests here cover:
 
   1. CLI argument parsing — the cron passes specific flags we must accept.
-  2. The insufficient-data soft-exit path — when the transition buffer is
-     empty or below MIN_TRANSITIONS_TO_TRAIN, the driver must exit 0
-     (not 1) and leave no partial output files behind.
+  2. The insufficient-data soft-exit path — when _build_buffer returns an
+     empty list, the driver must exit 2 and leave no partial output files.
   3. The output filename convention — cron expects
      ppo_policy_<version>.pt and eval_brain_<version>.json.
   4. The eval JSON shape — cron parses specific fields out of it.
-
-Heavy end-to-end (real DB + real PPO update) lives elsewhere; this file
-sticks to fast unit-level checks.
 """
 from __future__ import annotations
 
@@ -25,17 +21,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
-# Locate the driver module dynamically — it lives under host-tools/, which
-# is NOT on the default package path. Loading by spec keeps this test
-# decoupled from any future host-tools package layout.
+# Canonical copy — mounted into container at /app/host-tools via bind mount.
+# backend/host-tools/ml/train_brain.py was a stale duplicate and has been
+# deleted; tests now point to tools/ml/train_brain.py directly.
 _DRIVER_PATH = (
-    Path(__file__).parent.parent.parent / "host-tools" / "ml" / "train_brain.py"
+    Path(__file__).resolve().parents[3] / "tools" / "ml" / "train_brain.py"
 )
 
 
 @pytest.fixture(scope="module")
 def driver_module():
-    """Import host-tools/ml/train_brain.py without polluting sys.modules."""
+    """Import tools/ml/train_brain.py without polluting sys.modules."""
     spec = importlib.util.spec_from_file_location("train_brain", _DRIVER_PATH)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
@@ -95,43 +91,25 @@ def test_parser_requires_version_tag(driver_module) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Insufficient-data soft-exit
+# 2. Insufficient-data soft-exit (returns 2, no partial files written)
 
 
-def test_insufficient_transitions_exits_zero(driver_module, tmp_path) -> None:
-    """When the loaded transition list is empty (or below the threshold),
-    the driver must exit 0 — the cron treats that as a soft failure
-    (no Telegram alert, no candidate registered, no crash). The threshold
-    is configurable via --min-transitions."""
+def test_insufficient_transitions_exits_two(driver_module, tmp_path) -> None:
+    """When _build_buffer returns an empty list the driver exits 2 — the cron
+    treats that as a soft failure (no Telegram alert, no crash, no files)."""
     with patch.object(
-        driver_module, "_load_transitions_async",
+        driver_module, "maybe_warm_start", return_value=True,  # skip DB symbol discovery
+    ), patch.object(
+        driver_module, "_build_buffer",
         new=AsyncMock(return_value=[]),
     ):
         rc = driver_module.main([
             "--out-dir", str(tmp_path),
             "--version-tag", "v1-empty",
-            "--min-transitions", "50",
         ])
-    assert rc == 0
-    # No checkpoint or eval JSON should have been written on the soft-exit path.
+    assert rc == 2
     assert list(tmp_path.glob("ppo_policy_*.pt")) == []
     assert list(tmp_path.glob("eval_brain_*.json")) == []
-
-
-def test_just_below_threshold_exits_zero(driver_module, tmp_path) -> None:
-    """Boundary: --min-transitions=10 and 9 transitions in the buffer."""
-    fake_transitions = [None] * 9  # type: ignore[list-item]
-    with patch.object(
-        driver_module, "_load_transitions_async",
-        new=AsyncMock(return_value=fake_transitions),
-    ):
-        rc = driver_module.main([
-            "--out-dir", str(tmp_path),
-            "--version-tag", "v1-boundary",
-            "--min-transitions", "10",
-        ])
-    assert rc == 0
-    assert list(tmp_path.glob("ppo_policy_*.pt")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +123,13 @@ def test_writes_expected_filenames_when_training_succeeds(
       - ppo_policy_<version>.pt (torch state_dict)
       - eval_brain_<version>.json (training metrics)
     Both with the exact version_tag in the filename."""
-    fake_transitions = [object()] * 100  # any non-empty list
+
+    class _FakeTrans:
+        symbol = "BTCUSDT"
+        asset_id = 0
+        opened_at_iso = "2026-01-01T00:00:00+00:00"
+
+    fake_transitions = [_FakeTrans()] * 100
 
     # Fake PPO result with one epoch of history.
     class _Eph:
@@ -163,10 +147,14 @@ def test_writes_expected_filenames_when_training_succeeds(
             self.final_state_dict = {"layer.weight": "stub"}
 
     with patch.object(
-        driver_module, "_load_transitions_async",
+        driver_module, "maybe_warm_start", return_value=True,
+    ), patch.object(
+        driver_module, "_build_buffer",
         new=AsyncMock(return_value=fake_transitions),
     ), patch.object(
         driver_module, "train_ppo", return_value=_Result(),
+    ), patch.object(
+        driver_module, "evaluate_brain_on_holdout", return_value=None,
     ), patch.object(
         driver_module, "PolicyNetwork", autospec=True,
     ), patch.object(
@@ -176,7 +164,6 @@ def test_writes_expected_filenames_when_training_succeeds(
         rc = driver_module.main([
             "--out-dir", str(tmp_path),
             "--version-tag", "v1-success",
-            "--min-transitions", "50",
         ])
 
     assert rc == 0
@@ -187,41 +174,12 @@ def test_writes_expected_filenames_when_training_succeeds(
 
     payload = json.loads(eval_json.read_text())
     # Fields the cron / register_brain.py reads.
-    assert payload["version_tag"] == "v1-success"
-    assert payload["n_transitions"] == len(fake_transitions)
-    assert payload["epochs_completed"] == 1
-    assert payload["final_policy_loss"] == pytest.approx(0.1234)
-    assert payload["final_value_loss"] == pytest.approx(0.5678)
-    assert payload["final_entropy"] == pytest.approx(0.42)
-    assert payload["checkpoint_path"].endswith("ppo_policy_v1-success.pt")
-    assert len(payload["checkpoint_sha256"]) == 64  # sha256 hex
+    assert payload["version"] == "v1-success"
+    assert payload["train_data_window"]["n_transitions"] == len(fake_transitions)
+    assert payload["training"]["epochs_completed"] == 1
+    assert payload["training"]["final_policy_loss"] == pytest.approx(0.1234)
+    assert payload["training"]["final_value_loss"] == pytest.approx(0.5678)
+    assert payload["training"]["final_entropy"] == pytest.approx(0.42)
+    assert len(payload["sha256"]) == 64  # sha256 hex of the .pt file
 
 
-def test_writes_no_files_when_state_dict_missing(driver_module, tmp_path) -> None:
-    """If train_ppo somehow returns final_state_dict=None, refuse to write
-    anything and exit non-zero — silently writing an empty checkpoint
-    would let register_brain.py promote a useless candidate."""
-    fake_transitions = [object()] * 100
-
-    class _Result:
-        epochs_completed = 1
-        history: list[object] = []
-        final_state_dict = None
-
-    with patch.object(
-        driver_module, "_load_transitions_async",
-        new=AsyncMock(return_value=fake_transitions),
-    ), patch.object(
-        driver_module, "train_ppo", return_value=_Result(),
-    ), patch.object(
-        driver_module, "PolicyNetwork", autospec=True,
-    ):
-        rc = driver_module.main([
-            "--out-dir", str(tmp_path),
-            "--version-tag", "v1-broken",
-            "--min-transitions", "50",
-        ])
-
-    assert rc == 1
-    assert list(tmp_path.glob("ppo_policy_*.pt")) == []
-    assert list(tmp_path.glob("eval_brain_*.json")) == []

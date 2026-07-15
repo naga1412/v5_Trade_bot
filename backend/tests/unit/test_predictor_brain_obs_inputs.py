@@ -86,3 +86,51 @@ async def test_brain_asia_open_false_at_utc_14(monkeypatch: pytest.MonkeyPatch) 
     bars = _bars(end="2026-01-05 14:00")
     captured = await _capture(monkeypatch, bars)
     assert captured["macro"].asia_open is False
+
+
+async def test_brain_adjust_propagates_to_prediction_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """brain_hook.brain_adjust must appear in prediction_extras, not hardcoded 1.0.
+
+    Regression for: _build_extras was called with brain_adjust=1.0 even when
+    compute_brain_adjust_and_persist returned a different value.
+    """
+    async def fake_hook(**kwargs):
+        return BrainHookResult(brain_adjust=1.5, decision=None)
+
+    monkeypatch.setattr(
+        "app.core.predictor.compute_brain_adjust_and_persist",
+        fake_hook,
+    )
+    from app.core.predictor import build_prediction
+    result = await build_prediction(symbol="BTCUSDT", timeframe="1h", bars=_bars())
+    assert result is not None
+    assert result.prediction_extras["brain_adjust"] == pytest.approx(1.5)
+
+
+async def test_brain_regime_maps_bull_to_bull_breakout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regime classifier 'bull' must map to 'bull_breakout' in MarketFeatures."""
+    async def _bull():
+        return "bull"
+    monkeypatch.setattr("app.core.predictor.get_cached_market_regime", _bull)
+    captured = await _capture(monkeypatch, _bars())
+    assert captured["market"].regime == "bull_breakout"
+
+
+async def test_brain_regime_maps_bear_to_bear_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regime classifier 'bear' must map to 'bear_crash' in MarketFeatures."""
+    async def _bear():
+        return "bear"
+    monkeypatch.setattr("app.core.predictor.get_cached_market_regime", _bear)
+    captured = await _capture(monkeypatch, _bars())
+    assert captured["market"].regime == "bear_crash"
+
+
+async def test_brain_regime_none_falls_back_to_sideways(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regime fetch failure (None) must fall back to 'sideways_grind'."""
+    async def _fail():
+        return None
+    monkeypatch.setattr("app.core.predictor.get_cached_market_regime", _fail)
+    captured = await _capture(monkeypatch, _bars())
+    assert captured["market"].regime == "sideways_grind"
