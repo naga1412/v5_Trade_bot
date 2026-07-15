@@ -169,11 +169,33 @@ async def _fetch_closed_trades(
     return out
 
 
-def _layer_scores_to_tuple(d: dict[str, float]) -> tuple[float, ...]:
-    """Pull L1..L9 in deterministic order. Missing keys default to 0."""
+def _layer_scores_to_tuple(d: dict) -> tuple[float, ...]:
+    """Pull L1..L9 as signed floats for legacy shadow_trades rows.
+
+    Handles two key formats produced by different shadow worker versions:
+    - "1".."9"  (current format — predictor.py stores stringified ints)
+    - "L1".."L9" (early format used in test fixtures and first worker build)
+
+    Values may be bare scalars (float/int) OR LayerScoreOut.model_dump() dicts
+    of the form {"direction": "LONG", "strength": 0.15, "confidence": 0.8, ...}.
+    Dict values are converted to sign*strength*confidence to match the shadow
+    worker's own computation in shadow/worker.py.
+    """
     out: list[float] = []
-    for k in ("L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"):
-        out.append(float(d.get(k, 0.0)))
+    for i, lk in enumerate(("L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"), start=1):
+        v = d.get(lk)
+        if v is None:
+            v = d.get(str(i))
+        if v is None:
+            out.append(0.0)
+        elif isinstance(v, dict):
+            strength = float(v.get("strength", 0.0) or 0.0)
+            confidence = float(v.get("confidence", 0.0) or 0.0)
+            dir_val = v.get("direction", "NEUTRAL")
+            sign = 1.0 if dir_val == "LONG" else (-1.0 if dir_val == "SHORT" else 0.0)
+            out.append(sign * strength * confidence)
+        else:
+            out.append(float(v))
     return tuple(out)
 
 
@@ -263,13 +285,30 @@ async def _nearest_intermarket(
     return funding, oi_delta
 
 
-def _macro_defaults() -> MacroFeatures:
-    """Defensible defaults; a real macro/calendar service is a follow-up SP."""
+def _macro_from_ts_iso(opened_at_iso: str) -> MacroFeatures:
+    """Derive weekend/asia_open from opened_at timestamp.
+
+    Matches the logic in shadow/observation.py so legacy replay trades see
+    the same macro flags the shadow worker would have captured at open time.
+    """
+    from datetime import datetime, timezone
+    try:
+        ts = datetime.fromisoformat(opened_at_iso.replace("Z", "+00:00"))
+        ts = ts.astimezone(timezone.utc)
+    except ValueError:
+        return MacroFeatures(
+            hours_to_next_high_impact=24.0,
+            fomc_window=False,
+            weekend=False,
+            asia_open=False,
+        )
+    weekday = ts.weekday()   # 0=Mon .. 6=Sun
+    hour = ts.hour
     return MacroFeatures(
         hours_to_next_high_impact=24.0,
         fomc_window=False,
-        weekend=False,
-        asia_open=False,
+        weekend=weekday >= 5,
+        asia_open=0 <= hour < 8,
     )
 
 
@@ -394,7 +433,7 @@ async def load_from_shadow_trades(
                 gold_corr_30d=0.0,
                 regime=_resolve_regime(tr.opened_at_iso),
             )
-            macro = _macro_defaults()
+            macro = _macro_from_ts_iso(tr.opened_at_iso)
 
         obs = build_observation(asset_state, layer_tuple, market, position, macro)
 

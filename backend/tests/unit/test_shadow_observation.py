@@ -16,12 +16,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.shadow.observation import (
     SCHEMA_VERSION,
+    REGIME_MAPPING,
     _build_components,
     _macro_from_ts,
     build_obs_components,
     load_observation_components,
     persist_observation,
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_regime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent real Binance HTTP fetch in unit tests — regime always 'neutral'."""
+    async def _neutral():
+        return "neutral"
+    monkeypatch.setattr("app.shadow.observation.get_cached_market_regime", _neutral)
 
 
 CREATE_INTERMARKET = (
@@ -364,3 +373,90 @@ def test_components_is_json_serializable() -> None:
     parsed = json.loads(serialized)
     assert parsed["symbol"] == "X"
     assert parsed["market"]["funding_rate"] == pytest.approx(0.0001)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3B: regime detection wiring.
+
+
+def test_build_components_default_regime_is_sideways_grind() -> None:
+    comp = _build_components(
+        symbol="X", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1.0, last_close=100.0,
+        layer_scores_array=[0.0] * 9,
+        intermarket=None,
+    )
+    assert comp["market"]["regime"] == "sideways_grind"
+
+
+def test_build_components_explicit_regime_passed_through() -> None:
+    for raw, expected in REGIME_MAPPING.items():
+        if raw is None:
+            continue  # None can't be passed as regime; it maps to default
+        comp = _build_components(
+            symbol="X", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            atr=1.0, last_close=100.0,
+            layer_scores_array=[0.0] * 9,
+            intermarket=None,
+            regime=expected,
+        )
+        assert comp["market"]["regime"] == expected
+
+
+def test_regime_mapping_covers_all_classifier_outputs() -> None:
+    for key in ("bull", "bear", "neutral", None):
+        assert key in REGIME_MAPPING
+    assert REGIME_MAPPING["bull"] == "bull_breakout"
+    assert REGIME_MAPPING["bear"] == "bear_crash"
+    assert REGIME_MAPPING["neutral"] == "sideways_grind"
+    assert REGIME_MAPPING[None] == "sideways_grind"
+
+
+@pytest.mark.asyncio
+async def test_build_obs_components_bull_regime_maps_to_bull_breakout(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_obs_components forwards regime through REGIME_MAPPING."""
+    async def _bull():
+        return "bull"
+    monkeypatch.setattr("app.shadow.observation.get_cached_market_regime", _bull)
+    comp = await build_obs_components(
+        session,
+        symbol="BTCUSDT", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1000.0, last_close=60000.0,
+        layer_scores_array=[0.0] * 9,
+    )
+    assert comp["market"]["regime"] == "bull_breakout"
+
+
+@pytest.mark.asyncio
+async def test_build_obs_components_bear_regime_maps_to_bear_crash(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _bear():
+        return "bear"
+    monkeypatch.setattr("app.shadow.observation.get_cached_market_regime", _bear)
+    comp = await build_obs_components(
+        session,
+        symbol="BTCUSDT", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1000.0, last_close=60000.0,
+        layer_scores_array=[0.0] * 9,
+    )
+    assert comp["market"]["regime"] == "bear_crash"
+
+
+@pytest.mark.asyncio
+async def test_build_obs_components_none_regime_maps_to_sideways(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetch failure (returns None) must fall back to sideways_grind."""
+    async def _fail():
+        return None
+    monkeypatch.setattr("app.shadow.observation.get_cached_market_regime", _fail)
+    comp = await build_obs_components(
+        session,
+        symbol="BTCUSDT", captured_at=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        atr=1000.0, last_close=60000.0,
+        layer_scores_array=[0.0] * 9,
+    )
+    assert comp["market"]["regime"] == "sideways_grind"
