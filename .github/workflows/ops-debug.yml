@@ -43,6 +43,7 @@ on:
           - brain-activate # WRITE: list rl-cache .pt files + cron log + activate latest rl_checkpoint (is_active=true) + restart backend. Use when brain has been training nightly but never activated.
           - soak-verify # Phase 1+2 soak check: cooldown=4h, brain_decisions rows, pattern confidence in notes, 7d shadow win rate + exit reasons
           - brain-adjust-verify # READ-ONLY: PR #298 post-deploy check — confirms predictions.layer_scores brain_adjust is NOT stuck at hardcoded 1.0; also shows recent brain_decisions to confirm brain is running
+          - brain-decisions-audit # READ-ONLY: diagnose why brain_decisions has 0 rows despite brain_adjust working. Log grep + schema + all-time count + auth_violations.
 
 jobs:
   probe:
@@ -839,5 +840,48 @@ jobs:
                    FROM brain_decisions \
                    WHERE ts > NOW() - INTERVAL '3 hours' \
                    ORDER BY ts DESC LIMIT 10;\""
+              ;;
+            brain-decisions-audit)
+              # READ-ONLY: diagnose brain_decisions audit gap.
+              # brain_adjust is working (non-1.0 in predictions.layer_scores)
+              # but brain_decisions shows 0 rows in last 3h. Two possible
+              # causes per predictor_glue.py:141-155:
+              #   Case A: session=None passed by caller → INSERT skipped silently
+              #   Case B: record_brain_decision raised → logged as "record_brain_decision failed"
+              # A third (actual) cause: INSERT succeeds but session.commit()
+              # is never called → l9_session rolls back on context-manager exit.
+              # Logs since 03:45 UTC (brain activation at id=61) will distinguish.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== 1. log grep: record_brain_decision failed (since 03:45 UTC today) ===' && \
+                 docker compose logs --since=2026-07-15T03:45:00Z backend 2>&1 | \
+                   grep -E 'record_brain_decision' | head -20 && \
+                 echo '=== 2. log grep: brain_glue warnings (since 03:45 UTC today) ===' && \
+                 docker compose logs --since=2026-07-15T03:45:00Z backend 2>&1 | \
+                   grep -E 'brain_glue' | head -20 && \
+                 echo '=== 3. \\d brain_decisions (column names + types) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   '\d brain_decisions' && \
+                 echo '=== 4. all-time row count + last row ts ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT COUNT(*) AS total_rows, \
+                     MAX(ts) AS last_ts, \
+                     MIN(ts) AS first_ts \
+                   FROM brain_decisions;\" && \
+                 echo '=== 5. rows in last 24h ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT COUNT(*) AS last_24h FROM brain_decisions \
+                   WHERE ts > NOW() - INTERVAL '24 hours';\" && \
+                 echo '=== 6. auth_violations: audit_chain_broken on brain_decisions (last 24h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT COUNT(*) AS chain_breaks_24h FROM auth_violations \
+                   WHERE reason LIKE '%brain_decisions%' \
+                     AND attempted_at > NOW() - INTERVAL '24 hours';\" && \
+                 echo '=== 7. CHECK constraints on brain_decisions (action column) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                 \"SELECT conname, pg_get_constraintdef(oid) AS constraint_def \
+                   FROM pg_constraint \
+                   WHERE conrelid='brain_decisions'::regclass \
+                     AND contype='c';\""
               ;;
           esac
