@@ -12,7 +12,9 @@ Public surface:
 
 * :func:`record_brain_decision` — given a populated
   :class:`~app.rl.inference.BrainDecision`, write the row and return
-  the new ``row_hash``. Caller commits the session.
+  the new ``row_hash``. The caller is responsible for committing the
+  session after the row chain is complete; :func:`compute_brain_adjust_and_persist`
+  in :mod:`app.rl.predictor_glue` does this immediately after each call.
 
 The observation vector is serialized as a list of floats (not the
 named-key dict the spec sec 3.2 alluded to) — that's a smaller payload
@@ -56,8 +58,9 @@ async def record_brain_decision(
 ) -> str:
     """Insert one ``brain_decisions`` row with hash-chain integrity.
 
-    Returns the new ``row_hash``. Caller is responsible for
-    ``session.commit()``.
+    Returns the new ``row_hash``. The caller is responsible for committing
+    the session; :func:`~app.rl.predictor_glue.compute_brain_adjust_and_persist`
+    commits immediately after each call.
 
     Args:
         session: live AsyncSession.

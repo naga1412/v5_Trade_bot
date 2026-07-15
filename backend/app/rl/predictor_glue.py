@@ -146,6 +146,7 @@ async def compute_brain_adjust_and_persist(
                 symbol=symbol,
                 observation=_serialise_inputs(layer_scores, market, position, macro),
             )
+            await session.commit()
         except Exception:  # noqa: BLE001 — audit failure must not block trading
             log.warning(
                 "brain_glue: record_brain_decision failed; "
