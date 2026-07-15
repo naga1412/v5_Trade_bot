@@ -256,8 +256,12 @@ async def promotion_gate(
     excluded_tfs: list[str] = []
     if not _settings.SHADOW_15M_ELIGIBLE_FOR_PROMOTION:
         excluded_tfs = ["15m"]
+    # Only count directions the live path can trade (mirrors promotion.py gate
+    # logic) so the display matches what the actual authorization check will see.
+    _gate_dir = "LONG" if _settings.DISABLE_SHORT_SIGNALS else None
     rows = await _select_trades_since(
         session, user_id=current_user.id, since=since,
+        direction=_gate_dir,
         exclude_timeframes=excluded_tfs,
     )
     trades = [_row_to_trade(r) for r in rows]

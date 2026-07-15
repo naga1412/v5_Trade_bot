@@ -220,26 +220,34 @@ async def compute_gates_from_db(
     *,
     window_days: int = 30,
     now: datetime | None = None,
+    direction_filter: str | None = None,
 ) -> GateSnapshot:
     """Read closed shadow_trades from the rolling window and compute gates.
 
     Reads pnl_pct from shadow_trades where closed_at IS NOT NULL AND
     closed_at >= (now - window_days). When live_trades start landing
     in production, this gets extended to UNION with live_trades.
+
+    direction_filter: when set (e.g. "LONG"), count only trades in that
+    direction. Callers derive this from DISABLE_SHORT_SIGNALS so the gate
+    only scores directions the live path is actually trading.
     """
     n = now or datetime.now(timezone.utc)
     cutoff = n - timedelta(days=window_days)
 
-    rows = (await session.execute(
-        sa.text(
-            "SELECT pnl_pct FROM shadow_trades "
-            "WHERE closed_at IS NOT NULL "
-            "  AND closed_at >= :cutoff "
-            "  AND pnl_pct IS NOT NULL "
-            "ORDER BY closed_at"
-        ),
-        {"cutoff": cutoff},
-    )).all()
+    sql = (
+        "SELECT pnl_pct FROM shadow_trades "
+        "WHERE closed_at IS NOT NULL "
+        "  AND closed_at >= :cutoff "
+        "  AND pnl_pct IS NOT NULL "
+    )
+    params: dict = {"cutoff": cutoff}
+    if direction_filter is not None:
+        sql += "  AND direction = :direction_filter "
+        params["direction_filter"] = direction_filter
+    sql += "ORDER BY closed_at"
+
+    rows = (await session.execute(sa.text(sql), params)).all()
 
     pnl_pcts = [float(r.pnl_pct) for r in rows]
     return compute_stats(pnl_pcts, span_days=window_days, now=n)

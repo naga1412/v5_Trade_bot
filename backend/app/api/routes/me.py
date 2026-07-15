@@ -325,7 +325,11 @@ async def change_trading_mode(
                 status_code=400, detail="invalid TOTP code",
             )
         # Compute gates from DB so the client can't lie about its history.
-        snapshot = await compute_gates_from_db(session)
+        # Only count directions the live path can trade: when shorts are
+        # disabled, SHORT shadow trades must not dilute the gate metrics.
+        _gate_cfg = get_settings()
+        _dir_filter = "LONG" if _gate_cfg.DISABLE_SHORT_SIGNALS else None
+        snapshot = await compute_gates_from_db(session, direction_filter=_dir_filter)
 
     try:
         row_hash = await set_mode(

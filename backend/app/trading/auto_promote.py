@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import get_settings
 from app.ops.heartbeat import record_heartbeat
 from app.trading.modes import (
     Mode,
@@ -119,6 +120,11 @@ async def evaluate_user(
     # Window for the target's spec section (30d for Telegram-approve, 90d for Fully-auto).
     window_days = 30 if target == "telegram-approve" else 90
 
+    # Only count directions the live path can trade. When DISABLE_SHORT_SIGNALS
+    # is true, filter to LONG so SHORT shadow trades don't dilute gate metrics.
+    _cfg = get_settings()
+    direction_filter = "LONG" if _cfg.DISABLE_SHORT_SIGNALS else None
+
     # Walk back N days; gates must pass for EVERY day's snapshot.
     passed = 0
     latest_snapshot: GateSnapshot | None = None
@@ -126,6 +132,7 @@ async def evaluate_user(
         snapshot_now = n - timedelta(days=offset)
         snap = await compute_gates_from_db(
             session, window_days=window_days, now=snapshot_now,
+            direction_filter=direction_filter,
         )
         if offset == 0:
             latest_snapshot = snap
