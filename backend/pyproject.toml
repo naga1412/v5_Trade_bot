@@ -27,6 +27,7 @@ dependencies = [
     "duckdb==1.1.3",
     "ta-lib==0.6.5",
     "scipy==1.13.1",
+    "scikit-learn==1.5.2",
     "yfinance==0.2.40",
     # SP-7 Phase A3: ops hardening runtime deps.
     # - optuna: Bayesian search runner for the SP-7 hyperopt loop (§6.10).
