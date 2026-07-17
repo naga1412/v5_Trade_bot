@@ -1,8 +1,8 @@
 """p_win calibration report — ops-debug probe 'pwin-calibration-report'.
 
 Fits isotonic models on oldest 80% of closed shadow_trades, then prints
-a decile calibration table on the newest 20% (validation window) showing
-predicted p_win vs realized win rate per direction.
+a blended 30-day summary and a rank-bucketed decile calibration table on
+the newest 20% (validation window), with P&L and exit-reason breakdown.
 
 Usage (inside backend container via ops-debug.yml probe):
     docker compose exec -T backend python /app/scripts/pwin_calibration_report.py
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Allow running from /app (Docker) or from the repo root in tests.
@@ -25,6 +26,10 @@ from app.core.scoring.p_win_calibrator import (
 )
 from app.core.scoring.types import Direction
 from app.db.session import get_session_factory
+
+
+def _tz(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 async def main() -> None:
@@ -45,7 +50,7 @@ async def main() -> None:
         rows = (
             await session.execute(
                 text(
-                    "SELECT entry_score, direction,"
+                    "SELECT entry_score, direction, pnl_pct, exit_reason, closed_at,"
                     " CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END AS won"
                     " FROM shadow_trades"
                     " WHERE closed_at IS NOT NULL"
@@ -66,6 +71,39 @@ async def main() -> None:
         f"  Val (newest 20%): {len(val_rows)}\n"
     )
 
+    # ── Blended 30-day summary (full dataset, not restricted to val) ──────────
+    now = datetime.now(timezone.utc)
+    cutoff_30d = now - timedelta(days=30)
+    print("=" * 76)
+    print("BLENDED SUMMARY — last 30 days")
+    print("=" * 76)
+    print(
+        f"  {'Direction':>10}  {'Trades':>7}  {'WR%':>6}  "
+        f"{'AvgWin%':>8}  {'AvgLoss%':>9}  {'TotalPnl%':>10}"
+    )
+    print(f"  {'-'*10}  {'-'*7}  {'-'*6}  {'-'*8}  {'-'*9}  {'-'*10}")
+    for direction in (Direction.LONG, Direction.SHORT):
+        d_recent = [
+            r for r in rows
+            if r.direction == direction and _tz(r.closed_at) >= cutoff_30d
+        ]
+        if not d_recent:
+            print(f"  {direction:>10}  {'—':>7}  (no trades in last 30d)")
+            continue
+        pnls = [float(r.pnl_pct or 0.0) for r in d_recent]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        wr = 100.0 * len(wins) / len(d_recent)
+        avg_win = sum(wins) / len(wins) if wins else float("nan")
+        avg_loss = sum(losses) / len(losses) if losses else float("nan")
+        total_pnl = sum(pnls)
+        print(
+            f"  {direction:>10}  {len(d_recent):>7}  {wr:>6.1f}  "
+            f"{avg_win:>8.3f}  {avg_loss:>9.3f}  {total_pnl:>10.3f}"
+        )
+    print()
+
+    # ── Decile calibration tables (val set, rank-based bucketing) ─────────────
     for direction, path in [
         (Direction.LONG, P_WIN_MODEL_PATH_LONG),
         (Direction.SHORT, P_WIN_MODEL_PATH_SHORT),
@@ -76,32 +114,65 @@ async def main() -> None:
         with open(path, "rb") as f:
             model = pickle.load(f)
 
-        d_rows = [(r.entry_score, r.won) for r in val_rows if r.direction == direction]
+        d_rows = [
+            (r.entry_score, r.won, float(r.pnl_pct or 0.0), r.exit_reason or "UNKNOWN")
+            for r in val_rows if r.direction == direction
+        ]
         if len(d_rows) < 5:
             print(f"{direction}: only {len(d_rows)} val rows — skipping\n")
             continue
 
-        scores, labels = zip(*d_rows)
+        scores, labels, pnls_raw, exits_raw = zip(*d_rows)
         x = np.array([abs(s) for s in scores])
         p_wins = model.predict(x)
         labels_arr = np.array(labels, dtype=float)
+        pnls_arr = np.array(pnls_raw, dtype=float)
+        exits_list = list(exits_raw)
 
-        # Decile edges by predicted p_win rank
-        edges = np.percentile(p_wins, np.arange(0, 110, 10))
+        # Rank-based bucketing: sort indices by predicted p_win and split into 10
+        # equal slices. Fixes the percentile-edge mask bug where duplicate values
+        # at an isotonic plateau caused rows at decile boundaries to be counted in
+        # multiple buckets simultaneously (n summed to 3-4× the val-set size).
+        idx_sorted = np.argsort(p_wins, stable=True)
+        buckets = np.array_split(idx_sorted, 10)
 
-        print(f"{direction}  (n={len(d_rows)} validation trades)")
-        print(f"  {'Decile':>10}  {'pred_p_win':>10}  {'realized_wr':>11}  {'n':>5}")
-        print(f"  {'-'*10}  {'-'*10}  {'-'*11}  {'-'*5}")
-        for i in range(10):
-            lo, hi = edges[i], edges[i + 1]
-            mask = (p_wins >= lo) & (p_wins <= hi)
-            if not mask.any():
+        n_total = len(d_rows)
+        print(f"{direction}  (n={n_total} validation trades)")
+        print(
+            f"  {'Decile':>10}  {'pred_p_win':>10}  {'realized_wr':>11}  {'n':>5}"
+            f"  {'avg_pnl%':>8}  {'sum_pnl%':>9}  {'avg_win%':>8}  {'avg_loss%':>9}"
+            f"  {'TP':>5}  {'SL':>5}  {'TIMEOUT':>7}"
+        )
+        print(
+            f"  {'-'*10}  {'-'*10}  {'-'*11}  {'-'*5}"
+            f"  {'-'*8}  {'-'*9}  {'-'*8}  {'-'*9}"
+            f"  {'-'*5}  {'-'*5}  {'-'*7}"
+        )
+        n_check = 0
+        for i, bucket_idx in enumerate(buckets):
+            if len(bucket_idx) == 0:
                 continue
-            avg_pred = float(p_wins[mask].mean())
-            realized = float(labels_arr[mask].mean())
-            n = int(mask.sum())
-            print(f"  {i*10:>4}%–{(i+1)*10:<4}%  {avg_pred:>10.3f}  {realized:>11.3f}  {n:>5}")
-        print()
+            avg_pred = float(p_wins[bucket_idx].mean())
+            realized = float(labels_arr[bucket_idx].mean())
+            n = len(bucket_idx)
+            n_check += n
+            bucket_pnls = pnls_arr[bucket_idx]
+            avg_pnl = float(bucket_pnls.mean())
+            sum_pnl = float(bucket_pnls.sum())
+            win_mask = bucket_pnls > 0
+            loss_mask = ~win_mask
+            avg_win_pnl = float(bucket_pnls[win_mask].mean()) if win_mask.any() else float("nan")
+            avg_loss_pnl = float(bucket_pnls[loss_mask].mean()) if loss_mask.any() else float("nan")
+            bucket_exits = [exits_list[int(j)] for j in bucket_idx]
+            tp_n = sum(1 for e in bucket_exits if e == "TAKE_PROFIT")
+            sl_n = sum(1 for e in bucket_exits if e == "STOP_LOSS")
+            to_n = sum(1 for e in bucket_exits if e == "TIMEOUT")
+            print(
+                f"  {i*10:>4}%–{(i+1)*10:<4}%  {avg_pred:>10.3f}  {realized:>11.3f}  {n:>5}"
+                f"  {avg_pnl:>8.3f}  {sum_pnl:>9.3f}  {avg_win_pnl:>8.3f}  {avg_loss_pnl:>9.3f}"
+                f"  {tp_n:>5}  {sl_n:>5}  {to_n:>7}"
+            )
+        print(f"  {'TOTAL':>10}  {'':>10}  {'':>11}  {n_check:>5}  (== {n_total} ✓)\n")
 
     print("Done.")
 
