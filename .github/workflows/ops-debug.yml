@@ -40,6 +40,8 @@ on:
           - brain-rl-cache-archive # WRITE: mv all *.pt + eval_brain_*.json files from rl-cache into rl-cache/_predegenerate/. Idempotent. Forces next cron to cold-start. Does NOT touch rl_checkpoints DB rows.
           - brain-holdout-labels # READ-ONLY: label-side audit of the 59 backtest holdout trades (2026-05-19 → 2026-05-22). Reports trade dump + by-direction + by-hour + top-15 by-symbol — informs misclass analysis without needing brain decisions.
           - brain-reeval-checkpoints # READ-ONLY: re-evaluates each .pt in _predegenerate/ against current buffer state using PR-BRAIN-CORRECTNESS-METRIC. Outputs a comparison table with brain_correctness, sharpe, cumulative_reward — lets us judge old checkpoints by the new (non-invariant) metric without retraining.
+          - brain-cron-log # READ-ONLY: tail last 60 lines of /var/log/trading-radar-brain-cron.log on the host (outside Docker). Returns the cron's last run — Sharpe, win_rate, checkpoint id registered.
+          - shadow-allow-shorts-enable # WRITE: flip SHADOW_ALLOW_SHORTS=true in .env, recreate backend (up -d). Verifies both SHADOW_ALLOW_SHORTS and DISABLE_SHORT_SIGNALS after restart. Requires operator authorization. Does NOT touch any other .env variable.
 
 jobs:
   probe:
@@ -709,5 +711,21 @@ jobs:
             pwin-calibration-report)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/pwin_calibration_report.py"
+              ;;
+            brain-cron-log)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== last 60 lines of brain cron log ===' && \
+                 tail -60 /var/log/trading-radar-brain-cron.log 2>/dev/null || echo '(log file not found)'"
+              ;;
+            shadow-allow-shorts-enable)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && pwd && \
+                 grep -q '^SHADOW_ALLOW_SHORTS=' .env \
+                   && sed -i 's/^SHADOW_ALLOW_SHORTS=.*/SHADOW_ALLOW_SHORTS=true/' .env \
+                   || echo 'SHADOW_ALLOW_SHORTS=true' >> .env && \
+                 docker compose up -d backend && \
+                 docker compose exec -T backend python -c \
+                   'from app.config import get_settings; s=get_settings(); print(\"SHADOW_ALLOW_SHORTS:\", s.SHADOW_ALLOW_SHORTS); print(\"DISABLE_SHORT_SIGNALS:\", s.DISABLE_SHORT_SIGNALS)'"
               ;;
           esac
