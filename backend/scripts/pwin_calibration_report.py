@@ -133,7 +133,7 @@ async def main() -> None:
         # equal slices. Fixes the percentile-edge mask bug where duplicate values
         # at an isotonic plateau caused rows at decile boundaries to be counted in
         # multiple buckets simultaneously (n summed to 3-4× the val-set size).
-        idx_sorted = np.argsort(p_wins, stable=True)
+        idx_sorted = np.argsort(p_wins, kind="stable")
         buckets = np.array_split(idx_sorted, 10)
 
         n_total = len(d_rows)
