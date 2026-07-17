@@ -27,6 +27,14 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/trading-radar}"
 RL_CACHE_DIR="${RL_CACHE_DIR:-${INSTALL_DIR}/backend/data/rl-cache}"
 LOG_FILE="${LOG_FILE:-/var/log/trading-radar-brain-cron.log}"
 
+# Source .env so crontab environments inherit TELEGRAM_* and other secrets.
+if [ -f "${INSTALL_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${INSTALL_DIR}/.env"
+  set +a
+fi
+
 # Telegram secrets — supplied by the .env at install time.
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
