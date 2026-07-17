@@ -122,7 +122,7 @@ async def main() -> None:
               f"{avg_sl:>7.3f}  {avg_atr:>8.3f}  {avg_ratio:>9.3f}  {avg_pnl:>8.3f}")
 
     # ── Ratio distribution by exit reason ────────────────────────────────────
-    print(f"\n\nsl_atr_ratio DISTRIBUTION  (design target = 1.5×; floor=5% → ratio < 1.5)")
+    print("\n\nsl_atr_ratio DISTRIBUTION  (design target = 1.5x; floor=5% -> ratio < 1.5)")
     print(f"{'Bracket':<28}  {'SL exits':>9}  {'TP exits':>9}  {'TIMEOUT':>8}  {'Total':>6}")
     print(f"  {'-'*28}  {'-'*9}  {'-'*9}  {'-'*8}  {'-'*6}")
 
@@ -144,7 +144,7 @@ async def main() -> None:
     for rec in records:
         by_symbol[rec["symbol"]].append(rec)
 
-    print(f"\n\nPER-SYMBOL  (sorted by trade count desc)")
+    print("\n\nPER-SYMBOL  (sorted by trade count desc)")
     print(
         f"  {'Symbol':<12}  {'N':>4}  {'SL%':>5}  {'TP%':>5}  {'TO%':>5}"
         f"  {'AvgSLdist%':>10}  {'AvgATR%':>8}  {'AvgRatio':>9}"
