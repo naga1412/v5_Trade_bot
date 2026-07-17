@@ -42,6 +42,8 @@ on:
           - brain-reeval-checkpoints # READ-ONLY: re-evaluates each .pt in _predegenerate/ against current buffer state using PR-BRAIN-CORRECTNESS-METRIC. Outputs a comparison table with brain_correctness, sharpe, cumulative_reward — lets us judge old checkpoints by the new (non-invariant) metric without retraining.
           - brain-cron-log # READ-ONLY: tail last 60 lines of /var/log/trading-radar-brain-cron.log on the host (outside Docker). Returns the cron's last run — Sharpe, win_rate, checkpoint id registered.
           - shadow-allow-shorts-enable # WRITE: flip SHADOW_ALLOW_SHORTS=true in .env, recreate backend (up -d). Verifies both SHADOW_ALLOW_SHORTS and DISABLE_SHORT_SIGNALS after restart. Requires operator authorization. Does NOT touch any other .env variable.
+          - pwin-threshold-whatif # READ-ONLY: p_win threshold what-if grid on val window (newest 20%): lower-bound T in {0.24..0.30}, window [T, 0.35], top-decile-excluded variants. Columns: kept, vol%, WR%, avg_pnl%, sum_pnl%, expectancy.
+          - sl-autopsy # READ-ONLY: SL distance / ATR ratio analysis for closed LONG shadow_trades last 30d. Per-symbol + overall avg sl_dist%, avg_atr%, sl_atr_ratio distribution for SL-exit vs TP-exit. Answers: are stops inside the noise band?
 
 jobs:
   probe:
@@ -727,5 +729,13 @@ jobs:
                  docker compose up -d backend && \
                  docker compose exec -T backend python -c \
                    'from app.config import get_settings; s=get_settings(); print(\"SHADOW_ALLOW_SHORTS:\", s.SHADOW_ALLOW_SHORTS); print(\"DISABLE_SHORT_SIGNALS:\", s.DISABLE_SHORT_SIGNALS)'"
+              ;;
+            pwin-threshold-whatif)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/pwin_threshold_whatif.py"
+              ;;
+            sl-autopsy)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/sl_autopsy.py"
               ;;
           esac
