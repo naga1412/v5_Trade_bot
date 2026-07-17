@@ -25,8 +25,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.session import get_session_factory
 from app.rl.adapter import AssetEmbeddingTable
 from app.rl.audit import record_brain_decision
 from app.rl.checkpoints import get_active_asset_table_state, get_active_policy_and_checkpoint
@@ -97,6 +98,7 @@ async def compute_brain_adjust_and_persist(
     position: PositionState,
     macro: MacroFeatures,
     session: AsyncSession | None,
+    _session_factory: async_sessionmaker | None = None,
 ) -> BrainHookResult:
     """Run brain inference + persist the decision; return the multiplier.
 
@@ -108,6 +110,12 @@ async def compute_brain_adjust_and_persist(
     ``session`` may be ``None`` (legacy callers); in that case we skip
     the ``brain_decisions`` write but still consume the inference for
     the multiplier. This matches the pattern SP-9 used for L9 news.
+
+    When ``session`` is not None, the write uses its own dedicated short-lived
+    session opened from ``_session_factory`` (defaults to ``get_session_factory()``
+    when not supplied). The caller's ``session`` is never committed or rolled back
+    here — same isolation pattern as ``c433703`` in ``live_prediction.py``.
+    ``_session_factory`` exists for test injection; production callers omit it.
     """
     if get_active_policy_and_checkpoint() is None:
         # Fast path — no checkpoint loaded. Pre-SP-4 behaviour.
@@ -139,14 +147,16 @@ async def compute_brain_adjust_and_persist(
     )
 
     if session is not None:
+        _factory = _session_factory if _session_factory is not None else get_session_factory()
         try:
-            await record_brain_decision(
-                session,
-                decision=decision,
-                symbol=symbol,
-                observation=_serialise_inputs(layer_scores, market, position, macro),
-            )
-            await session.commit()
+            async with _factory() as bd_session:
+                await record_brain_decision(
+                    bd_session,
+                    decision=decision,
+                    symbol=symbol,
+                    observation=_serialise_inputs(layer_scores, market, position, macro),
+                )
+                await bd_session.commit()
         except Exception:  # noqa: BLE001 — audit failure must not block trading
             log.warning(
                 "brain_glue: record_brain_decision failed; "
