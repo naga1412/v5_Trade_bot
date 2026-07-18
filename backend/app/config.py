@@ -241,6 +241,11 @@ class Settings(BaseSettings):
     MIN_ENTRY_SCORE_LONG: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
     SHADOW_ALLOW_SHORTS: bool = False
+    # SHADOW_IGNORE_MIN_SCORE: when True, the shadow worker overrides a
+    # below_long_threshold gate denial and allows the shadow entry anyway.
+    # Live dispatch is completely unaffected — the gate itself still denies.
+    # Mirror of SHADOW_ALLOW_SHORTS (#303). Default False.
+    SHADOW_IGNORE_MIN_SCORE: bool = False
 
     # --- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) -----------------------
     # Confidence-tiered routing modifier on the existing telegram-approve
