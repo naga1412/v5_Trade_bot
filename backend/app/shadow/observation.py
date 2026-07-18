@@ -215,13 +215,12 @@ async def build_obs_components(
     values for that section (loader handles None at training time).
     """
     intermarket = await _latest_intermarket_snapshot(session, symbol)
+    features: dict[str, float | None] | None = None
     if bars is not None:
-        features: dict[str, float | None] = {
+        features = {
             **compute_mean_reversion(bars),
             **compute_volatility_state(bars),
         }
-    else:
-        features = None
     return _build_components(
         symbol=symbol,
         captured_at=captured_at,
