@@ -62,6 +62,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.features.btc_spread import compute as compute_btc_spread
 from app.core.features.mean_reversion import compute as compute_mean_reversion
 from app.core.features.volatility_state import compute as compute_volatility_state
 
@@ -220,6 +221,7 @@ async def build_obs_components(
         features = {
             **compute_mean_reversion(bars),
             **compute_volatility_state(bars),
+            **compute_btc_spread(bars),
         }
     return _build_components(
         symbol=symbol,
