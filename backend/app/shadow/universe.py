@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -8,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 log = logging.getLogger(__name__)
+
+# Acceptable USDT symbol format: uppercase letters + digits only, ending in USDT.
+# Rejects non-ASCII symbols (e.g. "币安人生USDT") that Binance occasionally lists
+# and that would otherwise pass the endswith("USDT") filter.
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
 
 
 @dataclass(frozen=True)
@@ -59,9 +65,13 @@ async def fetch_top_n_usdt_spot(
         blacklist = set(_get_pr10_7_settings().SHADOW_SPOT_BLACKLIST)
     except Exception:  # noqa: BLE001 — never block universe refresh on settings issues
         blacklist = set()
+    for t in tickers:
+        sym = t.get("symbol", "")
+        if sym.endswith("USDT") and not _SYMBOL_RE.match(sym):
+            log.info("universe: skipping non-standard symbol %r", sym)
     usdt_only = [
         t for t in tickers
-        if t.get("symbol", "").endswith("USDT")
+        if _SYMBOL_RE.match(t.get("symbol", ""))
         and t.get("symbol", "") not in blacklist
     ]
     usdt_only.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
