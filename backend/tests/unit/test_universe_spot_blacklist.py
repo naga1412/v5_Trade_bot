@@ -21,7 +21,7 @@ def _spot_blacklist_patch():
     """Patch get_settings to return a known blacklist for these tests."""
     from types import SimpleNamespace
     fake = SimpleNamespace(SHADOW_SPOT_BLACKLIST=[
-        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT",
+        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT", "USDCUSDT",
     ])
     with patch("app.config.get_settings", return_value=fake):
         yield
@@ -37,6 +37,7 @@ async def test_universe_filters_blacklisted_symbols(_spot_blacklist_patch) -> No
             {"symbol": "LUNCUSDT", "quoteVolume": "400000"},
             {"symbol": "SOLUSDT", "quoteVolume": "800000"},
             {"symbol": "UUSDT", "quoteVolume": "100000"},
+            {"symbol": "USDCUSDT", "quoteVolume": "50000"},
             {"symbol": "TONUSDT", "quoteVolume": "200000"},
         ])
     transport = httpx.MockTransport(handler)
@@ -51,6 +52,7 @@ async def test_universe_filters_blacklisted_symbols(_spot_blacklist_patch) -> No
     assert "EDENUSDT" not in symbols, "blacklisted (futures-only)"
     assert "LUNCUSDT" not in symbols, "blacklisted (delisted from SPOT)"
     assert "UUSDT" not in symbols, "blacklisted (suspect)"
+    assert "USDCUSDT" not in symbols, "blacklisted (stablecoin)"
     # Volume-sorted, so order should be BTC > ETH > SOL > TON
     assert entries[0].symbol == "BTCUSDT"
     assert entries[0].rank == 1

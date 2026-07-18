@@ -217,6 +217,14 @@ class Settings(BaseSettings):
     # entry was correct at the time but is now stale.
     SHADOW_SPOT_BLACKLIST: list[str] = [
         "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT",
+        # 2026-07-11: new stablecoins/pegged tokens that entered SPOT top-30
+        # but have no Binance Futures perpetual — caused ~100 premiumIndex
+        # 400 Bad Request errors/hour in the intermarket worker.
+        "RLUSDUSDT", "USD1USDT", "USDEUSDT", "SPCXBUSDT",
+        "EURUSDT", "FDUSDUSDT", "SNDKBUSDT",
+        # 2026-07-18: USDCUSDT — confirmed stablecoin contaminating shadow
+        # universe (avg ATR 0.007%, 81.2% SL rate on 30d LONG autopsy).
+        "USDCUSDT",
     ]
 
     # --- PR-strategy-1: entry-quality gate -------------------------------
