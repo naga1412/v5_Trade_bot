@@ -221,6 +221,9 @@ class Settings(BaseSettings):
         # 400 Bad Request errors/hour in the intermarket worker.
         "RLUSDUSDT", "USD1USDT", "USDEUSDT", "SPCXBUSDT",
         "EURUSDT", "FDUSDUSDT", "SNDKBUSDT",
+        # 2026-07-18: USDCUSDT — confirmed stablecoin contaminating shadow
+        # universe (avg ATR 0.007%, 81.2% SL rate on 30d LONG autopsy).
+        "USDCUSDT",
     ]
 
     # --- PR-strategy-1: entry-quality gate -------------------------------
