@@ -139,19 +139,40 @@ def test_zscore_matches_manual_formula():
 
 
 def test_uses_only_last_720_bars():
-    """Extreme outlier outside the 720-bar window must not affect the result."""
+    """Spike OUTSIDE the trailing 720-bar window must not change the z-score.
+
+    Constructs two bar arrays with identical last-720 bars but different
+    prefixes (one plain, one with an extreme spike). The z-score must be
+    identical because compute() slices to [-720:] before computing.
+    """
+    np.random.seed(99)
     update_btc_close(50000.0)
-    n = _MIN_BARS + 100
-    closes = np.full(n, 100.0)
-    # Spike at bar index 0 (well outside the trailing 720-bar window)
-    closes[0] = 1_000_000.0
-    bars = pd.DataFrame({
-        "open": closes, "high": closes + 1, "low": closes - 1,
-        "close": closes, "volume": np.ones(n),
-    })
-    # With only the last 720 bars (all 100.0), z-score must be 0
-    result = compute(bars)
-    assert result["alt_btc_log_zscore"] == pytest.approx(0.0, abs=1e-9)
+    prefix_len = 50
+    n = _MIN_BARS + prefix_len
+
+    window = 100.0 + np.cumsum(np.random.randn(_MIN_BARS) * 0.5)
+    plain_prefix = np.full(prefix_len, 100.0)
+    spike_prefix = plain_prefix.copy()
+    spike_prefix[0] = 1_000_000.0  # extreme spike in the discarded prefix
+
+    for prefix in (plain_prefix, spike_prefix):
+        closes = np.concatenate([prefix, window])
+        bars = pd.DataFrame({
+            "open": closes, "high": closes + 1, "low": closes - 1,
+            "close": closes, "volume": np.ones(n),
+        })
+
+    # Both should yield the same result since only the last 720 bars differ
+    results = []
+    for prefix in (plain_prefix, spike_prefix):
+        closes = np.concatenate([prefix, window])
+        bars = pd.DataFrame({
+            "open": closes, "high": closes + 1, "low": closes - 1,
+            "close": closes, "volume": np.ones(n),
+        })
+        results.append(compute(bars))
+
+    assert results[0] == results[1]
 
 
 # ── return shape ─────────────────────────────────────────────────────────────
