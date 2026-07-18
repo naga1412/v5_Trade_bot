@@ -652,6 +652,16 @@ class ShadowWorker:
             and _eq_settings.SHADOW_ALLOW_SHORTS
         ):
             _eq_decision = AllowDecision(allow=True, reason=None)
+        # SHADOW_IGNORE_MIN_SCORE: let shadow trades enter below MIN_ENTRY_SCORE_LONG
+        # so the training dataset isn't starved while the live threshold is raised.
+        # Uses startswith() because PATTERN_BOOST appends boost detail to the reason.
+        # All other gate reasons (regime, ADX, short_disabled) still block entry.
+        if (
+            not _eq_decision.allow
+            and (_eq_decision.reason or "").startswith("below_long_threshold")
+            and _eq_settings.SHADOW_IGNORE_MIN_SCORE
+        ):
+            _eq_decision = AllowDecision(allow=True, reason=None)
         if not _eq_decision.allow:
             log.info(
                 "shadow_worker: %s/%s GATE_DENIED %s score=%.3f",
