@@ -772,6 +772,7 @@ class ShadowWorker:
                         atr=atr_value,
                         last_close=candle.close,
                         layer_scores_array=layer_scores_array,
+                        bars=buf,
                     )
                     await persist_observation(
                         session,

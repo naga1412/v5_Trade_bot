@@ -58,13 +58,15 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.features.mean_reversion import compute as compute_mean_reversion
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 
 def _macro_from_ts(ts: datetime) -> dict[str, Any]:
@@ -160,6 +162,7 @@ def _build_components(
     last_close: float,
     layer_scores_array: list[float],
     intermarket: dict[str, Any] | None,
+    features: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """Pure assembler — no I/O. Easy to unit-test."""
     atr_pct = (atr / last_close) if last_close > 0 else 0.0
@@ -191,6 +194,7 @@ def _build_components(
             "bars_in_position": 0,
         },
         "macro": _macro_from_ts(captured_at),
+        "features": features,
     }
 
 
@@ -202,6 +206,7 @@ async def build_obs_components(
     atr: float,
     last_close: float,
     layer_scores_array: list[float],
+    bars: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Build the per-component obs dict for one shadow-trade-open event.
 
@@ -209,6 +214,7 @@ async def build_obs_components(
     values for that section (loader handles None at training time).
     """
     intermarket = await _latest_intermarket_snapshot(session, symbol)
+    features = compute_mean_reversion(bars) if bars is not None else None
     return _build_components(
         symbol=symbol,
         captured_at=captured_at,
@@ -216,6 +222,7 @@ async def build_obs_components(
         last_close=last_close,
         layer_scores_array=layer_scores_array,
         intermarket=intermarket,
+        features=features,
     )
 
 
