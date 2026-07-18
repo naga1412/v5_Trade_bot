@@ -66,10 +66,15 @@ def test_uusdt_no_longer_in_blacklist() -> None:
     from app.config import get_settings
     bl = get_settings().SHADOW_SPOT_BLACKLIST
     assert "UUSDT" not in bl
-    # Sanity: the other four PR10.7 entries are still blacklisted.
+    # Sanity: the four original PR10.7 entries are still blacklisted.
     for sym in ("EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT"):
         assert sym in bl, f"{sym} should still be blacklisted"
-    assert len(bl) == 4
+    # 2026-07-11 hotfix: 7 stablecoin/pegged entries added to main, now backported to dev.
+    # 2026-07-18: USDCUSDT added (confirmed stablecoin, avg ATR 0.007%).
+    for sym in ("RLUSDUSDT", "USD1USDT", "USDEUSDT", "SPCXBUSDT",
+                "EURUSDT", "FDUSDUSDT", "SNDKBUSDT", "USDCUSDT"):
+        assert sym in bl, f"{sym} should be blacklisted (stablecoin)"
+    assert len(bl) == 12
 
 
 @pytest.mark.asyncio

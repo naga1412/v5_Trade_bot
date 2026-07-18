@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import text
 
+from app.config import get_settings
 from app.db.session import get_session_factory
 
 RATIO_BRACKETS = [
@@ -55,6 +56,9 @@ def _mean(vals: list[float]) -> str:
 
 
 async def main() -> None:
+    settings = get_settings()
+    blacklist: set[str] = set(settings.SHADOW_SPOT_BLACKLIST)
+
     sf = get_session_factory()
     async with sf() as session:
         rows = (
@@ -73,8 +77,12 @@ async def main() -> None:
             )
         ).fetchall()
 
+    excluded_n = sum(1 for r in rows if r.symbol in blacklist)
+    rows = [r for r in rows if r.symbol not in blacklist]
+    print(f"SHADOW_SPOT_BLACKLIST: {len(blacklist)} entries — excluded {excluded_n} rows.")
+
     if not rows:
-        print("ERROR: no closed LONG shadow_trades in the last 30 days")
+        print("ERROR: no closed LONG shadow_trades in the last 30 days (after blacklist filter)")
         return
 
     # Compute derived fields

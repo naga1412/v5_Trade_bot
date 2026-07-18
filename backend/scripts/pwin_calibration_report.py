@@ -1,8 +1,12 @@
 """p_win calibration report — ops-debug probe 'pwin-calibration-report'.
 
-Fits isotonic models on oldest 80% of closed shadow_trades, then prints
-a blended 30-day summary and a rank-bucketed decile calibration table on
-the newest 20% (validation window), with P&L and exit-reason breakdown.
+Fits isotonic models on oldest 80% of closed shadow_trades (EXCLUDING the
+SHADOW_SPOT_BLACKLIST — stablecoins / pegged tokens). Prints a blended 30-day
+summary and a rank-bucketed decile calibration table on the newest 20%
+(validation window), with P&L and exit-reason breakdown.
+
+Models are fitted IN-MEMORY only — the production .pkl files on disk are NOT
+overwritten. Use the nightly cron to refresh production models.
 
 Usage (inside backend container via ops-debug.yml probe):
     docker compose exec -T backend python /app/scripts/pwin_calibration_report.py
@@ -14,16 +18,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Allow running from /app (Docker) or from the repo root in tests.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import text
 
-from app.core.scoring.p_win_calibrator import (
-    P_WIN_MODEL_PATH_LONG,
-    P_WIN_MODEL_PATH_SHORT,
-    fit_p_win_models,
-)
+from app.config import get_settings
 from app.core.scoring.types import Direction
 from app.db.session import get_session_factory
 
@@ -32,25 +31,49 @@ def _tz(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def _expectancy(wr_pct: float, avg_win: float, avg_loss: float) -> float:
+    if any(v != v for v in (wr_pct, avg_win, avg_loss)):
+        return float("nan")
+    wr = wr_pct / 100.0
+    return wr * avg_win + (1.0 - wr) * avg_loss
+
+
+def _fit_isotonic(train_rows: list, direction: str):
+    try:
+        from sklearn.isotonic import IsotonicRegression
+    except ImportError:
+        return None
+    d_rows = [
+        (abs(r.entry_score), 1 if r.won else 0)
+        for r in train_rows
+        if r.direction == direction
+    ]
+    if len(d_rows) < 20:
+        return None
+    x, y = zip(*d_rows)
+    ir = IsotonicRegression(y_min=0.0, y_max=1.0, increasing=True, out_of_bounds="clip")
+    ir.fit(list(x), list(y))
+    return ir
+
+
 async def main() -> None:
     try:
-        import pickle
-
         import numpy as np
-        from sklearn.isotonic import IsotonicRegression  # noqa: F401 — validate install
+        from sklearn.isotonic import IsotonicRegression  # noqa: F401
     except ImportError as exc:
         print(f"ERROR: missing dependency — {exc}")
         return
 
+    settings = get_settings()
+    blacklist: set[str] = set(settings.SHADOW_SPOT_BLACKLIST)
+    print(f"SHADOW_SPOT_BLACKLIST ({len(blacklist)} entries): {sorted(blacklist)}")
+
     sf = get_session_factory()
     async with sf() as session:
-        print("Fitting p_win models (train = oldest 80% of closed shadow_trades)...")
-        await fit_p_win_models(session)
-
         rows = (
             await session.execute(
                 text(
-                    "SELECT entry_score, direction, pnl_pct, exit_reason, closed_at,"
+                    "SELECT symbol, entry_score, direction, pnl_pct, exit_reason, closed_at,"
                     " CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END AS won"
                     " FROM shadow_trades"
                     " WHERE closed_at IS NOT NULL"
@@ -63,25 +86,47 @@ async def main() -> None:
         print("ERROR: no closed shadow_trades found")
         return
 
+    excluded = [r for r in rows if r.symbol in blacklist]
+    rows = [r for r in rows if r.symbol not in blacklist]
+    print(f"\nExcluded {len(excluded)} rows from {len({r.symbol for r in excluded})} blacklisted symbols.")
+
+    if len(rows) < 50:
+        print(f"ERROR: only {len(rows)} clean rows (need >=50)")
+        return
+
     split = int(len(rows) * 0.8)
+    train_rows = rows[:split]
     val_rows = rows[split:]
     print(
-        f"\nClosed trades total: {len(rows)}"
+        f"Clean trades total: {len(rows)}"
         f"  Train (oldest 80%): {split}"
         f"  Val (newest 20%): {len(val_rows)}\n"
     )
 
-    # ── Blended 30-day summary (full dataset, not restricted to val) ──────────
+    # Fit in-memory models (no prod .pkl overwrite)
+    print("Fitting clean isotonic models (in-memory, no disk write)...")
+    models = {}
+    for direction in (Direction.LONG, Direction.SHORT):
+        m = _fit_isotonic(train_rows, direction)
+        if m is not None:
+            models[direction] = m
+            d_count = sum(1 for r in train_rows if r.direction == direction)
+            print(f"  {direction}: fitted on {d_count} train rows")
+        else:
+            print(f"  {direction}: insufficient data — skipped")
+    print()
+
+    # ── Blended 30-day summary (clean data, full dataset) ─────────────────────
     now = datetime.now(timezone.utc)
     cutoff_30d = now - timedelta(days=30)
-    print("=" * 76)
-    print("BLENDED SUMMARY — last 30 days")
-    print("=" * 76)
+    print("=" * 84)
+    print("BLENDED SUMMARY — last 30 days (CLEAN: blacklist excluded)")
+    print("=" * 84)
     print(
         f"  {'Direction':>10}  {'Trades':>7}  {'WR%':>6}  "
-        f"{'AvgWin%':>8}  {'AvgLoss%':>9}  {'TotalPnl%':>10}"
+        f"{'AvgWin%':>8}  {'AvgLoss%':>9}  {'Expectancy':>11}  {'TotalPnl%':>10}"
     )
-    print(f"  {'-'*10}  {'-'*7}  {'-'*6}  {'-'*8}  {'-'*9}  {'-'*10}")
+    print(f"  {'-'*10}  {'-'*7}  {'-'*6}  {'-'*8}  {'-'*9}  {'-'*11}  {'-'*10}")
     for direction in (Direction.LONG, Direction.SHORT):
         d_recent = [
             r for r in rows
@@ -96,23 +141,20 @@ async def main() -> None:
         wr = 100.0 * len(wins) / len(d_recent)
         avg_win = sum(wins) / len(wins) if wins else float("nan")
         avg_loss = sum(losses) / len(losses) if losses else float("nan")
+        exp = _expectancy(wr, avg_win, avg_loss)
         total_pnl = sum(pnls)
         print(
             f"  {direction:>10}  {len(d_recent):>7}  {wr:>6.1f}  "
-            f"{avg_win:>8.3f}  {avg_loss:>9.3f}  {total_pnl:>10.3f}"
+            f"{avg_win:>8.3f}  {avg_loss:>9.3f}  {exp:>11.4f}  {total_pnl:>10.3f}"
         )
     print()
 
     # ── Decile calibration tables (val set, rank-based bucketing) ─────────────
-    for direction, path in [
-        (Direction.LONG, P_WIN_MODEL_PATH_LONG),
-        (Direction.SHORT, P_WIN_MODEL_PATH_SHORT),
-    ]:
-        if not path.exists():
-            print(f"{direction}: model not fitted (insufficient training rows)\n")
+    for direction in (Direction.LONG, Direction.SHORT):
+        model = models.get(direction)
+        if model is None:
+            print(f"{direction}: no model — skipping decile table\n")
             continue
-        with open(path, "rb") as f:
-            model = pickle.load(f)
 
         d_rows = [
             (r.entry_score, r.won, float(r.pnl_pct or 0.0), r.exit_reason or "UNKNOWN")
@@ -129,15 +171,11 @@ async def main() -> None:
         pnls_arr = np.array(pnls_raw, dtype=float)
         exits_list = list(exits_raw)
 
-        # Rank-based bucketing: sort indices by predicted p_win and split into 10
-        # equal slices. Fixes the percentile-edge mask bug where duplicate values
-        # at an isotonic plateau caused rows at decile boundaries to be counted in
-        # multiple buckets simultaneously (n summed to 3-4× the val-set size).
         idx_sorted = np.argsort(p_wins, kind="stable")
         buckets = np.array_split(idx_sorted, 10)
 
         n_total = len(d_rows)
-        print(f"{direction}  (n={n_total} validation trades)")
+        print(f"{direction}  (n={n_total} clean validation trades)")
         print(
             f"  {'Decile':>10}  {'pred_p_win':>10}  {'realized_wr':>11}  {'n':>5}"
             f"  {'avg_pnl%':>8}  {'sum_pnl%':>9}  {'avg_win%':>8}  {'avg_loss%':>9}"
