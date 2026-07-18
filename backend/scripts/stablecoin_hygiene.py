@@ -109,7 +109,7 @@ async def main() -> None:
     else:
         print("  (none — all stablecoin symbols successfully excluded from closed trades)")
 
-    print(f"\n--- 1b. OPEN POSITIONS from stablecoin symbols ---")
+    print("\n--- 1b. OPEN POSITIONS from stablecoin symbols ---")
     if open_rows:
         print(f"  {'Symbol':<14}  {'N':>6}  {'First open':>25}")
         print(f"  {'-'*14}  {'-'*6}  {'-'*25}")
