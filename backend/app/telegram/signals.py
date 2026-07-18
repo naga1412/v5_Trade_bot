@@ -216,6 +216,23 @@ def _format_funding_text(funding_rate_daily: float, direction: str) -> str:
     return f"{pct:+.3f}%"
 
 
+def _fmt_price(price: float) -> str:
+    """Adaptive decimal precision so sub-$1 symbols display sensibly.
+
+    BTC @ $79 000 → "$79,000.00"  (2 dp, comma-grouped)
+    SOL @ $150    → "$150.00"
+    ONDO @ $0.38  → "$0.380000"   (6 dp — ATR-based SL/TP are visible)
+    SHIB @ $0.000015 → "$0.00001500"  (8 dp)
+    """
+    if price >= 100:
+        return f"{price:,.2f}"
+    if price >= 1:
+        return f"{price:.2f}"
+    if price >= 0.01:
+        return f"{price:.6f}"
+    return f"{price:.8f}"
+
+
 def render_message(
     candidate: SignalCandidate,
     *,
@@ -271,10 +288,10 @@ def render_message(
         f"{direction_emoji} {candidate.direction}  •  {candidate.symbol}  "
         f"•  {n.strftime('%d %b %Y %H:%M UTC')}\n"
         f"─────────────────────────────────────\n"
-        f"Entry:        ${candidate.entry_price:,.2f}\n"
-        f"Stop loss:    ${candidate.stop_loss_price:,.2f}  "
+        f"Entry:        ${_fmt_price(candidate.entry_price)}\n"
+        f"Stop loss:    ${_fmt_price(candidate.stop_loss_price)}  "
         f"({-sl_pct:+.1f}%)\n"
-        f"Take profit:  ${candidate.take_profit_price:,.2f}  "
+        f"Take profit:  ${_fmt_price(candidate.take_profit_price)}  "
         f"({tp_pct:+.1f}%)\n"
         f"RR ratio:     {candidate.rr_ratio:.2f} : 1\n"
         f"Confidence:   {candidate.confidence_pct:.0f}%\n"
@@ -287,7 +304,7 @@ def render_message(
         f"{_DEFAULT_HARD_CAP}× for risk profile)\n"
         f"Position:     ${position_value:,.2f}\n"
         f"Loss at SL:   ${loss_at_sl:.2f} ({pct_of_margin:.0f}% of margin)\n"
-        f"Liquidation:  ${liq_price:,.2f}  "
+        f"Liquidation:  ${_fmt_price(liq_price)}  "
         f"({-liq_distance*100:+.0f}% adverse)\n"
         f"Buffer:       {safety_buffer_x:.1f}× safety vs SL\n"
         f"Funding rate: "
