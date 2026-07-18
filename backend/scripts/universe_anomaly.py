@@ -53,7 +53,7 @@ async def run(session: AsyncSession) -> None:
     )
     row = result.fetchone()
     if row and row[0]:
-        print(f"\n2. 币安人生USDT in asset_universe:")
+        print("\n2. 币安人生USDT in asset_universe:")
         print(f"   first_seen:  {row[0]}")
         print(f"   last_seen:   {row[1]}")
         print(f"   snapshots:   {row[2]}")

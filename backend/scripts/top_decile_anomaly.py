@@ -143,8 +143,10 @@ async def run(session: AsyncSession) -> None:
         scores = [abs(r.entry_score) for r in combined]
         pnls = [r.pnl_pct for r in combined]
         n = len(combined)
-        sx = sum(scores); sy = sum(pnls)
-        sx2 = sum(x**2 for x in scores); sxy = sum(x*y for x, y in zip(scores, pnls))
+        sx = sum(scores)
+        sy = sum(pnls)
+        sx2 = sum(x**2 for x in scores)
+        sxy = sum(x * y for x, y in zip(scores, pnls))
         denom = (n * sx2 - sx**2)
         if denom != 0:
             corr_num = n * sxy - sx * sy
