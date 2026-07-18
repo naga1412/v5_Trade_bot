@@ -41,6 +41,7 @@ from app.core.scoring.tiers import classify_tier
 from app.core.scoring.traps.base import TrapContext
 from app.core.scoring.types import Direction, LayerScore
 from app.core.features.mean_reversion import compute as compute_mean_reversion
+from app.core.features.volatility_state import compute as compute_volatility_state
 
 log = logging.getLogger(__name__)
 
@@ -612,7 +613,7 @@ async def build_prediction(
         fires=fires,
         tier=tier,
     )
-    extras["features"] = {"W1": compute_mean_reversion(bars)}
+    extras["features"] = {**compute_mean_reversion(bars), **compute_volatility_state(bars)}
 
     # SP-9 Phase F1: build the optional Tab 1 sentiment + news summaries.
     # Both are best-effort — any failure leaves the field as None so legacy

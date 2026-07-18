@@ -63,6 +63,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.features.mean_reversion import compute as compute_mean_reversion
+from app.core.features.volatility_state import compute as compute_volatility_state
 
 log = logging.getLogger(__name__)
 
@@ -214,7 +215,13 @@ async def build_obs_components(
     values for that section (loader handles None at training time).
     """
     intermarket = await _latest_intermarket_snapshot(session, symbol)
-    features = compute_mean_reversion(bars) if bars is not None else None
+    if bars is not None:
+        features: dict[str, float | None] = {
+            **compute_mean_reversion(bars),
+            **compute_volatility_state(bars),
+        }
+    else:
+        features = None
     return _build_components(
         symbol=symbol,
         captured_at=captured_at,
