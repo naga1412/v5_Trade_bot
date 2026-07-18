@@ -106,6 +106,68 @@ def test_fmt_price_tiny_coin_8dp() -> None:
     assert _fmt_price(0.00001580) == "0.00001580"
 
 
+# ─── 2b. quantize_price rounding direction ────────────────────────────────
+#
+# quantize_price uses math.floor (not round-to-nearest), so:
+#   - SL (below entry for LONG): floors DOWN  → stop moves 0-1 tick FARTHER from entry
+#     (slightly wider stop — won't trigger on a tick that barely touches; safe direction)
+#   - TP (above entry for LONG): floors DOWN  → TP moves 0-1 tick CLOSER to entry
+#     (1 tick less profit per win — acceptable; avoids Binance "precision" rejection)
+#
+# The key invariant: quantized price is always within ONE tick_size of the raw price.
+# A wrong rounding MODE (e.g. round-to-nearest) could flip by half a tick unexpectedly;
+# floor is deterministic and always conservative.
+
+
+def test_quantize_price_floors_not_rounds_to_nearest() -> None:
+    """quantize_price must floor, not round to nearest.
+
+    0.37595 with tick_size=0.0001:
+      nearest → 0.3760   (rounds up because .5 digit)
+      floor   → 0.3759   (what we actually want — conservative, deterministic)
+    """
+    tick = 0.0001
+    raw_sl = 0.37595
+    result = quantize_price(raw_sl, tick)
+    assert result == pytest.approx(0.3759, abs=1e-9), (
+        f"Expected floor=0.3759, got {result} "
+        f"(round-to-nearest would give 0.3760)"
+    )
+
+
+def test_quantize_price_result_within_one_tick_of_raw() -> None:
+    """Quantized price must be within [raw - tick_size, raw] (floor guarantee)."""
+    tick = 0.0001
+    for raw in [0.37595, 0.38810, 0.37600, 0.38000, 0.99999]:
+        q = quantize_price(raw, tick)
+        assert q <= raw + 1e-12, f"Quantized {q} exceeds raw {raw} for tick={tick}"
+        assert q >= raw - tick - 1e-12, (
+            f"Quantized {q} is more than one tick below raw {raw} (tick={tick})"
+        )
+
+
+def test_quantize_price_long_sl_floors_away_from_entry() -> None:
+    """For a LONG SL below entry, floor moves it farther from entry (slightly wider)."""
+    tick = 0.0001
+    entry = 0.38
+    raw_sl = entry - 1.5 * 0.0027   # 0.37595
+    q_sl = quantize_price(raw_sl, tick)
+    # SL should be AT or below raw_sl (floor direction).
+    assert q_sl <= raw_sl + 1e-12
+    # It must still be above the entry - 2 ticks floor (i.e. not catastrophically far).
+    assert q_sl >= raw_sl - tick - 1e-12
+
+
+def test_quantize_price_long_tp_floors_toward_entry() -> None:
+    """For a LONG TP above entry, floor brings it 0-1 tick closer to entry."""
+    tick = 0.0001
+    entry = 0.38
+    raw_tp = entry + 3.0 * 0.0027   # 0.38810
+    q_tp = quantize_price(raw_tp, tick)
+    assert q_tp <= raw_tp + 1e-12
+    assert q_tp >= raw_tp - tick - 1e-12
+
+
 # ─── 3. render_message card uses adaptive precision ───────────────────────
 
 
