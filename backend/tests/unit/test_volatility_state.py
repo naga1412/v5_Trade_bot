@@ -108,7 +108,7 @@ def test_realized_vol_positive():
 # ── vol_percentile_30d ────────────────────────────────────────────────────────
 
 def test_vol_percentile_none_below_744_bars():
-    bars = _make_bars(743)
+    bars = _make_bars(_MIN_BARS_PERCENTILE - 1)
     result = compute(bars)
     assert result["vol_percentile_30d"] is None
 
@@ -146,7 +146,7 @@ def test_vol_percentile_high_when_current_vol_is_max():
 # ── atr_expansion_ratio ───────────────────────────────────────────────────────
 
 def test_atr_expansion_none_below_35_bars():
-    bars = _make_bars(34)
+    bars = _make_bars(_MIN_BARS_ATR_RATIO - 1)
     result = compute(bars)
     assert result["atr_expansion_ratio"] is None
 
