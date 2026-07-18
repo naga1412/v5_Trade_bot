@@ -373,6 +373,13 @@ class ShadowWorker:
             return
         buf = self._append_bar(candle, tf)
 
+        # W3: keep the module-level BTC close cache fresh so alt symbols
+        # processed after BTCUSDT have an up-to-date denominator for
+        # alt_btc_log_zscore. Updated unconditionally (open or no position).
+        if candle.symbol == "BTCUSDT" and tf == "1h":
+            from app.core.features.btc_spread import update_btc_close as _upd_btc
+            _upd_btc(candle.close)
+
         key = (candle.symbol, tf)
         if key in self.open_positions:
             await self._maybe_close_position(candle, tf)
