@@ -25,7 +25,11 @@ improvements.
 
 | PR | Title | Why deferred |
 |----|-------|--------------|
+<<<<<<< HEAD
 | 4  | IC auto-weighting + regime-conditional weights | Needs 30+ days of MTF shadow data; reassess after PR3 ships |
+=======
+| 4 (G2/G3 only) | IC auto-weighting + regime-conditional weights | Needs 30+ days of MTF shadow data; reassess after PR3 ships. **Note (2026-05-18 scope audit)**: PR4's G1 component (Hold/TP scaling by `mtf_agreement`) was moved INTO PR3 — G1 has no MTF-shadow-data dependency since it reads `mtf_agreement` already on `predictions` from PR1. Only G2/G3 remain in this deferred row. |
+>>>>>>> origin/dev
 | 5  | Per-candle obs + BC pretrain + reward shaping | RL brain currently a placeholder — deferred until rule-based system is validated as the baseline |
 | 6  | Train v2 brain | Depends on PR5 |
 | 7  | RL ensemble + distillation | Depends on PR6 |
@@ -158,11 +162,25 @@ reverts to PR1 recording-only behavior. No DB rollback needed
 - Shadow stats during soak: signal rate drops 30-40%, win rate
   flat or improving, zero new audit chain breaks
 
+<<<<<<< HEAD
 ## PR3 — Multi-resolution shadow
 (Scope/details to be expanded into its own spec after PR2 lands.
  High-level: enable 15m lane in shadow worker, add prewarm,
  support narrow universe via SHADOW_NARROW_UNIVERSE config.
  4× signal rate accelerates promotion gate fills.)
+=======
+## PR3 — Multi-resolution shadow + Hold/TP scaling (G1)
+(Scope/details: spec `2026-05-17-pr3-multi-resolution-shadow-design.md`;
+ plan `2026-05-18-pr3-multi-resolution-shadow.md`.
+ High-level: enable 15m lane in shadow worker, add prewarm,
+ support narrow universe via SHADOW_NARROW_UNIVERSE config.
+ 4× signal rate accelerates promotion gate fills. Also: PR4's
+ G1 component (Hold/TP scaling by mtf_agreement) was moved INTO
+ PR3 per scope audit 2026-05-18 — G1 has no shadow-data
+ dependency since mtf_agreement is already on predictions from
+ PR1. G2 (IC auto-weighting) and G3 (regime-conditional weights)
+ stay deferred to v2 evaluation queue.)
+>>>>>>> origin/dev
 
 ## PR8 — Outcome-adaptive cooldown
 (Scope/details: spec `2026-05-18-pr8-outcome-adaptive-cooldown-design.md`;

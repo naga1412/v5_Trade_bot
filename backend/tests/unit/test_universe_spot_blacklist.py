@@ -21,7 +21,7 @@ def _spot_blacklist_patch():
     """Patch get_settings to return a known blacklist for these tests."""
     from types import SimpleNamespace
     fake = SimpleNamespace(SHADOW_SPOT_BLACKLIST=[
-        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT",
+        "EDENUSDT", "LUNCUSDT", "PAXGUSDT", "XAUTUSDT", "UUSDT", "USDCUSDT",
     ])
     with patch("app.config.get_settings", return_value=fake):
         yield
@@ -37,6 +37,7 @@ async def test_universe_filters_blacklisted_symbols(_spot_blacklist_patch) -> No
             {"symbol": "LUNCUSDT", "quoteVolume": "400000"},
             {"symbol": "SOLUSDT", "quoteVolume": "800000"},
             {"symbol": "UUSDT", "quoteVolume": "100000"},
+            {"symbol": "USDCUSDT", "quoteVolume": "50000"},
             {"symbol": "TONUSDT", "quoteVolume": "200000"},
         ])
     transport = httpx.MockTransport(handler)
@@ -51,6 +52,7 @@ async def test_universe_filters_blacklisted_symbols(_spot_blacklist_patch) -> No
     assert "EDENUSDT" not in symbols, "blacklisted (futures-only)"
     assert "LUNCUSDT" not in symbols, "blacklisted (delisted from SPOT)"
     assert "UUSDT" not in symbols, "blacklisted (suspect)"
+    assert "USDCUSDT" not in symbols, "blacklisted (stablecoin)"
     # Volume-sorted, so order should be BTC > ETH > SOL > TON
     assert entries[0].symbol == "BTCUSDT"
     assert entries[0].rank == 1
@@ -71,3 +73,60 @@ async def test_universe_excludes_non_usdt_pairs(_spot_blacklist_patch) -> None:
 
     symbols = [e.symbol for e in entries]
     assert symbols == ["BTCUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_universe_rejects_non_ascii_symbol(_spot_blacklist_patch) -> None:
+    """Format guard rejects symbols with non-ASCII characters (e.g. 币安人生USDT)."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"symbol": "BTCUSDT", "quoteVolume": "1000000"},
+            {"symbol": "币安人生USDT", "quoteVolume": "999999"},
+            {"symbol": "ETHUSDT", "quoteVolume": "900000"},
+        ])
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        entries = await fetch_top_n_usdt_spot(http, n=10)
+
+    symbols = [e.symbol for e in entries]
+    assert "币安人生USDT" not in symbols, "non-ASCII symbol must be rejected by format guard"
+    assert "BTCUSDT" in symbols
+    assert "ETHUSDT" in symbols
+
+
+@pytest.mark.asyncio
+async def test_universe_accepts_numeric_prefix_symbol(_spot_blacklist_patch) -> None:
+    """Format guard accepts symbols with numeric prefix (e.g. 1000PEPEUSDT)."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"symbol": "1000PEPEUSDT", "quoteVolume": "500000"},
+            {"symbol": "BTCUSDT", "quoteVolume": "1000000"},
+        ])
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        entries = await fetch_top_n_usdt_spot(http, n=10)
+
+    symbols = [e.symbol for e in entries]
+    assert "1000PEPEUSDT" in symbols, "numeric-prefix symbol must be accepted"
+    assert "BTCUSDT" in symbols
+
+
+@pytest.mark.asyncio
+async def test_universe_blacklist_still_applies_after_format_guard(_spot_blacklist_patch) -> None:
+    """Blacklist is applied after format guard — a standard-format blacklisted symbol is excluded."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"symbol": "BTCUSDT", "quoteVolume": "1000000"},
+            {"symbol": "EDENUSDT", "quoteVolume": "800000"},   # standard format but blacklisted
+            {"symbol": "ETHUSDT", "quoteVolume": "900000"},
+            {"symbol": "币安人生USDT", "quoteVolume": "700000"},  # non-ASCII + not blacklisted
+        ])
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        entries = await fetch_top_n_usdt_spot(http, n=10)
+
+    symbols = [e.symbol for e in entries]
+    assert "EDENUSDT" not in symbols, "blacklisted symbol must be excluded"
+    assert "币安人生USDT" not in symbols, "non-ASCII symbol must be excluded by format guard"
+    assert "BTCUSDT" in symbols
+    assert "ETHUSDT" in symbols

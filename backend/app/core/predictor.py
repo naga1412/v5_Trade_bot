@@ -41,6 +41,10 @@ from app.core.scoring.tiers import classify_tier
 from app.core.scoring.traps.base import TrapContext
 from app.core.scoring.types import Direction, LayerScore
 from app.core.regime.market_regime import get_cached_market_regime
+from app.core.features.btc_spread import compute as compute_btc_spread
+from app.core.features.btc_spread import update_btc_close as _update_btc_close
+from app.core.features.mean_reversion import compute as compute_mean_reversion
+from app.core.features.volatility_state import compute as compute_volatility_state
 
 # Maps the 3-class market_regime classifier output to the 5-class obs regime
 # string. Must stay in sync with shadow/observation.py REGIME_MAPPING.
@@ -621,6 +625,15 @@ async def build_prediction(
         fires=fires,
         tier=tier,
     )
+    # W3: keep the module-level BTC close cache fresh for alt_btc_log_zscore
+    # when this prediction is for BTCUSDT itself.
+    if symbol.replace("/", "").upper() == "BTCUSDT":
+        _update_btc_close(float(bars["close"].iloc[-1]))
+    extras["features"] = {
+        **compute_mean_reversion(bars),
+        **compute_volatility_state(bars),
+        **compute_btc_spread(bars),
+    }
 
     # SP-9 Phase F1: build the optional Tab 1 sentiment + news summaries.
     # Both are best-effort — any failure leaves the field as None so legacy

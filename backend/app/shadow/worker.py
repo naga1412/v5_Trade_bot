@@ -373,6 +373,13 @@ class ShadowWorker:
             return
         buf = self._append_bar(candle, tf)
 
+        # W3: keep the module-level BTC close cache fresh so alt symbols
+        # processed after BTCUSDT have an up-to-date denominator for
+        # alt_btc_log_zscore. Updated unconditionally (open or no position).
+        if candle.symbol == "BTCUSDT" and tf == "1h":
+            from app.core.features.btc_spread import update_btc_close as _upd_btc
+            _upd_btc(candle.close)
+
         key = (candle.symbol, tf)
         if key in self.open_positions:
             await self._maybe_close_position(candle, tf)
@@ -652,6 +659,16 @@ class ShadowWorker:
             and _eq_settings.SHADOW_ALLOW_SHORTS
         ):
             _eq_decision = AllowDecision(allow=True, reason=None)
+        # SHADOW_IGNORE_MIN_SCORE: let shadow trades enter below MIN_ENTRY_SCORE_LONG
+        # so the training dataset isn't starved while the live threshold is raised.
+        # Uses startswith() because PATTERN_BOOST appends boost detail to the reason.
+        # All other gate reasons (regime, ADX, short_disabled) still block entry.
+        if (
+            not _eq_decision.allow
+            and (_eq_decision.reason or "").startswith("below_long_threshold")
+            and _eq_settings.SHADOW_IGNORE_MIN_SCORE
+        ):
+            _eq_decision = AllowDecision(allow=True, reason=None)
         if not _eq_decision.allow:
             log.info(
                 "shadow_worker: %s/%s GATE_DENIED %s score=%.3f",
@@ -762,6 +779,7 @@ class ShadowWorker:
                         atr=atr_value,
                         last_close=candle.close,
                         layer_scores_array=layer_scores_array,
+                        bars=buf,
                     )
                     await persist_observation(
                         session,

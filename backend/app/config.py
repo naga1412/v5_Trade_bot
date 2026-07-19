@@ -79,9 +79,10 @@ class Settings(BaseSettings):
     # flip from PR2's effective ["1h"]. Rollback: set ["1h"] in env (spec §8).
     SHADOW_TIMEFRAMES: list[str] = ["1h", "15m"]
     SHADOW_PREWARM_BARS: int = 200  # matches MTF cache cap; setup() reuses cache
-    # Per-TF cooldown in hours. 4h prevents re-entry on the same choppy signal
-    # within the same trading session.
-    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 4.0, "15m": 4.0}
+    # Per-TF cooldown in hours. Both default 0.5h (30 min) — matches the
+    # pre-PR3 COOLDOWN_MINUTES=30 module constant. Dict shape future-proofs
+    # asymmetric values without API churn.
+    SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 0.5, "15m": 0.5}
     # Non-empty list = intersect with top-30 universe. Empty = full top-30.
     # Empty intersection logs WARN and falls back to full (fail-loud-then-open).
     SHADOW_NARROW_UNIVERSE: list[str] = []
@@ -221,6 +222,9 @@ class Settings(BaseSettings):
         # 400 Bad Request errors/hour in the intermarket worker.
         "RLUSDUSDT", "USD1USDT", "USDEUSDT", "SPCXBUSDT",
         "EURUSDT", "FDUSDUSDT", "SNDKBUSDT",
+        # 2026-07-18: USDCUSDT — confirmed stablecoin contaminating shadow
+        # universe (avg ATR 0.007%, 81.2% SL rate on 30d LONG autopsy).
+        "USDCUSDT",
     ]
 
     # --- PR-strategy-1: entry-quality gate -------------------------------
@@ -237,6 +241,11 @@ class Settings(BaseSettings):
     MIN_ENTRY_SCORE_LONG: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
     SHADOW_ALLOW_SHORTS: bool = False
+    # SHADOW_IGNORE_MIN_SCORE: when True, the shadow worker overrides a
+    # below_long_threshold gate denial and allows the shadow entry anyway.
+    # Live dispatch is completely unaffected — the gate itself still denies.
+    # Mirror of SHADOW_ALLOW_SHORTS (#303). Default False.
+    SHADOW_IGNORE_MIN_SCORE: bool = False
 
     # --- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) -----------------------
     # Confidence-tiered routing modifier on the existing telegram-approve

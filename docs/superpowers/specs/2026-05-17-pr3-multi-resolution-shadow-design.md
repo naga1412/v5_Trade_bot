@@ -212,6 +212,93 @@ TIMEOUT_BARS_PER_TF: dict[str, int] = {"1h": 24, "15m": 96}  # ~24h wall-clock p
 **Bounds:**
 - Equal ~24h wall-clock holdtime across TFs is the policy choice. Alternatives (different wall-clock per TF) are out-of-scope; if PR2's MTF gate + this 24h ceiling produce stale 15m positions, that's a tuning question for a follow-up PR.
 - The `exit_monitor` call site reads from the dict via `TIMEOUT_BARS_PER_TF[position.timeframe]`; KeyError on unknown TF is a programming error (fail-loud).
+<<<<<<< HEAD
+=======
+- **PR3 §4.6b layers Hold/TP scaling on top of the per-TF base**: when `HOLD_TP_SCALING_ENABLED=True` AND `position.timeout_bars` is set on the position at open-time, `exit_monitor` reads `position.timeout_bars` instead of the per-TF default. The per-TF dict is the baseline; the per-position field is the multiplier-applied override.
+
+### 4.6b `backend/app/shadow/{worker,exit_monitor}.py` — Hold/TP scaling by `mtf_agreement` (G1)
+
+Originally part of PR4's "smart-position v1" trio (G1/G2/G3). G2 (IC auto-weighting) and G3 (regime-conditional weights) stay deferred — both require 30+ days of shadow data. G1 has no such dependency: it uses `mtf_agreement` already populated on `predictions` from PR1, so it lands in PR3 alongside the 15m lane.
+
+**Behavior**: at trade-open, the worker looks up `mtf_agreement` for the entering signal and scales BOTH the `timeout_bars` and the `take_profit_price` per a fixed table. Stop-loss is **unchanged** (per-trade risk stays constant; only reward + hold-time scale up with multi-TF conviction).
+
+```python
+HOLD_TP_SCALING_ENABLED: bool = False  # default OFF; per-env enable after staging
+HOLD_TP_SCALING_TABLE: dict[int, tuple[int, float]] = {
+    # mtf_agreement: (timeout_bars, tp_multiplier)
+    3: (24,  1.0),    # baseline (same as un-scaled 1h)
+    4: (48,  1.25),
+    5: (96,  1.5),
+    6: (168, 2.0),
+}
+# None or < 3 → not reached (PR2 MTF gate blocks before this scaling lookup)
+```
+
+**Bounds:**
+- Default OFF — `HOLD_TP_SCALING_ENABLED=False` reproduces PR2 behavior bit-identically. Operator flips per-env after staging validates.
+- Per-trade risk (stop-loss distance) is INVARIANT under scaling. Only TP distance widens and timeout extends.
+- Table values are scaling factors for the **1h-baseline** `timeout_bars=24`. For 15m positions, the spec applies the same multipliers against the per-TF baseline `timeout_bars=96`: e.g. `mtf_agreement=4` on 15m → `96 × (48/24) = 192` bars. Plan phase formalizes this via `effective_timeout_bars(tf, mtf_agreement)`.
+- `mtf_agreement is None` (PR1 fail-open path) → no scaling applied; baseline timeout + 1.0× TP. The PR2 gate has already passed in this case, so the position opens as it would without scaling.
+- `take_profit_price` is computed as `entry_price ± (tp_multiplier × baseline_tp_distance)` where the sign matches direction. Baseline TP comes from the existing signal generation (`engine.py`'s `_compute_targets`).
+
+**ShadowPosition fields added**:
+```python
+@dataclass(frozen=True)
+class ShadowPosition:
+    ...
+    # G1: when scaling is ON, these record the actual (scaled) values used
+    # for this position. NULL when scaling is OFF (fall back to per-TF default).
+    # Recording-only — out of HASH_PAYLOAD_COLUMNS per policy.
+    hold_scaling_factor: float | None = None      # the tp_multiplier looked up
+    hold_timeout_bars: int | None = None           # the timeout_bars actually used
+```
+
+**`shadow_trades` + `live_trades` columns added** (PR3 alembic migration):
+```python
+op.execute("ALTER TABLE shadow_trades ADD COLUMN hold_scaling_factor REAL NULL;")
+op.execute("ALTER TABLE shadow_trades ADD COLUMN hold_timeout_bars   SMALLINT NULL;")
+op.execute("ALTER TABLE live_trades   ADD COLUMN hold_scaling_factor REAL NULL;")
+op.execute("ALTER TABLE live_trades   ADD COLUMN hold_timeout_bars   SMALLINT NULL;")
+```
+- Both NULL by default. Worker writes them on close-trade persistence; only non-NULL when scaling was active for that trade.
+- **NOT** added to `HASH_PAYLOAD_COLUMNS` — recording-only per policy (matches `mtf_*` from PR1, `p_win` etc.).
+- **YES** added to `NON_HASHED_ALLOW_LIST` on both tables, so the audit verifier doesn't mark them as missing hash inputs.
+- Forward-compat: `live_trades` gets the columns now (PR3), so when the operator later flips `users.trading_mode` to `fully-auto`, PR2's `_place_live_order` + telegram-approve path can be wired to populate them in a future PR without another schema migration. PR3 itself only POPULATES them on the shadow path.
+
+**Worker hook**:
+```python
+# In ShadowWorker._handle_candle, at the trade-open path:
+from app.shadow.scaling import effective_hold_tp
+
+if settings.HOLD_TP_SCALING_ENABLED:
+    timeout_bars, tp_mult = effective_hold_tp(
+        timeframe=tf, mtf_agreement=signal.mtf_agreement,
+        table=settings.HOLD_TP_SCALING_TABLE,
+    )
+else:
+    timeout_bars, tp_mult = (TIMEOUT_BARS_PER_TF[tf], 1.0)
+
+new_tp = entry_price + (tp_mult * baseline_tp_distance) * sign
+pos = ShadowPosition(
+    ...,
+    take_profit=new_tp,
+    hold_scaling_factor=tp_mult if settings.HOLD_TP_SCALING_ENABLED else None,
+    hold_timeout_bars=timeout_bars if settings.HOLD_TP_SCALING_ENABLED else None,
+)
+```
+
+**Tests** (4-5 new):
+- `test_hold_tp_scaling_lookup_per_agreement` — table lookup returns expected tuples for agreement 3/4/5/6; ValueError or fail-open None for values outside the table.
+- `test_hold_tp_scaling_applies_to_position_open` — with flag ON + `mtf_agreement=5`, opened position has `hold_timeout_bars=96` (for 1h) AND `take_profit_price` = entry + 1.5× baseline TP distance.
+- `test_hold_tp_scaling_disabled_default_24bar_1x` — flag OFF reproduces pre-PR3 1h behavior (24 bars, 1.0× TP); `hold_scaling_factor` and `hold_timeout_bars` columns stay NULL on `shadow_trades`.
+- `test_hold_tp_scaling_neutral_signal_no_scaling` — NEUTRAL direction never opens a position so scaling never fires (assertion-only test, locks contract).
+- `test_hold_tp_scaling_15m_applies_multiplier_against_per_tf_baseline` — flag ON + `mtf_agreement=4` + `tf=15m` → `hold_timeout_bars = 96 × 2 = 192` (the multiplier is relative to the TF baseline, not absolute).
+
+**Bounds (G1-specific)**:
+- G2 (IC auto-weighting) and G3 (regime-conditional weights) stay deferred to v2 evaluation queue — they need 30+ days of MTF shadow data which only starts accruing post-PR3 deploy. G1 has no such dependency and ships here.
+- The scaling table is a `dict[int, tuple[int, float]]` — JSON-encoded via Pydantic v2 BaseSettings for env overrides. Document this in the field comment.
+- Future tuning (different multipliers per TF, smoother curves, mtf_agreement=6 weight changes) is operator-deferred. PR3 ships the fixed table from the spec.
+>>>>>>> origin/dev
 
 ### 4.7 Heartbeat + watchdog wiring (B6 + B7)
 

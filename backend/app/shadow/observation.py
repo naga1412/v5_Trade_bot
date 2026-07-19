@@ -58,10 +58,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.regime.market_regime import get_cached_market_regime
+from app.core.features.btc_spread import compute as compute_btc_spread
+from app.core.features.mean_reversion import compute as compute_mean_reversion
+from app.core.features.volatility_state import compute as compute_volatility_state
 
 # Maps the 3-class market_regime classifier output to the 5-class obs regime
 # string. Must stay in sync with predictor.py _REGIME_MAP.
@@ -74,7 +78,7 @@ REGIME_MAPPING: dict[str | None, str] = {
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 
 def _macro_from_ts(ts: datetime) -> dict[str, Any]:
@@ -171,6 +175,7 @@ def _build_components(
     layer_scores_array: list[float],
     intermarket: dict[str, Any] | None,
     regime: str = "sideways_grind",
+    features: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """Pure assembler — no I/O. Easy to unit-test."""
     atr_pct = (atr / last_close) if last_close > 0 else 0.0
@@ -199,6 +204,7 @@ def _build_components(
             "bars_in_position": 0,
         },
         "macro": _macro_from_ts(captured_at),
+        "features": features,
     }
 
 
@@ -210,6 +216,7 @@ async def build_obs_components(
     atr: float,
     last_close: float,
     layer_scores_array: list[float],
+    bars: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Build the per-component obs dict for one shadow-trade-open event.
 
@@ -219,6 +226,13 @@ async def build_obs_components(
     intermarket = await _latest_intermarket_snapshot(session, symbol)
     raw_regime = await get_cached_market_regime()
     regime = REGIME_MAPPING[raw_regime]
+    features: dict[str, float | None] | None = None
+    if bars is not None:
+        features = {
+            **compute_mean_reversion(bars),
+            **compute_volatility_state(bars),
+            **compute_btc_spread(bars),
+        }
     return _build_components(
         symbol=symbol,
         captured_at=captured_at,
@@ -227,6 +241,7 @@ async def build_obs_components(
         layer_scores_array=layer_scores_array,
         intermarket=intermarket,
         regime=regime,
+        features=features,
     )
 
 

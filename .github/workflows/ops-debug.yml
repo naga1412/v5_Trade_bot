@@ -35,19 +35,18 @@ on:
           - staging-verify # READ-ONLY: hotfix #171 verification against STAGING (tr-staging-backend container, /opt/trading-radar-staging, port 8001, postgres-staging service). SELECT-only on staging DB, docker inspect, log grep — no writes, no restarts, no config changes. Operator-authorized for the hotfix #171 dev→main gate.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
-          - pwin-calibration-report # fit isotonic p_win model on shadow_trades + show decile calibration table on newest-20% val window (per direction)
+          - pwin-calibration-report # fit clean isotonic p_win model (SHADOW_SPOT_BLACKLIST excluded) + decile calibration table on newest-20% val window (per direction)
           - brain-cron-trigger # WRITE: post-deploy verify of PR-BRAIN-BOOTSTRAP-FIX. Verifies the 3 fixes on disk, manually fires hetzner_brain_cron.sh, tails the resulting log, reports rl_checkpoints + rl-cache. Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint (is_active stays False).
           - brain-rl-cache-archive # WRITE: mv all *.pt + eval_brain_*.json files from rl-cache into rl-cache/_predegenerate/. Idempotent. Forces next cron to cold-start. Does NOT touch rl_checkpoints DB rows.
           - brain-holdout-labels # READ-ONLY: label-side audit of the 59 backtest holdout trades (2026-05-19 → 2026-05-22). Reports trade dump + by-direction + by-hour + top-15 by-symbol — informs misclass analysis without needing brain decisions.
           - brain-reeval-checkpoints # READ-ONLY: re-evaluates each .pt in _predegenerate/ against current buffer state using PR-BRAIN-CORRECTNESS-METRIC. Outputs a comparison table with brain_correctness, sharpe, cumulative_reward — lets us judge old checkpoints by the new (non-invariant) metric without retraining.
           - brain-cron-log # READ-ONLY: tail last 60 lines of /var/log/trading-radar-brain-cron.log on the host (outside Docker). Returns the cron's last run — Sharpe, win_rate, checkpoint id registered.
           - shadow-allow-shorts-enable # WRITE: flip SHADOW_ALLOW_SHORTS=true in .env, recreate backend (up -d). Verifies both SHADOW_ALLOW_SHORTS and DISABLE_SHORT_SIGNALS after restart. Requires operator authorization. Does NOT touch any other .env variable.
-          - pwin-threshold-whatif # READ-ONLY: p_win threshold what-if grid on val window (newest 20%): lower-bound T in {0.24..0.30}, window [T, 0.35], top-decile-excluded variants. Columns: kept, vol%, WR%, avg_pnl%, sum_pnl%, expectancy.
+          - stablecoin-hygiene # READ-ONLY: (a) stablecoin symbol activity in shadow_trades/shadow_open_positions post-2026-07-11, (b) low-ATR sweep (avg ATR% <0.05 = flag for blacklist), (c) current SHADOW_SPOT_BLACKLIST + MIN_ENTRY_SCORE_LONG
+          - pwin-threshold-whatif # READ-ONLY: CLEAN p_win threshold what-if grid (blacklist excluded, in-memory refit): lower-bound T in {0.24..0.30}, window [T, 0.35], top-decile-excluded variants + model inversion (min entry_score where pred_p_win>=0.26).
           - sl-autopsy # READ-ONLY: SL distance / ATR ratio analysis for closed LONG shadow_trades last 30d. Per-symbol + overall avg sl_dist%, avg_atr%, sl_atr_ratio distribution for SL-exit vs TP-exit. Answers: are stops inside the noise band?
-          - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe
-          - brain-activate # WRITE: list rl-cache .pt files + cron log + activate latest rl_checkpoint (is_active=true) + restart backend. Use when brain has been training nightly but never activated.
-          - soak-verify # Phase 1+2 soak check: cooldown=4h, brain_decisions rows, pattern confidence in notes, 7d shadow win rate + exit reasons
-          - sub-dollar-live-trades # READ-ONLY: count + list live_trades where entry_price < $1.00 (P1 severity audit — how many trades had SL/TP corrupted by round(x,2) before the tickSize fix)
+          - top-decile-anomaly # READ-ONLY: compares extreme (entry_score>=0.445) vs high (0.36-0.445) vs below (<0.36) LONG bands — WR, avg_pnl, symbol/hour/layer distributions + score/pnl correlation. Tests momentum-exhaustion hypothesis for top-decile reversal.
+          - universe-anomaly # READ-ONLY: checks non-standard symbols in asset_universe, 币安人生USDT first/last appearance, orphan symbols in shadow_trades, live Binance top-100 for non-ASCII USDT tickers.
 
 jobs:
   probe:
@@ -714,96 +713,6 @@ jobs:
                  docker compose exec -T backend python /app/host-tools/ml/reeval_checkpoints.py \
                    --pt-glob '/app/data/rl-cache/ppo_policy_v*.pt' || true"
               ;;
-            recent-perf)
-              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
-                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
-                 \"SELECT direction, count(*) AS trades, \
-                    round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
-                    round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
-                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
-                    FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '30 days' \
-                    GROUP BY direction \
-                    UNION ALL SELECT 'TOTAL', count(*), \
-                      round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1), \
-                      round(sum(pnl_usdt)::numeric, 2), \
-                      round(avg(pnl_pct)::numeric * 100, 2) \
-                    FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '30 days';\" -c \
-                 \"SELECT DATE(closed_at) AS day, count(*) AS closes, \
-                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
-                    FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '14 days' \
-                    GROUP BY DATE(closed_at) ORDER BY day;\""
-              ;;
-            brain-activate)
-              # Operator-triggered one-shot: inspects rl-cache + cron log, then
-              # activates the latest trained brain checkpoint and restarts backend.
-              # This probe exists because the nightly cron trains but does not
-              # auto-activate — operator approval via Telegram was never wired.
-              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
-                "cd $DIR_DEFAULTED && \
-                 echo '=== rl-cache .pt files ===' && \
-                 ls -lht backend/data/rl-cache/*.pt 2>/dev/null || echo '(no .pt files in rl-cache)' && \
-                 echo '' && \
-                 echo '=== last 40 lines of brain cron log ===' && \
-                 tail -40 /var/log/trading-radar-brain-cron.log 2>/dev/null || echo '(log not found)' && \
-                 echo '' && \
-                 echo '=== latest 5 rl_checkpoints ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar \
-                   -c \"SELECT id, version, is_active, activated_at FROM rl_checkpoints ORDER BY id DESC LIMIT 5;\" && \
-                 echo '' && \
-                 echo '=== activating latest rl_checkpoint ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar \
-                   -c \"UPDATE rl_checkpoints SET is_active=FALSE, deactivated_at=NOW() \
-                        WHERE model_name='ppo_policy_v1' AND is_active=TRUE;\" \
-                   -c \"UPDATE rl_checkpoints SET is_active=TRUE, activated_at=NOW() \
-                        WHERE id=(SELECT MAX(id) FROM rl_checkpoints WHERE model_name='ppo_policy_v1') \
-                        RETURNING id, version, is_active;\" && \
-                 echo '' && \
-                 echo '=== restarting backend ===' && \
-                 docker compose restart backend && \
-                 echo '=== done — verify with checkpoints probe after 30s ==='"
-              ;;
-            soak-verify)
-              # Phase 1+2 soak verification: checks cooldown=4h, brain_decisions,
-              # pattern confidence in notes, and 7d shadow trade win rate + exit reasons.
-              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
-                "cd $DIR_DEFAULTED && \
-                 echo '=== 1. Cooldown windows (hours_remaining from NOW; ~0-4 = normal, >0 = still active) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT symbol, timeframe, cooldown_until, \
-                       ROUND(EXTRACT(EPOCH FROM (cooldown_until - NOW())) / 3600, 2) AS hours_remaining \
-                     FROM shadow_cooldowns \
-                     ORDER BY cooldown_until DESC LIMIT 10;\" && \
-                 echo '=== 2. brain_decisions rows (last 12h; expect >0 after #288 deploy) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT COUNT(*) AS brain_decisions_12h, \
-                       MIN(ts) AS earliest, MAX(ts) AS latest \
-                     FROM brain_decisions WHERE ts > NOW() - INTERVAL '12h';\" && \
-                 echo '=== 3. Pattern confidence in recent predictions (last 6h) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT ts, symbol, direction, \
-                       ROUND(final_score::numeric, 3) AS final_score, \
-                       ROUND(confidence::numeric, 3) AS conf \
-                     FROM predictions \
-                     WHERE ts > NOW() - INTERVAL '6h' \
-                     ORDER BY ts DESC LIMIT 10;\" && \
-                 echo '=== 4. Shadow trade win rate (7d) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT direction, COUNT(*) AS trades, \
-                       SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins, \
-                       ROUND(100.0 * SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS wr_pct, \
-                       ROUND(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct \
-                     FROM shadow_trades \
-                     WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
-                     GROUP BY direction ORDER BY direction;\" && \
-                 echo '=== 5. Exit reason breakdown (7d; TIMEOUT should not dominate SL) ===' && \
-                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT exit_reason, COUNT(*) AS n, \
-                       ROUND(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct \
-                     FROM shadow_trades \
-                     WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
-                     GROUP BY exit_reason ORDER BY n DESC;\""
-              ;;
             pwin-calibration-report)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/pwin_calibration_report.py"
@@ -832,23 +741,16 @@ jobs:
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/sl_autopsy.py"
               ;;
-            sub-dollar-live-trades)
+            stablecoin-hygiene)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
-                "cd $DIR_DEFAULTED && docker compose exec -T postgres \
-                 psql -U postgres -d trading_radar -c \
-                 \"SELECT COUNT(*) AS total_live_trades, \
-                          COUNT(*) FILTER (WHERE entry_price < 1.0) AS sub_dollar_count, \
-                          COUNT(*) FILTER (WHERE entry_price < 1.0 AND status = 'open') AS sub_dollar_open, \
-                          COUNT(*) FILTER (WHERE entry_price < 1.0 AND status = 'closed') AS sub_dollar_closed, \
-                          COUNT(*) FILTER (WHERE entry_price < 1.0 AND status = 'failed') AS sub_dollar_failed \
-                   FROM live_trades;\" \
-                 -c \
-                 \"SELECT symbol, status, entry_price, stop_loss_price, take_profit_price, \
-                          ROUND((ABS(entry_price - stop_loss_price) / entry_price * 100)::numeric, 2) AS sl_pct, \
-                          ROUND((ABS(take_profit_price - entry_price) / entry_price * 100)::numeric, 2) AS tp_pct, \
-                          opened_at \
-                   FROM live_trades \
-                   WHERE entry_price < 1.0 \
-                   ORDER BY opened_at DESC;\""
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/stablecoin_hygiene.py"
+              ;;
+            top-decile-anomaly)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/top_decile_anomaly.py"
+              ;;
+            universe-anomaly)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/universe_anomaly.py"
               ;;
           esac
