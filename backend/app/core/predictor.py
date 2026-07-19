@@ -45,6 +45,7 @@ from app.core.features.btc_spread import compute as compute_btc_spread
 from app.core.features.btc_spread import update_btc_close as _update_btc_close
 from app.core.features.flow_features import compute as compute_flow_features
 from app.core.features.mean_reversion import compute as compute_mean_reversion
+from app.core.features.structure_location import compute as compute_structure_location
 from app.core.features.volatility_state import compute as compute_volatility_state
 
 # Maps the 3-class market_regime classifier output to the 5-class obs regime
@@ -635,6 +636,7 @@ async def build_prediction(
         **compute_volatility_state(bars),
         **compute_btc_spread(bars),
         **compute_flow_features(symbol),
+        **compute_structure_location(bars),
     }
 
     # SP-9 Phase F1: build the optional Tab 1 sentiment + news summaries.
