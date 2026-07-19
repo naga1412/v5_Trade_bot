@@ -50,6 +50,7 @@ on:
           - soak-verify # Phase 1+2 soak check: cooldown=4h, brain_decisions rows, pattern confidence in notes, 7d shadow win rate + exit reasons
           - top-decile-anomaly # READ-ONLY: compares extreme (entry_score>=0.445) vs high (0.36-0.445) vs below (<0.36) LONG bands — WR, avg_pnl, symbol/hour/layer distributions + score/pnl correlation. Tests momentum-exhaustion hypothesis for top-decile reversal.
           - universe-anomaly # READ-ONLY: checks non-standard symbols in asset_universe, 币安人生USDT first/last appearance, orphan symbols in shadow_trades, live Binance top-100 for non-ASCII USDT tickers.
+          - signal-lookup # READ-ONLY: (1) 4-value config check (MIN_ENTRY_SCORE_LONG, SHADOW_IGNORE_MIN_SCORE, SHADOW_ALLOW_SHORTS, DISABLE_SHORT_SIGNALS), (2) backend container start time (env-flip proxy), (3) lookup a shadow trade by signal_id + recent TRXUSDT predictions.
 
 jobs:
   probe:
@@ -845,5 +846,38 @@ jobs:
             universe-anomaly)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/universe_anomaly.py"
+              ;;
+            signal-lookup)
+              # READ-ONLY: verify env flip + look up shadow trade for sig_05e153e327b32c32.
+              # Reports: (1) 4-value config check, (2) backend container start time (env-flip proxy),
+              # (3) entry_score for the signal (shadow_trades or shadow_open_positions),
+              # (4) recent TRXUSDT predictions to cross-reference final_score.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== 1. Config 4-value check ===' && \
+                 docker compose exec -T backend python -c \
+                   'from app.config import get_settings; s=get_settings(); print(s.MIN_ENTRY_SCORE_LONG, s.SHADOW_IGNORE_MIN_SCORE, s.SHADOW_ALLOW_SHORTS, s.DISABLE_SHORT_SIGNALS)' && \
+                 echo '' && \
+                 echo '=== 2. Backend container start time (proxy for last env-flip restart) ===' && \
+                 docker inspect \$(docker compose ps -q backend) --format '{{.State.StartedAt}}' && \
+                 echo '' && \
+                 echo '=== 3. Signal lookup: sig_05e153e327b32c32 ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT 'shadow_trades' AS tbl, signal_id, symbol, direction, \
+                       ROUND(entry_score::numeric, 5) AS entry_score, opened_at, closed_at \
+                     FROM shadow_trades WHERE signal_id = 'sig_05e153e327b32c32' \
+                     UNION ALL \
+                     SELECT 'shadow_open_positions', signal_id, symbol, direction, \
+                       ROUND(entry_score::numeric, 5) AS entry_score, opened_at, NULL \
+                     FROM shadow_open_positions WHERE signal_id = 'sig_05e153e327b32c32';\" && \
+                 echo '' && \
+                 echo '=== 4. TRXUSDT predictions 2026-07-19 08:00-10:00 UTC (final_score at candle open time) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT ts, symbol, direction, ROUND(final_score::numeric, 5) AS final_score \
+                     FROM predictions \
+                     WHERE symbol = 'TRXUSDT' \
+                       AND ts >= '2026-07-19 08:00:00+00' \
+                       AND ts <= '2026-07-19 10:00:00+00' \
+                     ORDER BY ts DESC LIMIT 5;\""
               ;;
           esac
