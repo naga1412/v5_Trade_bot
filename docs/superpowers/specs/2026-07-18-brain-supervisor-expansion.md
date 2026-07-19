@@ -339,6 +339,7 @@ Each of these is a separate PR with its own promotion gate.
 5. **Schema backward compatibility**: v1 `shadow_observations` rows remain readable after Phase 2; the loader zero-fills missing worker dims.
 6. **Separate pretrain buffer**: backtest-generated experience is never silently mixed into the live shadow replay buffer. Source flag is required.
 7. **Champion gate is unchanged**: pretrained challengers face the same Sharpe gate as normally trained ones. No force-promote bypass.
+8. **CI-not-triggering diagnostic rule (STANDING)**: any "CI not triggering" diagnosis MUST begin with `gh pr view N --json mergeable,mergeStateStatus`. `mergeStateStatus: UNKNOWN` or `DIRTY` means the branch has diverged (can't test-merge). Root cause: a later dev commit touched the same file. Fix: `git merge origin/dev` into the PR branch, resolve conflicts, push. Do not investigate GitHub webhooks, Actions configuration, or anything else before running this command. *Violated twice (PR #322): 2026-07-17 session and 2026-07-19 session.*
 
 ---
 
