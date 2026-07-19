@@ -848,10 +848,9 @@ jobs:
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/universe_anomaly.py"
               ;;
             signal-lookup)
-              # READ-ONLY: verify env flip + look up shadow trade for sig_05e153e327b32c32.
-              # Reports: (1) 4-value config check, (2) backend container start time (env-flip proxy),
-              # (3) entry_score for the signal (shadow_trades or shadow_open_positions),
-              # (4) recent TRXUSDT predictions to cross-reference final_score.
+              # READ-ONLY: verify env flip + look up sig_05e153e327b32c32 in all tables.
+              # telegram_signals schema: id (PK, = signal_id), sent_at, payload JSONB (score is payload->>'confidence_pct')
+              # live_trades schema: signal_id stored in reasoning->>'signal_id' JSONB
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && \
                  echo '=== 1. Config 4-value check ===' && \
@@ -861,7 +860,7 @@ jobs:
                  echo '=== 2. Backend container start time (proxy for last env-flip restart) ===' && \
                  docker inspect \$(docker compose ps -q backend) --format '{{.State.StartedAt}}' && \
                  echo '' && \
-                 echo '=== 3. Signal lookup: sig_05e153e327b32c32 ===' && \
+                 echo '=== 3. Shadow trade lookup: sig_05e153e327b32c32 ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT 'shadow_trades' AS tbl, signal_id, symbol, direction, \
                        ROUND(entry_score::numeric, 5) AS entry_score, opened_at, closed_at \
@@ -871,21 +870,22 @@ jobs:
                        ROUND(entry_score::numeric, 5) AS entry_score, opened_at, NULL \
                      FROM shadow_open_positions WHERE signal_id = 'sig_05e153e327b32c32';\" && \
                  echo '' && \
-                 echo '=== 4. telegram_signals lookup ===' && \
+                 echo '=== 4. telegram_signals lookup (id=signal_id PK; score in payload JSONB) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT signal_id, symbol, direction, \
-                       ROUND(score::numeric, 5) AS score, created_at, response \
+                   \"SELECT id AS signal_id, symbol, direction, sent_at, response, \
+                       payload->>'entry_price' AS entry_price, \
+                       payload->>'confidence_pct' AS confidence_pct, \
+                       payload->>'rr_ratio' AS rr_ratio \
                      FROM telegram_signals \
-                     WHERE signal_id = 'sig_05e153e327b32c32' \
-                        OR signal_id LIKE '%05e153e327b32c32%' \
-                     ORDER BY created_at DESC LIMIT 5;\" && \
+                     WHERE id = 'sig_05e153e327b32c32';\" && \
                  echo '' && \
-                 echo '=== 5. live_trades lookup ===' && \
+                 echo '=== 5. live_trades lookup (signal_id in reasoning JSONB) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT signal_id, symbol, direction, opened_at, closed_at, status \
+                   \"SELECT id, symbol, direction, status, opened_at, closed_at, \
+                       entry_price, stop_loss, take_profit, \
+                       reasoning->>'signal_id' AS signal_id \
                      FROM live_trades \
-                     WHERE signal_id = 'sig_05e153e327b32c32' \
-                        OR signal_id LIKE '%05e153e327b32c32%' \
+                     WHERE reasoning->>'signal_id' = 'sig_05e153e327b32c32' \
                      ORDER BY opened_at DESC LIMIT 5;\" && \
                  echo '' && \
                  echo '=== 6. TRXUSDT predictions today (last 24h) ===' && \
@@ -898,11 +898,10 @@ jobs:
                  echo '' && \
                  echo '=== 7. Recent Telegram signals TRXUSDT (last 24h) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
-                   \"SELECT signal_id, symbol, direction, ROUND(score::numeric, 5) AS score, \
-                       created_at, response \
+                   \"SELECT id AS signal_id, symbol, direction, sent_at, response \
                      FROM telegram_signals \
                      WHERE symbol = 'TRXUSDT' \
-                       AND created_at >= NOW() - INTERVAL '24h' \
-                     ORDER BY created_at DESC LIMIT 5;\""
+                       AND sent_at >= NOW() - INTERVAL '24h' \
+                     ORDER BY sent_at DESC LIMIT 5;\""
               ;;
           esac
