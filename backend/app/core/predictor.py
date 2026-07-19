@@ -97,8 +97,8 @@ def _build_trade_setup(direction: Direction, last_close: float, atr: float) -> T
     reward = abs(tp - last_close)
     rr = reward / risk if risk > 0 else 0.0
     return TradeSetupOut(
-        direction=direction.value, entry=round(last_close, 2),
-        stop_loss=round(sl, 2), take_profit=round(tp, 2),
+        direction=direction.value, entry=last_close,
+        stop_loss=sl, take_profit=tp,
         risk_reward=round(rr, 2),
     )
 
