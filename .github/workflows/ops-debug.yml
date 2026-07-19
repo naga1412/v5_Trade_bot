@@ -871,13 +871,38 @@ jobs:
                        ROUND(entry_score::numeric, 5) AS entry_score, opened_at, NULL \
                      FROM shadow_open_positions WHERE signal_id = 'sig_05e153e327b32c32';\" && \
                  echo '' && \
-                 echo '=== 4. TRXUSDT predictions 2026-07-19 08:00-10:00 UTC (final_score at candle open time) ===' && \
+                 echo '=== 4. telegram_signals lookup ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT signal_id, symbol, direction, \
+                       ROUND(score::numeric, 5) AS score, created_at, response \
+                     FROM telegram_signals \
+                     WHERE signal_id = 'sig_05e153e327b32c32' \
+                        OR signal_id LIKE '%05e153e327b32c32%' \
+                     ORDER BY created_at DESC LIMIT 5;\" && \
+                 echo '' && \
+                 echo '=== 5. live_trades lookup ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT signal_id, symbol, direction, opened_at, closed_at, status \
+                     FROM live_trades \
+                     WHERE signal_id = 'sig_05e153e327b32c32' \
+                        OR signal_id LIKE '%05e153e327b32c32%' \
+                     ORDER BY opened_at DESC LIMIT 5;\" && \
+                 echo '' && \
+                 echo '=== 6. TRXUSDT predictions today (last 24h) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT ts, symbol, direction, ROUND(final_score::numeric, 5) AS final_score \
                      FROM predictions \
                      WHERE symbol = 'TRXUSDT' \
-                       AND ts >= '2026-07-19 08:00:00+00' \
-                       AND ts <= '2026-07-19 10:00:00+00' \
-                     ORDER BY ts DESC LIMIT 5;\""
+                       AND ts >= NOW() - INTERVAL '24h' \
+                     ORDER BY ts DESC LIMIT 10;\" && \
+                 echo '' && \
+                 echo '=== 7. Recent Telegram signals TRXUSDT (last 24h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT signal_id, symbol, direction, ROUND(score::numeric, 5) AS score, \
+                       created_at, response \
+                     FROM telegram_signals \
+                     WHERE symbol = 'TRXUSDT' \
+                       AND created_at >= NOW() - INTERVAL '24h' \
+                     ORDER BY created_at DESC LIMIT 5;\""
               ;;
           esac
