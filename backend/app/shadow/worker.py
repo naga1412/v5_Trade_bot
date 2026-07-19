@@ -377,6 +377,15 @@ class ShadowWorker:
             return
         buf = self._append_bar(candle, tf)
 
+        # W4: refresh per-symbol order-flow cache from Binance Futures as a
+        # fire-and-forget background task on each 1h candle.  The previous
+        # hour's cached value is used for the current observation — at most
+        # 1h stale, immaterial for slow order-flow signals.
+        if tf == "1h":
+            import asyncio as _aio
+            from app.core.features.flow_features import update_flow_cache as _upd_flow
+            _aio.create_task(_upd_flow(candle.symbol))
+
         key = (candle.symbol, tf)
         if key in self.open_positions:
             await self._maybe_close_position(candle, tf)
@@ -898,6 +907,7 @@ class ShadowWorker:
                         atr=atr_value,
                         last_close=candle.close,
                         layer_scores_array=layer_scores_array,
+                        bars=buf,
                     )
                     await persist_observation(
                         session,
