@@ -48,6 +48,7 @@ from app.db.audit import insert_with_chain
 from app.db.payload_builders import build_live_trade_payload
 from app.exchanges.binance_filters import (
     get_symbol_filters,
+    quantize_price,
     quantize_qty,
 )
 from app.exchanges.binance_live import (
@@ -598,6 +599,18 @@ async def _place_live_order(
             f"(symbol delisted or exchangeInfo fetch failed)",
         )
     qty = quantize_qty(raw_qty, filters.step_size)
+
+    # Quantize SL/TP to tickSize so Binance never rejects with -1111.
+    # _build_trade_setup used to do round(x, 2), which collapsed geometry
+    # on sub-$1 symbols (ONDO@$0.38: 1.5×ATR SL rounded to $0.01 = 2.6%
+    # instead of the designed 1.07%, producing 1:1 RR instead of 2:1).
+    if filters.tick_size > 0:
+        sl_price = quantize_price(proposal.stop_loss_price, filters.tick_size)
+        tp_price = quantize_price(proposal.take_profit_price, filters.tick_size)
+    else:
+        sl_price = proposal.stop_loss_price
+        tp_price = proposal.take_profit_price
+
     if qty < filters.min_qty:
         raise OrderRejected(
             f"_place_live_order: quantized qty {qty} below symbol min "
@@ -628,8 +641,8 @@ async def _place_live_order(
         margin_usdt=margin_usdt,
         leverage=leverage,
         entry_price=proposal.entry_price,  # signal-time; updated post-fill
-        stop_loss=proposal.stop_loss_price,
-        take_profit=proposal.take_profit_price,
+        stop_loss=sl_price,
+        take_profit=tp_price,
         binance_order_id=pending_placeholder,
         opened_at=now,
         mode_at_open=user.mode,
@@ -676,8 +689,8 @@ async def _place_live_order(
                 client,
                 symbol=binance_native_sym, side=side,
                 quantity=qty, leverage=leverage,
-                stop_loss_price=proposal.stop_loss_price,
-                take_profit_price=proposal.take_profit_price,
+                stop_loss_price=sl_price,
+                take_profit_price=tp_price,
             )
         except GhostPositionError as ghost_exc:
             async with session_factory() as s_fail:

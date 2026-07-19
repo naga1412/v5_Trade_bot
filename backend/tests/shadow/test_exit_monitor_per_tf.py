@@ -90,15 +90,17 @@ def test_unknown_tf_raises_keyerror() -> None:
 
 def test_sl_still_fires_before_timeout_1h() -> None:
     """Regression guard: SL/TP detection runs BEFORE timeout — so a 1h
-    position at 24 bars that hits SL exits with STOP_LOSS, not TIMEOUT."""
+    position at 24 bars that hits SL exits with STOP_LOSS, not TIMEOUT.
+
+    HEAD semantics: SL/TP wins over TIMEOUT on the same bar, because
+    stop_loss gives a known exit price whereas bar_close (TIMEOUT) could
+    be worse if the asset crashes through the stop. Test locks this in.
+    """
     p = _pos(timeframe="1h", bars_held=24)
     # LONG SL at 98.0; bar low touches it
     decision = check_exit(p, bar_high=99.5, bar_low=97.0, bar_close=98.5)
     assert decision is not None
-    # Per the existing semantics: TIMEOUT fires regardless of SL/TP at the
-    # bars_held check, BEFORE the SL hit check. Existing behavior preserved.
-    # Test locks this in — if a future refactor swaps the order, this fails.
-    assert decision.reason == ExitReason.TIMEOUT
+    assert decision.reason == ExitReason.STOP_LOSS
 
 
 def test_g1_position_with_explicit_timeout_bars_overrides_per_tf_default() -> None:

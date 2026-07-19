@@ -212,6 +212,8 @@ TIMEOUT_BARS_PER_TF: dict[str, int] = {"1h": 24, "15m": 96}  # ~24h wall-clock p
 **Bounds:**
 - Equal ~24h wall-clock holdtime across TFs is the policy choice. Alternatives (different wall-clock per TF) are out-of-scope; if PR2's MTF gate + this 24h ceiling produce stale 15m positions, that's a tuning question for a follow-up PR.
 - The `exit_monitor` call site reads from the dict via `TIMEOUT_BARS_PER_TF[position.timeframe]`; KeyError on unknown TF is a programming error (fail-loud).
+<<<<<<< HEAD
+=======
 - **PR3 §4.6b layers Hold/TP scaling on top of the per-TF base**: when `HOLD_TP_SCALING_ENABLED=True` AND `position.timeout_bars` is set on the position at open-time, `exit_monitor` reads `position.timeout_bars` instead of the per-TF default. The per-TF dict is the baseline; the per-position field is the multiplier-applied override.
 
 ### 4.6b `backend/app/shadow/{worker,exit_monitor}.py` — Hold/TP scaling by `mtf_agreement` (G1)
@@ -296,6 +298,7 @@ pos = ShadowPosition(
 - G2 (IC auto-weighting) and G3 (regime-conditional weights) stay deferred to v2 evaluation queue — they need 30+ days of MTF shadow data which only starts accruing post-PR3 deploy. G1 has no such dependency and ships here.
 - The scaling table is a `dict[int, tuple[int, float]]` — JSON-encoded via Pydantic v2 BaseSettings for env overrides. Document this in the field comment.
 - Future tuning (different multipliers per TF, smoother curves, mtf_agreement=6 weight changes) is operator-deferred. PR3 ships the fixed table from the spec.
+>>>>>>> origin/dev
 
 ### 4.7 Heartbeat + watchdog wiring (B6 + B7)
 

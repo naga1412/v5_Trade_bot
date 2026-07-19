@@ -62,9 +62,19 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.regime.market_regime import get_cached_market_regime
 from app.core.features.btc_spread import compute as compute_btc_spread
 from app.core.features.mean_reversion import compute as compute_mean_reversion
 from app.core.features.volatility_state import compute as compute_volatility_state
+
+# Maps the 3-class market_regime classifier output to the 5-class obs regime
+# string. Must stay in sync with predictor.py _REGIME_MAP.
+REGIME_MAPPING: dict[str | None, str] = {
+    "bull": "bull_breakout",
+    "bear": "bear_crash",
+    "neutral": "sideways_grind",
+    None: "sideways_grind",
+}
 
 log = logging.getLogger(__name__)
 
@@ -164,6 +174,7 @@ def _build_components(
     last_close: float,
     layer_scores_array: list[float],
     intermarket: dict[str, Any] | None,
+    regime: str = "sideways_grind",
     features: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """Pure assembler — no I/O. Easy to unit-test."""
@@ -184,10 +195,7 @@ def _build_components(
             "oi_delta_24h": intermarket.get("oi_delta_24h") if intermarket else None,
             "dxy_corr_30d": 0.0,
             "gold_corr_30d": 0.0,
-            # Regime classifier integration is a follow-up — for now we
-            # stamp "sideways_grind" as the safe default (no regime
-            # interpretation rather than wrong interpretation).
-            "regime": "sideways_grind",
+            "regime": regime,
         },
         # At open, every position is by definition flat/just-opened.
         "position": {
@@ -212,10 +220,12 @@ async def build_obs_components(
 ) -> dict[str, Any]:
     """Build the per-component obs dict for one shadow-trade-open event.
 
-    Best-effort — failures in the intermarket lookup fall back to None
-    values for that section (loader handles None at training time).
+    Best-effort — failures in the intermarket or regime lookups fall back to
+    safe defaults (None / "sideways_grind").
     """
     intermarket = await _latest_intermarket_snapshot(session, symbol)
+    raw_regime = await get_cached_market_regime()
+    regime = REGIME_MAPPING[raw_regime]
     features: dict[str, float | None] | None = None
     if bars is not None:
         features = {
@@ -230,6 +240,7 @@ async def build_obs_components(
         last_close=last_close,
         layer_scores_array=layer_scores_array,
         intermarket=intermarket,
+        regime=regime,
         features=features,
     )
 
