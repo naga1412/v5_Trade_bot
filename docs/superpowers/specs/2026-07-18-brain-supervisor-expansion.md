@@ -343,6 +343,28 @@ Each of these is a separate PR with its own promotion gate.
 
 ---
 
+## OPEN OPERATOR AUTHORIZATIONS
+
+Authorized env/config changes that are pending execution. Each entry is created at time of authorization and struck through when confirmed executed + verified.
+
+| # | Action | Authorized | Blocker at auth time | Status |
+|---|--------|-----------|---------------------|--------|
+| 1 | `MIN_ENTRY_SCORE_LONG=0.36` + `SHADOW_IGNORE_MIN_SCORE=true` on Hetzner `.env`, restart backend, verify `0.36 True True True` | Pre-2026-07-19 session | PR #324 (fix for score-gate bypass) | **PENDING** — flip has not been executed as of 2026-07-20 |
+
+**Runbook (operator-SSH only):**
+```bash
+cd /opt/trading-radar && pwd
+grep -q "^SHADOW_IGNORE_MIN_SCORE=" .env && sed -i 's/^SHADOW_IGNORE_MIN_SCORE=.*/SHADOW_IGNORE_MIN_SCORE=true/' .env || echo "SHADOW_IGNORE_MIN_SCORE=true" >> .env
+grep -q "^MIN_ENTRY_SCORE_LONG=" .env && sed -i 's/^MIN_ENTRY_SCORE_LONG=.*/MIN_ENTRY_SCORE_LONG=0.36/' .env || echo "MIN_ENTRY_SCORE_LONG=0.36" >> .env
+docker compose up -d backend
+docker compose exec -T backend python -c "from app.config import get_settings; s=get_settings(); print(s.MIN_ENTRY_SCORE_LONG, s.SHADOW_IGNORE_MIN_SCORE, s.SHADOW_ALLOW_SHORTS, s.DISABLE_SHORT_SIGNALS)"
+```
+PASS = `0.36 True True True`. STOP and report if anything else.
+
+**Note for Claude sessions:** This table is the canonical tracking record. On any session start, check this section before reporting "nothing pending." Strike through the row and record the verified output + timestamp when executed.
+
+---
+
 ## 8. Implementation Order
 
 ```
