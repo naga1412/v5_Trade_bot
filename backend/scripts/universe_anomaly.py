@@ -113,7 +113,7 @@ async def run(session: AsyncSession) -> None:
 
 
 async def main() -> None:
-    engine = create_async_engine(settings.DATABASE_URL, echo=False)
+    engine = create_async_engine(settings.database_url, echo=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         await run(session)
