@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from app.config import get_settings
 
 settings = get_settings()
-blacklist: set[str] = set(settings.SHADOW_SPOT_BLACKLIST)
+blacklist: set[str] = set(settings.shadow_spot_blacklist)
 
 
 async def run(session: AsyncSession) -> None:
@@ -167,7 +167,7 @@ async def run(session: AsyncSession) -> None:
 
 
 async def main() -> None:
-    engine = create_async_engine(settings.DATABASE_URL.replace("+asyncpg", "+asyncpg"), echo=False)
+    engine = create_async_engine(settings.database_url, echo=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         await run(session)
