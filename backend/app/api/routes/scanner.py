@@ -33,6 +33,13 @@ router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
 
 _VALID_MARKETS = {"crypto", "stock", "fx", "commodity", "index"}
 _VALID_TFS = {"1m", "5m", "15m", "1h", "4h", "1d"}
+_TF_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900,
+    "1h": 3600, "4h": 14400, "1d": 86400,
+}
+# A card is flagged is_stale when the underlying prediction is older than
+# 2 * timeframe. Display-only: dispatcher acts on the same predictions row.
+_STALE_MULTIPLIER = 2
 
 
 def _coerce_layer_scores(raw: Any) -> dict[str, Any]:
@@ -47,6 +54,24 @@ def _coerce_layer_scores(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return cast(dict[str, Any], raw)
     return {}
+
+
+def _parse_row_ts(raw: Any) -> datetime | None:
+    """Coerce a raw ``predictions.ts`` value to a tz-aware UTC datetime.
+
+    Postgres asyncpg returns a real ``datetime`` (naive or aware); SQLite
+    returns a string. Anything else — or an unparseable string — yields
+    ``None`` and the caller treats the card as ``is_stale=False``.
+    """
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
 
 
 def _confirmed_tier(tier: str) -> bool:
@@ -69,7 +94,12 @@ def _wyckoff_phase_from_notes(notes: str) -> str:
     return "unknown"
 
 
-def _build_card(row: Any) -> SignalCardOut | None:
+def _build_card(
+    row: Any,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: float | None = None,
+) -> SignalCardOut | None:
     ls = _coerce_layer_scores(row.layer_scores)
     # direction / final_score / confidence live on dedicated top-level
     # columns of the predictions row. Read them from there first.
@@ -143,6 +173,14 @@ def _build_card(row: Any) -> SignalCardOut | None:
     full_name_raw = getattr(row, "full_name", None) or ""
     full_name = full_name_raw if full_name_raw else row.symbol.split("/")[0]
 
+    ts_value = _parse_row_ts(getattr(row, "ts", None))
+    is_stale = (
+        ts_value is not None
+        and now is not None
+        and stale_after_seconds is not None
+        and (now - ts_value).total_seconds() > stale_after_seconds
+    )
+
     return SignalCardOut(
         symbol=row.symbol,
         full_name=full_name,
@@ -155,6 +193,8 @@ def _build_card(row: Any) -> SignalCardOut | None:
         wyckoff_phase=wyckoff_phase,
         scores=scores,
         sparkline=sparkline[-20:],
+        ts=ts_value,
+        is_stale=is_stale,
     )
 
 
@@ -204,7 +244,12 @@ async def radar(
         "LIMIT :lim"
     ), {"u": current_user.id, "tf": tf, "lim": limit})).all()
 
-    cards_unfiltered = [_build_card(r) for r in rows]
+    now = datetime.now(timezone.utc)
+    stale_after_seconds = _TF_SECONDS[tf] * _STALE_MULTIPLIER
+    cards_unfiltered = [
+        _build_card(r, now=now, stale_after_seconds=stale_after_seconds)
+        for r in rows
+    ]
     cards: list[SignalCardOut] = [c for c in cards_unfiltered if c is not None]
     bullish = [c for c in cards if c.direction == "LONG"]
     bearish = [c for c in cards if c.direction == "SHORT"]

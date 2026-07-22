@@ -725,6 +725,8 @@ class SignalCardOut(BaseModel):
     confidence: int = Field(ge=0, le=100)  # already scaled to 0..100
     scores: SignalCardScores
     sparkline: list[float] = Field(default_factory=list, max_length=20)
+    ts: datetime | None = None
+    is_stale: bool = False
 
 
 class ScannerFilterCounts(BaseModel):

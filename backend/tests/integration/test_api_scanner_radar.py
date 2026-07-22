@@ -170,6 +170,79 @@ async def test_radar_unknown_timeframe_returns_400(  # type: ignore[no-untyped-d
     assert r.status_code == 400
 
 
+async def _seed_one(  # type: ignore[no-untyped-def]
+    session, *, user_id: int, symbol: str, ts: datetime, tf: str = "1h",
+) -> None:
+    """Seed a single LONG prediction at an explicit ts, used by staleness tests.
+
+    Score/tier values are hard-coded to keep the row a valid LONG card that
+    survives _build_card's direction filter. The staleness flag depends only
+    on ts vs now, so we don't vary anything else.
+    """
+    layer_scores = {
+        "1": {"direction": "LONG", "strength": 0.6, "confidence": 0.7,
+              "notes": "Wyckoff: Markup"},
+        "3": {"direction": "LONG", "strength": 0.4, "confidence": 0.5, "notes": ""},
+        "4": {"direction": "LONG", "strength": 0.8, "confidence": 0.7, "notes": ""},
+        "6": {"direction": "LONG", "strength": 0.3, "confidence": 0.4, "notes": ""},
+        "final": {"score": 0.55, "direction": "LONG",
+                  "confidence": 0.7, "contributing_layers": [1, 3, 4, 6]},
+        "tier": "PAPER", "traps_fired": [], "static_score": 55.0,
+    }
+    await session.execute(sa.text(
+        "INSERT INTO predictions (user_id, symbol, timeframe, ts, price, "
+        "layer_scores, direction, final_score, confidence, inputs_hash) "
+        "VALUES (:u, :s, :tf, :t, :p, :ls, :d, :sc, :cf, 'h_stale')"
+    ), {
+        "u": user_id, "s": symbol, "tf": tf,
+        "t": ts.isoformat(), "p": 100.0, "ls": json.dumps(layer_scores),
+        "d": "LONG", "sc": 0.55, "cf": 0.7,
+    })
+
+
+@pytest.mark.asyncio
+async def test_radar_marks_old_predictions_stale(  # type: ignore[no-untyped-def]
+    bot_status_client, bot_status_factory,
+):
+    """Predictions older than 2× timeframe get is_stale=true. Fresh ones don't.
+
+    1h TF → 2h threshold. Seed one 30-min-old row (fresh) and one 3-hour-old
+    row (stale); assert the flag per symbol.
+    """
+    now = datetime.now(timezone.utc)
+    async with bot_status_factory() as s:
+        await _seed_one(s, user_id=1, symbol="FRESH/USDT",
+                        ts=now - timedelta(minutes=30))
+        await _seed_one(s, user_id=1, symbol="STALE/USDT",
+                        ts=now - timedelta(hours=3))
+        await s.commit()
+    r = await bot_status_client.get("/api/v1/scanner/radar?market=crypto&tf=1h&limit=10")
+    body = r.json()
+    by_symbol = {c["symbol"]: c for c in body["bullish"]}
+    assert by_symbol["FRESH/USDT"]["is_stale"] is False
+    assert by_symbol["STALE/USDT"]["is_stale"] is True
+    # ts must round-trip as an ISO string on both cards.
+    assert by_symbol["FRESH/USDT"]["ts"] is not None
+    assert by_symbol["STALE/USDT"]["ts"] is not None
+
+
+@pytest.mark.asyncio
+async def test_radar_stale_threshold_scales_with_timeframe(  # type: ignore[no-untyped-def]
+    bot_status_client, bot_status_factory,
+):
+    """15m TF → 30-min threshold. Same 45-min-old row that was fresh on 1h TF
+    is stale on 15m TF."""
+    now = datetime.now(timezone.utc)
+    async with bot_status_factory() as s:
+        await _seed_one(s, user_id=1, symbol="MID/USDT",
+                        ts=now - timedelta(minutes=45), tf="15m")
+        await s.commit()
+    r = await bot_status_client.get("/api/v1/scanner/radar?market=crypto&tf=15m&limit=10")
+    body = r.json()
+    assert body["bullish"][0]["symbol"] == "MID/USDT"
+    assert body["bullish"][0]["is_stale"] is True
+
+
 @pytest.mark.asyncio
 async def test_radar_requires_authenticated_user(  # type: ignore[no-untyped-def]
     bot_status_client,

@@ -31,6 +31,8 @@ function makeCard(symbol: string): SignalCardData {
     confidence: 60,
     scores: { smc: 1, wyckoff: 1, microstructure: 1, momentum: 1 },
     sparkline: [1, 2, 3],
+    ts: null,
+    is_stale: false,
   };
 }
 
