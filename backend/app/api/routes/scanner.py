@@ -56,6 +56,24 @@ def _coerce_layer_scores(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _parse_row_ts(raw: Any) -> datetime | None:
+    """Coerce a raw ``predictions.ts`` value to a tz-aware UTC datetime.
+
+    Postgres asyncpg returns a real ``datetime`` (naive or aware); SQLite
+    returns a string. Anything else — or an unparseable string — yields
+    ``None`` and the caller treats the card as ``is_stale=False``.
+    """
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 def _confirmed_tier(tier: str) -> bool:
     return tier in ("STANDARD", "A+")
 
@@ -79,8 +97,8 @@ def _wyckoff_phase_from_notes(notes: str) -> str:
 def _build_card(
     row: Any,
     *,
-    now: datetime,
-    stale_after_seconds: float,
+    now: datetime | None = None,
+    stale_after_seconds: float | None = None,
 ) -> SignalCardOut | None:
     ls = _coerce_layer_scores(row.layer_scores)
     # direction / final_score / confidence live on dedicated top-level
@@ -155,14 +173,11 @@ def _build_card(
     full_name_raw = getattr(row, "full_name", None) or ""
     full_name = full_name_raw if full_name_raw else row.symbol.split("/")[0]
 
-    ts_raw = getattr(row, "ts", None)
-    ts_value: datetime | None
-    if isinstance(ts_raw, datetime):
-        ts_value = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
-    else:
-        ts_value = None
+    ts_value = _parse_row_ts(getattr(row, "ts", None))
     is_stale = (
         ts_value is not None
+        and now is not None
+        and stale_after_seconds is not None
         and (now - ts_value).total_seconds() > stale_after_seconds
     )
 
