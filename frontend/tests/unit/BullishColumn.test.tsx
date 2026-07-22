@@ -19,6 +19,8 @@ function makeCard(symbol: string, full_name: string, overrides: Partial<SignalCa
     confidence: 70,
     scores: { smc: 1, wyckoff: 1, microstructure: 1, momentum: 1 },
     sparkline: [1, 2, 3, 4, 5],
+    ts: null,
+    is_stale: false,
     ...overrides,
   };
 }

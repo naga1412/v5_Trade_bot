@@ -32,6 +32,8 @@ const sample: ScannerRadar = {
       confidence: 80,
       scores: { smc: 5, wyckoff: 5, microstructure: 5, momentum: 5 },
       sparkline: [1, 2, 3, 4, 5, 6, 7],
+      ts: null,
+      is_stale: false,
     },
   ],
   bearish: [
@@ -50,6 +52,8 @@ const sample: ScannerRadar = {
       confidence: 65,
       scores: { smc: -2, wyckoff: -2, microstructure: -2, momentum: -2 },
       sparkline: [7, 6, 5, 4, 3, 2, 1],
+      ts: null,
+      is_stale: false,
     },
   ],
 };
