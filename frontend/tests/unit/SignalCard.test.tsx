@@ -19,6 +19,8 @@ function makeCard(overrides: Partial<SignalCardData> = {}): SignalCardData {
     confidence: 84,
     scores: { smc: 22, wyckoff: 14, microstructure: -3, momentum: 9 },
     sparkline: [100, 101, 99, 103, 105, 104, 107, 108, 110, 109, 111, 112, 113, 110, 115, 116, 117, 118, 120, 119],
+    ts: "2026-07-22T17:00:00+00:00",
+    is_stale: false,
     ...overrides,
   };
 }
@@ -80,6 +82,24 @@ describe("SignalCard", () => {
     expect(screen.getByText("+3.42%")).toBeInTheDocument();
     rerender(<SignalCard card={makeCard({ pct_change: -1.7 })} />);
     expect(screen.getByText("-1.70%")).toBeInTheDocument();
+  });
+
+  test("renders STALE pill and dims card when is_stale=true", () => {
+    render(<SignalCard card={makeCard({ is_stale: true })} />);
+    expect(screen.getByTestId("signal-card-stale-BTC/USDT")).toBeInTheDocument();
+    expect(screen.getByText("STALE")).toBeInTheDocument();
+    const cardEl = screen.getByTestId("signal-card-BTC/USDT");
+    expect(cardEl.className).toMatch(/opacity-60/);
+    expect(cardEl.getAttribute("title")).toMatch(/older than 2/);
+  });
+
+  test("does not render STALE pill or dim when is_stale=false", () => {
+    render(<SignalCard card={makeCard({ is_stale: false })} />);
+    expect(screen.queryByTestId("signal-card-stale-BTC/USDT")).toBeNull();
+    expect(screen.queryByText("STALE")).toBeNull();
+    const cardEl = screen.getByTestId("signal-card-BTC/USDT");
+    expect(cardEl.className).not.toMatch(/opacity-60/);
+    expect(cardEl.getAttribute("title")).toBeNull();
   });
 
   test("clicking the card invokes onClick callback with the card", () => {
