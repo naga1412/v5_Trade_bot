@@ -51,6 +51,12 @@ on:
           - top-decile-anomaly # READ-ONLY: compares extreme (entry_score>=0.445) vs high (0.36-0.445) vs below (<0.36) LONG bands — WR, avg_pnl, symbol/hour/layer distributions + score/pnl correlation. Tests momentum-exhaustion hypothesis for top-decile reversal.
           - universe-anomaly # READ-ONLY: checks non-standard symbols in asset_universe, 币安人生USDT first/last appearance, orphan symbols in shadow_trades, live Binance top-100 for non-ASCII USDT tickers.
           - signal-lookup # READ-ONLY: (1) 4-value config check (MIN_ENTRY_SCORE_LONG, SHADOW_IGNORE_MIN_SCORE, SHADOW_ALLOW_SHORTS, DISABLE_SHORT_SIGNALS), (2) backend container start time (env-flip proxy), (3) lookup a shadow trade by signal_id + recent TRXUSDT predictions.
+          - sql-select # READ-ONLY: run one SELECT / WITH statement from the `sql` input against prod Postgres via the backend container. Enforced read-only at 3 layers (shape check, SET SESSION TRANSACTION READ ONLY, statement_timeout=15s). Row cap 500. See backend/scripts/sql_select_probe.py.
+      sql:
+        description: SQL for the sql-select probe (SELECT or WITH only, single statement, 15s timeout, 500-row cap). Ignored by every other probe.
+        required: false
+        default: ''
+        type: string
 
 jobs:
   probe:
@@ -76,6 +82,7 @@ jobs:
         if: env.HETZNER_HOST != ''
         env:
           PROBE: ${{ inputs.probe }}
+          SQL: ${{ inputs.sql }}
         run: |
           USER_DEFAULTED="${HETZNER_USER:-root}"
           DIR_DEFAULTED="${HETZNER_INSTALL_DIR:-/opt/trading-radar}"
@@ -903,5 +910,17 @@ jobs:
                      WHERE symbol = 'TRXUSDT' \
                        AND sent_at >= NOW() - INTERVAL '24h' \
                      ORDER BY sent_at DESC LIMIT 5;\""
+              ;;
+            sql-select)
+              # SQL comes from the workflow input; we forward it as stdin so no
+              # shell escaping of the SQL text is ever required. The script
+              # enforces (a) SELECT / WITH only, (b) SET SESSION TRANSACTION
+              # READ ONLY, (c) statement_timeout=15s, (d) 500-row fetch cap.
+              if [ -z "$SQL" ]; then
+                echo "ERROR: sql-select probe requires the 'sql' workflow input" >&2
+                exit 2
+              fi
+              printf '%s' "$SQL" | ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/sql_select_probe.py"
               ;;
           esac
