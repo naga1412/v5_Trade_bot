@@ -1,6 +1,7 @@
 """PR10 symbol_allowlist_refresh worker — writes 1 snapshot per symbol."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -9,7 +10,10 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.workers.symbol_allowlist_refresh import run_one_refresh_cycle
+from app.workers.symbol_allowlist_refresh import (
+    run_one_refresh_cycle,
+    run_symbol_allowlist_refresh_loop,
+)
 
 
 _NOW = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -80,6 +84,46 @@ async def test_refresh_cycle_writes_one_row_per_symbol() -> None:
     symbols = {r.symbol for r in rows}
     assert "BTCUSDT" in symbols
     assert "ETHUSDT" in symbols
+
+
+@pytest.mark.asyncio
+async def test_loop_fires_cycle_before_first_sleep() -> None:
+    """Regression: previous loop shape slept 24h BEFORE the first cycle,
+    so every backend restart deferred the first heartbeat. Restart cascades
+    within 24h of each other starved the worker (observed 2026-07-22).
+
+    The fix runs the cycle FIRST then sleeps; this test pins that order.
+    """
+    call_order: list[str] = []
+    cycle_mock = AsyncMock(return_value=0)
+
+    async def fake_sleep(_: float) -> None:
+        call_order.append("sleep")
+        # First sleep after first cycle → break out.
+        raise asyncio.CancelledError
+
+    async def instrumented_cycle(**_: object) -> int:
+        call_order.append("cycle")
+        return 0
+
+    with patch(
+        "app.workers.symbol_allowlist_refresh.run_one_refresh_cycle",
+        new=instrumented_cycle,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await run_symbol_allowlist_refresh_loop(
+                session_factory=None,  # type: ignore[arg-type]
+                settings_factory=lambda: _settings(),
+                poll_interval_s=86400.0,
+                _sleep=fake_sleep,
+            )
+
+    assert call_order == ["cycle", "sleep"], (
+        f"expected cycle-first-then-sleep, got {call_order!r}"
+    )
+    # Silence the unused-var lint (cycle_mock is a spare hook if we
+    # ever need to inspect call_args later).
+    _ = cycle_mock
 
 
 @pytest.mark.asyncio
