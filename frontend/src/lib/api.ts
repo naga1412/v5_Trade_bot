@@ -526,6 +526,8 @@ export interface SignalCard {
   confidence: number;
   scores: SignalCardScores;
   sparkline: number[];
+  ts: string | null;
+  is_stale: boolean;
 }
 
 export interface ScannerFilterCounts {

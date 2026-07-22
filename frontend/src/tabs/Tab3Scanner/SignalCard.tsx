@@ -74,12 +74,18 @@ export function SignalCard({ card, onClick }: Props) {
   const pctTxt = fmtPct(card.pct_change);
   const aiScoreTxt = fmtSigned(card.ai_score, "").replace(/^([+-])/, "AI $1");
 
+  const staleTooltip = card.is_stale && card.ts
+    ? `Prediction older than 2× timeframe (ts=${card.ts})`
+    : undefined;
+
   return (
     <button
       type="button"
       onClick={() => onClick?.(card)}
       data-testid={`signal-card-${card.symbol}`}
-      className="block w-full text-left bg-bg-panel border border-border rounded p-2 mb-2 hover:bg-bg-elevated focus:outline-none focus:ring-1 focus:ring-cyan"
+      title={staleTooltip}
+      aria-label={card.is_stale ? `${card.symbol} (stale)` : undefined}
+      className={`block w-full text-left bg-bg-panel border border-border rounded p-2 mb-2 hover:bg-bg-elevated focus:outline-none focus:ring-1 focus:ring-cyan ${card.is_stale ? "opacity-60" : ""}`}
     >
       {/* Row 1 — favorite + symbol + name | sparkline + points */}
       <div className="flex justify-between items-center mb-1">
@@ -128,6 +134,14 @@ export function SignalCard({ card, onClick }: Props) {
             className={`px-1 rounded text-[9px] font-medium border ${badge.cls}`}
           >
             {badge.label}
+          </span>
+        )}
+        {card.is_stale && (
+          <span
+            data-testid={`signal-card-stale-${card.symbol}`}
+            className="px-1 rounded text-[9px] font-medium border text-text-tertiary border-text-tertiary/40"
+          >
+            STALE
           </span>
         )}
         {card.hybrid_flag && (
