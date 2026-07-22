@@ -95,10 +95,15 @@ async def run_query(sql: str) -> int:
         await conn.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT_MS}ms'")
         # Stream via a server-side cursor so a runaway result set never
         # buffers more than MAX_ROWS+1 records in the probe process.
-        # Cursors require an explicit transaction.
+        # Cursors require an explicit transaction; asyncpg's cursor()
+        # returns a CursorFactory that is an async-iterable — a plain
+        # ``async for`` walks the results one at a time.
+        rows: list = []
         async with conn.transaction():
-            cursor = conn.cursor(sql)
-            rows = await cursor.fetch(MAX_ROWS + 1)
+            async for row in conn.cursor(sql):
+                rows.append(row)
+                if len(rows) > MAX_ROWS:
+                    break
     finally:
         await conn.close()
 
