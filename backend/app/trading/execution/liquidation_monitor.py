@@ -74,11 +74,16 @@ class MonitorOutcome:
 
 
 async def _list_open_positions(session: AsyncSession) -> list[OpenPosition]:
+    # `status='open'` is the canonical predicate. `closed_at IS NULL`
+    # alone would sweep up May-vintage legacy rows (id=7 WLD/USDT,
+    # id=9 BTC/USDT) that are status='closed' AND closed_at NULL AND
+    # exit_reason NULL — the monitor would poll Binance for symbols it
+    # closed months ago and thrash on the stale entry_price.
     rows = (await session.execute(
         sa.text(
             "SELECT id, user_id, symbol, direction, entry_price, stop_loss, "
             "       mtf_agreement "
-            "FROM live_trades WHERE closed_at IS NULL"
+            "FROM live_trades WHERE status = 'open'"
         )
     )).all()
     return [
