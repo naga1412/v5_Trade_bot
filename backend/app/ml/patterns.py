@@ -76,10 +76,11 @@ async def update_pattern_stats(session: AsyncSession) -> int:
                 counts[key][1] += 1
 
     n_upserted = 0
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
     for (pat, sym, tf), (n_total, n_win) in counts.items():
         # SQLite + Postgres both accept this ON CONFLICT form against the
-        # (pattern_id, symbol, timeframe) UNIQUE constraint.
+        # (pattern_id, symbol, timeframe) UNIQUE constraint. Bind the
+        # datetime object directly — asyncpg strict-binds TIMESTAMPTZ.
         await session.execute(
             sa.text(
                 "INSERT INTO pattern_stats "
@@ -91,7 +92,7 @@ async def update_pattern_stats(session: AsyncSession) -> int:
                 "n_correct = excluded.n_correct, "
                 "last_updated = excluded.last_updated"
             ),
-            {"p": pat, "s": sym, "tf": tf, "n": n_total, "w": n_win, "u": now_iso},
+            {"p": pat, "s": sym, "tf": tf, "n": n_total, "w": n_win, "u": now},
         )
         n_upserted += 1
 
