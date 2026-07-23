@@ -60,7 +60,7 @@ def _build_message() -> str:
 
 async def _run() -> int:
     message = _build_message()
-    print(f"healer_selftest: sending → alert_routing.alert_admin(level='critical')")
+    print("healer_selftest: sending → alert_routing.alert_admin(level='critical')")
     print(f"healer_selftest: message length = {len(message)}")
 
     routed_ok: bool = False

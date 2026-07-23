@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.healer import detectors
 from app.healer.detectors import (
     detect_blocked_rate_anomaly,
     detect_dispatch_error_rate,
