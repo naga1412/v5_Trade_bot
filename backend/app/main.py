@@ -299,6 +299,13 @@ async def lifespan(_app: FastAPI):
             get_session_factory(), _get_fu28_settings,
         )
 
+        # Healer Phase 0 — detect-only monitoring layer. NOT gated on
+        # AUTONOMOUS_TRADING; the detectors are useful in all modes.
+        from app.healer import start_healer_detector_task
+        healer_detector_task = start_healer_detector_task(
+            get_session_factory(),
+        )
+
         # SP-8 Phase J: gate the autonomous-trading subsystem on
         # AUTONOMOUS_TRADING_ENABLED + a passing pre-flight. Pre-flight
         # validates passphrase, vault decrypt, Binance permissions
