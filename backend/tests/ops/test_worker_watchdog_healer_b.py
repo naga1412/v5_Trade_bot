@@ -12,7 +12,6 @@ Adjacencies covered by the same test file:
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -21,7 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ops import worker_watchdog
-from app.ops.worker_registry import HEARTBEAT, WORKER_REGISTRY, WorkerSpec, by_name
+from app.ops.worker_registry import HEARTBEAT, WorkerSpec, by_name
 
 
 # ---------- fixture ------------------------------------------------------
