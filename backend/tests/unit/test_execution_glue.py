@@ -250,7 +250,7 @@ async def _setup_users(*, mode: str = "manual") -> Any:
             "CREATE TABLE live_trades ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "user_id INTEGER, margin_usdt REAL, pnl_usdt REAL, "
-            "closed_at TEXT)"
+            "closed_at TEXT, status TEXT, exit_reason TEXT)"
         ))
     return engine
 
@@ -302,10 +302,52 @@ async def test_build_context_counts_open_positions(tmp_path: Path) -> None:
     engine = await _setup_users()
     async with AsyncSession(engine) as s:
         await s.execute(sa.text(
-            "INSERT INTO live_trades (user_id, margin_usdt, pnl_usdt, closed_at) "
-            "VALUES (1, 30, NULL, NULL), (1, 30, NULL, NULL)"
+            "INSERT INTO live_trades "
+            "(user_id, margin_usdt, pnl_usdt, closed_at, status) "
+            "VALUES (1, 30, NULL, NULL, 'open'), "
+            "       (1, 30, NULL, NULL, 'open')"
         ))
         await s.commit()
         ctx = await build_user_context(s, user_id=1, use_testnet=True)
     assert ctx is not None
     assert ctx.open_positions_count == 2
+
+
+@pytest.mark.asyncio
+async def test_build_context_ignores_may_bug_legacy_rows(tmp_path: Path) -> None:
+    """Regression: rows shaped like the 2026-07-22 legacy pair
+    (status='closed' AND closed_at NULL AND exit_reason NULL) must NOT
+    count against open_positions_count. Under the old `closed_at IS NULL`
+    predicate they silently consumed 2/5 concurrent-position slots.
+    """
+    blob = encrypt_secrets(
+        {"binance_api_key": "kk", "binance_api_secret": "ss"},
+        passphrase="correct-passphrase-2026",
+    )
+    p = tmp_path / "secrets.enc"
+    p.write_bytes(blob)
+    initialize_vault_cache(
+        passphrase="correct-passphrase-2026", secrets_path=p,
+    )
+    engine = await _setup_users()
+    async with AsyncSession(engine) as s:
+        # The exact shape of live_trades id=7 (WLD/USDT) and id=9 (BTC/USDT)
+        # in prod on 2026-07-22 — verified directly by operator.
+        await s.execute(sa.text(
+            "INSERT INTO live_trades "
+            "(user_id, margin_usdt, pnl_usdt, closed_at, status, exit_reason) "
+            "VALUES (1, 25, NULL, NULL, 'closed', NULL), "
+            "       (1, 10, NULL, NULL, 'closed', NULL)"
+        ))
+        # Plus one real open row so we know the query still finds the
+        # real thing.
+        await s.execute(sa.text(
+            "INSERT INTO live_trades "
+            "(user_id, margin_usdt, pnl_usdt, closed_at, status) "
+            "VALUES (1, 30, NULL, NULL, 'open')"
+        ))
+        await s.commit()
+        ctx = await build_user_context(s, user_id=1, use_testnet=True)
+    assert ctx is not None
+    # Old predicate would have returned 3; new predicate must return 1.
+    assert ctx.open_positions_count == 1

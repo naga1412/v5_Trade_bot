@@ -128,8 +128,8 @@ jobs:
                  psql -U postgres -d trading_radar -c \
                  \"SELECT 'paper trades closed' AS kind, count(*) AS n FROM shadow_trades WHERE closed_at IS NOT NULL \
                    UNION ALL SELECT 'paper trades open', count(*) FROM shadow_trades WHERE closed_at IS NULL \
-                   UNION ALL SELECT 'live trades open', count(*) FROM live_trades WHERE closed_at IS NULL \
-                   UNION ALL SELECT 'live trades closed', count(*) FROM live_trades WHERE closed_at IS NOT NULL;\" -c \
+                   UNION ALL SELECT 'live trades open', count(*) FROM live_trades WHERE status = 'open' \
+                   UNION ALL SELECT 'live trades closed', count(*) FROM live_trades WHERE status = 'closed';\" -c \
                  \"SELECT direction, count(*) AS trades, \
                     round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
                     round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \

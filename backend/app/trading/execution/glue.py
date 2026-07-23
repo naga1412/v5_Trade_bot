@@ -296,10 +296,16 @@ async def build_user_context(
     if row is None:
         return None
 
+    # `status='open'` is the source of truth for "position currently on
+    # Binance". `closed_at IS NULL` alone was the historical predicate
+    # but observed 2026-07-22: id=7 (WLD/USDT) + id=9 (BTC/USDT) are
+    # May-vintage rows with status='closed' AND closed_at NULL AND
+    # exit_reason NULL — they count against max_concurrent_positions
+    # under the old predicate and silently consume 2/5 capacity slots.
     open_count = (await session.execute(
         sa.text(
             "SELECT count(*) FROM live_trades "
-            "WHERE user_id = :u AND closed_at IS NULL"
+            "WHERE user_id = :u AND status = 'open'"
         ),
         {"u": user_id},
     )).scalar() or 0
