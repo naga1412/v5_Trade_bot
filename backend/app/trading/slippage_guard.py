@@ -97,11 +97,14 @@ async def check_slippage(
         ),
         {
             "s": symbol,
-            # Use ISO strings so SQLite (TEXT) and Postgres (TIMESTAMPTZ)
-            # both accept the value via SQLAlchemy's `sa.text` bind.
-            "u": halt_until.isoformat(),
+            # Bind datetime objects directly. asyncpg strict-binds
+            # TIMESTAMPTZ and rejects ISO strings — the comment above
+            # this line used to claim ISO strings work in both dialects,
+            # which was factually wrong on the asyncpg side and hid a
+            # dormant bug behind a rarely-reached UPSERT path.
+            "u": halt_until,
             "r": reason,
-            "c": datetime.now(tz=timezone.utc).isoformat(),
+            "c": datetime.now(tz=timezone.utc),
         },
     )
 
