@@ -103,24 +103,26 @@ async def export_recent_to_parquet(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=days)
 
-    # NOTE: ts/closed_at columns are TEXT in SQLite (test fixture) and
-    # TIMESTAMPTZ in Postgres. Comparing against the iso string works in both
-    # — sortable iso8601 in TEXT, implicit cast in Postgres.
+    # Bind the datetime object directly. The previous comment here
+    # claimed ISO strings work in both SQLite (TEXT) and Postgres
+    # (TIMESTAMPTZ) — factually true for SQLite (lexicographic on TEXT)
+    # but WRONG for Postgres via asyncpg, which strict-binds TIMESTAMPTZ
+    # and rejects strings.
     queries: dict[str, tuple[str, dict[str, Any]]] = {
         "predictions_30d.parquet": (
             "SELECT * FROM predictions WHERE ts >= :since ORDER BY ts ASC",
-            {"since": since.isoformat()},
+            {"since": since},
         ),
         "shadow_trades_30d.parquet": (
             "SELECT * FROM shadow_trades WHERE closed_at >= :since "
             "ORDER BY closed_at ASC",
-            {"since": since.isoformat()},
+            {"since": since},
         ),
         # ohlcv may not exist as a table in dev; fall back to empty Parquet.
         "ohlcv_1h_30d.parquet": (
             "SELECT * FROM ohlcv WHERE ts >= :since AND timeframe = '1h' "
             "ORDER BY ts ASC",
-            {"since": since.isoformat()},
+            {"since": since},
         ),
     }
 

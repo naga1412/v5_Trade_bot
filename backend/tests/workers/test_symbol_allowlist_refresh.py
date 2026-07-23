@@ -87,43 +87,58 @@ async def test_refresh_cycle_writes_one_row_per_symbol() -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_fires_cycle_before_first_sleep() -> None:
-    """Regression: previous loop shape slept 24h BEFORE the first cycle,
-    so every backend restart deferred the first heartbeat. Restart cascades
-    within 24h of each other starved the worker (observed 2026-07-22).
+async def test_loop_first_cycle_completes_with_ok_heartbeat() -> None:
+    """Stronger than merely checking the cycle fires: assert it COMPLETES
+    successfully and heartbeats status='ok'.
 
-    The fix runs the cycle FIRST then sleeps; this test pins that order.
+    Regression history:
+      - 2026-07-22: sleep-first loop meant the first cycle never fired
+        (fixed in PR #344).
+      - 2026-07-23: PR #344 exposed a dormant .isoformat() SQL bind bug
+        against asyncpg TIMESTAMPTZ — the cycle fired but instantly
+        errored, heartbeats stuck at status='error' for ~2 months
+        undetected. This assertion (status='ok', not just 'fired') is
+        the one that would have caught that class two months ago.
+
+    Runs the REAL run_one_refresh_cycle against an in-memory SQLite —
+    the loop-shape + cycle body are both exercised. Only record_heartbeat
+    is mocked (its INSERT uses Postgres JSONB cast + NOW() which SQLite
+    doesn't speak).
     """
+    engine = await _mk_engine_with_shadow_trades()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
     call_order: list[str] = []
-    cycle_mock = AsyncMock(return_value=0)
 
     async def fake_sleep(_: float) -> None:
         call_order.append("sleep")
-        # First sleep after first cycle → break out.
         raise asyncio.CancelledError
 
-    async def instrumented_cycle(**_: object) -> int:
-        call_order.append("cycle")
-        return 0
+    hb_mock = AsyncMock(return_value=None)
 
     with patch(
-        "app.workers.symbol_allowlist_refresh.run_one_refresh_cycle",
-        new=instrumented_cycle,
+        "app.workers.symbol_allowlist_refresh.record_heartbeat", new=hb_mock,
     ):
         with pytest.raises(asyncio.CancelledError):
             await run_symbol_allowlist_refresh_loop(
-                session_factory=None,  # type: ignore[arg-type]
-                settings_factory=lambda: _settings(),
+                session_factory=factory,
+                settings_factory=_settings,
                 poll_interval_s=86400.0,
                 _sleep=fake_sleep,
             )
 
-    assert call_order == ["cycle", "sleep"], (
-        f"expected cycle-first-then-sleep, got {call_order!r}"
+    # Cycle-before-sleep ordering (PR #344 assertion).
+    assert call_order == ["sleep"], (
+        f"expected first sleep only AFTER cycle completed, got {call_order!r}"
     )
-    # Silence the unused-var lint (cycle_mock is a spare hook if we
-    # ever need to inspect call_args later).
-    _ = cycle_mock
+    # Cycle-body-succeeded assertion (PR #350 assertion — the one that
+    # would have caught the .isoformat() bug on the first commit).
+    hb_mock.assert_awaited()
+    call_kwargs = hb_mock.call_args.kwargs
+    assert call_kwargs.get("status") == "ok", (
+        f"first cycle should heartbeat status='ok'; got "
+        f"{call_kwargs.get('status')!r} details={call_kwargs.get('details')!r}"
+    )
 
 
 @pytest.mark.asyncio

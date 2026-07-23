@@ -60,12 +60,16 @@ async def _load_closed_trades_for_window(
     session: AsyncSession, *, window_start: datetime,
 ) -> list[_ClosedTradeRow]:
     """Read all closed shadow_trades in the window. Aggregates across users."""
+    # Bind the datetime object directly. asyncpg strict-binds TIMESTAMPTZ
+    # and rejects ISO strings (bug class instance #3, exposed 2026-07-23
+    # by PR #344 loop-fix). Same convention across the codebase per the
+    # bug-class sweep — see the AST regression test.
     rows = (await session.execute(sa.text(
         "SELECT symbol, closed_at, pnl_usdt, pnl_pct "
         "  FROM shadow_trades "
         " WHERE closed_at IS NOT NULL "
         "   AND closed_at >= :since"
-    ), {"since": window_start.isoformat()})).all()
+    ), {"since": window_start})).all()
     out: list[_ClosedTradeRow] = []
     for r in rows:
         out.append(_ClosedTradeRow(
