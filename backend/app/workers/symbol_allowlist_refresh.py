@@ -140,15 +140,19 @@ async def run_symbol_allowlist_refresh_loop(
     poll_interval_s: float = _POLL_INTERVAL_SECONDS,
     _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
-    """Forever-loop. Fires one cycle per day."""
+    """Forever-loop. Fires one cycle immediately on start, then once per
+    ``poll_interval_s`` after that.
+
+    The previous shape slept BEFORE the first cycle. That meant every
+    backend restart delayed the first heartbeat by 24 h, and restart
+    cascades within 24 h of each other starved the worker entirely.
+    Observed 2026-07-22: last heartbeat 2026-07-20 17:47 UTC, ~48 h
+    stale across two intervening deploys.
+    """
     log.info(
         "symbol_allowlist_refresh: starting (interval=%.0fs)", poll_interval_s,
     )
     while True:
-        try:
-            await _sleep(poll_interval_s)
-        except asyncio.CancelledError:
-            raise
         try:
             await run_one_refresh_cycle(
                 session_factory=session_factory,
@@ -158,6 +162,10 @@ async def run_symbol_allowlist_refresh_loop(
             raise
         except Exception as e:  # noqa: BLE001
             log.error("symbol_allowlist_refresh outer-loop error: %s", e)
+        try:
+            await _sleep(poll_interval_s)
+        except asyncio.CancelledError:
+            raise
 
 
 def start_symbol_allowlist_refresh(
