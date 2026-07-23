@@ -315,3 +315,51 @@ def test_b3_auto_promote_task_registry_declares_gate_env() -> None:
         "AUTO_PROMOTE_TO_TELEGRAM_ENABLED",
         "AUTO_PROMOTE_TO_FULLYAUTO_ENABLED",
     }
+
+
+# ---- Healer close-out: watchdog alerts on Telegram-first path -----------
+
+
+def test_close_out_watchdog_imports_alert_routing_alert_admin() -> None:
+    """Regression: the watchdog critical-alert path MUST route through
+    ``app.ops.alert_routing.alert_admin`` (Telegram > SMTP > log), not
+    ``app.ops.alerts.alert_admin`` (SMTP-only).
+
+    Under the current prod config SMTP is unconfigured — the pre-close-out
+    path silently swallowed every watchdog alarm at the mail relay. This
+    test pins the fix so a future refactor can't silently regress it.
+    """
+    import app.ops.alert_routing as routing
+    import app.ops.alerts as smtp_only
+    assert worker_watchdog.alert_admin is routing.alert_admin
+    assert worker_watchdog.alert_admin is not smtp_only.alert_admin
+
+
+@pytest.mark.asyncio
+async def test_close_out_watchdog_alarm_uses_level_critical(
+    heartbeat_factory,
+) -> None:
+    """The rewire flips the keyword from `severity=` (alerts.alert_admin's
+    contract) to `level=` (alert_routing.alert_admin's contract), and the
+    critical path must pass level='critical' to opt into Telegram-first."""
+    now = datetime.now(timezone.utc)
+    # Seed a stale worker so _alert_if_dead has something to alarm about.
+    daily_spec = _spec(max_staleness_seconds=60)
+    await _insert_beat(
+        heartbeat_factory,
+        worker=daily_spec.name,
+        beat_at=now - timedelta(seconds=1800),  # far past 60s budget
+        last_status="ok",
+    )
+    called_kwargs: dict[str, object] = {}
+
+    async def fake_alert(msg, *, level="warning"):
+        called_kwargs["level"] = level
+        called_kwargs["msg"] = msg
+        return True
+
+    with patch.object(worker_watchdog, "WORKER_REGISTRY", (daily_spec,)), \
+         patch.object(worker_watchdog, "alert_admin", new=fake_alert):
+        statuses = await worker_watchdog.check_all_workers(heartbeat_factory)
+        await worker_watchdog._alert_if_dead(statuses)
+    assert called_kwargs.get("level") == "critical", called_kwargs

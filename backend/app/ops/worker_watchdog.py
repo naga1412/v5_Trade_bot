@@ -31,7 +31,14 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.ops import worker_supervisor
-from app.ops.alerts import alert_admin
+# Healer close-out (2026-07-23): watchdog critical alerts must land on the
+# operator's phone, not just SMTP. `alert_routing.alert_admin` does
+# Telegram > SMTP > log with `level='critical'`; `alerts.alert_admin` is
+# SMTP-only. Under the current prod config SMTP is unconfigured (per
+# `alert_routing`'s FU-2 note), so the pre-close-out path silently
+# swallowed every watchdog alarm at the mail relay. A detector that
+# alerts into an unwatched channel is not a detector.
+from app.ops.alert_routing import alert_admin
 from app.ops.heartbeat import record_heartbeat
 from app.ops.worker_registry import WORKER_REGISTRY, WorkerSpec
 
@@ -439,7 +446,9 @@ async def _alert_if_dead(statuses: list[dict[str, object]]) -> None:
     healed_all = all(
         v == "restarted" for v in restart_results.values()
     ) and bool(restart_results)
-    await alert_admin(body, severity="warning" if healed_all else "critical")
+    # `level=` (not `severity=`) matches alert_routing's signature.
+    # 'critical' opts into Telegram-first per alert_routing's precedence.
+    await alert_admin(body, level="warning" if healed_all else "critical")
 
 
 async def _watchdog_loop(
