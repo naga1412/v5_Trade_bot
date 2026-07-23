@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.exchanges.binance_live import (
     BinanceLiveClient,
@@ -11,6 +13,7 @@ from app.exchanges.binance_live import (
 )
 from app.trading.execution.liquidation_monitor import (
     OpenPosition,
+    _list_open_positions,
     evaluate_position,
 )
 
@@ -192,3 +195,40 @@ async def test_binance_error_returns_error_outcome() -> None:
     finally:
         await client.aclose()
     assert out.action == "error"
+
+
+# ---- Regression: May-bug legacy rows must NOT be polled -----------------
+
+
+@pytest.mark.asyncio
+async def test_list_open_positions_skips_may_bug_legacy_rows() -> None:
+    """Rows shaped like id=7 (WLD/USDT) / id=9 (BTC/USDT) on 2026-07-22
+    have status='closed' AND closed_at NULL AND exit_reason NULL. The old
+    `closed_at IS NULL` predicate would sweep them into the monitor and
+    thrash on stale entry_price. `status='open'` skips them cleanly.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE live_trades ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, symbol TEXT, direction TEXT, "
+            "entry_price REAL, stop_loss REAL, mtf_agreement INTEGER, "
+            "closed_at TEXT, status TEXT, exit_reason TEXT)"
+        ))
+        # Two legacy rows (May-bug shape) + one real open position.
+        await conn.execute(sa.text(
+            "INSERT INTO live_trades "
+            "(user_id, symbol, direction, entry_price, stop_loss, "
+            " closed_at, status, exit_reason) "
+            "VALUES (1, 'BTC/USDT', 'LONG', 75881.8, 74000, NULL, 'closed', NULL), "
+            "       (1, 'WLD/USDT', 'LONG', 0.39, 0.36, NULL, 'closed', NULL), "
+            "       (1, 'ETH/USDT', 'LONG', 3500, 3400, NULL, 'open', NULL)"
+        ))
+    async with AsyncSession(engine) as s:
+        positions = await _list_open_positions(s)
+    assert len(positions) == 1, (
+        f"expected 1 real open position, got {len(positions)}: "
+        f"{[p.symbol for p in positions]}"
+    )
+    assert positions[0].symbol == "ETH/USDT"
