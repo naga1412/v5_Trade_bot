@@ -152,6 +152,7 @@ async def lifespan(_app: FastAPI):
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
     ui_freshness_monitor_task = None  # PR10.5 / FU-28
+    healer_detector_task = None  # Healer Phase 0
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -297,6 +298,13 @@ async def lifespan(_app: FastAPI):
         from app.config import get_settings as _get_fu28_settings
         ui_freshness_monitor_task = start_ui_freshness_monitor(
             get_session_factory(), _get_fu28_settings,
+        )
+
+        # Healer Phase 0 — detect-only monitoring layer. NOT gated on
+        # AUTONOMOUS_TRADING; the detectors are useful in all modes.
+        from app.healer import start_healer_detector_task
+        healer_detector_task = start_healer_detector_task(
+            get_session_factory(),
         )
 
         # SP-8 Phase J: gate the autonomous-trading subsystem on
@@ -661,6 +669,8 @@ async def lifespan(_app: FastAPI):
             symbol_allowlist_task.cancel()
         if ui_freshness_monitor_task is not None:
             ui_freshness_monitor_task.cancel()
+        if healer_detector_task is not None:
+            healer_detector_task.cancel()
         await _aclose_adapters()
 
 
