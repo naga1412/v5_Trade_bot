@@ -152,6 +152,7 @@ async def lifespan(_app: FastAPI):
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
     ui_freshness_monitor_task = None  # PR10.5 / FU-28
+    healer_detector_task = None  # Healer Phase 0
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
         # SP-1 §6.1: pin the active ML checkpoint at startup so the live
         # worker can call predict_ghost_candle. No active row → log warning
@@ -668,6 +669,8 @@ async def lifespan(_app: FastAPI):
             symbol_allowlist_task.cancel()
         if ui_freshness_monitor_task is not None:
             ui_freshness_monitor_task.cancel()
+        if healer_detector_task is not None:
+            healer_detector_task.cancel()
         await _aclose_adapters()
 
 
