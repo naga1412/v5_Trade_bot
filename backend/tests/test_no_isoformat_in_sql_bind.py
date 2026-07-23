@@ -107,5 +107,5 @@ def test_no_isoformat_in_execute_params() -> None:
         "Found `.isoformat()` used as a SQL execute() bind value. asyncpg "
         "strict-binds TIMESTAMPTZ/TIMESTAMP columns and rejects ISO "
         "strings — bind the raw datetime object instead. "
-        f"Instances:\n  " + "\n  ".join(violations)
+        "Instances:\n  " + "\n  ".join(violations)
     )
