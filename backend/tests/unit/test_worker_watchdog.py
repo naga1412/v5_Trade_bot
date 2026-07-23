@@ -116,7 +116,7 @@ async def test_pending_heartbeat_does_not_trigger_alert() -> None:
     ]
     sent: list[str] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
+    async def _capture(message: str, *, level: str = "warning") -> bool:
         sent.append(message)
         return True
 
@@ -166,16 +166,16 @@ async def test_alert_only_emitted_for_dead_workers() -> None:
     ]
     sent: list[tuple[str, str]] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
-        sent.append((severity, message))
+    async def _capture(message: str, *, level: str = "warning") -> bool:
+        sent.append((level, message))
         return True
 
     with patch.object(worker_watchdog, "alert_admin", _capture):
         await worker_watchdog._alert_if_dead(statuses)
 
     assert len(sent) == 1
-    severity, body = sent[0]
-    assert severity == "critical"
+    level, body = sent[0]
+    assert level == "critical"
     assert "stale_one" in body
     assert "ok_one" not in body
     assert "absent_one" not in body
@@ -186,8 +186,8 @@ async def test_no_alert_when_all_workers_ok() -> None:
     statuses = [{"name": "w", "state": "ok"}]
     sent: list[tuple[str, str]] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
-        sent.append((severity, message))
+    async def _capture(message: str, *, level: str = "warning") -> bool:
+        sent.append((level, message))
         return True
 
     with patch.object(worker_watchdog, "alert_admin", _capture):
@@ -203,7 +203,7 @@ async def test_stateful_workers_marked_alert_only_in_message() -> None:
     ]
     sent: list[str] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
+    async def _capture(message: str, *, level: str = "warning") -> bool:
         sent.append(message)
         return True
 
@@ -240,8 +240,8 @@ async def test_supervised_nonstateful_worker_is_restarted_and_severity_downgrade
     ]
     sent: list[tuple[str, str]] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
-        sent.append((severity, message))
+    async def _capture(message: str, *, level: str = "warning") -> bool:
+        sent.append((level, message))
         return True
 
     with (
@@ -253,9 +253,9 @@ async def test_supervised_nonstateful_worker_is_restarted_and_severity_downgrade
 
     assert restart_calls == ["scanner_batch_task"]
     assert len(sent) == 1
-    severity, body = sent[0]
+    level, body = sent[0]
     # Self-heal succeeded → severity downgraded.
-    assert severity == "warning"
+    assert level == "warning"
     assert "action=restarted" in body
 
 
@@ -274,16 +274,16 @@ async def test_unsupervised_nonstateful_worker_alerts_critical() -> None:
     ]
     sent: list[tuple[str, str]] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
-        sent.append((severity, message))
+    async def _capture(message: str, *, level: str = "warning") -> bool:
+        sent.append((level, message))
         return True
 
     with patch.object(worker_watchdog, "alert_admin", _capture):
         await worker_watchdog._alert_if_dead(statuses)
 
     assert len(sent) == 1
-    severity, body = sent[0]
-    assert severity == "critical"
+    level, body = sent[0]
+    assert level == "critical"
     assert "action=alert (not_supervised)" in body
 
 
@@ -304,8 +304,8 @@ async def test_failed_restart_keeps_severity_critical() -> None:
     ]
     sent: list[tuple[str, str]] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
-        sent.append((severity, message))
+    async def _capture(message: str, *, level: str = "warning") -> bool:
+        sent.append((level, message))
         return True
 
     with (
@@ -315,8 +315,8 @@ async def test_failed_restart_keeps_severity_critical() -> None:
     ):
         await worker_watchdog._alert_if_dead(statuses)
 
-    severity, body = sent[0]
-    assert severity == "critical"
+    level, body = sent[0]
+    assert level == "critical"
     assert "restart_FAILED" in body
 
 
@@ -342,8 +342,8 @@ async def test_mixed_dead_workers_severity_critical_unless_all_healed() -> None:
     ]
     sent: list[tuple[str, str]] = []
 
-    async def _capture(message: str, *, severity: str = "warning") -> bool:
-        sent.append((severity, message))
+    async def _capture(message: str, *, level: str = "warning") -> bool:
+        sent.append((level, message))
         return True
 
     def _fake_is_registered(name: str) -> bool:
@@ -356,8 +356,8 @@ async def test_mixed_dead_workers_severity_critical_unless_all_healed() -> None:
     ):
         await worker_watchdog._alert_if_dead(statuses)
 
-    severity, body = sent[0]
-    assert severity == "critical"
+    level, body = sent[0]
+    assert level == "critical"
     # All three actions are correctly classified in the body.
     assert "ALERT-ONLY (stateful)" in body
     assert "action=restarted" in body
