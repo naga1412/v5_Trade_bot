@@ -52,6 +52,8 @@ on:
           - universe-anomaly # READ-ONLY: checks non-standard symbols in asset_universe, 币安人生USDT first/last appearance, orphan symbols in shadow_trades, live Binance top-100 for non-ASCII USDT tickers.
           - signal-lookup # READ-ONLY: (1) 4-value config check (MIN_ENTRY_SCORE_LONG, SHADOW_IGNORE_MIN_SCORE, SHADOW_ALLOW_SHORTS, DISABLE_SHORT_SIGNALS), (2) backend container start time (env-flip proxy), (3) lookup a shadow trade by signal_id + recent TRXUSDT predictions.
           - sql-select # READ-ONLY: run one SELECT / WITH statement from the `sql` input against prod Postgres via the backend container. Enforced read-only at 3 layers (shape check, SET SESSION TRANSACTION READ ONLY, statement_timeout=15s). Row cap 500. See backend/scripts/sql_select_probe.py.
+          - healer-status # READ-ONLY: current + last-24h healer findings summary (Phase 0). Groups by detector_name, severity + shows the 10 most-recent rows for triage.
+          - healer-selftest # SENDS one synthetic [SELFTEST]-tagged CRITICAL alert through the full alert_routing chain (Telegram > SMTP > log). Operator confirms physical Telegram receipt on their phone — the acceptance test for healer Phase 0 alerting. Also records one healer_findings row so healer-status shows when it last ran.
       sql:
         description: SQL for the sql-select probe (SELECT or WITH only, single statement, 15s timeout, 500-row cap). Ignored by every other probe.
         required: false
@@ -922,5 +924,47 @@ jobs:
               fi
               printf '%s' "$SQL" | ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/sql_select_probe.py"
+              ;;
+            healer-status)
+              # Healer Phase 0 status page: last-24h counts by detector +
+              # severity, plus the 10 most-recent rows for triage.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== healer_findings summary (last 24h) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT detector_name, severity, COUNT(*) AS n, \
+                       MAX(detected_at) AS most_recent \
+                     FROM healer_findings \
+                     WHERE detected_at >= NOW() - INTERVAL '24 hours' \
+                     GROUP BY detector_name, severity \
+                     ORDER BY severity DESC, n DESC;\" && \
+                 echo '' && \
+                 echo '=== 10 most-recent findings ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT detected_at, detector_name, severity, summary \
+                     FROM healer_findings \
+                     ORDER BY detected_at DESC LIMIT 10;\" && \
+                 echo '' && \
+                 echo '=== known dispatch error types (registry) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT error_type, first_seen_at, last_seen_at, seen_count \
+                     FROM healer_known_error_types \
+                     ORDER BY seen_count DESC LIMIT 20;\" && \
+                 echo '' && \
+                 echo '=== healer_detector_task heartbeat ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT worker_name, beat_at, last_status, details \
+                     FROM worker_heartbeats \
+                     WHERE worker_name = 'healer_detector_task';\""
+              ;;
+            healer-selftest)
+              # Send one [SELFTEST]-tagged CRITICAL through the full
+              # alert_routing chain. The operator confirms the message
+              # physically arrived on their Telegram — the Phase 0
+              # acceptance test. Exit code is non-zero when every channel
+              # (Telegram + SMTP) failed, so an ops-debug run that goes
+              # green means at least one path succeeded.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/healer_selftest.py"
               ;;
           esac

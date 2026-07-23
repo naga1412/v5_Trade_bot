@@ -348,6 +348,20 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=15 * 60,
         stateful=False,
     ),
+    # 21. Healer Phase 0 — detect-only monitoring layer. Runs the C1-C4
+    #     detectors on a 5-min cadence + persists findings to
+    #     healer_findings for the healer-status ops-debug probe.
+    WorkerSpec(
+        name="healer_detector_task",
+        description=(
+            "5-min poll of C1-C4 detectors (dispatch error rate, "
+            "score-distribution anomaly, per-symbol prediction "
+            "freshness, blocked-rate anomaly)"
+        ),
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=15 * 60,  # 5-min cadence + 10-min slack
+        stateful=False,
+    ),
 )
 
 

@@ -55,6 +55,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "mtf_cache_ttl_refresh_task": "app/core/scoring/mtf_confluence.py",
     "symbol_allowlist_refresh": "app/workers/symbol_allowlist_refresh.py",
     "ui_freshness_monitor": "app/workers/ui_freshness_monitor.py",
+    "healer_detector_task": "app/healer/runner.py",
 }
 
 
@@ -194,6 +195,7 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "intermarket_snapshot_task": 5 * 60,
     "ws_keepalive_task": 5 * 60,  # SUPERVISOR heartbeat cadence
     "ui_freshness_monitor": 5 * 60,
+    "healer_detector_task": 5 * 60,
     # 24h nightly
     "universe_refresh_task": 24 * 60 * 60,
     "universe_sync_task": 24 * 60 * 60,
