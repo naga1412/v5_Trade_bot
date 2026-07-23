@@ -49,15 +49,21 @@ async def insert_snapshot_row(
     computed_at: datetime,
 ) -> str:
     """Append one snapshot row via insert_with_chain. Returns row_hash."""
+    # Bind datetime objects directly — insert_with_chain forwards the
+    # payload dict as SQL bind params against TIMESTAMPTZ columns. See
+    # test_no_isoformat_in_sql_bind for the bug class this avoids.
+    # Hash impact: symbol_performance_snapshots' HASH_PAYLOAD_COLUMNS
+    # excludes all datetime fields, so switching from ISO string to
+    # datetime does not alter the row_hash.
     payload = {
         "symbol": symbol,
-        "window_start": window_start.isoformat(),
-        "window_end": window_end.isoformat(),
+        "window_start": window_start,
+        "window_end": window_end,
         "trades_count": trades_count,
         "win_rate": win_rate,
         "sharpe": sharpe,
         "allowed": allowed,
-        "computed_at": computed_at.isoformat(),
+        "computed_at": computed_at,
         "inputs_hash": None,
     }
     return await insert_with_chain(
