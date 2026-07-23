@@ -64,7 +64,32 @@ BAD_STATES: frozenset[str] = frozenset({
     # FU-15: single-shot-specific alarming states
     "single_shot_never_completed",
     "single_shot_failed",
+    # Healer B1 (2026-07-23): a worker that heartbeats on time with
+    # last_status='error' looks 'ok' under the pure-staleness classifier
+    # and stays PERMANENTLY BLIND. See the 2026-07-22 -> 2026-07-23
+    # symbol_allowlist_refresh incident.
+    "heartbeat_error",
 })
+
+# Healer B1: how many consecutive error-status beats trigger the alarm.
+# Continuous-cadence workers (30s/60s/5min) tolerate one flaky cycle;
+# daily-cadence workers must alarm on the first error since a second
+# consecutive error means ~24h of blindness. Keyed by worker_name; each
+# entry is the minimum consecutive count that promotes the state to
+# 'heartbeat_error'.
+ERROR_STREAK_ALARM_THRESHOLD_DEFAULT: int = 2
+ERROR_STREAK_ALARM_THRESHOLD_DAILY: int = 1
+# Daily-cadence workers (max_staleness_seconds > 12h) get the strict N=1
+# threshold. Kept as a computed rule rather than a per-worker constant so
+# the registry stays the single source of truth for cadence.
+_DAILY_CADENCE_S: int = 12 * 60 * 60
+
+# Module-level tracker for consecutive error-status beats. In-memory only
+# — resets on backend restart. Adequate for Phase 0 detect-only. Key is
+# (worker_name, latest beat_at ISO); we clear the entry once the streak
+# hits the alarm threshold OR once a non-error beat arrives.
+_ERROR_STREAKS: dict[str, int] = {}
+_LAST_SEEN_BEAT_AT: dict[str, datetime] = {}
 
 # Name the watchdog uses to record its OWN heartbeat. Without this the
 # watchdog itself is a blind spot — if it crashes silently, the workers
@@ -150,6 +175,32 @@ async def _fetch_heartbeat_status(
     return (beat_at, last_status)
 
 
+def _error_streak_threshold(spec: WorkerSpec) -> int:
+    """B1: how many consecutive error-status beats promote to alarm.
+
+    Daily-cadence workers get N=1 (a second error means ~24h blindness);
+    everything else gets N=2 (one flaky cycle is tolerated).
+    """
+    if spec.max_staleness_seconds >= _DAILY_CADENCE_S:
+        return ERROR_STREAK_ALARM_THRESHOLD_DAILY
+    return ERROR_STREAK_ALARM_THRESHOLD_DEFAULT
+
+
+def _optional_gate_env_active(spec: WorkerSpec) -> bool:
+    """B3: True if the worker's feature flag makes it intentionally idle.
+
+    Called only when the spec declares ``optional_gate_env`` — returns
+    True when at least one of those vars is truthy (worker is active),
+    False when none are (worker is expected_dormant).
+    """
+    import os
+    for var in spec.optional_gate_env:
+        val = os.environ.get(var, "").strip().lower()
+        if val and val not in {"false", "0", "no"}:
+            return True
+    return False
+
+
 async def check_all_workers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[dict[str, object]]:
@@ -161,6 +212,21 @@ async def check_all_workers(
                 "name": spec.name,
                 "state": "expected_absent",
                 "reason": f"required_env not set: {spec.required_env}",
+            })
+            continue
+
+        # Healer B3: worker is spawned but its feature flags are off →
+        # intentionally idle. Classify expected_dormant BEFORE the staleness
+        # / heartbeat_error checks so we never alarm on it.
+        if spec.optional_gate_env and not _optional_gate_env_active(spec):
+            statuses.append({
+                "name": spec.name,
+                "description": spec.description,
+                "state": "expected_dormant",
+                "reason": (
+                    f"none of {spec.optional_gate_env} are truthy — "
+                    "worker intentionally idle"
+                ),
             })
             continue
 
@@ -215,9 +281,89 @@ async def check_all_workers(
         elif stale > spec.max_staleness_seconds:
             entry["state"] = "stale"
         else:
-            entry["state"] = "ok"
+            # Healer B1: fresh beat + `last_status='error'` used to fall
+            # through to state='ok' — the exact blind spot behind the
+            # 2026-07-22 -> 2026-07-23 symbol_allowlist_refresh incident.
+            # Only fetch last_status when staleness is healthy; a stale
+            # worker's status is subsumed by the `stale` alarm above.
+            beat_at, last_status = await _fetch_heartbeat_status(
+                session_factory, spec.name,
+            )
+            entry["last_status"] = last_status
+            if last_status == "error" and beat_at is not None:
+                streak = _record_error_streak(spec.name, beat_at)
+                entry["error_streak"] = streak
+                if streak >= _error_streak_threshold(spec):
+                    details = await _fetch_heartbeat_details(
+                        session_factory, spec.name,
+                    )
+                    entry["state"] = "heartbeat_error"
+                    entry["details_excerpt"] = details
+                else:
+                    entry["state"] = "ok"  # tolerate short streak
+            else:
+                _clear_error_streak(spec.name, beat_at)
+                entry["state"] = "ok"
         statuses.append(entry)
     return statuses
+
+
+def _record_error_streak(worker_name: str, beat_at: datetime) -> int:
+    """Advance the consecutive-error counter for a worker on a NEW beat.
+
+    Returns the current streak length. Same beat_at as last observed →
+    no advance (watchdog polled twice inside a single worker cadence).
+    """
+    prev_beat = _LAST_SEEN_BEAT_AT.get(worker_name)
+    if prev_beat is not None and prev_beat == beat_at:
+        return _ERROR_STREAKS.get(worker_name, 0)
+    _LAST_SEEN_BEAT_AT[worker_name] = beat_at
+    streak = _ERROR_STREAKS.get(worker_name, 0) + 1
+    _ERROR_STREAKS[worker_name] = streak
+    return streak
+
+
+def _clear_error_streak(
+    worker_name: str, beat_at: datetime | None,
+) -> None:
+    """Reset the streak on a non-error beat OR when we can't observe."""
+    if beat_at is not None:
+        _LAST_SEEN_BEAT_AT[worker_name] = beat_at
+    _ERROR_STREAKS.pop(worker_name, None)
+
+
+async def _fetch_heartbeat_details(
+    session_factory: async_sessionmaker[AsyncSession],
+    worker_name: str,
+) -> str | None:
+    """Return the `details` JSONB column (as text) for the latest beat.
+
+    Best-effort: on any error → None. The excerpt is truncated to 300
+    chars so the alarm body stays legible.
+    """
+    try:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    sa.text(
+                        # CAST(...) is portable across SQLite tests and
+                        # Postgres prod; `::text` is Postgres-only and
+                        # breaks the SQLite fixture.
+                        "SELECT CAST(details AS TEXT) FROM worker_heartbeats "
+                        "WHERE worker_name = :n"
+                    ),
+                    {"n": worker_name},
+                )
+            ).first()
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "watchdog: details fetch failed for %s: %s", worker_name, e,
+        )
+        return None
+    if row is None or row[0] is None:
+        return None
+    text = str(row[0])
+    return text[:300] + ("…" if len(text) > 300 else "")
 
 
 async def _attempt_restart(name: str) -> bool:
@@ -273,9 +419,16 @@ async def _alert_if_dead(statuses: list[dict[str, object]]) -> None:
         else:
             stale_str = "?"
         action = restart_results.get(name, "alert")
+        # Healer B1: the heartbeat_error class carries the failing worker's
+        # `details` JSONB excerpt (typically an exception message). Surface
+        # it in the alarm body so the operator sees WHY it failed without a
+        # round-trip to the DB.
+        excerpt = s.get("details_excerpt")
+        excerpt_str = f" details={excerpt}" if excerpt else ""
         lines.append(
             f"  - {name}: {s['state']} (stale={stale_str}, "
-            f"max={s.get('max_staleness_seconds')}s) action={action}",
+            f"max={s.get('max_staleness_seconds')}s) "
+            f"action={action}{excerpt_str}",
         )
     body = "\n".join(lines)
     log.error(body)
