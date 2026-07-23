@@ -1,7 +1,9 @@
 # Healer Phase 1 — Auto-Recovery Action Matrix
 
-**Status:** proposal only. NOT implemented in Phase 0.
+**Status:** proposal + ruling. Row-by-row grading, plus the operator's Phase 1 ruling.
 **Written:** 2026-07-23 (after Phase 0 detection layer landed via PR #352 + #353).
+**Ratified:** 2026-07-23 close-out. All ⛔ rows are RATIFIED PERMANENT and will
+never be revisited regardless of any future Phase.
 
 Phase 0 (detect-only) gave us the eyes: a watchdog that catches error-status
 heartbeats + a healer_detector_task that catches four classes of silent
@@ -10,9 +12,25 @@ a Phase 0 detector fires. Every row here is a proposal for operator
 line-item review. Nothing gets implemented until the operator approves it
 explicitly.
 
-Operator-only forever rows are marked ⛔ and will stay operator-only in
-every future phase. The healer must NEVER perform them regardless of
-detector confidence.
+## Operator's Phase 1 ruling (2026-07-23 close-out)
+
+Two ✅ rows are **CONDITIONALLY APPROVED** for Phase 1 implementation:
+  * Row 7 — C3 auto-restart WS keepalive child for stale (symbol, timeframe)
+  * Row 10 — B1 auto-restart `symbol_allowlist_refresh` on `heartbeat_error`
+
+**Approval condition** (both rows):
+  1. Phase 0 runs **detect-only in prod for 7 consecutive days** with ZERO
+     false-positive CRITICAL alerts on the operator's phone.
+  2. `healer-selftest` probe fires successfully AND the operator confirms
+     the [SELFTEST]-tagged message physically arrived on Telegram.
+  3. Explicit operator GO in the current conversation before any merge.
+
+Branches may be prepared in advance. They will NOT merge until all three
+conditions are met.
+
+All ⛔ rows below are **RATIFIED PERMANENT** — the healer must NEVER perform
+them regardless of detector confidence, disease-model refinement, or any
+future automation ambition. Ratification is not up for review.
 
 ---
 
@@ -66,7 +84,7 @@ Phase 1 implements only approved rows.
 | Fault | Stateful worker stale — live_worker, shadow_worker, liquidation_monitor, telegram_poller, ws_keepalive |
 | Proposed auto-action | Alert-only. Auto-restart risks lost open positions / duplicate orders / vault re-init / WS rate-limit hits (per safety contract in `worker_supervisor.py`). |
 | Blast radius | *live-money* if wrong |
-| **Recommendation** | ⛔ **operator-only forever** |
+| **Recommendation** | ⛔ **operator-only forever — RATIFIED PERMANENT 2026-07-23** |
 
 ### Row 4 — `C1 dispatch_error_rate: novel exception class`
 
@@ -103,7 +121,7 @@ Phase 1 implements only approved rows.
 | Blast radius (C) | *contained* — flushing MTF cache burns ~60s of REST + burnt Binance quota; positions unaffected |
 | False-positive cost (C) | *low* — 60s of extra latency once; cache warms back |
 | Rollback (C) | *automatic* — cache re-populates from live WS candles |
-| **Recommendation** | ⏸ **defer B forever** (stateful-worker restart risks positions); **operator-approve C** if desired |
+| **Recommendation** | ⛔ **B RATIFIED PERMANENT 2026-07-23** (stateful-worker restart risks positions and is Row-3-class); **operator-approve C** if desired |
 
 ### Row 7 — `C3 per_symbol_prediction_freshness` (per-symbol silent drop)
 
@@ -115,7 +133,7 @@ Phase 1 implements only approved rows.
 | Blast radius (B) | *contained* — child task cancel + respawn; siblings unaffected |
 | False-positive cost (B) | *low* — one Binance WS reconnect per false positive; Binance per-IP rate limit is ~5 conn/sec, this is well under |
 | Rollback (B) | *automatic* — the fleet already tolerates transient reconnects; the respawned child heartbeats on the next kline |
-| **Recommendation** | ✅ **enable Option B** — cleanest first Phase-1 auto-action; low blast, high leverage |
+| **Recommendation** | ✅ **CONDITIONALLY APPROVED for Phase 1 (2026-07-23)** — cleanest first Phase-1 auto-action; low blast, high leverage. Condition: 7-day Phase-0 clean run + selftest confirmation + explicit operator GO. Branch may be prepped in advance; no merge until all three are met. |
 
 ### Row 8 — `C4 blocked_rate_anomaly` (>95% blocked for >2h)
 
@@ -124,7 +142,7 @@ Phase 1 implements only approved rows.
 | Detector | `detect_blocked_rate_anomaly` (C4) |
 | Fault | >95% of telegram_signals blocked over 2h |
 | Proposed auto-action | Info-log only. Any auto-action here is either "loosen a gate" (env flip → ⛔ operator-only) or "flip trading_mode" (⛔ operator-only). |
-| **Recommendation** | ⛔ **operator-only forever** — every action is a live-money/env decision |
+| **Recommendation** | ⛔ **operator-only forever — RATIFIED PERMANENT 2026-07-23** — every action is a live-money/env decision |
 
 ### Row 9 — Vault re-init on `vault_keys() is None` observed by healer
 
@@ -133,7 +151,7 @@ Phase 1 implements only approved rows.
 | Detector | *proposal — not in Phase 0* — a new detector that samples `vault_keys() is None` after container startup + past a grace window |
 | Fault | Vault decrypt didn't run at startup — dispatcher silent-drops every LONG/SHORT |
 | Proposed auto-action | **Cannot** — the vault passphrase lives in the operator's head; the healer has no way to obtain it. |
-| **Recommendation** | ⛔ **operator-only forever** |
+| **Recommendation** | ⛔ **operator-only forever — RATIFIED PERMANENT 2026-07-23** |
 
 ### Row 10 — `symbol_allowlist_refresh` auto-heal on `heartbeat_error`
 
@@ -145,7 +163,7 @@ Phase 1 implements only approved rows.
 | Blast radius (B) | *contained* — same as Row 2 |
 | False-positive cost (B) | *low* — a same-day double-write; `insert_snapshot_row` is idempotent via the hash chain |
 | Rollback (B) | *automatic* |
-| **Recommendation** | ✅ **enable Option B** — natural extension of the existing supervisor.restart() path; would have closed the 2026-07-22 incident in one 5-min watchdog tick |
+| **Recommendation** | ✅ **CONDITIONALLY APPROVED for Phase 1 (2026-07-23)** — natural extension of the existing supervisor.restart() path; would have closed the 2026-07-22 incident in one 5-min watchdog tick. Condition: 7-day Phase-0 clean run + selftest confirmation + explicit operator GO. Branch may be prepped in advance; no merge until all three are met. |
 
 ### Row 11 — Env-var flips (`MIN_ENTRY_SCORE_LONG`, `SHADOW_ALLOW_SHORTS`, `AUTONOMOUS_TRADING_ENABLED`, `AUTO_PROMOTE_TO_*`, `BINANCE_USE_TESTNET`, `DISABLE_SHORT_SIGNALS`, `MTF_MIN_AGREEMENT_*`, `SHORT_VETO_*`, `SHORT_FUNDING_HALVE_HOLD`)
 
@@ -154,7 +172,7 @@ Phase 1 implements only approved rows.
 | Detector | Any |
 | Fault | Any |
 | Proposed auto-action | Nothing. Env flips are the operator's control surface for the whole strategy. Healing them means the healer is making strategy decisions. |
-| **Recommendation** | ⛔ **operator-only forever** |
+| **Recommendation** | ⛔ **operator-only forever — RATIFIED PERMANENT 2026-07-23** |
 
 ### Row 12 — `users.trading_mode` changes (manual ↔ telegram-approve ↔ fully-auto)
 
@@ -163,7 +181,7 @@ Phase 1 implements only approved rows.
 | Detector | Any |
 | Fault | Any |
 | Proposed auto-action | Nothing. Same reason as Row 11. |
-| **Recommendation** | ⛔ **operator-only forever** |
+| **Recommendation** | ⛔ **operator-only forever — RATIFIED PERMANENT 2026-07-23** |
 
 ### Row 13 — Any DB write to `live_trades`, `shadow_trades`, `users`, `predictions`, `telegram_signals`, `brain_decisions`, `rl_checkpoints`
 
@@ -172,29 +190,69 @@ Phase 1 implements only approved rows.
 | Detector | Any |
 | Fault | Any |
 | Proposed auto-action | Nothing. The audit hash chain is the operator's source of truth. Any healer write to a chained table poisons downstream verification. |
-| **Recommendation** | ⛔ **operator-only forever**. (Writes to healer_findings / healer_known_error_types are fine — those are operational, non-chained.) |
+| **Recommendation** | ⛔ **operator-only forever — RATIFIED PERMANENT 2026-07-23**. (Writes to healer_findings / healer_known_error_types are fine — those are operational, non-chained.) |
 
 ---
 
-## Recommended Phase 1 opening move
+## Phase 1 opening move — CONDITIONALLY APPROVED
 
-Ship the three ✅ auto-actions in one PR:
+Ship the two ✅ auto-actions as one-row PRs (soak / verify per PR stays
+clean). Both are CONDITIONALLY APPROVED as of 2026-07-23:
 
 1. **Row 7** — C3 auto-restart WS keepalive child for the stale (symbol, timeframe)
-2. **Row 10** — B1 auto-restart `symbol_allowlist_refresh` on heartbeat_error (would have closed the motivating incident in one tick)
-3. **Row 1** — Alerting on heartbeat_error already ships in PR #352; document formally that this is the Phase 1 action for that fault
+2. **Row 10** — B1 auto-restart `symbol_allowlist_refresh` on heartbeat_error (would have closed the 2026-07-22 motivating incident in one 5-min tick)
 
-Total blast radius: three contained/reversible actions with automatic
-rollback. False-positive cost: low across all three. Combined they close
-the motivating incident + one adjacent silent-drop class + one existing
-blind spot without touching any ⛔ row.
+Row 1's alerting-as-Phase-1-action is already in-flight via PR #352 —
+mentioned for completeness but requires no new PR.
 
-Everything else in the matrix stays deferred to Phase 2 (Options B on
-Rows 5/6/7 that need a canonical throttle / cache-rebuild module) or
-stays ⛔ operator-only forever.
+Total blast radius across Row 7 + Row 10: two *contained* actions with
+*automatic* rollback and *low* false-positive cost. Combined they close
+the motivating incident + one adjacent per-symbol silent-drop class
+without touching any ⛔ row.
+
+### Approval condition — ALL THREE must hold before either PR merges
+
+1. **7 consecutive days** of Phase 0 running detect-only in prod with
+   ZERO false-positive CRITICAL alerts on the operator's phone. Measured
+   from the deploy timestamp of the last Phase 0 promotion (#352/#353).
+2. **`healer-selftest` probe fires successfully** AND the operator
+   confirms the `[SELFTEST]`-tagged message physically arrived on their
+   Telegram. This is the acceptance test for the whole alert path.
+3. **Explicit operator GO** in the current conversation. Branches may
+   be prepped in advance; the merge waits for the GO.
+
+Everything else in the matrix stays deferred to Phase 2 (Rows 5 / 6
+Option C, needing a canonical throttle / cache-rebuild module) or stays
+⛔ RATIFIED PERMANENT.
+
+## Detection-latency precision (2026-07-23 close-out fix)
+
+Watchdog worst-case latency from "the failing beat lands in the DB" to
+"the operator's phone lights up" is bounded at **one watchdog tick** =
+`WATCHDOG_INTERVAL_SECONDS` = **300 seconds**. That's the interval
+between two consecutive `check_all_workers` passes.
+
+Daily-cadence workers add the worker's OWN cadence to the worst case:
+the failing beat can only exist after the worker's own tick fires and
+writes `last_status='error'`. So the fully-specified worst case for a
+daily-cadence worker is:
+
+  **`worker_cadence + WATCHDOG_INTERVAL_SECONDS` = 24 h + 300 s**
+
+For the 2026-07-22 `symbol_allowlist_refresh` incident specifically:
+the first error beat lands ~seconds after container boot (cycle-first
+loop shape from #344), so the practical latency to alert was
+~10 s + 300 s ≈ **~5 min**, not 24 h + 5 min. The 24 h in the formula
+represents the wait for the ERROR STATE TO ARISE at all — not a
+detection lag once it does. Both framings matter:
+
+  * Time-to-error state onset: at most one worker cadence
+  * Time-to-alert once error is on disk: ≤ 300 s
+
+This system's product is trust; the claims stay exact.
 
 ## Operator sign-off
 
 The operator reviews rows individually. Each ✅ row that gets sign-off
 becomes a Phase 1 PR — one row per PR so soak / verify pattern stays
-clean. ⛔ rows stay ⛔ regardless of any future Phase.
+clean. ⛔ rows are RATIFIED PERMANENT; they will not be revisited.
