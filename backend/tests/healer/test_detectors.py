@@ -76,7 +76,18 @@ async def _mk_healer_findings_engine():
     return engine
 
 
-async def _mk_predictions_engine():
+async def _mk_predictions_engine(*, seed_universe: list[str] | None = None):
+    """SQLite in-memory fixture for C3 tests.
+
+    ``seed_universe`` (Binance no-slash form, e.g. ``["BTCUSDT",
+    "ETHUSDT"]``) seeds one row per symbol in asset_universe with
+    snapshot_at=NOW. C3 requires a non-empty current universe now
+    (universe-scope fix 2026-07-24); pass an explicit list unless the
+    test is exercising the empty-universe guard.
+
+    Note: for tests that seed predictions with slash-form symbols like
+    'SYM0/USDT', pass the corresponding no-slash forms 'SYM0USDT' here.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.execute(sa.text(
@@ -98,6 +109,24 @@ async def _mk_predictions_engine():
             "last_status TEXT, "
             "details TEXT)"
         ))
+        # asset_universe — needed by C3's universe-scope filter (added
+        # 2026-07-24). Same column names as prod's SP-3.5 schema.
+        await conn.execute(sa.text(
+            "CREATE TABLE asset_universe ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "snapshot_at TEXT NOT NULL, "
+            "quote_volume_usd_24h REAL, "
+            "rank INTEGER)"
+        ))
+        if seed_universe:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for i, sym in enumerate(seed_universe):
+                await conn.execute(sa.text(
+                    "INSERT INTO asset_universe "
+                    "(symbol, snapshot_at, quote_volume_usd_24h, rank) "
+                    "VALUES (:s, :t, 0, :r)"
+                ), {"s": sym, "t": now_iso, "r": i})
     return engine
 
 
@@ -288,7 +317,9 @@ async def test_c2_below_sample_size_floor_no_finding() -> None:
 @pytest.mark.asyncio
 async def test_c3_stale_symbol_alarms_warning(bypass_c3_boot_grace) -> None:
     """SUBSET stale (per-symbol drop) → warning. Original C3 value."""
-    engine = await _mk_predictions_engine()
+    engine = await _mk_predictions_engine(
+        seed_universe=["FRESHUSDT", "STALEUSDT"],
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
@@ -318,7 +349,8 @@ async def test_c3_stale_symbol_alarms_warning(bypass_c3_boot_grace) -> None:
 
 @pytest.mark.asyncio
 async def test_c3_all_symbols_fresh_no_finding(bypass_c3_boot_grace) -> None:
-    engine = await _mk_predictions_engine()
+    universe = [f"SYM{i}USDT" for i in range(10)]
+    engine = await _mk_predictions_engine(seed_universe=universe)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
@@ -347,7 +379,9 @@ async def test_c3_boot_grace_suppresses_all_findings(monkeypatch) -> None:
     monkeypatch.setattr(
         detectors_mod, "_container_uptime_seconds", lambda: 60.0,
     )
-    engine = await _mk_predictions_engine()
+    engine = await _mk_predictions_engine(
+        seed_universe=[f"OLD{i}USDT" for i in range(5)],
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
@@ -374,7 +408,9 @@ async def test_c3_universe_stall_first_tick_is_warning_not_critical(
     not CRITICAL. Guards against transient post-restart timing races
     (boot grace expiring seconds after the last hourly close aged past
     2× threshold) paging the operator + resetting the Phase 1 clock."""
-    engine = await _mk_predictions_engine()
+    engine = await _mk_predictions_engine(
+        seed_universe=[f"SYM{i}USDT" for i in range(5)],
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
@@ -411,7 +447,9 @@ async def test_c3_universe_stall_escalates_to_critical_on_second_tick(
 ) -> None:
     """The N=2 streak crossing: two consecutive ticks with the universe
     stall condition holding → CRITICAL on tick 2."""
-    engine = await _mk_predictions_engine()
+    engine = await _mk_predictions_engine(
+        seed_universe=[f"SYM{i}USDT" for i in range(5)],
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
@@ -454,7 +492,13 @@ async def test_c3_universe_stall_streak_resets_on_clean_tick(
     """A tick where the stall condition doesn't hold (e.g. fresh
     predictions arrived, or shadow_worker went stale) resets the streak.
     A subsequent stall observation must start from 1 again, not 2."""
-    engine = await _mk_predictions_engine()
+    # Seed BOTH the stall symbols (SYM0..4/USDT) AND the recovery
+    # symbol (OK/USDT) AND the tick-3 re-stall symbols (AGAIN0..4/USDT).
+    engine = await _mk_predictions_engine(seed_universe=(
+        [f"SYM{i}USDT" for i in range(5)]
+        + ["OKUSDT"]
+        + [f"AGAIN{i}USDT" for i in range(5)]
+    ))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
 
@@ -512,13 +556,164 @@ async def test_c3_universe_stall_streak_resets_on_clean_tick(
 
 
 @pytest.mark.asyncio
+async def test_c3_universe_scope_drops_out_of_universe_stales(
+    bypass_c3_boot_grace,
+) -> None:
+    """Universe-scope fix (2026-07-24): symbols with predictions that
+    are NOT in the current asset_universe snapshot must be ignored.
+
+    Regression against the 2026-07-24 staging observation: 89 stale
+    findings per tick, dominated by symbols like EDEN/USDT (63 days
+    stale) that hadn't been in the universe for months. Real per-symbol
+    drops were invisible in the noise.
+    """
+    engine = await _mk_predictions_engine(
+        # Current universe: ONLY these two symbols
+        seed_universe=["BTCUSDT", "ETHUSDT"],
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # BTC/USDT: fresh, in universe → NOT stale
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('BTC/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(minutes=30)).isoformat()})
+        # ETH/USDT: fresh, in universe → NOT stale
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('ETH/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(minutes=30)).isoformat()})
+        # EDEN/USDT: MASSIVELY stale but NOT in universe → must be ignored
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('EDEN/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(days=63)).isoformat()})
+        # ALT/USDT: same — stale but out of universe
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('ALT/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(days=56)).isoformat()})
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert findings == [], (
+        f"expected no findings — every in-universe symbol is fresh, "
+        f"out-of-universe stales must be dropped. Got {findings}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_c3_universe_scope_counts_only_in_universe_stales(
+    bypass_c3_boot_grace,
+) -> None:
+    """Precision check: stale_count reflects ONLY in-universe (symbol, tf)
+    pairs, not the union of live + dead history."""
+    engine = await _mk_predictions_engine(
+        seed_universe=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # BTC/USDT: fresh (in universe)
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('BTC/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(minutes=30)).isoformat()})
+        # ETH/USDT: stale (in universe → counts)
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('ETH/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(hours=3)).isoformat()})
+        # SOL/USDT: stale (in universe → counts)
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('SOL/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(hours=5)).isoformat()})
+        # Ancient dropouts: not in universe, must be ignored
+        for old_sym in ("EDEN/USDT", "ALT/USDT", "BABY/USDT"):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:s, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {"s": old_sym, "t": (now - timedelta(days=30)).isoformat()})
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert len(findings) == 1
+    # 2 stale (ETH, SOL) out of 3 in-universe → per_symbol_drop warning
+    assert findings[0].severity == "warning"
+    assert findings[0].details["class"] == "per_symbol_drop"
+    assert findings[0].details["stale_count"] == 2, (
+        f"stale_count must be 2 (ETH/SOL), got {findings[0].details['stale_count']}"
+    )
+    assert findings[0].details["total_pairs"] == 3, (
+        f"total_pairs must be 3 (universe size), got "
+        f"{findings[0].details['total_pairs']}"
+    )
+    # Sample must not include the ancient dropouts
+    sample_syms = {item["symbol"] for item in findings[0].details["sample"]}
+    assert sample_syms == {"ETH/USDT", "SOL/USDT"}
+
+
+@pytest.mark.asyncio
+async def test_c3_empty_universe_emits_anomaly_finding(
+    bypass_c3_boot_grace,
+) -> None:
+    """Empty-universe guard: when asset_universe has zero USDT symbols
+    (e.g. universe_refresh_task is down), C3 must NOT silently pass
+    with zero findings. It emits a warning with class='universe_input_empty'.
+
+    A detector that goes quiet because its input vanished is the worst
+    failure mode — operator has no way to know detection stopped.
+    """
+    # NO seed_universe → asset_universe is empty
+    engine = await _mk_predictions_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # Add some predictions — these should NOT be evaluated because
+        # the universe query returns empty first.
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"SYM{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert len(findings) == 1, (
+        f"empty universe must emit exactly one anomaly finding, got "
+        f"{len(findings)}: {findings}"
+    )
+    assert findings[0].severity == "warning"
+    assert findings[0].details["class"] == "universe_input_empty"
+    assert "asset_universe" in findings[0].summary.lower() or (
+        "empty" in findings[0].summary.lower()
+    )
+
+
+@pytest.mark.asyncio
 async def test_c3_all_stale_without_fresh_shadow_worker_stays_warning(
     bypass_c3_boot_grace,
 ) -> None:
     """ALL symbols stale BUT shadow_worker heartbeat is ALSO stale/absent
     → warning, NOT critical. When the worker itself is down the watchdog
     already alarms; C3 should not double-alarm."""
-    engine = await _mk_predictions_engine()
+    engine = await _mk_predictions_engine(
+        seed_universe=[f"SYM{i}USDT" for i in range(5)],
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
