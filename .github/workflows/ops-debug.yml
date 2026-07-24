@@ -59,6 +59,14 @@ on:
         required: false
         default: ''
         type: string
+      target:
+        description: sql-select target — 'prod' (default) hits /opt/trading-radar backend against trading_radar; 'staging' hits /opt/trading-radar-staging backend-staging against trading_radar_staging. Ignored by every other probe.
+        required: false
+        default: prod
+        type: choice
+        options:
+          - prod
+          - staging
 
 jobs:
   probe:
@@ -85,6 +93,7 @@ jobs:
         env:
           PROBE: ${{ inputs.probe }}
           SQL: ${{ inputs.sql }}
+          TARGET: ${{ inputs.target }}
         run: |
           USER_DEFAULTED="${HETZNER_USER:-root}"
           DIR_DEFAULTED="${HETZNER_INSTALL_DIR:-/opt/trading-radar}"
@@ -918,12 +927,34 @@ jobs:
               # shell escaping of the SQL text is ever required. The script
               # enforces (a) SELECT / WITH only, (b) SET SESSION TRANSACTION
               # READ ONLY, (c) statement_timeout=15s, (d) 500-row fetch cap.
+              #
+              # `target=prod` (default) hits /opt/trading-radar backend against
+              # trading_radar. `target=staging` hits /opt/trading-radar-staging
+              # backend-staging against trading_radar_staging. Prod is the
+              # default so nothing changes implicitly.
               if [ -z "$SQL" ]; then
                 echo "ERROR: sql-select probe requires the 'sql' workflow input" >&2
                 exit 2
               fi
+              TARGET_DEFAULTED="${TARGET:-prod}"
+              case "$TARGET_DEFAULTED" in
+                prod)
+                  SQL_TARGET_DIR="$DIR_DEFAULTED"
+                  SQL_TARGET_COMPOSE_ARGS=""
+                  SQL_TARGET_BACKEND_SVC="backend"
+                  ;;
+                staging)
+                  SQL_TARGET_DIR="${DIR_DEFAULTED}-staging"
+                  SQL_TARGET_COMPOSE_ARGS="-f docker-compose.staging.yml --env-file .env.staging"
+                  SQL_TARGET_BACKEND_SVC="backend-staging"
+                  ;;
+                *)
+                  echo "ERROR: sql-select target must be 'prod' or 'staging' (got '$TARGET_DEFAULTED')" >&2
+                  exit 2
+                  ;;
+              esac
               printf '%s' "$SQL" | ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
-                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/sql_select_probe.py"
+                "cd $SQL_TARGET_DIR && docker compose $SQL_TARGET_COMPOSE_ARGS exec -T $SQL_TARGET_BACKEND_SVC python /app/scripts/sql_select_probe.py"
               ;;
             healer-status)
               # Healer Phase 0 status page: last-24h counts by detector +
