@@ -4,6 +4,10 @@
 **Written:** 2026-07-23 (after Phase 0 detection layer landed via PR #352 + #353).
 **Ratified:** 2026-07-23 close-out. All ⛔ rows are RATIFIED PERMANENT and will
 never be revisited regardless of any future Phase.
+**Amended 2026-07-24:** Row 7 (WS-child auto-restart) gains a hard prerequisite —
+the C3 redesign (boot grace + severity split, shipping as the Phase 0 completion
+PR) must land and run its own clean observation window before Row 7 auto-action
+merges. See Row 7 detail below.
 
 Phase 0 (detect-only) gave us the eyes: a watchdog that catches error-status
 heartbeats + a healer_detector_task that catches four classes of silent
@@ -155,7 +159,7 @@ Phase 1 implements only approved rows.
 | Blast radius (B) | *contained* — child task cancel + respawn; siblings unaffected |
 | False-positive cost (B) | *low* — one Binance WS reconnect per false positive; Binance per-IP rate limit is ~5 conn/sec, this is well under |
 | Rollback (B) | *automatic* — the fleet already tolerates transient reconnects; the respawned child heartbeats on the next kline |
-| **Recommendation** | ✅ **CONDITIONALLY APPROVED for Phase 1 (2026-07-23)** — cleanest first Phase-1 auto-action; low blast, high leverage. Condition: 7-day Phase-0 clean run + selftest confirmation + explicit operator GO. Branch may be prepped in advance; no merge until all three are met. |
+| **Recommendation** | ✅ **CONDITIONALLY APPROVED for Phase 1 (2026-07-23)** — cleanest first Phase-1 auto-action; low blast, high leverage. Condition: 7-day Phase-0 clean run + selftest confirmation + explicit operator GO. Branch may be prepped in advance; no merge until all three are met.<br><br>**PREREQUISITE ADDED 2026-07-24 (post prod-promotion #27):** the C3 redesign (boot grace + severity split shipped as Phase 0 completion) MUST land AND run its own clean observation window BEFORE this row's auto-restart merges. Auto-restarting on the previous C3 shape = churn every deploy (85 warnings observed on the #27 first tick). The redesign fixes that; the auto-restart layer builds on the fixed detector, not the noisy one. |
 
 ### Row 8 — `C4 blocked_rate_anomaly` (>95% blocked for >2h)
 
