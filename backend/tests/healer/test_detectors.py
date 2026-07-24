@@ -37,6 +37,15 @@ def bypass_c3_boot_grace(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_c3_universe_stall_streak():
+    """Wipe the in-memory C3 universe-stall streak between tests so a
+    prior test's streak can't cascade into an unrelated test's assertion."""
+    detectors_mod._C3_UNIVERSE_STALL_STREAK.clear()
+    yield
+    detectors_mod._C3_UNIVERSE_STALL_STREAK.clear()
+
+
 # ---- fixtures -----------------------------------------------------------
 
 
@@ -358,16 +367,17 @@ async def test_c3_boot_grace_suppresses_all_findings(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_c3_universe_stall_is_critical_when_shadow_worker_fresh(
+async def test_c3_universe_stall_first_tick_is_warning_not_critical(
     bypass_c3_boot_grace,
 ) -> None:
-    """ALL symbols stale AND shadow_worker heartbeat fresh → critical
-    'universe stall'. Producer alive but producing nothing."""
+    """Streak gate: FIRST universe_stall observation emits WARNING,
+    not CRITICAL. Guards against transient post-restart timing races
+    (boot grace expiring seconds after the last hourly close aged past
+    2× threshold) paging the operator + resetting the Phase 1 clock."""
     engine = await _mk_predictions_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     async with factory() as s:
-        # Every symbol is stale
         for i in range(5):
             await s.execute(sa.text(
                 "INSERT INTO predictions "
@@ -377,7 +387,6 @@ async def test_c3_universe_stall_is_critical_when_shadow_worker_fresh(
                 "sym": f"SYM{i}/USDT",
                 "t": (now - timedelta(hours=6)).isoformat(),
             })
-        # But shadow_worker heartbeat is fresh
         await s.execute(sa.text(
             "INSERT INTO worker_heartbeats "
             "(worker_name, beat_at, last_status) "
@@ -387,13 +396,119 @@ async def test_c3_universe_stall_is_critical_when_shadow_worker_fresh(
 
     findings = await detect_per_symbol_prediction_freshness(factory)
     assert len(findings) == 1
-    assert findings[0].severity == "critical", (
-        f"expected critical for universe stall, got {findings[0].severity}: "
-        f"{findings[0].summary}"
+    assert findings[0].severity == "warning", (
+        f"first-tick universe_stall must be warning, not critical; got "
+        f"{findings[0].severity}: {findings[0].summary}"
     )
-    assert "UNIVERSE STALL" in findings[0].summary
-    assert findings[0].details["class"] == "universe_stall"
-    assert findings[0].details["shadow_worker_fresh"] is True
+    assert findings[0].details["class"] == "universe_stall_pending"
+    assert findings[0].details["streak"] == 1
+    assert findings[0].details["streak_threshold"] == 2
+
+
+@pytest.mark.asyncio
+async def test_c3_universe_stall_escalates_to_critical_on_second_tick(
+    bypass_c3_boot_grace,
+) -> None:
+    """The N=2 streak crossing: two consecutive ticks with the universe
+    stall condition holding → CRITICAL on tick 2."""
+    engine = await _mk_predictions_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"SYM{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        await s.execute(sa.text(
+            "INSERT INTO worker_heartbeats "
+            "(worker_name, beat_at, last_status) "
+            "VALUES ('shadow_worker', :b, 'ok')"
+        ), {"b": (now - timedelta(seconds=30)).isoformat()})
+        await s.commit()
+
+    # Tick 1: warning (streak=1)
+    first = await detect_per_symbol_prediction_freshness(factory)
+    assert first[0].severity == "warning"
+    assert first[0].details["streak"] == 1
+
+    # Tick 2: critical (streak=2 crosses threshold)
+    second = await detect_per_symbol_prediction_freshness(factory)
+    assert second[0].severity == "critical", (
+        f"second consecutive tick must escalate to critical, got "
+        f"{second[0].severity}: {second[0].summary}"
+    )
+    assert "UNIVERSE STALL" in second[0].summary
+    assert second[0].details["class"] == "universe_stall"
+    assert second[0].details["streak"] == 2
+
+
+@pytest.mark.asyncio
+async def test_c3_universe_stall_streak_resets_on_clean_tick(
+    bypass_c3_boot_grace,
+) -> None:
+    """A tick where the stall condition doesn't hold (e.g. fresh
+    predictions arrived, or shadow_worker went stale) resets the streak.
+    A subsequent stall observation must start from 1 again, not 2."""
+    engine = await _mk_predictions_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    # Tick 1: seed one universe-stall observation
+    async with factory() as s:
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"SYM{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        await s.execute(sa.text(
+            "INSERT INTO worker_heartbeats "
+            "(worker_name, beat_at, last_status) "
+            "VALUES ('shadow_worker', :b, 'ok')"
+        ), {"b": (now - timedelta(seconds=30)).isoformat()})
+        await s.commit()
+    first = await detect_per_symbol_prediction_freshness(factory)
+    assert first[0].details["streak"] == 1
+
+    # Tick 2: clear all stale rows, add a fresh row (simulate recovery)
+    async with factory() as s:
+        await s.execute(sa.text("DELETE FROM predictions"))
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('OK/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(minutes=30)).isoformat()})
+        await s.commit()
+    second = await detect_per_symbol_prediction_freshness(factory)
+    assert second == [], "recovery tick should emit no findings"
+
+    # Tick 3: re-seed the stall condition, assert streak restarts at 1
+    async with factory() as s:
+        await s.execute(sa.text("DELETE FROM predictions"))
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"AGAIN{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        await s.commit()
+    third = await detect_per_symbol_prediction_freshness(factory)
+    assert third[0].severity == "warning"
+    assert third[0].details["streak"] == 1, (
+        f"streak should restart at 1 after recovery, got "
+        f"{third[0].details['streak']}"
+    )
 
 
 @pytest.mark.asyncio
