@@ -266,6 +266,51 @@ async def _shadow_worker_is_fresh(
     return (now - beat_at).total_seconds() <= C3_SHADOW_WORKER_FRESH_SECONDS
 
 
+def _binance_no_slash_to_slash(sym: str) -> str | None:
+    """Normalize an ``asset_universe.symbol`` (Binance no-slash form,
+    e.g. ``BTCUSDT``) to the ``predictions.symbol`` slash form
+    (``BTC/USDT``). Returns None on any symbol that doesn't end in USDT
+    — shadow lane is USDT-only; anything else is not in scope.
+    """
+    if not sym or not sym.endswith("USDT"):
+        return None
+    base = sym[: -len("USDT")]
+    if not base:
+        return None
+    return f"{base}/USDT"
+
+
+async def _load_current_universe_symbols(session: AsyncSession) -> set[str]:
+    """C3 helper: return the set of ``predictions.symbol``-form symbols
+    in the most recent ``asset_universe`` snapshot.
+
+    Canonical source verified 2026-07-24 via
+    ``shadow/universe.py:load_current_universe``: the current universe
+    is the set of rows where ``snapshot_at = MAX(snapshot_at)``. Uses
+    the same WHERE clause here so C3 stays in sync with what the shadow
+    worker actually subscribes to.
+
+    Returns a set for O(1) membership checks in the freshness loop.
+    Empty set means either the table is empty (first-boot before
+    universe_refresh_task runs) or every row's normalization failed —
+    caller must treat empty as an anomaly, not silently skip.
+    """
+    try:
+        rows = (await session.execute(sa.text(
+            "SELECT symbol FROM asset_universe "
+            "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM asset_universe)"
+        ))).all()
+    except Exception as e:  # noqa: BLE001
+        log.warning("healer C3: current-universe query failed: %s", e)
+        return set()
+    syms: set[str] = set()
+    for r in rows:
+        normalized = _binance_no_slash_to_slash(str(r.symbol))
+        if normalized is not None:
+            syms.add(normalized)
+    return syms
+
+
 async def detect_per_symbol_prediction_freshness(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[HealerFinding]:
@@ -298,6 +343,38 @@ async def detect_per_symbol_prediction_freshness(
     now = datetime.now(timezone.utc)
     try:
         async with session_factory() as session:
+            # Universe-scope fix (Phase 0 completion follow-up 2026-07-24):
+            # restrict the freshness scan to symbols in the CURRENT
+            # asset_universe snapshot. Pre-fix, the query returned every
+            # symbol that had ever produced a prediction — ancient
+            # dropouts (EDEN/USDT 63 days stale, ALT/USDT 56 days, etc.)
+            # counted against the stale/total ratio, drowning real drops
+            # under ~89 fake ones per tick.
+            universe_syms = await _load_current_universe_symbols(session)
+            # Empty-universe guard: NEVER silently pass. A detector that
+            # goes quiet because its input vanished is the worst failure
+            # mode. Emit ONE warning finding so healer-status surfaces it
+            # and the operator can investigate universe_refresh_task.
+            if not universe_syms:
+                _C3_UNIVERSE_STALL_STREAK.pop("universe_stall", None)
+                findings.append(HealerFinding(
+                    detector_name="per_symbol_prediction_freshness",
+                    severity="warning",
+                    summary=(
+                        "C3 anomaly: current asset_universe snapshot is "
+                        "empty. universe_refresh_task may be down; "
+                        "detector cannot evaluate freshness this tick."
+                    ),
+                    details={
+                        "class": "universe_input_empty",
+                        "reason": (
+                            "asset_universe returned zero USDT symbols "
+                            "for MAX(snapshot_at)"
+                        ),
+                    },
+                ))
+                return findings
+
             rows = (await session.execute(
                 sa.text(
                     "WITH latest AS ("
@@ -317,6 +394,12 @@ async def detect_per_symbol_prediction_freshness(
     stale_syms: list[dict[str, object]] = []
     total_pairs = 0
     for r in rows:
+        # Universe scope: skip symbols not in the current asset_universe
+        # snapshot. Ancient dropouts are no longer C3's concern; the
+        # shadow worker isn't subscribing to them, so their stale ts
+        # isn't a per-symbol drop, it's dead history.
+        if r.symbol not in universe_syms:
+            continue
         tf = str(r.timeframe)
         tf_seconds = _TF_SECONDS.get(tf)
         if tf_seconds is None:
