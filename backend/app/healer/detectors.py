@@ -24,6 +24,7 @@ Detector menu:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import sqlalchemy as sa
@@ -43,8 +44,33 @@ log = logging.getLogger(__name__)
 C1_HOURLY_RATE_LIMIT: int = 5
 C2_UNIVERSE_QUIET_LOOKBACK_MINUTES: int = 60
 C3_TIMEFRAME_MULTIPLIER: int = 2
+# C3 boot grace (Phase 0 completion 2026-07-24): suppress C3 until we've
+# been up long enough for at least one candle close on the longest TF
+# we run (currently 1h). Before that, predictions.ts holds pre-boot values
+# and every symbol looks stale → 85 warnings on first tick = cry-wolf.
+C3_BOOT_GRACE_SECONDS: int = 3600 + 300  # 1h + 5min slack
+# C3 severity split (Phase 0 completion): if EVERY symbol/tf pair is
+# stale AND the shadow_worker heartbeat is fresh, the producer is alive
+# but producing nothing — a real silent-drop class not covered by the
+# worker heartbeat check. Elevated to critical. Subset stale stays
+# warning (the per-symbol silent-drop is C3's original value).
+C3_UNIVERSE_STALL_RATIO: float = 1.0  # 100% stale = universe stall
+C3_SHADOW_WORKER_FRESH_SECONDS: int = 30 * 60  # matches worker_registry
 C4_BLOCKED_RATE_THRESHOLD: float = 0.95
 C4_LOOKBACK_HOURS: int = 2
+# C4 min-sample guard (Phase 0 completion): 2/2 = 100% is noise. Require
+# at least this many signals in the window before evaluating the rate.
+C4_MIN_SAMPLE_SIZE: int = 10
+
+# Module-load time as a proxy for container start. The healer module is
+# imported when main.py:lifespan spawns start_healer_detector_task, so
+# this captures within a few seconds of container boot.
+_MODULE_LOAD_TIME: float = time.time()
+
+
+def _container_uptime_seconds() -> float:
+    """Seconds since the healer module was imported ≈ container uptime."""
+    return time.time() - _MODULE_LOAD_TIME
 
 
 # ---- C1: dispatch-outcome monitor ---------------------------------------
@@ -196,25 +222,66 @@ _TF_SECONDS: dict[str, int] = {
 }
 
 
+async def _shadow_worker_is_fresh(
+    session: AsyncSession, *, now: datetime,
+) -> bool:
+    """C3 helper: True iff shadow_worker's last heartbeat is fresh.
+
+    Used to distinguish "worker alive but producing nothing" (a real
+    silent stall not caught by heartbeat checks) from "worker itself
+    is down" (which the watchdog would already alarm on)."""
+    try:
+        row = (await session.execute(
+            sa.text(
+                "SELECT beat_at FROM worker_heartbeats "
+                "WHERE worker_name = 'shadow_worker'"
+            ),
+        )).first()
+    except Exception as e:  # noqa: BLE001
+        log.warning("healer C3: shadow_worker heartbeat query failed: %s", e)
+        return False
+    if row is None or row[0] is None:
+        return False
+    beat_at = row[0]
+    if isinstance(beat_at, str):
+        beat_at = datetime.fromisoformat(beat_at.replace("Z", "+00:00"))
+    if beat_at.tzinfo is None:
+        beat_at = beat_at.replace(tzinfo=timezone.utc)
+    return (now - beat_at).total_seconds() <= C3_SHADOW_WORKER_FRESH_SECONDS
+
+
 async def detect_per_symbol_prediction_freshness(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[HealerFinding]:
-    """C3: any universe symbol with no prediction for >2× its timeframe.
+    """C3: prediction-freshness detector with severity split.
 
-    Catches the per-symbol silent-drop class the worker-heartbeat check
-    would miss (shadow_worker keeps beating for the fleet while one
-    symbol silently drops out of the prediction stream).
+    Two failure classes:
 
-    Fires ONE aggregate finding per detector tick if any symbols are
-    stale; keeps the details compact.
+      * **Universe stall** (critical): EVERY (symbol, tf) pair stale
+        AND shadow_worker heartbeat is fresh — producer alive but
+        producing nothing. A real silent-drop class not covered by
+        the watchdog heartbeat check.
+
+      * **Per-symbol drop** (warning): SUBSET stale while others fresh.
+        C3's original value — one symbol silently drops out of the WS
+        fleet while its siblings keep flowing.
+
+    Boot grace: suppressed for the first C3_BOOT_GRACE_SECONDS after
+    the healer module loaded (~= container start). Before the grace
+    elapses every prediction is pre-boot vintage; every symbol looks
+    stale → cry-wolf on every deploy (85 warnings observed on the
+    prod-promotion #27 first tick, 2026-07-24).
     """
-    now = datetime.now(timezone.utc)
     findings: list[HealerFinding] = []
+    uptime = _container_uptime_seconds()
+    if uptime < C3_BOOT_GRACE_SECONDS:
+        # Suppressed. Deploys don't produce noise; the next tick after
+        # the grace window will fire if anything is actually stale.
+        return findings
+
+    now = datetime.now(timezone.utc)
     try:
         async with session_factory() as session:
-            # Latest asset_universe snapshot symbol list (matches the
-            # scanner's freshness contract). We look at 1h and 15m TFs —
-            # the two the shadow worker currently runs.
             rows = (await session.execute(
                 sa.text(
                     "WITH latest AS ("
@@ -226,10 +293,13 @@ async def detect_per_symbol_prediction_freshness(
                     "SELECT symbol, timeframe, max_ts FROM latest"
                 ),
             )).all()
+            shadow_fresh = await _shadow_worker_is_fresh(session, now=now)
     except Exception as e:  # noqa: BLE001
         log.warning("healer C3: query failed: %s", e)
         return []
+
     stale_syms: list[dict[str, object]] = []
+    total_pairs = 0
     for r in rows:
         tf = str(r.timeframe)
         tf_seconds = _TF_SECONDS.get(tf)
@@ -242,6 +312,7 @@ async def detect_per_symbol_prediction_freshness(
             max_ts = datetime.fromisoformat(max_ts.replace("Z", "+00:00"))
         if max_ts.tzinfo is None:
             max_ts = max_ts.replace(tzinfo=timezone.utc)
+        total_pairs += 1
         age_seconds = (now - max_ts).total_seconds()
         if age_seconds > tf_seconds * C3_TIMEFRAME_MULTIPLIER:
             stale_syms.append({
@@ -250,20 +321,51 @@ async def detect_per_symbol_prediction_freshness(
                 "age_seconds": int(age_seconds),
                 "threshold_seconds": tf_seconds * C3_TIMEFRAME_MULTIPLIER,
             })
-    if stale_syms:
-        # Keep the details JSON compact — first 20 stale symbols is
-        # enough to diagnose. If the whole universe is stale (>20 hits)
-        # C2 will already have fired critical.
+
+    if not stale_syms:
+        return findings
+
+    stale_ratio = len(stale_syms) / total_pairs if total_pairs else 0.0
+    universe_stall = (
+        stale_ratio >= C3_UNIVERSE_STALL_RATIO
+        and shadow_fresh
+        and total_pairs > 0
+    )
+
+    if universe_stall:
+        findings.append(HealerFinding(
+            detector_name="per_symbol_prediction_freshness",
+            severity="critical",
+            summary=(
+                f"UNIVERSE STALL — {len(stale_syms)}/{total_pairs} symbol/tf "
+                f"pair(s) stale while shadow_worker heartbeat is fresh. "
+                f"Producer alive but producing nothing."
+            ),
+            details={
+                "stale_count": len(stale_syms),
+                "total_pairs": total_pairs,
+                "stale_ratio": stale_ratio,
+                "shadow_worker_fresh": True,
+                "sample": stale_syms[:20],
+                "class": "universe_stall",
+            },
+        ))
+    else:
         findings.append(HealerFinding(
             detector_name="per_symbol_prediction_freshness",
             severity="warning",
             summary=(
-                f"{len(stale_syms)} symbol/tf pair(s) with predictions "
-                f"older than {C3_TIMEFRAME_MULTIPLIER}× timeframe"
+                f"{len(stale_syms)}/{total_pairs} symbol/tf pair(s) with "
+                f"predictions older than {C3_TIMEFRAME_MULTIPLIER}× "
+                f"timeframe"
             ),
             details={
                 "stale_count": len(stale_syms),
+                "total_pairs": total_pairs,
+                "stale_ratio": stale_ratio,
+                "shadow_worker_fresh": shadow_fresh,
                 "sample": stale_syms[:20],
+                "class": "per_symbol_drop",
             },
         ))
     return findings
@@ -309,6 +411,13 @@ async def detect_blocked_rate_anomaly(
         return []
     total = int(row.total)
     blocked = int(row.blocked or 0)
+    # Min-sample guard (Phase 0 completion 2026-07-24): 2/2 = 100% is
+    # noise, not detection. Wait until the sample size is meaningful
+    # before evaluating the threshold. The observed prod-promotion #27
+    # first tick had 2/2 telegram signals blocked = 100% — clearly a
+    # cold-start artifact, not a real gate over-blocking.
+    if total < C4_MIN_SAMPLE_SIZE:
+        return []
     if total == 0:
         return findings
     rate = blocked / total
@@ -335,9 +444,13 @@ async def detect_blocked_rate_anomaly(
 __all__ = [
     "C1_HOURLY_RATE_LIMIT",
     "C2_UNIVERSE_QUIET_LOOKBACK_MINUTES",
+    "C3_BOOT_GRACE_SECONDS",
+    "C3_SHADOW_WORKER_FRESH_SECONDS",
     "C3_TIMEFRAME_MULTIPLIER",
+    "C3_UNIVERSE_STALL_RATIO",
     "C4_BLOCKED_RATE_THRESHOLD",
     "C4_LOOKBACK_HOURS",
+    "C4_MIN_SAMPLE_SIZE",
     "detect_blocked_rate_anomaly",
     "detect_dispatch_error_rate",
     "detect_per_symbol_prediction_freshness",

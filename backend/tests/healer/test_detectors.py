@@ -17,6 +17,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.healer import detectors as detectors_mod
 from app.healer.detectors import (
     detect_blocked_rate_anomaly,
     detect_dispatch_error_rate,
@@ -24,6 +25,16 @@ from app.healer.detectors import (
     detect_score_distribution_anomaly,
 )
 from app.healer.findings import DISPATCH_EXCEPTION_DETECTOR
+
+
+@pytest.fixture
+def bypass_c3_boot_grace(monkeypatch):
+    """Force C3 to skip the boot-grace check so tests can exercise the
+    detector body without waiting real wall-clock time. The Phase 0
+    completion adds a 1h+5min grace at module load; tests need to opt in."""
+    monkeypatch.setattr(
+        detectors_mod, "_container_uptime_seconds", lambda: 999_999.0,
+    )
 
 
 # ---- fixtures -----------------------------------------------------------
@@ -68,6 +79,15 @@ async def _mk_predictions_engine():
             "direction TEXT NOT NULL, "
             "final_score REAL NOT NULL, "
             "confidence REAL NOT NULL)"
+        ))
+        # worker_heartbeats — needed by C3's _shadow_worker_is_fresh
+        # helper to decide universe-stall vs per-symbol-drop.
+        await conn.execute(sa.text(
+            "CREATE TABLE worker_heartbeats ("
+            "worker_name TEXT PRIMARY KEY, "
+            "beat_at TEXT NOT NULL, "
+            "last_status TEXT, "
+            "details TEXT)"
         ))
     return engine
 
@@ -257,8 +277,8 @@ async def test_c2_below_sample_size_floor_no_finding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_c3_stale_symbol_alarms_warning() -> None:
-    """One symbol's prediction is >2× TF old → warning."""
+async def test_c3_stale_symbol_alarms_warning(bypass_c3_boot_grace) -> None:
+    """SUBSET stale (per-symbol drop) → warning. Original C3 value."""
     engine = await _mk_predictions_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
@@ -282,12 +302,13 @@ async def test_c3_stale_symbol_alarms_warning() -> None:
     assert findings[0].severity == "warning"
     assert findings[0].details is not None
     assert findings[0].details["stale_count"] == 1
+    assert findings[0].details["class"] == "per_symbol_drop"
     sample = findings[0].details["sample"]
     assert any(item["symbol"] == "STALE/USDT" for item in sample)
 
 
 @pytest.mark.asyncio
-async def test_c3_all_symbols_fresh_no_finding() -> None:
+async def test_c3_all_symbols_fresh_no_finding(bypass_c3_boot_grace) -> None:
     engine = await _mk_predictions_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
@@ -307,12 +328,113 @@ async def test_c3_all_symbols_fresh_no_finding() -> None:
     assert findings == []
 
 
+@pytest.mark.asyncio
+async def test_c3_boot_grace_suppresses_all_findings(monkeypatch) -> None:
+    """During boot grace, C3 returns [] even for definitely-stale rows.
+
+    Regression against the 2026-07-24 prod-promotion #27 first tick that
+    emitted 85 warnings because every prediction was pre-boot vintage.
+    """
+    monkeypatch.setattr(
+        detectors_mod, "_container_uptime_seconds", lambda: 60.0,
+    )
+    engine = await _mk_predictions_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"OLD{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_c3_universe_stall_is_critical_when_shadow_worker_fresh(
+    bypass_c3_boot_grace,
+) -> None:
+    """ALL symbols stale AND shadow_worker heartbeat fresh → critical
+    'universe stall'. Producer alive but producing nothing."""
+    engine = await _mk_predictions_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # Every symbol is stale
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"SYM{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        # But shadow_worker heartbeat is fresh
+        await s.execute(sa.text(
+            "INSERT INTO worker_heartbeats "
+            "(worker_name, beat_at, last_status) "
+            "VALUES ('shadow_worker', :b, 'ok')"
+        ), {"b": (now - timedelta(seconds=30)).isoformat()})
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert len(findings) == 1
+    assert findings[0].severity == "critical", (
+        f"expected critical for universe stall, got {findings[0].severity}: "
+        f"{findings[0].summary}"
+    )
+    assert "UNIVERSE STALL" in findings[0].summary
+    assert findings[0].details["class"] == "universe_stall"
+    assert findings[0].details["shadow_worker_fresh"] is True
+
+
+@pytest.mark.asyncio
+async def test_c3_all_stale_without_fresh_shadow_worker_stays_warning(
+    bypass_c3_boot_grace,
+) -> None:
+    """ALL symbols stale BUT shadow_worker heartbeat is ALSO stale/absent
+    → warning, NOT critical. When the worker itself is down the watchdog
+    already alarms; C3 should not double-alarm."""
+    engine = await _mk_predictions_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        for i in range(5):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"SYM{i}/USDT",
+                "t": (now - timedelta(hours=6)).isoformat(),
+            })
+        # NO shadow_worker heartbeat inserted → shadow_fresh = False
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert len(findings) == 1
+    assert findings[0].severity == "warning"
+    assert findings[0].details["class"] == "per_symbol_drop"
+    assert findings[0].details["shadow_worker_fresh"] is False
+
+
 # ---- C4 tests -----------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_c4_high_blocked_rate_alarms_info() -> None:
-    """95% of telegram_signals blocked over the window → info."""
+    """95% of telegram_signals blocked over the window → info.
+
+    Sample size 20 is well above the C4_MIN_SAMPLE_SIZE guard.
+    """
     engine = await _mk_telegram_signals_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
@@ -334,6 +456,34 @@ async def test_c4_high_blocked_rate_alarms_info() -> None:
     assert len(findings) == 1
     assert findings[0].severity == "info"
     assert "19/20" in findings[0].summary
+
+
+@pytest.mark.asyncio
+async def test_c4_min_sample_guard_suppresses_small_windows() -> None:
+    """2/2 = 100% blocked is noise, not detection. The min-sample guard
+    must suppress the finding until at least C4_MIN_SAMPLE_SIZE signals
+    exist in the lookback window.
+
+    Regression against the 2026-07-24 prod-promotion #27 first tick that
+    fired a 2/2 = 100% finding immediately after container boot.
+    """
+    engine = await _mk_telegram_signals_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # 2 blocked out of 2 = 100%, but sample size < MIN_SAMPLE_SIZE
+        for i in range(2):
+            await s.execute(sa.text(
+                "INSERT INTO telegram_signals "
+                "(id, sent_at, response) VALUES (:i, :t, 'auto_skipped')"
+            ), {"i": f"sig_early_{i}",
+                "t": (now - timedelta(minutes=30)).isoformat()})
+        await s.commit()
+
+    findings = await detect_blocked_rate_anomaly(factory)
+    assert findings == [], (
+        f"expected no finding below min-sample threshold, got {findings}"
+    )
 
 
 @pytest.mark.asyncio

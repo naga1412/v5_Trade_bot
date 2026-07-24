@@ -391,6 +391,29 @@ async def _maybe_dispatch(
             )
     except Exception as e:  # noqa: BLE001
         log.error("dispatch_if_eligible failed: %s", e)
+        # Healer C1 writer (Phase 0 completion): record the exception so
+        # the C1 detector can aggregate by type and alarm CRITICAL on any
+        # NEVER-BEFORE-SEEN class. This is the true outermost boundary —
+        # every dispatch-path exception (glue, dispatcher, place-order,
+        # audit chain, ANY of it) lands here before being swallowed.
+        # Best-effort: healer write failure must never re-raise.
+        try:
+            from app.healer import record_dispatch_error
+            await record_dispatch_error(
+                session_factory,
+                exception=e,
+                context={
+                    "symbol": getattr(pred, "symbol", None),
+                    "timeframe": getattr(pred, "timeframe", None),
+                    "direction": getattr(
+                        getattr(pred, "final", None), "direction", None,
+                    ),
+                },
+            )
+        except Exception as heal_exc:  # noqa: BLE001
+            log.warning(
+                "healer.record_dispatch_error failed: %s", heal_exc,
+            )
 
 
 def start_background_worker() -> asyncio.Task:
