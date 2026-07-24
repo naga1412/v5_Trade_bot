@@ -56,6 +56,22 @@ C3_BOOT_GRACE_SECONDS: int = 3600 + 300  # 1h + 5min slack
 # warning (the per-symbol silent-drop is C3's original value).
 C3_UNIVERSE_STALL_RATIO: float = 1.0  # 100% stale = universe stall
 C3_SHADOW_WORKER_FRESH_SECONDS: int = 30 * 60  # matches worker_registry
+# C3 universe-stall streak (Phase 0 completion 2026-07-24 follow-up):
+# transient post-restart timing races (boot grace expires seconds after
+# the last hourly close was 2h old) can single-tick a universe_stall
+# critical. Require N consecutive tick observations before escalating to
+# CRITICAL — same pattern B1 uses for heartbeat_error. On tick 1 the
+# finding is emitted as WARNING (per_symbol_drop shape); on tick N the
+# escalated CRITICAL fires. Detector tick cadence is
+# ``HEALER_TICK_SECONDS = 5 * 60`` (5 min) — so the escalation delay is
+# 5 min per extra tick required.
+C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL: int = 2
+
+# In-process streak counter, keyed on "universe_stall" (single detector
+# scope). In-memory only; resets on container restart, which is the
+# right semantics — a fresh restart resets the boot grace and the
+# streak together. Tests can monkey-patch this dict to seed a streak.
+_C3_UNIVERSE_STALL_STREAK: dict[str, int] = {}
 C4_BLOCKED_RATE_THRESHOLD: float = 0.95
 C4_LOOKBACK_HOURS: int = 2
 # C4 min-sample guard (Phase 0 completion): 2/2 = 100% is noise. Require
@@ -323,6 +339,8 @@ async def detect_per_symbol_prediction_freshness(
             })
 
     if not stale_syms:
+        # Everything fresh — reset any accumulated universe_stall streak.
+        _C3_UNIVERSE_STALL_STREAK.pop("universe_stall", None)
         return findings
 
     stale_ratio = len(stale_syms) / total_pairs if total_pairs else 0.0
@@ -333,24 +351,67 @@ async def detect_per_symbol_prediction_freshness(
     )
 
     if universe_stall:
-        findings.append(HealerFinding(
-            detector_name="per_symbol_prediction_freshness",
-            severity="critical",
-            summary=(
-                f"UNIVERSE STALL — {len(stale_syms)}/{total_pairs} symbol/tf "
-                f"pair(s) stale while shadow_worker heartbeat is fresh. "
-                f"Producer alive but producing nothing."
-            ),
-            details={
-                "stale_count": len(stale_syms),
-                "total_pairs": total_pairs,
-                "stale_ratio": stale_ratio,
-                "shadow_worker_fresh": True,
-                "sample": stale_syms[:20],
-                "class": "universe_stall",
-            },
-        ))
+        # Streak gate: escalate to CRITICAL only after N consecutive
+        # tick observations. On tick 1 emit as WARNING to avoid paging
+        # the operator on a transient post-restart timing race (boot
+        # grace expiring seconds after the last hourly close aged past
+        # 2× threshold). Once the streak crosses the threshold, emit
+        # CRITICAL; the streak resets on any tick where universe_stall
+        # doesn't hold (see _c3_reset_universe_stall_streak below).
+        streak = _C3_UNIVERSE_STALL_STREAK.get("universe_stall", 0) + 1
+        _C3_UNIVERSE_STALL_STREAK["universe_stall"] = streak
+        if streak >= C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL:
+            findings.append(HealerFinding(
+                detector_name="per_symbol_prediction_freshness",
+                severity="critical",
+                summary=(
+                    f"UNIVERSE STALL (streak={streak}) — "
+                    f"{len(stale_syms)}/{total_pairs} symbol/tf pair(s) "
+                    f"stale while shadow_worker heartbeat is fresh across "
+                    f"{streak} consecutive ticks. Producer alive but "
+                    f"producing nothing."
+                ),
+                details={
+                    "stale_count": len(stale_syms),
+                    "total_pairs": total_pairs,
+                    "stale_ratio": stale_ratio,
+                    "shadow_worker_fresh": True,
+                    "sample": stale_syms[:20],
+                    "class": "universe_stall",
+                    "streak": streak,
+                    "streak_threshold": C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL,
+                },
+            ))
+        else:
+            # First-observation warning: same shape as per_symbol_drop
+            # so downstream readers can filter, but details.class marks
+            # it as pending-escalation universe_stall.
+            findings.append(HealerFinding(
+                detector_name="per_symbol_prediction_freshness",
+                severity="warning",
+                summary=(
+                    f"universe stall observed (streak={streak}/"
+                    f"{C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL}) — "
+                    f"{len(stale_syms)}/{total_pairs} stale, shadow_worker "
+                    f"fresh. Escalates to CRITICAL on next tick if the "
+                    f"condition holds."
+                ),
+                details={
+                    "stale_count": len(stale_syms),
+                    "total_pairs": total_pairs,
+                    "stale_ratio": stale_ratio,
+                    "shadow_worker_fresh": True,
+                    "sample": stale_syms[:20],
+                    "class": "universe_stall_pending",
+                    "streak": streak,
+                    "streak_threshold": C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL,
+                },
+            ))
     else:
+        # Not a universe stall on this tick — reset any accumulated
+        # streak so a transient post-restart tick doesn't count toward
+        # a later, unrelated stall.
+        _C3_UNIVERSE_STALL_STREAK.pop("universe_stall", None)
         findings.append(HealerFinding(
             detector_name="per_symbol_prediction_freshness",
             severity="warning",
@@ -448,6 +509,7 @@ __all__ = [
     "C3_SHADOW_WORKER_FRESH_SECONDS",
     "C3_TIMEFRAME_MULTIPLIER",
     "C3_UNIVERSE_STALL_RATIO",
+    "C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL",
     "C4_BLOCKED_RATE_THRESHOLD",
     "C4_LOOKBACK_HOURS",
     "C4_MIN_SAMPLE_SIZE",
