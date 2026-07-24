@@ -32,6 +32,28 @@ Two ✅ rows are **CONDITIONALLY APPROVED** for Phase 1 implementation:
 Branches may be prepared in advance. They will NOT merge until all three
 conditions are met.
 
+### Clock rule refinement (2026-07-24 close-out)
+
+CRITICAL alerts split into two classes for clock-management purposes:
+
+  * **False-positive CRITICAL** — a CRITICAL fired by a detector that did
+    NOT reflect a real fault (e.g. C3 universe_stall firing during the
+    03:00 UTC nightly batch when predictions naturally lag). This
+    **RESETS the 7-day clock AND BLOCKS Phase 1 approval** until the
+    detector is fixed. A detector that cries wolf must never drive
+    auto-actions — the whole point of the 7-day condition is
+    detector-trust, not incident-frequency.
+  * **True-positive CRITICAL** — a CRITICAL fired by a detector because
+    a real fault exists. This does **NOT reset the detector-trust
+    clock**; fix the underlying fault on its own merits. The detector
+    did its job; punishing it for that would create pressure to blunt
+    detection.
+
+Classification is done post-hoc by the operator when a CRITICAL fires:
+   "Was this real?" → yes = true-positive; no = false-positive.
+Ambiguous cases default to false-positive (safer: err on the side of
+distrusting the detector rather than the operator's incident sense).
+
 All ⛔ rows below are **RATIFIED PERMANENT** — the healer must NEVER perform
 them regardless of detector confidence, disease-model refinement, or any
 future automation ambition. Ratification is not up for review.
@@ -254,6 +276,31 @@ detection lag once it does. Both framings matter:
   * Time-to-alert once error is on disk: ≤ 300 s
 
 This system's product is trust; the claims stay exact.
+
+## Dev soak = executing staging deploy (correction 2026-07-24)
+
+Correcting an inference in earlier close-out notes: `.github/workflows/deploy.yml`
+routes `push: branches: [main, dev]` — the **dev branch DOES deploy to a
+running staging environment** (not purely a cooling-off period).
+
+Staging layout (per `deploy.yml:79-114`):
+  * Same Hetzner host as prod, separate docker-compose stack
+    (`docker-compose.staging.yml`) with `--env-file .env.staging`
+  * Directory: `/opt/trading-radar-staging` (separate git checkout so a
+    corrupted dev branch can't overwrite the prod tree)
+  * Port: 8001 (prod uses 8000)
+  * Postgres: separate DB, separate volumes
+  * Domain: `staging.aji12.nagayuaj.com`
+  * Autonomous trading: **hard-OFF regardless of `.env.staging` contents**
+    (compose env override, per `deploy.yml:14`)
+
+Implication for soak-class documentation: dev soak IS observation, not
+just a cool-down. Detector behaviour on staging is representative for
+UI-facing and DB-facing paths; it is NOT representative for the live
+trade path (autonomous trading forced off) or for the shadow universe
+if staging is empty. Use staging soak signal for schema/migration/CI
+correctness; use prod-post-deploy verify for behaviour that depends on
+live universe or live dispatch traffic.
 
 ## Operator sign-off
 
