@@ -51,6 +51,19 @@ class WorkerSpec:
     # The worker records ONE heartbeat with `status="single_shot_completed"`
     # on clean exit. `mtf_cache_prewarm_task` is the canonical example.
     single_shot: bool = False
+    # Healer B3 (2026-07-23): tuple of env vars that gate whether the worker
+    # ACTUALLY DOES WORK. When none are set to a truthy value, the watchdog
+    # classifies the worker as `expected_dormant` (info, not alarm) even if
+    # it never heartbeats. Distinct from `required_env`, which gates whether
+    # the worker is even SPAWNED — `optional_gate_env` covers workers that
+    # ARE spawned but self-disable when their feature flag is off (auto_promote_task
+    # is the canonical example: spawned when AUTONOMOUS_TRADING_ENABLED is
+    # set, but early-returns when AUTO_PROMOTE_TO_* is not enabled).
+    #
+    # Cry-wolf prevention: without this, auto_promote_task alarms as
+    # never_heartbeated on every watchdog tick under the current opt-in-off
+    # prod config — training the operator to ignore the watchdog.
+    optional_gate_env: tuple[str, ...] = ()
 
 
 # Canonical liveness signal for workers that have one in a natural table.
@@ -234,6 +247,16 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,
         required_env=("AUTONOMOUS_TRADING_ENABLED",),
+        # Healer B3 (2026-07-23): the loop early-returns without heartbeating
+        # when neither AUTO_PROMOTE_TO_TELEGRAM_ENABLED nor
+        # AUTO_PROMOTE_TO_FULLYAUTO_ENABLED is truthy. Both default false, so
+        # under current prod config this worker is intentionally idle — the
+        # watchdog must class it expected_dormant rather than never_heartbeated
+        # to stop the daily cry-wolf alarm.
+        optional_gate_env=(
+            "AUTO_PROMOTE_TO_TELEGRAM_ENABLED",
+            "AUTO_PROMOTE_TO_FULLYAUTO_ENABLED",
+        ),
         # FU-1 closed for auto_promote_task — record_heartbeat wired in
         # run_auto_promote_loop per daily evaluation cycle.
     ),
@@ -301,7 +324,13 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
             "Writes one symbol_performance_snapshots row per symbol."
         ),
         liveness_query=HEARTBEAT,
-        max_staleness_seconds=2 * 86400,  # 2-day budget (1 missed run allowed)
+        # Healer B2 (2026-07-23): tightened from 2 days ("1 missed run allowed")
+        # to cadence + 10% grace, matching the live_worker treatment. Under
+        # the old 48h budget the 2026-07-22 stale incident (last successful
+        # cycle 7/20 17:47 UTC) took ~24h longer than necessary to visibly
+        # cross the alarm threshold. 26h = 24h cadence + 2h slack — one
+        # missed cycle now alarms within an hour of the next scheduled fire.
+        max_staleness_seconds=26 * 60 * 60,
         stateful=False,  # safe to auto-restart
     ),
     # 20. PR10.5 / FU-28 — UI data-pipeline freshness monitor.
@@ -317,6 +346,20 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         ),
         liveness_query=HEARTBEAT,
         max_staleness_seconds=15 * 60,
+        stateful=False,
+    ),
+    # 21. Healer Phase 0 — detect-only monitoring layer. Runs the C1-C4
+    #     detectors on a 5-min cadence + persists findings to
+    #     healer_findings for the healer-status ops-debug probe.
+    WorkerSpec(
+        name="healer_detector_task",
+        description=(
+            "5-min poll of C1-C4 detectors (dispatch error rate, "
+            "score-distribution anomaly, per-symbol prediction "
+            "freshness, blocked-rate anomaly)"
+        ),
+        liveness_query=HEARTBEAT,
+        max_staleness_seconds=15 * 60,  # 5-min cadence + 10-min slack
         stateful=False,
     ),
 )
