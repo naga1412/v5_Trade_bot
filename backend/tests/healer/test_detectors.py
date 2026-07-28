@@ -825,3 +825,108 @@ async def test_c4_zero_dispatches_no_finding() -> None:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     findings = await detect_blocked_rate_anomaly(factory)
     assert findings == []
+
+
+# ---- C3 fleet-eligible scope tests (2026-07-28) -------------------------
+
+
+@pytest.mark.asyncio
+async def test_c3_ranks_21_plus_are_out_of_scope(
+    bypass_c3_boot_grace,
+) -> None:
+    """Symbols ranked beyond KEEPALIVE_TOP_N must NOT be flagged as
+    stale even when their predictions are ancient. They are structurally
+    outside the fleet's subscription set — ratified 2026-07-28 per
+    docs/superpowers/decisions/2026-07-28-fleet-cap-top-20-ratified.md.
+
+    Regression against the 9/27 permanent WARNING that fired every 5min
+    tick between 2026-07-27 and 2026-07-28 for LINK/UNI/LTC/etc.
+    (ranks 21-30).
+    """
+    # 21 symbols in universe (ranks 0..20). KEEPALIVE_TOP_N=20 means
+    # the last one (rank 20) is OUT of the fleet slice ([:20] takes
+    # ranks 0..19). Seed a stale prediction row for it — must NOT
+    # produce a finding.
+    universe = [f"IN{i}USDT" for i in range(20)] + ["OUTUSDT"]
+    engine = await _mk_predictions_engine(seed_universe=universe)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # All 20 IN-fleet symbols fresh (30min old on 1h TF).
+        for i in range(20):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"IN{i}/USDT",
+                "t": (now - timedelta(minutes=30)).isoformat(),
+            })
+        # OUT-of-fleet symbol has an ancient prediction (50 days old).
+        # This mirrors LINK's real state in prod on 2026-07-28.
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('OUT/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(days=50)).isoformat()})
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    # OUT/USDT (rank 20) must be filtered out. No stale finding.
+    assert findings == [], (
+        "rank >= KEEPALIVE_TOP_N must be structurally out of scope; "
+        f"got findings: {findings}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_c3_btc_singleton_stays_expected_when_dropped_from_top_20(
+    bypass_c3_boot_grace,
+) -> None:
+    """BTC/USDT/1h is handled by the singleton `live_worker` regardless
+    of whether BTCUSDT is in the fleet's top-20 rank slice on any given
+    day. DEFAULT_EXCLUDE (the fleet's "handled elsewhere" set) is
+    unioned back into the expected set so C3 keeps monitoring BTC even
+    if it drops out of the top-20 rank (rare but possible).
+
+    Regression against a mis-implementation where the expected set is
+    computed as `fleet_pairs - DEFAULT_EXCLUDE` and BTC goes dark for
+    C3 on days it ranks below 20.
+    """
+    # 21-symbol universe where BTC is deliberately NOT in top-20 (rank
+    # 20 — one past the cap). Every other slot is filler.
+    universe = [f"FILL{i}USDT" for i in range(20)] + ["BTCUSDT"]
+    engine = await _mk_predictions_engine(seed_universe=universe)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        # All 20 filler symbols fresh.
+        for i in range(20):
+            await s.execute(sa.text(
+                "INSERT INTO predictions "
+                "(symbol, timeframe, ts, direction, final_score, confidence) "
+                "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+            ), {
+                "sym": f"FILL{i}/USDT",
+                "t": (now - timedelta(minutes=30)).isoformat(),
+            })
+        # BTC is stale (3 hours on 1h TF). Must be flagged even though
+        # BTCUSDT is at rank 20 (out of top-20 fleet slice) — the
+        # singleton is still expected to write it.
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES ('BTC/USDT', '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"t": (now - timedelta(hours=3)).isoformat()})
+        await s.commit()
+
+    findings = await detect_per_symbol_prediction_freshness(factory)
+    assert len(findings) == 1, findings
+    assert findings[0].severity == "warning"
+    assert findings[0].details["stale_count"] == 1
+    sample = findings[0].details["sample"]
+    assert any(item["symbol"] == "BTC/USDT" for item in sample), (
+        "BTC/USDT must remain expected via DEFAULT_EXCLUDE union even "
+        "when it drops out of the top-20 fleet slice; got sample: "
+        f"{sample}"
+    )

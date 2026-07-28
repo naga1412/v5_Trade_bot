@@ -35,6 +35,13 @@ from app.healer.findings import (
     HealerFinding,
     upsert_known_error_type,
 )
+from app.shadow.universe import load_current_universe
+from app.ws.keepalive import (
+    DEFAULT_EXCLUDE,
+    KEEPALIVE_TIMEFRAME,
+    KEEPALIVE_TOP_N,
+    to_pair,
+)
 
 
 log = logging.getLogger(__name__)
@@ -280,35 +287,67 @@ def _binance_no_slash_to_slash(sym: str) -> str | None:
     return f"{base}/USDT"
 
 
-async def _load_current_universe_symbols(session: AsyncSession) -> set[str]:
-    """C3 helper: return the set of ``predictions.symbol``-form symbols
-    in the most recent ``asset_universe`` snapshot.
+async def _load_expected_prediction_pairs(
+    session: AsyncSession,
+) -> set[tuple[str, str]]:
+    """C3 helper: return the set of (symbol, timeframe) pairs the live
+    prediction stack is EXPECTED to produce.
 
-    Canonical source verified 2026-07-24 via
-    ``shadow/universe.py:load_current_universe``: the current universe
-    is the set of rows where ``snapshot_at = MAX(snapshot_at)``. Uses
-    the same WHERE clause here so C3 stays in sync with what the shadow
-    worker actually subscribes to.
+    Mirrors INTENT, not runtime state — reads the same universe source
+    and shares the same top-N constant the fleet uses, so C3 asks "did
+    every symbol that SHOULD have a prediction get one?" A runtime-state
+    mirror (e.g. reading ws_keepalive_task's children list) would go
+    silent about the very failure C3 exists to catch: a child that
+    failed to spawn drops out of the runtime set and its absence looks
+    normal.
 
-    Returns a set for O(1) membership checks in the freshness loop.
-    Empty set means either the table is empty (first-boot before
-    universe_refresh_task runs) or every row's normalization failed —
-    caller must treat empty as an anomaly, not silently skip.
+    Composition:
+      * Fleet (ws_keepalive_task): top-``KEEPALIVE_TOP_N`` universe
+        symbols on ``KEEPALIVE_TIMEFRAME`` = 20 × 1h = 20 pairs, minus
+        ``DEFAULT_EXCLUDE`` (BTC/USDT/1h — handled by live_worker).
+      * Singleton (live_worker): the pairs the fleet excludes. Adding
+        them back ensures BTC is expected even on the (rare) day it
+        drops out of top-20 by rank — the singleton runs on it
+        regardless.
+
+    Result: `(fleet_pairs) ∪ DEFAULT_EXCLUDE`. When BTC is in top-20
+    (usually rank 1), that's exactly ``KEEPALIVE_TOP_N`` pairs; when
+    BTC drops out, it's ``KEEPALIVE_TOP_N + |DEFAULT_EXCLUDE|``.
+
+    Ranks 21-30 are OUT OF SCOPE by design — ratified 2026-07-28 per
+    ``docs/superpowers/decisions/2026-07-28-fleet-cap-top-20-ratified.md``.
+    Their absence from this set is intentional; C3 will not flag them
+    even though the shadow_worker subscribes to all 30 for shadow-only
+    trades. See the decision doc for the +EV analysis + reversal
+    criteria.
+
+    Returns an empty set only on universe-query failure (logged); the
+    caller treats empty as an anomaly, not silent skip.
     """
     try:
-        rows = (await session.execute(sa.text(
-            "SELECT symbol FROM asset_universe "
-            "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM asset_universe)"
-        ))).all()
+        entries = await load_current_universe(session)
     except Exception as e:  # noqa: BLE001
-        log.warning("healer C3: current-universe query failed: %s", e)
+        log.warning("healer C3: load_current_universe failed: %s", e)
         return set()
-    syms: set[str] = set()
-    for r in rows:
-        normalized = _binance_no_slash_to_slash(str(r.symbol))
-        if normalized is not None:
-            syms.add(normalized)
-    return syms
+
+    # Empty universe → empty result; caller's empty-universe guard
+    # fires the anomaly finding. Do NOT return DEFAULT_EXCLUDE alone
+    # here — the singleton alone isn't a "healthy" state, and the
+    # operator needs the alarm.
+    if not entries:
+        return set()
+
+    # Fleet slice — imports KEEPALIVE_TOP_N so any future retune of the
+    # cap flows here automatically (one source of truth).
+    fleet_pairs: set[tuple[str, str]] = {
+        (to_pair(e.symbol), KEEPALIVE_TIMEFRAME)
+        for e in entries[:KEEPALIVE_TOP_N]
+    }
+    # Union with DEFAULT_EXCLUDE (the singleton's pairs) — fleet's
+    # excluded set IS the singleton's covered set by construction, so
+    # this restores the singleton's expectation without hard-coding
+    # BTC/USDT/1h in a second place.
+    return fleet_pairs | set(DEFAULT_EXCLUDE)
 
 
 async def detect_per_symbol_prediction_freshness(
@@ -343,33 +382,37 @@ async def detect_per_symbol_prediction_freshness(
     now = datetime.now(timezone.utc)
     try:
         async with session_factory() as session:
-            # Universe-scope fix (Phase 0 completion follow-up 2026-07-24):
-            # restrict the freshness scan to symbols in the CURRENT
-            # asset_universe snapshot. Pre-fix, the query returned every
-            # symbol that had ever produced a prediction — ancient
-            # dropouts (EDEN/USDT 63 days stale, ALT/USDT 56 days, etc.)
-            # counted against the stale/total ratio, drowning real drops
-            # under ~89 fake ones per tick.
-            universe_syms = await _load_current_universe_symbols(session)
+            # Scope fix (2026-07-28, post prod-promotion #28):
+            # narrow the freshness scan from "all universe symbols" to
+            # "symbols the fleet+singleton are EXPECTED to write
+            # predictions for" = top-KEEPALIVE_TOP_N slice ∪ singleton.
+            # Ranks 21-30 are out-of-scope by ratified decision — see
+            # docs/superpowers/decisions/2026-07-28-fleet-cap-top-20-
+            # ratified.md. Prior universe-wide scope produced ~10
+            # permanent false-positive warnings/tick (LINK/UNI/LTC/etc.
+            # correctly detected as prediction-less, but there is no
+            # WS child to restart for them by architectural design).
+            expected_pairs = await _load_expected_prediction_pairs(session)
             # Empty-universe guard: NEVER silently pass. A detector that
             # goes quiet because its input vanished is the worst failure
             # mode. Emit ONE warning finding so healer-status surfaces it
             # and the operator can investigate universe_refresh_task.
-            if not universe_syms:
+            if not expected_pairs:
                 _C3_UNIVERSE_STALL_STREAK.pop("universe_stall", None)
                 findings.append(HealerFinding(
                     detector_name="per_symbol_prediction_freshness",
                     severity="warning",
                     summary=(
-                        "C3 anomaly: current asset_universe snapshot is "
-                        "empty. universe_refresh_task may be down; "
-                        "detector cannot evaluate freshness this tick."
+                        "C3 anomaly: expected-prediction set is empty. "
+                        "universe_refresh_task may be down or the "
+                        "top-N slice is misconfigured; detector cannot "
+                        "evaluate freshness this tick."
                     ),
                     details={
                         "class": "universe_input_empty",
                         "reason": (
-                            "asset_universe returned zero USDT symbols "
-                            "for MAX(snapshot_at)"
+                            "load_current_universe returned zero "
+                            "entries for MAX(snapshot_at)"
                         ),
                     },
                 ))
@@ -394,13 +437,15 @@ async def detect_per_symbol_prediction_freshness(
     stale_syms: list[dict[str, object]] = []
     total_pairs = 0
     for r in rows:
-        # Universe scope: skip symbols not in the current asset_universe
-        # snapshot. Ancient dropouts are no longer C3's concern; the
-        # shadow worker isn't subscribing to them, so their stale ts
-        # isn't a per-symbol drop, it's dead history.
-        if r.symbol not in universe_syms:
-            continue
         tf = str(r.timeframe)
+        # Fleet-eligible scope: skip (symbol, timeframe) pairs the live
+        # prediction stack isn't expected to write. Ranks 21-30 and
+        # non-1h timeframes for top-20 fall out here — see
+        # _load_expected_prediction_pairs docstring for the composition
+        # rules and the ratified decision doc for why this scope is
+        # correct.
+        if (r.symbol, tf) not in expected_pairs:
+            continue
         tf_seconds = _TF_SECONDS.get(tf)
         if tf_seconds is None:
             continue
