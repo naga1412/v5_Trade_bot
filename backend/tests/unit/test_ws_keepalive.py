@@ -2,7 +2,7 @@
 
 These cover the four pieces of the supervisor in isolation:
 
-1. ``_to_pair`` — Binance no-slash ↔ slash-form normalization.
+1. ``to_pair`` — Binance no-slash ↔ slash-form normalization.
 2. ``_load_keepalive_symbols`` — top-N + exclude filtering against a
    real (sqlite) asset_universe table; graceful empty on DB failure.
 3. ``_refresh_children`` — reconciliation diff: add new, cancel removed,
@@ -28,18 +28,18 @@ from app.ws import keepalive
 
 
 # ---------------------------------------------------------------------------
-# _to_pair — pure helper.
+# to_pair — pure helper.
 
 
 def test_to_pair_strips_usdt_suffix() -> None:
-    assert keepalive._to_pair("BTCUSDT") == "BTC/USDT"
-    assert keepalive._to_pair("ETHUSDT") == "ETH/USDT"
-    assert keepalive._to_pair("1000PEPEUSDT") == "1000PEPE/USDT"
+    assert keepalive.to_pair("BTCUSDT") == "BTC/USDT"
+    assert keepalive.to_pair("ETHUSDT") == "ETH/USDT"
+    assert keepalive.to_pair("1000PEPEUSDT") == "1000PEPE/USDT"
 
 
 def test_to_pair_leaves_non_usdt_alone() -> None:
     """Defensive: if the table ever holds a non-USDT symbol we don't mangle it."""
-    assert keepalive._to_pair("BTCBUSD") == "BTCBUSD"
+    assert keepalive.to_pair("BTCBUSD") == "BTCBUSD"
 
 
 # ---------------------------------------------------------------------------
