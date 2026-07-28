@@ -65,11 +65,13 @@ DEFAULT_EXCLUDE: frozenset[tuple[str, str]] = frozenset({("BTC/USDT", "1h")})
 WORKER_NAME: str = "ws_keepalive_task"
 
 
-# Internal SPOT symbol → "X/USDT" formatter. The asset_universe table
-# stores symbols in Binance no-slash form (BTCUSDT); the rest of the
-# stack uses slash form (BTC/USDT). We normalize at this boundary so
-# downstream call sites don't have to special-case.
-def _to_pair(symbol_no_slash: str) -> str:
+# SPOT symbol → "X/USDT" formatter. The asset_universe table stores
+# symbols in Binance no-slash form (BTCUSDT); the rest of the stack uses
+# slash form (BTC/USDT). We normalize at this boundary so downstream
+# call sites don't have to special-case. Public so the healer C3
+# detector can use the same normalization when scoping to the fleet's
+# expected prediction set — one source of truth for the pair format.
+def to_pair(symbol_no_slash: str) -> str:
     if symbol_no_slash.endswith("USDT"):
         return f"{symbol_no_slash[:-4]}/USDT"
     return symbol_no_slash
@@ -130,7 +132,7 @@ async def _load_keepalive_symbols(
 
     pairs: list[tuple[str, str]] = []
     for entry in entries[:top_n]:
-        pair = _to_pair(entry.symbol)
+        pair = to_pair(entry.symbol)
         key = (pair, timeframe)
         if key in exclude:
             continue
@@ -262,4 +264,5 @@ __all__ = [
     "WORKER_NAME",
     "run_keepalive",
     "start_keepalive_task",
+    "to_pair",
 ]
