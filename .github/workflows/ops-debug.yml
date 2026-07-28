@@ -44,6 +44,7 @@ on:
           - shadow-allow-shorts-enable # WRITE: flip SHADOW_ALLOW_SHORTS=true in .env, recreate backend (up -d). Verifies both SHADOW_ALLOW_SHORTS and DISABLE_SHORT_SIGNALS after restart. Requires operator authorization. Does NOT touch any other .env variable.
           - stablecoin-hygiene # READ-ONLY: (a) stablecoin symbol activity in shadow_trades/shadow_open_positions post-2026-07-11, (b) low-ATR sweep (avg ATR% <0.05 = flag for blacklist), (c) current SHADOW_SPOT_BLACKLIST + MIN_ENTRY_SCORE_LONG
           - pwin-threshold-whatif # READ-ONLY: CLEAN p_win threshold what-if grid (blacklist excluded, in-memory refit): lower-bound T in {0.24..0.30}, window [T, 0.35], top-decile-excluded variants + model inversion (min entry_score where pred_p_win>=0.26).
+          - mfe-mae-curve # READ-ONLY: Phase 1 MFE study — fetches 1h Binance klines per LONG shadow_trade (entry_score>=0.36, 60d, blacklist excluded, top-20 at time-of-trade + ranks_21_30 for comparison). Computes MFE_R / MAE_R per trade; per TP_R in {0.5..2.0} reports implied_WR, expectancy_R, after-fee variant + SL-near-miss autopsy. ~5min runtime.
           - sl-autopsy # READ-ONLY: SL distance / ATR ratio analysis for closed LONG shadow_trades last 30d. Per-symbol + overall avg sl_dist%, avg_atr%, sl_atr_ratio distribution for SL-exit vs TP-exit. Answers: are stops inside the noise band?
           - top-decile-anomaly # READ-ONLY: compares extreme (entry_score>=0.445) vs high (0.36-0.445) vs below (<0.36) LONG bands — WR, avg_pnl, symbol/hour/layer distributions + score/pnl correlation. Tests momentum-exhaustion hypothesis for top-decile reversal.
           - universe-anomaly # READ-ONLY: checks non-standard symbols in asset_universe, 币安人生USDT first/last appearance, orphan symbols in shadow_trades, live Binance top-100 for non-ASCII USDT tickers.
@@ -754,6 +755,10 @@ jobs:
             pwin-threshold-whatif)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/pwin_threshold_whatif.py"
+              ;;
+            mfe-mae-curve)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/mfe_mae_curve.py"
               ;;
             sl-autopsy)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
