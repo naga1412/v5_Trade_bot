@@ -8,6 +8,24 @@ never be revisited regardless of any future Phase.
 the C3 redesign (boot grace + severity split, shipping as the Phase 0 completion
 PR) must land and run its own clean observation window before Row 7 auto-action
 merges. See Row 7 detail below.
+**Amended 2026-07-28:** Row 7 is **DOWNGRADED from conditionally-approved to
+BLOCKED PENDING ROOT CAUSE.** Post-#362 investigation of the C3-flagged stale
+majors (LINK 50d, UNI 13d, LTC 6d, plus rolling drops on XLM/PUMP/ADA/ONDO/ENA/
+SUI/NEAR/U across the last 10 days) found the failure is **NOT WS-child death.**
+Prod's backend was recreated ≥5 times in the 6 days preceding the finding (7/21,
+7/22, 7/23×2, 7/27) and the stale symbols survived every restart. Container
+recreate rebuilds every WS subscription from scratch; a per-symbol WS-child
+restart cannot heal a failure class that already ignores full-stack restarts.
+The actual failure layer is prediction-persistence for the (symbol, timeframe)
+row — the predictor evidently still scores LINK (shadow_open_positions has a
+`LINKUSDT 1h SHORT opened 2026-07-27 22:00 UTC`) and Binance is returning 200-OK
+klines for LINKUSDT every scanner tick, but the `predictions` INSERT never lands.
+An auto-heal that acts without healing is worse than no auto-heal — the healer
+would loop-restart WS children forever without changing the outcome. Row 7 may
+be reinstated ONLY when the persistence-layer root cause is identified AND a
+per-symbol WS-child restart demonstrably resolves that class. The 8/3 clock
+keeps running but is no longer sufficient on its own — root cause is the gate.
+See Row 7 detail below.
 
 Phase 0 (detect-only) gave us the eyes: a watchdog that catches error-status
 heartbeats + a healer_detector_task that catches four classes of silent
@@ -137,7 +155,7 @@ Phase 1 implements only approved rows.
 | Blast radius (B) | *contained* — child task cancel + respawn; siblings unaffected |
 | False-positive cost (B) | *low* — one Binance WS reconnect per false positive; Binance per-IP rate limit is ~5 conn/sec, this is well under |
 | Rollback (B) | *automatic* — the fleet already tolerates transient reconnects; the respawned child heartbeats on the next kline |
-| **Recommendation** | ✅ **CONDITIONALLY APPROVED for Phase 1 (2026-07-23)** — cleanest first Phase-1 auto-action; low blast, high leverage. Condition: 7-day Phase-0 clean run + selftest confirmation + explicit operator GO. Branch may be prepped in advance; no merge until all three are met.<br><br>**PREREQUISITE ADDED 2026-07-24 (post prod-promotion #27):** the C3 redesign (boot grace + severity split shipped as Phase 0 completion) MUST land AND run its own clean observation window BEFORE this row's auto-restart merges. Auto-restarting on the previous C3 shape = churn every deploy (85 warnings observed on the #27 first tick). The redesign fixes that; the auto-restart layer builds on the fixed detector, not the noisy one. |
+| **Recommendation** | ⛔ **BLOCKED PENDING ROOT CAUSE (amended 2026-07-28, post prod-promotion #28)** — downgraded from CONDITIONALLY APPROVED after post-#362 stale-majors investigation showed the failure class is NOT WS-child death. Predictions.LINK/USDT has been silent for 50 days; UNI 13d, LTC 6d; rolling per-symbol drops across XLM/PUMP/ADA/ONDO/ENA/SUI/NEAR/U in the last 10 days. Prod's backend was recreated ≥5 times in the 6 days preceding the finding — each recreate resubscribes every WS child from scratch, and the stale symbols survived every one. A per-symbol WS-child restart cannot heal what a full-stack restart already ignores. Meanwhile the predictor evidently still scores LINK (shadow_open_positions has `LINKUSDT 1h SHORT opened 2026-07-27 22:00 UTC`) and Binance is returning 200-OK klines for LINKUSDT each scanner tick — the failure is at the prediction-persistence layer, not the ingestion layer. Auto-restarting the WS child would fire repeatedly and change nothing; an auto-heal that acts without healing is worse than no auto-heal. Reinstate ONLY when (1) the persistence-layer root cause is identified, AND (2) a per-symbol WS-child restart is demonstrated to resolve that specific class. The 8/3 clock keeps running but is no longer sufficient on its own.<br><br>**Historical amendments preserved:**<br>• **2026-07-23**: CONDITIONALLY APPROVED for Phase 1 — cleanest first Phase-1 auto-action; low blast, high leverage. Condition: 7-day Phase-0 clean run + selftest confirmation + explicit operator GO.<br>• **2026-07-24 (post prod-promotion #27)**: PREREQUISITE ADDED — the C3 redesign (boot grace + severity split shipped as Phase 0 completion) MUST land AND run its own clean observation window BEFORE this row's auto-restart merges. Auto-restarting on the previous C3 shape = churn every deploy (85 warnings observed on the #27 first tick). The redesign fixes that; the auto-restart layer builds on the fixed detector, not the noisy one. |
 
 ### Row 8 — `C4 blocked_rate_anomaly` (>95% blocked for >2h)
 
