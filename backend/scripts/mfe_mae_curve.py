@@ -384,16 +384,9 @@ def _report_task_a(metrics: list[TradeMetrics], interval_label: str) -> None:
             actual_key = "actual_win" if actual_win else "actual_loss"
             cm[(model_out, actual_key)] += 1
         n = len(subset)
-        # Agreement: model win ~ actual win, model loss ~ actual loss.
-        # Timeout ~ actual_loss if pnl <= 0, actual_win if pnl > 0 —
-        # count timeouts as matching whatever actual sign says.
-        agree = (
-            cm[("win", "actual_win")]
-            + cm[("loss", "actual_loss")]
-            + cm[("timeout", "actual_win")]
-            + cm[("timeout", "actual_loss")]
-        )
-        # Only WIN/LOSS mismatches contribute to disagreement.
+        # Only WIN/LOSS mismatches contribute to directional disagreement.
+        # Timeout rows are counted as matching (either sign) since the
+        # model does not emit a directional prediction in that case.
         mismatch = cm[("win", "actual_loss")] + cm[("loss", "actual_win")]
         print(f"\n[{scope}] interval={interval_label}  n={n}")
         header = "model \\ actual"
