@@ -765,3 +765,36 @@ shipping FU-33 before `AUTONOMOUS_TRADING_ENABLED=True`.
 PR-strategy-1's entry-quality gate is preventive (don't open low-score
 LONGs / any SHORTs). FU-33 is reactive (cooldown the symbol after
 demonstrated bad slippage). Different category — separate PR.
+
+### FU-34 — `ohlcv` table is empty (0 rows ever); no persisted candle history
+
+**Impact.** Any historical-path research (MFE/MAE, drawdown replay, entry-timing
+analytics) requires on-demand Binance kline fetches — the `ohlcv` table exists
+but was never populated by any worker. A `LEFT JOIN ohlcv ON ...` silently
+returns empty rather than raising, so a query that assumes the table has data
+will produce a misleading zero result. Discovered 2026-07-28 during the Phase 1
+MFE study; workaround pattern in `backend/scripts/mfe_mae_curve.py` (fetch klines
+on demand via the public SPOT `/api/v3/klines` endpoint — no auth required, well
+under Binance rate limits at sequential-200ms cadence). Not a fix target;
+recorded so the next author doesn't lose an hour to it.
+
+### FU-35 — `p_win` column is 100% NULL; `predict_p_win` never implemented
+
+**Impact.** `shadow_trades.p_win` has been NULL for every trade since PR1
+shipped. Root cause: `backend/app/core/scoring/p_win_calibrator.py:predict_p_win`
+is a documented PR1 stub that always returns None (see module docstring —
+"PR5 will replace"). PR5 was never fully implemented. Sibling PR1 columns are
+partially populated: `effective_score` and `realized_vol_20d` are 89.7% NULL
+(compute-path failures on newer symbols lacking 20d history); `mtf_agreement`
+and `funding_directional_adj` populate reliably (~83% for fdadj).
+
+Discovered 2026-07-28 during Phase 1 MFE study; the `pwin-threshold-whatif`
+probe works because it refits isotonic in-memory on demand — analysis-time
+calibrator is the operational workaround. Aug 3-10 dual-axis validation (score
+deciles × p_win bands) uses this same refit approach in `pwin_threshold_whatif.py`;
+no fix required to run the validation.
+
+Fix path (if operator wants persistent p_win column populated): implement PR5
+per the docstring — sklearn isotonic fit-and-persist per direction, nightly
+refit worker, lazy-load at predict-time. Non-trivial (~1-2 days). Only affects
+trades opened AFTER deploy; historical NULLs stay NULL.
