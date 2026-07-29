@@ -798,3 +798,66 @@ Fix path (if operator wants persistent p_win column populated): implement PR5
 per the docstring — sklearn isotonic fit-and-persist per direction, nightly
 refit worker, lazy-load at predict-time. Non-trivial (~1-2 days). Only affects
 trades opened AFTER deploy; historical NULLs stay NULL.
+
+**PR5 deferred (operator ruling 2026-07-28):** analysis-time calibrator
+(via `pwin_threshold_whatif` in-memory refit) is the operational workaround
+for Aug 3-10. PR5 real implementation not worth 1-2 days plus soak for the
+~50-100 rows that would populate inside the validation window. Recorded here
+as a capability gap to revisit after the Aug decision.
+
+**Evidence hierarchy for Aug 3-10 (operator ruling 2026-07-28):**
+- **`entry_score`** — primary (stored ground truth on every trade).
+- **`p_win`** — corroborating only. Because every p_win result this project
+  has ever produced comes from an in-memory refit on a small validation
+  split (stored p_win has ALWAYS been NULL), p_win MUST NOT be the
+  tiebreaker if the two axes disagree. Note: the July [0.24-0.35] p_win-band
+  contradiction — where a specific window looked profitable in the
+  isotonic-refit output — falls in this category and cannot on its own
+  override an entry_score-axis finding.
+
+### FU-36 — `effective_score` + `realized_vol_20d` are analytics-only (89.7% NULL is a gap not a bug)
+
+**Verified 2026-07-28** in response to the Phase 1 MFE-study question of
+whether the ~90% NULL rate on these two columns represents a live-behavior
+bug. It does not.
+
+**Trace (read-only, dev tip 2026-07-28):**
+- Producer: `backend/app/core/predictor.py:406-407` calls
+  `compute_realized_vol_20d(_bar_list)` and `compute_effective_score(final.score, realized_vol)`.
+  Both are wrapped in a `try/except → log.exception → None` fail-open at
+  predictor.py:403-410. Values are then packed into a tuple at :671-672 and
+  attached to the Prediction object at :715-716.
+- Consumers of the STORED `shadow_trades.effective_score` column: **none**
+  in any decision path. It's written by `payload_builders.build_shadow_trade_payload`
+  (payload_builders.py:198), and never re-read. Grep of `effective_score` in
+  `backend/app/**` returns only the write path (payload builders, worker attach,
+  persistence, live_prediction pass-through) plus API schema output.
+- Consumers of the STORED `shadow_trades.realized_vol_20d` column: **none**.
+  Same story — write-only column.
+- The dispatcher entry-quality gate at `backend/app/core/gates/entry_quality.py:184-215`
+  has a LOCAL variable named `effective_score` (line 188) initialized from
+  `entry_score` and adjusted by Layer-2 pattern boost/penalty. **This is
+  NOT the stored column** — it's a different computation with a colliding
+  name. The gate reads `entry_score` (populated on every trade), never the
+  stored `effective_score`. Naming collision is a readability trap but not
+  a live-behavior bug.
+- `realized_vol_20d` feeds `compute_effective_score` at vol_normalization.py:83
+  (returns None if rvol None per :106) — but the downstream `effective_score`
+  it produces is only stored, never gated on.
+
+**Why the 89.7% NULL rate on both.** Correlated failure: same compute path
+(`realized_vol` → `effective_score`) so nulling one nulls the other. Root
+cause is `compute_realized_vol_20d` requires ≥20 daily bars derived from
+the input bar list; the input is the predictor's in-memory bar buffer.
+Every backend recreate resets in-memory buffers; prod recreated ≥5 times
+in the 6 days preceding this finding (see FU-35 companion investigation).
+Bars accumulate from that point at ~24/day; a symbol needs ~20 days of
+continuous subscription post-recreate to accumulate 20 daily closes. This
+correlates with the FU-35 KEEPALIVE_TOP_N fleet-rotation hypothesis: symbols
+that rotate in and out of top-20 don't accumulate continuous history.
+
+**Verdict.** 89.7% NULL on effective_score + realized_vol_20d is an
+**analytics gap** (missing observability data), NOT a live-behavior bug.
+No fix required for live trading; if operator wants continuous stored
+history, the fix would be to make the vol computation source-of-truth-agnostic
+(e.g. compute from on-demand Binance klines rather than in-memory buffer).
