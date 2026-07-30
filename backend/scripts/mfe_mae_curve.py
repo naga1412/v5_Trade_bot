@@ -94,9 +94,11 @@ class TradeRow:
     entry_price: float
     stop_loss: float
     take_profit: float
+    entry_atr: float
     exit_reason: str
     pnl_pct: float
-    scope: str
+    scope: str          # 'top20' | 'ranks_21_30'
+    atr_class: str      # 'atr_bound' | 'cap_bound'  (per 1.5*ATR > 5% of entry)
 
 
 @dataclass
@@ -110,6 +112,7 @@ class Bar:
 class TradeMetrics:
     trade_id: int
     scope: str
+    atr_class: str
     symbol: str
     exit_reason: str
     actual_pnl_pct: float
@@ -151,6 +154,7 @@ async def _load_trades() -> list[TradeRow]:
                 s.entry_price,
                 s.stop_loss,
                 s.take_profit,
+                s.entry_atr,
                 s.exit_reason,
                 s.pnl_pct,
                 (SELECT MAX(snapshot_at) FROM asset_universe
@@ -163,6 +167,7 @@ async def _load_trades() -> list[TradeRow]:
               AND s.entry_price > 0
               AND s.stop_loss > 0
               AND s.take_profit > 0
+              AND s.entry_atr > 0
               AND s.stop_loss < s.entry_price
               AND s.take_profit > s.entry_price
         )
@@ -186,17 +191,23 @@ async def _load_trades() -> list[TradeRow]:
             scope = "top20"
         else:
             scope = "ranks_21_30"
+        entry_atr = float(r.entry_atr)
+        entry_price = float(r.entry_price)
+        # Match engine.py convention: cap_bound iff 1.5*ATR > 5% of entry.
+        atr_class = "cap_bound" if (1.5 * entry_atr) > (0.05 * entry_price) else "atr_bound"
         out.append(TradeRow(
             id=int(r.id),
             symbol=str(r.symbol),
             opened_at_ms=int(r.opened_at.timestamp() * 1000),
             closed_at_ms=int(r.closed_at.timestamp() * 1000),
-            entry_price=float(r.entry_price),
+            entry_price=entry_price,
             stop_loss=float(r.stop_loss),
             take_profit=float(r.take_profit),
+            entry_atr=entry_atr,
             exit_reason=str(r.exit_reason),
             pnl_pct=float(r.pnl_pct),
             scope=scope,
+            atr_class=atr_class,
         ))
     return out
 
@@ -241,7 +252,8 @@ def _compute_metrics(trade: TradeRow, bars: list[Bar]) -> TradeMetrics:
     r_unit = trade.entry_price - trade.stop_loss
     r_pct = r_unit / trade.entry_price if trade.entry_price > 0 else 0.0
     m = TradeMetrics(
-        trade_id=trade.id, scope=trade.scope, symbol=trade.symbol,
+        trade_id=trade.id, scope=trade.scope, atr_class=trade.atr_class,
+        symbol=trade.symbol,
         exit_reason=trade.exit_reason, actual_pnl_pct=trade.pnl_pct,
         entry_price=trade.entry_price, stop_loss=trade.stop_loss,
         take_profit=trade.take_profit,
@@ -293,11 +305,24 @@ def _fee_pct_round_trip() -> float:
     return FEE_ROUND_TRIP_PCT * 100.0  # in percent
 
 
+def _slices(metrics: list[TradeMetrics]) -> list[tuple[str, list[TradeMetrics]]]:
+    """Yield (label, subset) for every scope × atr_class breakdown."""
+    slices: list[tuple[str, list[TradeMetrics]]] = []
+    for scope in ("top20", "ranks_21_30"):
+        for ac in ("atr_bound", "cap_bound"):
+            subset = [m for m in metrics if m.scope == scope and m.atr_class == ac]
+            slices.append((f"{scope}/{ac}", subset))
+        # Also the full scope (atr+cap combined) for backward compat
+        subset_all = [m for m in metrics if m.scope == scope]
+        slices.append((f"{scope}/all", subset_all))
+    return slices
+
+
 def _report_item1_agreement(metrics: list[TradeMetrics]) -> None:
     print("\n===== ITEM 1 — CORRECTED 1h MODEL (per-trade actual TP/SL) =====")
     print("  Confusion matrix vs actual pnl sign at each trade's own TP/SL")
-    for scope in ("top20", "ranks_21_30"):
-        subset = [m for m in metrics if m.scope == scope]
+    for label, subset in _slices(metrics):
+        scope = label
         if not subset:
             continue
         cm = {
@@ -344,11 +369,9 @@ def _report_item1_agreement(metrics: list[TradeMetrics]) -> None:
 def _report_study2_style(metrics: list[TradeMetrics]) -> None:
     print("\n===== STUDY 2 (with corrected model) — SL near-miss @ 1h =====")
     print("  MFE_R distribution among trades whose ACTUAL exit_reason='STOP_LOSS'")
-    for scope in ("top20", "ranks_21_30"):
-        sl_trades = [
-            m for m in metrics
-            if m.scope == scope and m.exit_reason == "STOP_LOSS"
-        ]
+    for label, subset in _slices(metrics):
+        scope = label
+        sl_trades = [m for m in subset if m.exit_reason == "STOP_LOSS"]
         if not sl_trades:
             print(f"\n[{scope}] n_sl=0")
             continue
@@ -445,8 +468,8 @@ def _simulate_breakeven(m: TradeMetrics, trigger: float) -> tuple[str, float]:
 def _report_item2_breakeven(metrics: list[TradeMetrics]) -> None:
     print("\n===== ITEM 2 — PATH-AWARE BREAKEVEN ON CORRECTED 1h MODEL =====")
     fee_pct = _fee_pct_round_trip()
-    for scope in ("top20", "ranks_21_30"):
-        subset = [m for m in metrics if m.scope == scope]
+    for label, subset in _slices(metrics):
+        scope = label
         if not subset:
             continue
         # Baseline expectancy
