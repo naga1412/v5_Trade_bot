@@ -881,25 +881,45 @@ returned zero hits — **no per-symbol concentration limit exists at all**.
 Each individual open was LEGAL under per-TF cooldown, but the aggregate
 lost -20% on one symbol in less than a day.
 
-**Interaction with live path:** `LIVE_COOLDOWN_ENABLED: bool = False` at
-`backend/app/config.py:114`. When operator flips to fully-auto, LIVE has
-ZERO cooldown protection — worse than shadow, not better. Shadow's 4h
-per-TF cooldown makes shadow MORE protected than live-without-cooldown,
-so **shadow UNDERSTATES live loss frequency** in tail-event weeks. The
-corrected 2026-07-30 baseline of −0.018%/trade net-of-fee is OPTIMISTIC
-for live, not pessimistic.
+**Interaction with live path (CORRECTED 2026-07-30 via settings-check
+probe on running container):** `LIVE_COOLDOWN_ENABLED = True` on prod
+(overridden in operator's `.env`; the `config.py:114` default `False`
+does NOT apply on the running container). Live cooldown is per-symbol
+(no timeframe column on `live_cooldowns`); live path is 1h-only per
+fleet-cap ratification (`KEEPALIVE_TIMEFRAME = "1h"`, singleton also
+1h). So live has EXACTLY ONE cooldown lane per symbol, and a stop-out
+on COTI blocks all further COTI entries for `LIVE_COOLDOWN_HOURS_BY_
+OUTCOME['stop_loss'] = 8h` — matching shadow's per-TF 4h for the 1h
+lane and being STRICTER than shadow because live has no separate 15m
+lane to re-enter through.
 
-**Fix candidates (not scheduled):**
-1. Cross-TF cooldown — extend `shadow_cooldowns` PK to `(user_id, symbol)`
-   only, or add a stricter cross-TF check in `check_cooldowns` that treats
-   any cooldown row for the symbol as blocking all TFs.
-2. Per-symbol concentration limit — max N losses per rolling window per
-   symbol before hard blacklist for a longer cooldown.
-3. Live cooldown default-ON parity — flip `LIVE_COOLDOWN_ENABLED=True`
-   before any live trading resumes (operator-only env change).
+**Direction of bias (corrected):** shadow's cross-TF re-entry cluster
+(4× COTI −5% in 18h across 1h+15m) CANNOT happen in live. Live is
+1h-only + per-symbol cooldown. So **shadow OVERSTATES live tail-loss
+frequency**, and the shadow-side baseline is PESSIMISTIC for live
+(not optimistic as earlier stated).
 
-Sequencing: not a live-blocker today (mode=manual). But mandatory review
-before flipping AUTONOMOUS_TRADING_ENABLED=True or trading_mode=fully-auto.
+**Standing rule established 2026-07-30**: live capacity expansion is
+gated on shadow demonstrating positive net edge, never on measurement
+speed. See `docs/superpowers/decisions/2026-07-30-live-capacity-
+expansion-rule.md` when written; memory `live_capacity_expansion_rule`.
+
+**Fix candidates (still not scheduled, but the ranking changed):**
+1. Cross-TF cooldown on the SHADOW side — extend `shadow_cooldowns` PK
+   to `(user_id, symbol)` only, OR add a cross-TF check that treats any
+   cooldown row for the symbol as blocking all TFs. This aligns shadow's
+   measurement with live's actual behavior — makes shadow a better
+   proxy for what live would do. Non-urgent unless shadow-vs-live
+   accuracy becomes a decision blocker.
+2. Per-symbol concentration limit on shadow (max N losses per rolling
+   window before hard blacklist). Same rationale as (1).
+3. Live cooldown parity: ALREADY IN PLACE — this correction supersedes
+   the earlier "flip LIVE_COOLDOWN_ENABLED=True" candidate.
+
+Sequencing: not a live-blocker (mode=manual today). Not a blocker for
+Aug-3-10 either (Aug 3-10 CANCELLED per operator 2026-07-30). Only a
+blocker for shadow-vs-live proxy accuracy, and that's dominated by the
+signal-earns-its-own-fees finding, not this cooldown asymmetry.
 
 ### FU-38 — Asymmetric SL cap / uncapped TP (informational, not a defect)
 
