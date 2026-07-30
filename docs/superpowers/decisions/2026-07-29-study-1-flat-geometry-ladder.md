@@ -89,9 +89,38 @@ All numbers above are **GROSS of Binance fees**. Confirmed 2026-07-29:
 `shadow_trades.pnl_pct` is `(exit - entry) / entry × 100` with no fee
 subtraction. Round-trip taker fee for the bot's configured order types
 (MARKET entry + STOP_MARKET / TAKE_PROFIT_MARKET exit) is **0.10%**.
-Restated top-20 avg net of fee: **+0.128%/trade** (down from gross
-+0.228%, a 43.9% erosion). The 2:1-retained-by-default ratification
-holds under either accounting.
+
+**AMENDED 2026-07-30 — the +0.228% figure was a positive-window snapshot.**
+Re-running STUDY 3's exact SQL 45 hours later showed top-20 avg drifted
+to **+0.0822% gross** (n=179, ~45h of new closes added 11 trades whose
+cluster including 3× COTI −5% floor hits dragged the average down by
+~15 percentage points of sum PnL). Corrected as-of-2026-07-30 headline
+under the same accounting:
+
+| snapshot | n | gross avg | after-fee avg (0.10% RT) |
+|---|---|---|---|
+| STUDY 3 (2026-07-28 06:34 UTC) | 168 | +0.228% | +0.128% |
+| v3 probe (2026-07-29 09:52 UTC) | 166 | +0.0466% | −0.0534% |
+| **as of 2026-07-30 03:24 UTC** | **179** | **+0.0822%** | **−0.0178%** |
+
+The current honest read: **bot is breakeven-with-friction at the 0.36
+gate — after fees, top-20 expected value is ~zero, drifting inside the
+observed noise of the rolling window.** The 2:1-retained-by-default
+ratification holds under either accounting (the flat-ladder finding is
+about geometry, not baseline expectancy magnitude).
+
+**Methodology rule adopted 2026-07-30 (operator ruling):** stop quoting
+point-estimate expectancy. Three measurements of the same population
+gave +0.228% / +0.047% / +0.082% within 45 hours. Every expectancy
+figure going forward must carry `n` and a dispersion measure (std
+error or the range across a few trailing windows, e.g. 30d/60d/90d).
+Applies to the Aug 3-10 report too — an 8-day window will be even
+noisier.
+
+**Aug 3-10 baseline methodology (operator ruling 2026-07-30):** compute
+a fresh 60d trailing baseline on 2026-08-03 (baseline for pre/post
+comparison), plus the 8-day observed window figure. Do NOT quote the
++0.228% snapshot as the current expected value.
 
 ## Reversal criteria
 
