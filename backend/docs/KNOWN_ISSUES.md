@@ -861,3 +861,80 @@ that rotate in and out of top-20 don't accumulate continuous history.
 No fix required for live trading; if operator wants continuous stored
 history, the fix would be to make the vol computation source-of-truth-agnostic
 (e.g. compute from on-demand Binance klines rather than in-memory buffer).
+
+### FU-37 — Shadow cooldown is PER-TIMEFRAME, no cross-TF check, no per-symbol concentration limit
+
+**Discovered 2026-07-30** while investigating a 4× −5% COTIUSDT cluster over
+9 hours (2026-07-29 → 2026-07-30) that dragged the top-20 60d avg from
++0.228%/trade to +0.0822%/trade.
+
+**Trace:** `SHADOW_COOLDOWN_HOURS = {"1h": 4.0, "15m": 4.0}` at
+`backend/app/config.py:84`. `set_cooldown` at `backend/app/shadow/worker.py:453`
+fires after every close. `shadow_cooldowns` table PK is
+`(user_id, symbol, timeframe)` — so a `(COTIUSDT, 1h)` cooldown does NOT
+block a `(COTIUSDT, 15m)` new open. Grep of `backend/app/shadow/**` and
+`backend/app/trading/**` for `concentration | max_per_symbol | MAX_PER_SYMBOL`
+returned zero hits — **no per-symbol concentration limit exists at all**.
+
+**Observed exploit:** COTIUSDT ran 4 concurrent-lane stop-outs in 18h
+(1h: 2253, 2270; 15m: 2271, 2302) plus 1 earlier TP win (15m: 2247).
+Each individual open was LEGAL under per-TF cooldown, but the aggregate
+lost -20% on one symbol in less than a day.
+
+**Interaction with live path:** `LIVE_COOLDOWN_ENABLED: bool = False` at
+`backend/app/config.py:114`. When operator flips to fully-auto, LIVE has
+ZERO cooldown protection — worse than shadow, not better. Shadow's 4h
+per-TF cooldown makes shadow MORE protected than live-without-cooldown,
+so **shadow UNDERSTATES live loss frequency** in tail-event weeks. The
+corrected 2026-07-30 baseline of −0.018%/trade net-of-fee is OPTIMISTIC
+for live, not pessimistic.
+
+**Fix candidates (not scheduled):**
+1. Cross-TF cooldown — extend `shadow_cooldowns` PK to `(user_id, symbol)`
+   only, or add a stricter cross-TF check in `check_cooldowns` that treats
+   any cooldown row for the symbol as blocking all TFs.
+2. Per-symbol concentration limit — max N losses per rolling window per
+   symbol before hard blacklist for a longer cooldown.
+3. Live cooldown default-ON parity — flip `LIVE_COOLDOWN_ENABLED=True`
+   before any live trading resumes (operator-only env change).
+
+Sequencing: not a live-blocker today (mode=manual). But mandatory review
+before flipping AUTONOMOUS_TRADING_ENABLED=True or trading_mode=fully-auto.
+
+### FU-38 — Asymmetric SL cap / uncapped TP (informational, not a defect)
+
+**Verified 2026-07-30** during Q1 investigation of the -5% SL floor
+hypothesis (see FU-37 for the COTI trigger context).
+
+**Formula** at `backend/app/shadow/engine.py:167-168` (LONG):
+```
+sl = max(entry - 1.5*ATR, entry * 0.95)     # closer stop wins → 5% cap
+tp = entry + 3.0*ATR                         # UNCAPPED
+```
+
+Nominal R:R = 2.0:1 (3×ATR / 1.5×ATR) when ATR is small. When ATR
+exceeds 3.33% of entry (`1.5×ATR > 0.05`), the 5% floor binds → SL is
+tighter than nominal 1.5×ATR while TP stays at unbounded 3×ATR distance.
+
+**Top-20 60d empirical split (n=179, gate 0.36, LONG):**
+
+| group | n | WR% | avg_pnl | avg_sl_dist | avg_tp_dist | realized_RR | -5% floor hits |
+|---|---|---|---|---|---|---|---|
+| atr_bound (1.5×ATR≤5%) | 167 | 28.7 | -0.064 | 1.21% | 3.10% | 2.41:1 | 0 |
+| cap_bound (1.5×ATR>5%) | 12 | 33.3 | +2.123 | 5.23% | 20.30% | 3.93:1 | 6 |
+
+**COUNTERINTUITIVE**: the cap-bound cohort is currently PROFITABLE
+despite the -5% floor because uncapped TP delivers big wins on the
+6/12 non-stopped trades (avg ~+9%/win). The asymmetry is accidentally
+favorable in the aggregate 60d window.
+
+Caveats: n=12 is thin. The 6/12 -5% floor hits include the recent 3×
+COTIUSDT cluster (FU-37); the "positive avg" is dominated by 6
+historical big TP wins with high variance.
+
+**Not a strategy defect. IS a variance amplifier.** Any decision
+touching the cap should acknowledge the cap_bound cohort's 4× wider
+TP distance and 6× wider R:R range vs the atr_bound cohort. Removing
+or widening the SL cap would degrade the currently-profitable
+cap_bound cohort — the fix candidate is more nuanced than "widen the
+stop".
