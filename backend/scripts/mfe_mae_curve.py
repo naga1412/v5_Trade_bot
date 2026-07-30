@@ -89,6 +89,7 @@ BAR_MS_1H: int = 60 * 60 * 1000
 class TradeRow:
     id: int
     symbol: str
+    timeframe: str      # v5: fetch bars at this trade's own TF
     opened_at_ms: int
     closed_at_ms: int
     entry_price: float
@@ -149,6 +150,7 @@ async def _load_trades() -> list[TradeRow]:
             SELECT
                 s.id,
                 s.symbol,
+                s.timeframe,
                 s.opened_at,
                 s.closed_at,
                 s.entry_price,
@@ -170,6 +172,7 @@ async def _load_trades() -> list[TradeRow]:
               AND s.entry_atr > 0
               AND s.stop_loss < s.entry_price
               AND s.take_profit > s.entry_price
+              AND s.timeframe IN ('1h', '15m')
         )
         SELECT t.*, au.rank AS rank_at_trade
         FROM trades t
@@ -198,6 +201,7 @@ async def _load_trades() -> list[TradeRow]:
         out.append(TradeRow(
             id=int(r.id),
             symbol=str(r.symbol),
+            timeframe=str(r.timeframe),
             opened_at_ms=int(r.opened_at.timestamp() * 1000),
             closed_at_ms=int(r.closed_at.timestamp() * 1000),
             entry_price=entry_price,
@@ -212,15 +216,34 @@ async def _load_trades() -> list[TradeRow]:
     return out
 
 
-async def _fetch_1h_bars(
-    client: httpx.AsyncClient, symbol: str, start_ms: int, end_ms: int,
+_TF_TO_INTERVAL: dict[str, tuple[str, int]] = {
+    "1h": (INTERVAL_1H, BAR_MS_1H),
+    "15m": ("15m", 15 * 60 * 1000),
+}
+
+
+async def _fetch_bars_at_tf(
+    client: httpx.AsyncClient,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    timeframe: str,
 ) -> list[Bar]:
+    """v5: fetch bars at the trade's OWN timeframe (15m or 1h).
+
+    Same production interval as check_exit would have used for that
+    position — dissolves the v3/v4 model-vs-reality resolution mismatch.
+    """
+    if timeframe not in _TF_TO_INTERVAL:
+        return []
+    interval, bar_ms = _TF_TO_INTERVAL[timeframe]
     bars: list[Bar] = []
     cursor = start_ms
     while cursor <= end_ms:
         params = {
             "symbol": symbol,
-            "interval": INTERVAL_1H,
+            "interval": interval,
             "startTime": cursor,
             "endTime": end_ms,
             "limit": 1000,
@@ -230,16 +253,16 @@ async def _fetch_1h_bars(
             resp.raise_for_status()
             payload = resp.json()
         except Exception as e:  # noqa: BLE001
-            print(f"  ! kline fetch failed {symbol} start={cursor}: {e}")
+            print(f"  ! kline fetch failed {symbol}@{interval} start={cursor}: {e}")
             return bars
         if not payload:
             break
         for row in payload:
             bars.append(Bar(ts_ms=int(row[0]), high=float(row[2]), low=float(row[3])))
         last_open = int(payload[-1][0])
-        if last_open + BAR_MS_1H > end_ms or len(payload) < 1000:
+        if last_open + bar_ms > end_ms or len(payload) < 1000:
             break
-        cursor = last_open + BAR_MS_1H
+        cursor = last_open + bar_ms
         await asyncio.sleep(FETCH_DELAY_S)
     return bars
 
@@ -518,15 +541,25 @@ def _report_item2_breakeven(metrics: list[TradeMetrics]) -> None:
             )
 
 
-async def _fetch_all_1h(
+async def _fetch_all_native_tf(
     trades: list[TradeRow], client: httpx.AsyncClient,
 ) -> list[TradeMetrics]:
+    """v5: fetch each trade on its OWN timeframe's bars.
+
+    A 15m trade uses 15m bars; a 1h trade uses 1h bars. This matches
+    exactly what production `check_exit` would have seen for the
+    position — dissolves the v4 resolution-mismatch artifact where a
+    mostly-15m population was simulated on 1h bars.
+    """
     metrics: list[TradeMetrics] = []
     start = time.time()
     for i, t in enumerate(trades, 1):
-        start_ms = t.opened_at_ms - BAR_MS_1H
-        end_ms = t.closed_at_ms + BAR_MS_1H
-        bars = await _fetch_1h_bars(client, t.symbol, start_ms, end_ms)
+        _interval, bar_ms = _TF_TO_INTERVAL.get(t.timeframe, (INTERVAL_1H, BAR_MS_1H))
+        start_ms = t.opened_at_ms - bar_ms
+        end_ms = t.closed_at_ms + bar_ms
+        bars = await _fetch_bars_at_tf(
+            client, t.symbol, start_ms, end_ms, timeframe=t.timeframe,
+        )
         bars = [b for b in bars if t.opened_at_ms <= b.ts_ms <= t.closed_at_ms]
         if not bars:
             continue
@@ -539,16 +572,20 @@ async def _fetch_all_1h(
 
 async def main() -> None:
     t0 = time.time()
-    print("MFE/MAE curve probe v3 — loading trades (LONG @ gate 0.36, 60d) …")
+    print("MFE/MAE curve probe v5 — native-TF (each trade on its OWN timeframe's bars)")
     trades = await _load_trades()
     top = sum(1 for t in trades if t.scope == "top20")
     bot = sum(1 for t in trades if t.scope == "ranks_21_30")
+    tf_counts: dict[str, int] = {}
+    for t in trades:
+        tf_counts[t.timeframe] = tf_counts.get(t.timeframe, 0) + 1
     print(f"  loaded {len(trades)} trades ({top} top20, {bot} ranks_21_30)")
+    print(f"  timeframe breakdown: {tf_counts}")
 
-    print(f"\nFetching 1h Binance klines per trade (~{FETCH_DELAY_S}s each) …")
+    print(f"\nFetching Binance klines per trade at native TF (~{FETCH_DELAY_S}s each) …")
     async with httpx.AsyncClient() as client:
-        metrics = await _fetch_all_1h(trades, client)
-    print(f"  1h: {len(metrics)} trades with computed metrics")
+        metrics = await _fetch_all_native_tf(trades, client)
+    print(f"  fetched: {len(metrics)} trades with computed metrics")
 
     print("\n===== COVERAGE =====")
     print(f"  Total shadow_trades matching filter: {len(trades)}")
