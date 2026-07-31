@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -455,6 +456,54 @@ async def test_place_approved_order_blocked_when_symbol_has_open_position() -> N
         ))).all()
     # Only the pre-existing open row — no new pending or open row.
     assert [r.binance_order_id for r in rows] == ["pre-existing"]
+
+
+@pytest.mark.asyncio
+async def test_place_approved_order_fails_closed_on_position_check_db_error(
+    caplog,
+) -> None:
+    """Approve-time fail-CLOSED on DB error: if the per-symbol
+    open-position query raises, refuse the order (no Binance call, no
+    live_trades row) and log distinct `blocked_position_check_failed`
+    so the operator can tell verification failure from real duplicate.
+
+    Rationale: this gate exists to prevent position doubling — "allow
+    on error" is exactly the harm the gate was built to prevent.
+    """
+    import logging as _logging
+
+    engine = await _mk_engine()
+    await _seed(engine)  # BTC/USDT signal, no open position seeded
+
+    from app.trading.execution import symbol_position_gate as _spg
+
+    async def _boom(_session, *, user_id, symbol):  # noqa: ARG001
+        raise RuntimeError("simulated DB failure at approve time")
+
+    stub = _StubBinance(order_id="should-not-be-called")
+    with caplog.at_level(_logging.ERROR):
+        with patch.object(_spg, "get_open_position_trade_id", _boom):
+            order_id = await _place_approved_order(
+                lambda: AsyncSession(engine), signal_id="abc123",
+                leverage=5, use_testnet=True,
+                user_id=1, binance_factory=lambda: stub, now=_NOW,
+            )
+
+    assert order_id is None
+    assert stub.placed == []  # no Binance call
+
+    # No live_trades row inserted (pre-Phase-1 refusal).
+    async with AsyncSession(engine) as s:
+        n = (await s.execute(sa.text(
+            "SELECT count(*) FROM live_trades"
+        ))).scalar()
+    assert n == 0
+
+    # Distinct outcome name in log so operator can grep for it.
+    assert any(
+        "blocked_position_check_failed" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 # ---- _route_callback ---------------------------------------------------

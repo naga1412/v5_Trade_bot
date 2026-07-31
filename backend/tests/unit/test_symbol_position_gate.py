@@ -108,14 +108,18 @@ async def test_ignores_different_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fails_open_on_db_error() -> None:
-    """Any DB exception returns None (max-concurrent gate is backstop)."""
+async def test_raises_on_db_error() -> None:
+    """Helper does NOT swallow DB errors — caller owns fail-open vs
+    fail-closed policy. Dispatcher pre-card wraps in try/except and
+    fails open; telegram approve-time wraps in try/except and fails
+    CLOSED with a distinct `blocked_position_check_failed` outcome.
+    """
     engine = await _mk_engine()
     async with AsyncSession(engine) as s:
         # Drop the table AFTER the session is bound to force an error.
         await s.execute(sa.text("DROP TABLE live_trades"))
         await s.commit()
-        # Should not raise, should return None.
-        assert await get_open_position_trade_id(
-            s, user_id=1, symbol="BTC/USDT",
-        ) is None
+        with pytest.raises(Exception):
+            await get_open_position_trade_id(
+                s, user_id=1, symbol="BTC/USDT",
+            )

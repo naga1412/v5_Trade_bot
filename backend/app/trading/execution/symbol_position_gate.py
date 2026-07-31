@@ -22,11 +22,24 @@ tap Approve minutes later, and in the interim a different signal
 (or a manual trade, or another approved card) may have opened a
 position on the same symbol.
 
-Fail-open contract: any unexpected DB error returns False (let the
-trade proceed) — matches the other gate modules
-(`symbol_allowlist_gate`, `cooldown_gate`). Justified because the
-GLOBAL max-concurrent gate remains as backstop; a transient DB
-error should not veto every trade.
+Error semantics: the helper does NOT swallow exceptions. Callers
+decide their own contract:
+
+- Dispatcher pre-card gate — **fail-open** on DB error. A card is
+  only a notification; the operator remains the approval step; a
+  transient DB error should not veto every dispatch. Wraps the
+  call in try/except and returns None on error, matching the other
+  gate modules (`symbol_allowlist_gate`, `cooldown_gate`).
+
+- Telegram approve-time gate — **fail-closed** on DB error. This
+  gate exists to prevent position doubling; on a DB failure "allow
+  the order" causes exactly the harm it was built to prevent, at
+  the moment the system is least healthy. Missed trade cost is
+  near-zero (net-zero edge, signal recurs); doubled position is
+  2× risk on one symbol with an undesigned exit level. Wraps the
+  call in try/except and logs `blocked_position_check_failed`
+  (distinct from `blocked_symbol_position_open`) so the operator
+  can see it was a verification failure, not a real duplicate.
 """
 from __future__ import annotations
 
@@ -55,21 +68,16 @@ async def get_open_position_trade_id(
     currently on Binance" per glue.py:build_user_context inline note.
     Historic `closed_at IS NULL` alone had false positives from
     May-vintage rows with status='closed' AND closed_at NULL.
+
+    Raises whatever DB exception the query raises. The caller owns
+    the fail-open vs fail-closed policy — see the module docstring.
     """
-    try:
-        row = (await session.execute(
-            sa.text(
-                "SELECT id FROM live_trades "
-                "WHERE user_id = :u AND symbol = :s AND status = 'open' "
-                "LIMIT 1"
-            ),
-            {"u": user_id, "s": symbol},
-        )).first()
-    except Exception as exc:  # noqa: BLE001 — fail-open contract
-        log.warning(
-            "symbol_position_gate: DB error checking (user=%d, sym=%s): %s "
-            "— failing open (max-concurrent gate is backstop)",
-            user_id, symbol, exc,
-        )
-        return None
+    row = (await session.execute(
+        sa.text(
+            "SELECT id FROM live_trades "
+            "WHERE user_id = :u AND symbol = :s AND status = 'open' "
+            "LIMIT 1"
+        ),
+        {"u": user_id, "s": symbol},
+    )).first()
     return int(row.id) if row is not None else None

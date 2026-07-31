@@ -1009,7 +1009,16 @@ same symbol.
   — seeds pre-existing open + asserts no Binance stub call and no
   new live_trades row.
 
-**Fail-open contract**: any unexpected DB exception in the helper
-returns None (trade proceeds); the GLOBAL max-concurrent check
-remains as backstop. Justified because a transient DB error should
-not veto every trade.
+**Error policy (split by caller)**:
+- Pre-card gate — **fail-OPEN** on DB error. A card is only a
+  notification; operator is still the approval step. Backstopped
+  by the GLOBAL max-concurrent gate + the approve-time gate below.
+- Approve-time gate — **fail-CLOSED** on DB error. Distinct outcome
+  literal `blocked_position_check_failed` (separate from
+  `blocked_symbol_position_open`) so the operator can distinguish
+  a verification failure from a real duplicate. Asymmetric cost
+  rationale: missed trade ~= zero cost (net-zero edge, signal
+  recurs); doubled position = 2× risk on one symbol with an
+  undesigned exit level, at the moment the system is least healthy.
+The helper `get_open_position_trade_id` itself does NOT swallow
+exceptions — callers own their policy via try/except wraps.

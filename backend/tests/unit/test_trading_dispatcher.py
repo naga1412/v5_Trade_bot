@@ -239,6 +239,38 @@ async def test_allowed_when_only_closed_row_on_symbol() -> None:
     assert r.outcome == "sent_telegram"
 
 
+@pytest.mark.asyncio
+async def test_pre_card_gate_fails_open_on_db_error() -> None:
+    """Dispatcher pre-card gate MUST fail-open on DB error — a card is
+    only a notification, the operator is still the approval step, and
+    the approve-time gate fail-CLOSES. Verifies dispatch continues to
+    `sent_telegram` when the per-symbol query raises.
+    """
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.commit()
+
+    from app.trading.execution import symbol_position_gate as _spg
+
+    async def _boom(_session, *, user_id, symbol):  # noqa: ARG001
+        raise RuntimeError("simulated DB failure")
+
+    with patch.object(_spg, "get_open_position_trade_id", _boom):
+        async with AsyncSession(engine) as s:
+            r = await dispatch(
+                s,
+                proposal=_proposal(),
+                user=_user(mode="telegram-approve"),
+                now=_NOW,
+            )
+            await s.commit()
+    # Pre-card fails open → normal dispatch continues, card is written.
+    assert r.outcome == "sent_telegram"
+
+
 # ---- Telegram-approve happy path ----------------------------------------
 
 

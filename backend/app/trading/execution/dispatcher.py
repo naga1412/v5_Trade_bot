@@ -197,6 +197,12 @@ DispatchOutcome = Literal[
     # time defense-in-depth). See app/trading/execution/symbol_position_gate.py
     # for the class-1 defect this fixes.
     "blocked_symbol_position_open",
+    # Approve-time only: the DB read that would have detected a duplicate
+    # open position itself raised. Approve-time gate fail-CLOSES here —
+    # `_place_approved_order` refuses the order and logs this outcome so
+    # the operator can distinguish a verification failure from a real
+    # duplicate. Never emitted by `dispatch()` (pre-card fails open).
+    "blocked_position_check_failed",
 ]
 
 
@@ -891,12 +897,27 @@ async def dispatch(
     # SL/TP pair on the same Binance position (closePosition=true SL
     # from the newer entry can then prematurely liquidate the older
     # entry at 2x size). Reject before card is sent.
+    #
+    # PRE-CARD policy: FAIL-OPEN on DB error. A card is only a
+    # notification; the operator is still the approval step. The
+    # approve-time gate in `_place_approved_order` fail-CLOSES, which
+    # is the true safety point. See symbol_position_gate module
+    # docstring for the asymmetry rationale.
     from app.trading.execution.symbol_position_gate import (
         get_open_position_trade_id,
     )
-    _existing_id = await get_open_position_trade_id(
-        session, user_id=user.user_id, symbol=proposal.symbol,
-    )
+    try:
+        _existing_id = await get_open_position_trade_id(
+            session, user_id=user.user_id, symbol=proposal.symbol,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open at pre-card
+        log.warning(
+            "symbol_position_gate (pre-card): DB error checking "
+            "(user=%d, sym=%s): %s — failing open; approve-time gate "
+            "will fail closed if the check still errors then",
+            user.user_id, proposal.symbol, exc,
+        )
+        _existing_id = None
     if _existing_id is not None:
         return DispatchResult(
             outcome="blocked_symbol_position_open",
