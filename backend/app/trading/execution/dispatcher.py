@@ -191,6 +191,12 @@ DispatchOutcome = Literal[
     # outcome lives on the literal so dashboards / dispatch-log greps
     # treat it as a first-class outcome alongside the gate blocks).
     "stale_price",
+    # PR-SAFETY-PER-SYMBOL-OPEN-POSITION-GATE: the (user_id, symbol)
+    # tuple already has an open live_trades row. Emitted both by
+    # `dispatch()` (pre-card) and by `_place_approved_order` (approve-
+    # time defense-in-depth). See app/trading/execution/symbol_position_gate.py
+    # for the class-1 defect this fixes.
+    "blocked_symbol_position_open",
 ]
 
 
@@ -877,6 +883,29 @@ async def dispatch(
         return gate_result
     proposal = _maybe_tighten_short_sl(proposal, pr2_settings)
     # ---- end PR2 gates --------------------------------------------------
+
+    # ---- Per-symbol open-position gate (safety) ------------------------
+    # Class-1 defect fix: the global max-concurrent check below permits
+    # a second signal on a symbol that already has an open position,
+    # causing `place_with_sltp` to lay a doubled market entry + a second
+    # SL/TP pair on the same Binance position (closePosition=true SL
+    # from the newer entry can then prematurely liquidate the older
+    # entry at 2x size). Reject before card is sent.
+    from app.trading.execution.symbol_position_gate import (
+        get_open_position_trade_id,
+    )
+    _existing_id = await get_open_position_trade_id(
+        session, user_id=user.user_id, symbol=proposal.symbol,
+    )
+    if _existing_id is not None:
+        return DispatchResult(
+            outcome="blocked_symbol_position_open",
+            detail=(
+                f"symbol {proposal.symbol} already has open live_trades "
+                f"id={_existing_id}; refuse new entry"
+            ),
+        )
+    # ---- end per-symbol open-position gate -----------------------------
 
     # Max concurrent
     if user.open_positions_count >= user.max_concurrent_positions:

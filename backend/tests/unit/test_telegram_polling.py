@@ -422,6 +422,41 @@ async def test_place_approved_order_returns_none_for_unknown_signal() -> None:
     assert order_id is None
 
 
+@pytest.mark.asyncio
+async def test_place_approved_order_blocked_when_symbol_has_open_position() -> None:
+    """Approve-time per-symbol gate: if BTC/USDT already has an open
+    live_trades row when the operator taps Approve, refuse to submit
+    a second Binance order (would double-stack via closePosition=true
+    SL). No Binance call, no new live_trades row.
+    """
+    engine = await _mk_engine()
+    await _seed(engine)  # telegram_signals row for BTC/USDT
+    # Seed pre-existing open position on the SAME symbol.
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "INSERT INTO live_trades "
+            "(user_id, symbol, direction, status, binance_order_id) "
+            "VALUES (1, 'BTC/USDT', 'LONG', 'open', 'pre-existing')"
+        ))
+        await s.commit()
+
+    stub = _StubBinance(order_id="should-not-be-called")
+    async with AsyncSession(engine) as s:
+        order_id = await _place_approved_order(
+            lambda: AsyncSession(engine), signal_id="abc123", leverage=5, use_testnet=True,
+            user_id=1, binance_factory=lambda: stub, now=_NOW,
+        )
+    assert order_id is None
+    assert stub.placed == []  # no Binance call
+
+    async with AsyncSession(engine) as s:
+        rows = (await s.execute(sa.text(
+            "SELECT binance_order_id FROM live_trades ORDER BY id"
+        ))).all()
+    # Only the pre-existing open row — no new pending or open row.
+    assert [r.binance_order_id for r in rows] == ["pre-existing"]
+
+
 # ---- _route_callback ---------------------------------------------------
 
 
