@@ -269,3 +269,73 @@ async def load_cooldowns_per_tf(
         (r.symbol, getattr(r, "timeframe", None) or "1h"): _to_dt(r.cooldown_until)
         for r in result
     }
+
+
+async def lookup_shadow_trade_id_by_row_hash(
+    session: AsyncSession, *, row_hash: str,
+) -> int | None:
+    """Return `shadow_trades.id` for a given `row_hash`.
+
+    Amendment 3 (2026-07-31): the breakeven-variant lane needs the id
+    of a base row it just inserted so it can FK variant rows to it.
+    `insert_with_chain` returns the row_hash (canonical for hash-chain
+    integrity), but callers historically didn't need the id. Rather
+    than change the widely-used `persist_closed_trade` signature, we
+    look up by row_hash — which is unique per row by construction.
+
+    Returns None on miss (e.g. the caller passed a stale hash from a
+    row that was rolled back). Callers should treat None as "skip
+    variant persistence for this signal" — never a fatal error.
+    """
+    row = (await session.execute(
+        sa.text("SELECT id FROM shadow_trades WHERE row_hash = :h LIMIT 1"),
+        {"h": row_hash},
+    )).first()
+    return int(row.id) if row is not None else None
+
+
+async def insert_shadow_trade_variant(
+    session: AsyncSession,
+    *,
+    base_shadow_trade_id: int,
+    variant_name: str,
+    trigger_r: float,
+    armed: bool,
+    exit_price: float,
+    exit_reason: ExitReason,
+    exit_ts: datetime,
+    bars_held: int,
+    pnl_pct: float,
+) -> None:
+    """Insert one row into `shadow_trade_variants`.
+
+    Amendment 3 (2026-07-31). Not hash-chained (see design doc).
+    Uses plain INSERT with `ON CONFLICT DO NOTHING` on the
+    (base_shadow_trade_id, variant_name) UNIQUE so a retried close
+    attempt does not surface as a duplicate error.
+
+    Caller commits its own session. Failures propagate — the worker
+    wraps the batch in try/except so variant persist errors never
+    corrupt the base close.
+    """
+    await session.execute(
+        sa.text(
+            "INSERT INTO shadow_trade_variants "
+            "(base_shadow_trade_id, variant_name, trigger_r, armed, "
+            " exit_price, exit_reason, exit_ts, bars_held, pnl_pct) "
+            "VALUES (:base_id, :vname, :trig, :armed, "
+            "        :exit_p, :exit_r, :exit_ts, :bh, :pnl) "
+            "ON CONFLICT (base_shadow_trade_id, variant_name) DO NOTHING"
+        ),
+        {
+            "base_id": base_shadow_trade_id,
+            "vname": variant_name,
+            "trig": trigger_r,
+            "armed": armed,
+            "exit_p": exit_price,
+            "exit_r": exit_reason.value,
+            "exit_ts": exit_ts,
+            "bh": bars_held,
+            "pnl": pnl_pct,
+        },
+    )

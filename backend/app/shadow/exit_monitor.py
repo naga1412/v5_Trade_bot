@@ -23,6 +23,13 @@ class ExitReason(str, Enum):
     TAKE_PROFIT = "TAKE_PROFIT"
     STOP_LOSS = "STOP_LOSS"
     TIMEOUT = "TIMEOUT"
+    # Emitted ONLY by the breakeven-variant lane simulator
+    # (`app/shadow/breakeven_variant.py`). Base-lane `check_exit` never
+    # returns BREAKEVEN — the base lane is unchanged. The
+    # `shadow_trades.exit_reason` CHECK constraint therefore does not
+    # need extending; only `shadow_trade_variants.exit_reason` accepts
+    # this value.
+    BREAKEVEN = "BREAKEVEN"
 
 
 @dataclass(frozen=True)

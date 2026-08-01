@@ -44,7 +44,9 @@ from app.shadow.multi_stream import MultiStreamCandle, MultiStreamReader
 from app.shadow.observation import build_obs_components, persist_observation
 from app.shadow.persistence import (
     delete_open_position,
+    insert_shadow_trade_variant,
     list_open_positions,
+    lookup_shadow_trade_id_by_row_hash,
     persist_closed_trade,
     persist_open_position,
     set_cooldown,
@@ -410,6 +412,34 @@ class ShadowWorker:
         pos.bars_held += 1
         pos.last_check_at = candle.ts
 
+        # Amendment 3 (2026-07-31): append this candle to the position's
+        # in-memory bar-history buffer BEFORE running check_exit. The
+        # buffer is replayed by the breakeven-variant simulator at
+        # close time. Capped to prevent unbounded growth in a
+        # pathological hold (should never happen given TIMEOUT_BARS,
+        # but the cap is defense in depth). Restart-recovered positions
+        # start with an empty buffer — their variants will emit a
+        # benign timeout-at-entry row, which is fine (variant lane is
+        # analytics, not authoritative).
+        try:
+            from app.config import get_settings as _get_bev_settings
+            from app.shadow.breakeven_variant import BarSnapshot
+            _bev_settings = _get_bev_settings()
+            if _bev_settings.SHADOW_BREAKEVEN_VARIANTS_ENABLED:
+                if len(pos.bar_history) < _bev_settings.SHADOW_BREAKEVEN_BAR_HISTORY_CAP:
+                    pos.bar_history.append(BarSnapshot(
+                        ts=candle.ts,
+                        high=candle.high,
+                        low=candle.low,
+                        close=candle.close,
+                    ))
+        except Exception as _bev_buf_err:  # noqa: BLE001 — variant lane is analytics
+            log.warning(
+                "shadow_worker: bar_history append failed for %s/%s (variant "
+                "lane will emit degraded rows): %s",
+                candle.symbol, tf, _bev_buf_err,
+            )
+
         decision: ExitDecision | None = check_exit(
             pos,
             bar_high=candle.high,
@@ -451,9 +481,10 @@ class ShadowWorker:
         _cooldown_hours = _cooldown_table.get(tf, COOLDOWN_MINUTES / 60.0)
         cooldown_until = candle.ts + timedelta(hours=_cooldown_hours)
 
+        base_row_hash: str | None = None
         try:
             async with self.session_factory() as session:
-                await persist_closed_trade(
+                base_row_hash = await persist_closed_trade(
                     session, pos,
                     user_id=self.user_id,
                     exit_price=decision.exit_price,
@@ -478,6 +509,68 @@ class ShadowWorker:
                 candle.symbol, tf, e,
             )
             return
+
+        # Amendment 3 (2026-07-31): breakeven-variant lane. Runs AFTER
+        # the base commit succeeds; a separate session so a variant
+        # failure cannot roll back the base close. NO cooldown writes,
+        # NO touches to open_shadow_positions — confirmations required
+        # by the operator ruling that authorized this build. Wrapped
+        # best-effort: any exception is logged and swallowed, base
+        # publish path continues unchanged.
+        if base_row_hash is not None:
+            try:
+                from app.config import get_settings as _get_bev_persist_settings
+                from app.shadow.breakeven_variant import (
+                    simulate_variant_exit,
+                    variant_name_for,
+                )
+                _bev_ps = _get_bev_persist_settings()
+                _triggers = list(_bev_ps.SHADOW_BREAKEVEN_VARIANT_TRIGGERS_R)
+                if (
+                    _bev_ps.SHADOW_BREAKEVEN_VARIANTS_ENABLED
+                    and _triggers
+                ):
+                    async with self.session_factory() as _var_session:
+                        base_id = await lookup_shadow_trade_id_by_row_hash(
+                            _var_session, row_hash=base_row_hash,
+                        )
+                        if base_id is not None:
+                            for _trig in _triggers:
+                                _outcome = simulate_variant_exit(
+                                    direction=pos.direction.value,
+                                    entry_price=pos.entry_price,
+                                    initial_stop_loss=pos.stop_loss,
+                                    take_profit=pos.take_profit,
+                                    timeframe=tf,
+                                    trigger_r=float(_trig),
+                                    bar_history=list(pos.bar_history),
+                                    hold_timeout_bars=pos.hold_timeout_bars,
+                                )
+                                await insert_shadow_trade_variant(
+                                    _var_session,
+                                    base_shadow_trade_id=base_id,
+                                    variant_name=variant_name_for(float(_trig)),
+                                    trigger_r=float(_trig),
+                                    armed=_outcome.armed,
+                                    exit_price=_outcome.exit_price,
+                                    exit_reason=_outcome.exit_reason,
+                                    exit_ts=_outcome.exit_ts,
+                                    bars_held=_outcome.bars_held,
+                                    pnl_pct=_outcome.pnl_pct,
+                                )
+                            await _var_session.commit()
+            except Exception as _var_err:  # noqa: BLE001
+                log.warning(
+                    "shadow_worker: variant persist failed for %s/%s "
+                    "(base close intact; suppressed): %s",
+                    candle.symbol, tf, _var_err,
+                )
+
+        # Clear bar_history now that the position has closed — memory
+        # hygiene (defensive; the position is popped from open_positions
+        # a few lines below, but we don't want a lingering reference to
+        # retain the buffer if anything holds pos).
+        pos.bar_history.clear()
 
         # FU-33: slippage circuit-breaker. Only fires on SL exits — TP /
         # TIMEOUT are not "slippage" events. Wrapped best-effort so a
