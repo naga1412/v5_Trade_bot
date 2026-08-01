@@ -439,6 +439,47 @@ async def _place_approved_order(
     binance_native_sym = symbol.replace("/", "")
 
     # ─── Phase 0b: pre-validations (no DB writes, no Binance writes) ──
+    # Per-symbol open-position gate (defense-in-depth alongside the
+    # dispatch-pre-card check in dispatcher.py). A card can be sent,
+    # the operator can tap Approve minutes later, and in the interim
+    # another signal on the same symbol may have opened a position —
+    # placing a second one here would double-stack the entry with a
+    # closePosition=true SL that liquidates the older entry at 2x.
+    #
+    # APPROVE-TIME policy: FAIL-CLOSED on DB error. This gate exists
+    # to prevent position doubling; "allow the order on error" is
+    # exactly the harm the gate was built to prevent, at the moment
+    # the system is least healthy. Missed trade ~= zero cost
+    # (net-zero edge, signal recurs); doubled position = 2x risk on
+    # one symbol with an undesigned exit. Distinct outcome name
+    # `blocked_position_check_failed` so the operator can tell a
+    # verification failure from a real duplicate.
+    from app.trading.execution.symbol_position_gate import (
+        get_open_position_trade_id,
+    )
+    try:
+        async with session_factory() as _pos_session:
+            _existing_id = await get_open_position_trade_id(
+                _pos_session, user_id=user_id, symbol=symbol,
+            )
+    except Exception as exc:  # noqa: BLE001 — fail-closed at approve
+        log.error(
+            "place_approved_order: blocked_position_check_failed — "
+            "DB error verifying per-symbol open-position for %s "
+            "(signal_id=%s, user_id=%d): %s — refusing order "
+            "(cannot confirm no duplicate)",
+            symbol, signal_id, user_id, exc,
+        )
+        return None
+    if _existing_id is not None:
+        log.warning(
+            "place_approved_order: blocked_symbol_position_open — "
+            "symbol %s already has open live_trades id=%d "
+            "(signal_id=%s, user_id=%d)",
+            symbol, _existing_id, signal_id, user_id,
+        )
+        return None
+
     filters = await get_symbol_filters(
         binance_native_sym, use_testnet=use_testnet,
     )

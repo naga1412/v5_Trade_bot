@@ -158,6 +158,119 @@ async def test_blocked_when_at_max_concurrent_positions() -> None:
     assert r.outcome == "blocked_max_positions"
 
 
+# ---- Per-symbol open-position gate (safety) -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_blocked_when_symbol_already_has_open_position() -> None:
+    """Seed open live_trades on BTC/USDT for user 1, dispatch new
+    BTC/USDT signal — must be blocked AND no telegram_signals row
+    written (i.e. no card would go to the operator).
+    """
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.execute(sa.text(
+            "INSERT INTO live_trades (user_id, symbol, direction, status) "
+            "VALUES (1, 'BTC/USDT', 'LONG', 'open')"
+        ))
+        await s.commit()
+        r = await dispatch(
+            s,
+            proposal=_proposal(),
+            user=_user(mode="telegram-approve"),
+            now=_NOW,
+        )
+        await s.commit()
+    assert r.outcome == "blocked_symbol_position_open"
+    assert "BTC/USDT" in r.detail
+    async with AsyncSession(engine) as s:
+        card_count = (await s.execute(sa.text(
+            "SELECT count(*) FROM telegram_signals"
+        ))).scalar()
+    assert card_count == 0
+
+
+@pytest.mark.asyncio
+async def test_allowed_when_open_position_is_different_symbol() -> None:
+    """ETH/USDT open must NOT block BTC/USDT — gate is per-symbol."""
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.execute(sa.text(
+            "INSERT INTO live_trades (user_id, symbol, direction, status) "
+            "VALUES (1, 'ETH/USDT', 'LONG', 'open')"
+        ))
+        await s.commit()
+        r = await dispatch(
+            s,
+            proposal=_proposal(),  # BTC/USDT
+            user=_user(mode="telegram-approve"),
+            now=_NOW,
+        )
+        await s.commit()
+    assert r.outcome == "sent_telegram"
+
+
+@pytest.mark.asyncio
+async def test_allowed_when_only_closed_row_on_symbol() -> None:
+    """`status='closed'` row must not gate a fresh entry."""
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.execute(sa.text(
+            "INSERT INTO live_trades (user_id, symbol, direction, status) "
+            "VALUES (1, 'BTC/USDT', 'LONG', 'closed')"
+        ))
+        await s.commit()
+        r = await dispatch(
+            s,
+            proposal=_proposal(),
+            user=_user(mode="telegram-approve"),
+            now=_NOW,
+        )
+        await s.commit()
+    assert r.outcome == "sent_telegram"
+
+
+@pytest.mark.asyncio
+async def test_pre_card_gate_fails_open_on_db_error() -> None:
+    """Dispatcher pre-card gate MUST fail-open on DB error — a card is
+    only a notification, the operator is still the approval step, and
+    the approve-time gate fail-CLOSES. Verifies dispatch continues to
+    `sent_telegram` when the per-symbol query raises.
+    """
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.commit()
+
+    from app.trading.execution import symbol_position_gate as _spg
+
+    async def _boom(_session, *, user_id, symbol):  # noqa: ARG001
+        raise RuntimeError("simulated DB failure")
+
+    with patch.object(_spg, "get_open_position_trade_id", _boom):
+        async with AsyncSession(engine) as s:
+            r = await dispatch(
+                s,
+                proposal=_proposal(),
+                user=_user(mode="telegram-approve"),
+                now=_NOW,
+            )
+            await s.commit()
+    # Pre-card fails open → normal dispatch continues, card is written.
+    assert r.outcome == "sent_telegram"
+
+
 # ---- Telegram-approve happy path ----------------------------------------
 
 

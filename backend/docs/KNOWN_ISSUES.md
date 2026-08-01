@@ -958,3 +958,67 @@ TP distance and 6× wider R:R range vs the atr_bound cohort. Removing
 or widening the SL cap would degrade the currently-profitable
 cap_bound cohort — the fix candidate is more nuanced than "widen the
 stop".
+
+### FU-39 — Live per-symbol open-position check missing — ✅ FIXED-BY PR (pending merge)
+
+**Class-1 SAFETY defect**, live-money. Discovered 2026-07-30 during
+repeat-signal position-upgrade investigation.
+
+**Root cause**: the only position gate in `dispatcher.dispatch` was
+GLOBAL — `if user.open_positions_count >= user.max_concurrent_positions`
+at `backend/app/trading/execution/dispatcher.py:~882`. `open_positions_count`
+comes from `glue.build_user_context` which counts `SELECT count(*) FROM
+live_trades WHERE user_id=:u AND status='open'` across all symbols.
+
+**Failure mode**: with `max_concurrent_positions=5` and 0-4 slots used,
+a second approved signal on a symbol already open could reach
+`_place_live_order` / `_place_approved_order`, which calls
+`place_with_sltp` and lays a NEW market entry + a NEW SL/TP pair on
+the same Binance position. Because `place_with_sltp` uses
+`closePosition=true` on the SL/TP, the newer (higher) stop covers
+the DOUBLED position, so a routine wick can prematurely liquidate the
+older entry at 2× size. Prior known win-loss asymmetry in the same
+class (BANKUSDT repeat-signal cluster) was hypothesized to be signal
+confirmation but is at least partially explained by this defect.
+
+**Fix**: new `symbol_position_gate.get_open_position_trade_id` — pure
+read-only `SELECT id FROM live_trades WHERE user_id=:u AND symbol=:s
+AND status='open' LIMIT 1`. Called from BOTH:
+- `dispatcher.dispatch` (pre-card, before the global max-concurrent
+  check) — emits new `blocked_symbol_position_open` DispatchOutcome
+- `telegram_polling._place_approved_order` (approve-time Phase 0b,
+  before any Binance call) — logs warning with same outcome name and
+  returns None; no live_trades row inserted, no order placed.
+
+Defense-in-depth at both sites because a card can be sent, the
+operator can tap Approve minutes later, and in the interim a
+different signal or manual trade may have opened a position on the
+same symbol.
+
+**Regression coverage**:
+- `tests/unit/test_symbol_position_gate.py` — 7 cases including fail-
+  open on DB error, ignores closed / pending / different-symbol /
+  different-user rows.
+- `tests/unit/test_trading_dispatcher.py::test_blocked_when_symbol_already_has_open_position`
+  — seeds open row + asserts blocked outcome AND that no
+  `telegram_signals` card row was written.
+- `tests/unit/test_trading_dispatcher.py::test_allowed_when_open_position_is_different_symbol`
+  and `::test_allowed_when_only_closed_row_on_symbol` — negative
+  cases.
+- `tests/unit/test_telegram_polling.py::test_place_approved_order_blocked_when_symbol_has_open_position`
+  — seeds pre-existing open + asserts no Binance stub call and no
+  new live_trades row.
+
+**Error policy (split by caller)**:
+- Pre-card gate — **fail-OPEN** on DB error. A card is only a
+  notification; operator is still the approval step. Backstopped
+  by the GLOBAL max-concurrent gate + the approve-time gate below.
+- Approve-time gate — **fail-CLOSED** on DB error. Distinct outcome
+  literal `blocked_position_check_failed` (separate from
+  `blocked_symbol_position_open`) so the operator can distinguish
+  a verification failure from a real duplicate. Asymmetric cost
+  rationale: missed trade ~= zero cost (net-zero edge, signal
+  recurs); doubled position = 2× risk on one symbol with an
+  undesigned exit level, at the moment the system is least healthy.
+The helper `get_open_position_trade_id` itself does NOT swallow
+exceptions — callers own their policy via try/except wraps.
