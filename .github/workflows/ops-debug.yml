@@ -45,6 +45,7 @@ on:
           - stablecoin-hygiene # READ-ONLY: (a) stablecoin symbol activity in shadow_trades/shadow_open_positions post-2026-07-11, (b) low-ATR sweep (avg ATR% <0.05 = flag for blacklist), (c) current SHADOW_SPOT_BLACKLIST + MIN_ENTRY_SCORE_LONG
           - pwin-threshold-whatif # READ-ONLY: CLEAN p_win threshold what-if grid (blacklist excluded, in-memory refit): lower-bound T in {0.24..0.30}, window [T, 0.35], top-decile-excluded variants + model inversion (min entry_score where pred_p_win>=0.26).
           - mfe-mae-curve # READ-ONLY: Phase 1 MFE study — fetches 1h Binance klines per LONG shadow_trade (entry_score>=0.36, 60d, blacklist excluded, top-20 at time-of-trade + ranks_21_30 for comparison). Computes MFE_R / MAE_R per trade; per TP_R in {0.5..2.0} reports implied_WR, expectancy_R, after-fee variant + SL-near-miss autopsy. ~5min runtime.
+          - shadow-variant-rolling-report # READ-ONLY: paired-Δ analysis on shadow_trade_variants (Amendment 3 breakeven lane). Per (variant_name, cohort=atr_bound|cap_bound|aggregate, timeframe, window in {7,30,60,90}d): n_paired, n_armed, share_armed, mean paired Δ_gross ± SE. Also prints per-cohort DECISION rule (PASS/FAIL/NOT-YET-N at n>=100) + EARLY directional read at n>=30 + leader trigger. Filters: direction=LONG, entry_score>=0.36, blacklist excluded, top-20 rank at trade-open (BTCUSDT exempt). Δ_after_fee asserted == Δ_gross (paired fees cancel; divergence flagged as BUG).
           - settings-check # READ-ONLY: print selected Settings values from the RUNNING backend container (LIVE_COOLDOWN_ENABLED, SHADOW_TIMEFRAMES, MIN_ENTRY_SCORE_LONG, etc.) — verifies deployed env vs code defaults per operator's 2026-07-30 rule "never state env-gated behavior from a config.py default."
           - sl-autopsy # READ-ONLY: SL distance / ATR ratio analysis for closed LONG shadow_trades last 30d. Per-symbol + overall avg sl_dist%, avg_atr%, sl_atr_ratio distribution for SL-exit vs TP-exit. Answers: are stops inside the noise band?
           - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe
@@ -854,6 +855,10 @@ jobs:
             mfe-mae-curve)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/mfe_mae_curve.py"
+              ;;
+            shadow-variant-rolling-report)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/shadow_variant_rolling_report.py"
               ;;
             settings-check)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \

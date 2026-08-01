@@ -107,6 +107,17 @@ class ShadowPosition:
     realized_vol_20d: float | None = None
     funding_directional_adj: float | None = None
 
+    # Amendment 3 (2026-07-31): in-memory bar buffer used by the
+    # breakeven-variant lane to replay the position's price path at
+    # close time. NOT PERSISTED — deliberately ephemeral. Restart-
+    # recovered positions (loaded from shadow_open_positions) have
+    # an empty buffer; their variants emit a benign timeout-at-entry
+    # row rather than nothing (see simulate_variant_exit contract).
+    # Capped inside the worker at BAR_HISTORY_CAP entries so a
+    # runaway hold (should never happen given timeout logic) cannot
+    # unbounded-grow memory.
+    bar_history: list = field(default_factory=list)
+
     @classmethod
     def from_signal(cls, sig: ShadowSignal, *, position_size_usdt: float) -> "ShadowPosition":
         return cls(

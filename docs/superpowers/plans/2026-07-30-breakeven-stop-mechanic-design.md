@@ -1,10 +1,202 @@
 # Breakeven-stop mechanic — design draft
 
-**Status: DRAFT (2026-07-30).** Docs only. No code. Not merging to any
-implementation branch. Held explicitly behind the Aug 3-10 validation
-window per operator ruling — this doc exists so the design is durable
-and reviewable rather than living in chat, and can be picked up cleanly
-after the window closes.
+**Status: AMENDED 2026-07-31.** Docs → implementation. See
+"Amendment 3" below for the current architecture (variant lane,
+separate table, dual triggers). Sections below "Amendment 3" and
+above "Persistence & schema (AMENDED)" are the original 2026-07-30
+draft, retained for context but superseded on the persistence path
+and the measurement plan.
+
+## Amendment 3 — variant lane, separate table, dual triggers (2026-07-31)
+
+Operator has ruled and authorized this shape:
+
+1. **Variant lane, not before/after cutover.** For every base signal
+   the shadow engine ordinarily produces, the same base signal is
+   ALSO simulated under one or more breakeven-armed alternative exit
+   rules. Base row still lands in `shadow_trades`; variant rows land
+   in a NEW table `shadow_trade_variants`. Removes regime confound
+   inherent in a temporal A/B (measurement lens vs strategy change).
+
+2. **Separate table `shadow_trade_variants`.** Not additional rows on
+   `shadow_trades`. Reason: adding rows to `shadow_trades` silently
+   corrupts every consumer that does not filter on variant (analytics,
+   dashboards, universe snapshots, exit-reason histograms, reference-
+   cohort computations). Separate table keeps blast radius zero on
+   existing readers.
+
+3. **Two triggers ship together: 0.40R AND 0.50R.** Each base signal
+   produces TWO variant rows (one per trigger). This settles the
+   trigger-selection question in the same measurement cycle instead
+   of another 2-3 month wait (0.43 trades/day live shadow throughput
+   → ~93 days for n=40 comparable pairs on a single trigger). Cost
+   is one additional row + one additional pure-function call per base
+   close. Reversible: drop 0.40R lane later by setting its config to
+   empty list.
+
+4. **Variant lane writes NO cooldowns** and does **NOT touch
+   `open_shadow_positions`** — confirmations required by operator
+   (destroying the pairing otherwise). Implementation constraint:
+   the variant compute path must not call `set_cooldown`, must not
+   read/write `open_shadow_positions`, and must not participate in
+   any per-user position counter. Shadow already has no per-user
+   `max_concurrent_positions` (unlike live), so this is trivially
+   satisfied for position limits; cooldown avoidance is enforced by
+   architecture (variant persist is a separate function that only
+   touches `shadow_trade_variants`).
+
+### Variant lane architecture
+
+**Simulation timing**: at BASE-close time, not at each candle. When
+the base position closes normally (persist_closed_trade path in
+`shadow/worker.py::_maybe_close_position`), the worker replays the
+same bar history through a pure `simulate_variant_exit(...)` function
+for each active trigger. Each variant produces its own
+(exit_price, exit_reason, exit_ts, bars_held, pnl_pct) tuple.
+
+**Bar history buffer**: `ShadowPosition` gains an in-memory-only
+`bar_history: list[BarSnapshot]` cleared on close. Each candle
+processed by `_maybe_close_position` (whether it triggers an exit or
+not) appends a snapshot `(ts, high, low, close)`. Size cap: 500
+entries (15m × 500 = ~5 days, exceeds any practical hold before
+timeout). Not persisted; not audit-chained; not touched on
+worker restart (positions loaded from DB have empty buffer and
+therefore emit no variants — acceptable, since the pairing only
+needs to hold for positions that open+close in the same process
+lifetime).
+
+**Pure simulator function**: `app/shadow/breakeven_variant.py::
+simulate_variant_exit(entry_price, initial_stop_loss, take_profit,
+direction, trigger_r, bar_history) -> VariantOutcome`. Walks the
+buffer in order, tracks peak MFE in R units, arms breakeven when
+peak crosses `trigger_r`, then continues with `stop_loss = entry`.
+Same-bar tiebreak: SL-first on the ORIGINAL stop (matches production
+convention at `exit_monitor.py:55`). Returns
+`VariantOutcome(exit_price, exit_reason, exit_ts, bars_held,
+pnl_pct, armed_bar_index | None)`.
+
+**Persist at base close**: after `persist_closed_trade` + `set_cooldown`
+succeed, the worker computes variants and inserts them in a separate
+best-effort try/except so a variant persistence failure never breaks
+the base close. Variant rows carry `base_shadow_trade_id` FK back
+to the base row for join-based analysis.
+
+### `shadow_trade_variants` table (schema)
+
+```
+id                   BIGSERIAL PRIMARY KEY
+base_shadow_trade_id BIGINT NOT NULL REFERENCES shadow_trades(id)
+                       ON DELETE CASCADE
+                     -- FK back to the base row that generated this variant
+variant_name         TEXT NOT NULL
+                     -- 'breakeven_0.40R' / 'breakeven_0.50R' initially
+trigger_r            NUMERIC(6,4) NOT NULL
+                     -- 0.4000 / 0.5000
+armed                BOOLEAN NOT NULL
+                     -- True iff peak MFE crossed trigger_r before exit
+exit_price           NUMERIC(20,10) NOT NULL
+exit_reason          TEXT NOT NULL
+                     -- 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIMEOUT' | 'BREAKEVEN'
+exit_ts              TIMESTAMPTZ NOT NULL
+bars_held            INT NOT NULL
+pnl_pct              NUMERIC(10,6) NOT NULL
+                     -- gross % vs entry, same formula as shadow_trades.pnl_pct
+created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+
+UNIQUE (base_shadow_trade_id, variant_name)  -- one row per (base, variant)
+INDEX ON (base_shadow_trade_id)
+```
+
+**Hash-chain status**: NOT chained. Rationale: variants are derived
+data from bar history the audit chain doesn't cover anyway, and the
+base row IS chained (`shadow_trades` in `HASHED_TABLES`). The
+integrity of the base signal (entry/SL/TP/direction/inputs_hash) is
+already protected. Recomputing variants from bar history is not
+supported (buffer is in-memory only), so a hash chain would only
+detect tampering, not enable replay. Analytics-only table → skip.
+
+### `ExitReason.BREAKEVEN` still added, but only in the variant path
+
+The `ExitReason` enum in `app/shadow/exit_monitor.py` still gains
+`BREAKEVEN` (variant-lane emits it). The `shadow_trades.exit_reason`
+CHECK constraint does NOT need extending because base rows never
+carry `BREAKEVEN` (base lane behavior is unchanged). The
+`shadow_trade_variants.exit_reason` column uses its own CHECK
+that includes `BREAKEVEN`.
+
+### Settings
+
+```python
+# Turns the variant lane on/off wholesale (default OFF).
+SHADOW_BREAKEVEN_VARIANTS_ENABLED: bool = False
+
+# List of trigger R values to simulate. Default: dual lane.
+# Empty list is equivalent to _ENABLED=False.
+SHADOW_BREAKEVEN_VARIANT_TRIGGERS_R: list[float] = [0.40, 0.50]
+```
+
+Live-side is unchanged from the original design — this amendment
+covers shadow-only. Live parity remains a separate follow-up
+gated on the confirmations from FU-37 and LIVE_COOLDOWN_ENABLED.
+
+### Measurement plan (replaces "Before/after measurement plan")
+
+**No pre-flip / post-flip cutover.** The variant lane runs
+continuously the moment `SHADOW_BREAKEVEN_VARIANTS_ENABLED=True`.
+Analysis is paired-comparison:
+
+- For each base row `b` in the observation window: retrieve
+  `shadow_trade_variants` rows keyed by `b.id`.
+- Compute per-variant Δ_pnl vs base: `pnl_pct_variant - pnl_pct_base`.
+  These are PAIRED observations on the same signal → no regime
+  confound → SE shrinks vs. two independent means.
+- Report mean Δ, SE, n, and share_armed per (variant, TF, window).
+- Ship-or-keep decision: whichever trigger's cumulative Δ exceeds
+  its SE with the right sign becomes the recommended live-side
+  trigger. If both survive, prefer higher n_armed × Δ product.
+
+Sample-size acceleration: because paired deltas have lower SE than
+independent means, meaningful measurement is expected at n≈40 pairs
+per variant (~2 months at current 0.43 trades/day live shadow rate),
+vs. the ~6 months required for two-sample comparison at similar
+power.
+
+### Open questions from original design — RESOLVED
+
+1. **Option A vs Option B same-bar tiebreak**: **Option B** (SL-first
+   on original stop) — matches production convention, no code
+   change to `check_exit`.
+2. **`stop_loss_original` column**: N/A — variant rows carry
+   `trigger_r` and `armed` directly; base rows are unchanged.
+3. **Live parity in same PR**: **Separate follow-up**. Ship shadow
+   variants first, accumulate ~2 months of paired data, then live.
+4. **Trigger config hardcoded vs per-TF**: **Global list** in
+   `SHADOW_BREAKEVEN_VARIANT_TRIGGERS_R`. Per-TF is a future
+   refinement once we know which trigger wins on which TF.
+5. **WR denominator for BE exits**: BREAKEVEN counts as **neither
+   win nor loss** in dashboards. The paired-Δ methodology above
+   doesn't touch WR; it works on avg_pnl_pct directly.
+
+### Non-goals for this amendment
+
+- Trailing after breakeven: still explicitly out of scope.
+- Multi-tier breakeven (0.5R then 1.0R): still out; the dual-lane
+  0.40R vs 0.50R is a TRIGGER selection experiment, not a multi-tier
+  mechanic.
+
+### Cross-references
+
+- `docs/superpowers/decisions/2026-07-29-study-1-flat-geometry-ladder.md`
+- `backend/docs/KNOWN_ISSUES.md` FU-37 (live-side prerequisite)
+- `backend/scripts/mfe_mae_curve.py` (v5 native-TF probe that
+  produced the +0.338% Δ_af at 0.50R, n=174)
+- Operator ruling 2026-07-31 (this session): "TABLE DECISION IS
+  SETTLED: separate table (shadow_trade_variants) ... variant-lane
+  exits write NO cooldowns and do NOT count toward position limits."
+
+---
+
+## Original draft (2026-07-30) — superseded on persistence and measurement paths
 
 ## Origin
 
