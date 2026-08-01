@@ -91,6 +91,25 @@ class Settings(BaseSettings):
     # until staging win-rate validates. Operator flips per-env after.
     SHADOW_15M_ELIGIBLE_FOR_PROMOTION: bool = False
 
+    # --- Amendment 3 (2026-07-31): breakeven-variant lane ----------------
+    # Paired-comparison variant lane on shadow_trades. Each base close
+    # spawns one row per active trigger into `shadow_trade_variants`.
+    # Variant lane writes NO cooldowns and does NOT touch
+    # open_shadow_positions (confirmations required by operator). Base
+    # lane behavior is unchanged in every way.
+    # Default OFF so shipping is a zero-behavior-change deploy.
+    SHADOW_BREAKEVEN_VARIANTS_ENABLED: bool = False
+    # Trigger R values to simulate. Dual lane 0.40 + 0.50 default so the
+    # trigger-selection question is settled in the same measurement cycle
+    # instead of waiting another 2+ months. Empty list is equivalent to
+    # _ENABLED=False (worker short-circuits).
+    SHADOW_BREAKEVEN_VARIANT_TRIGGERS_R: list[float] = [0.40, 0.50]
+    # In-memory bar-history buffer cap per open ShadowPosition. 500 × 15m
+    # = ~5 days, comfortably exceeds any real hold before TIMEOUT_BARS
+    # fires (96 for 15m, 24 for 1h). Prevents unbounded memory in
+    # pathological cases.
+    SHADOW_BREAKEVEN_BAR_HISTORY_CAP: int = 500
+
     # --- PR3 G1: Hold/TP scaling by mtf_agreement (spec §4.6b) -----------
     # Default OFF — scaling does NOT apply; positions use the per-TF
     # baseline timeout (TIMEOUT_BARS_PER_TF) and engine-computed TP.
