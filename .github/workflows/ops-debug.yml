@@ -57,6 +57,7 @@ on:
           - sql-select # READ-ONLY: run one SELECT / WITH statement from the `sql` input against prod Postgres via the backend container. Enforced read-only at 3 layers (shape check, SET SESSION TRANSACTION READ ONLY, statement_timeout=15s). Row cap 500. See backend/scripts/sql_select_probe.py.
           - healer-status # READ-ONLY: current + last-24h healer findings summary (Phase 0). Groups by detector_name, severity + shows the 10 most-recent rows for triage.
           - healer-selftest # SENDS one synthetic [SELFTEST]-tagged CRITICAL alert through the full alert_routing chain (Telegram > SMTP > log). Operator confirms physical Telegram receipt on their phone — the acceptance test for healer Phase 0 alerting. Also records one healer_findings row so healer-status shows when it last ran.
+          - regime-live-check # READ-ONLY: BUG 1 diagnostic — reports the live process's regime cache state, attempts a FRESH BTCUSDT daily-kline fetch + classification (isolates fetch-failure vs cache-never-persists vs genuine neutral), and prints REGIME_GATE_ENABLED/ADX_GATE_ENABLED's deployed values.
       sql:
         description: SQL for the sql-select probe (SELECT or WITH only, single statement, 15s timeout, 500-row cap). Ignored by every other probe.
         required: false
@@ -867,6 +868,10 @@ jobs:
             sl-autopsy)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
                 "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/sl_autopsy.py"
+              ;;
+            regime-live-check)
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && docker compose exec -T backend python /app/scripts/regime_live_check.py"
               ;;
             stablecoin-hygiene)
               ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
