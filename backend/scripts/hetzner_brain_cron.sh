@@ -48,10 +48,23 @@ notify() {
       | tee -a "$LOG_FILE"
     return 0
   fi
-  curl -s -X POST \
+  # 2026-08-05: the curl response + exit code used to be swallowed
+  # (`>/dev/null || true`) — a delivery failure (bad token, Telegram API
+  # rejecting the request, network blip) was invisible: the log would
+  # simply have no notify-related line at all, identical to the happy
+  # path. Capture both so a silent-delivery-failure is distinguishable
+  # from "notify was never called" when reading the log after the fact.
+  local resp_file="/tmp/brain_cron_notify_resp.$$"
+  local http_code
+  http_code=$(curl -s -o "$resp_file" -w '%{http_code}' -X POST \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
-    -d text="${emoji} brain retrain: ${msg}" >/dev/null || true
+    -d text="${emoji} brain retrain: ${msg}") || true
+  if [ "$http_code" != "200" ]; then
+    echo "[$(date -u +%FT%TZ)] WARN: telegram notify FAILED (http_code=${http_code:-none}): $(cat "$resp_file" 2>/dev/null)" \
+      | tee -a "$LOG_FILE"
+  fi
+  rm -f "$resp_file"
 }
 
 ts() { date -u +%FT%TZ; }

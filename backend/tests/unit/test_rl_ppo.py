@@ -13,6 +13,7 @@ from app.rl.ppo import (
     DEFAULT_LR,
     TrainConfig,
     TrainResult,
+    _assert_finite_obs,
     action_to_index,
     index_to_action,
     train_ppo,
@@ -200,3 +201,84 @@ def test_entropy_warmup_uses_higher_coef_first_n_epochs() -> None:
     # log(5) ≈ 1.6. Entropy should stay > 1.0.
     for stat in result.history:
         assert stat.entropy > 1.0
+
+
+# ---------------------------------------------------------------------------
+# NaN guards (2026-08-05, Phase 1.2) — see app.rl.ppo module docstring.
+# Regression coverage for the "16 consecutive nightly cron failures with
+# only an opaque torch.distributions error to diagnose from" incident.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_finite_obs_passes_clean_tensor() -> None:
+    obs = torch.zeros((4, OBS_DIM))
+    transitions = _synthetic_transitions(4)
+    _assert_finite_obs(obs, transitions, stage="test")  # must not raise
+
+
+def test_assert_finite_obs_names_offending_transition() -> None:
+    obs = torch.zeros((3, OBS_DIM))
+    obs[1, 5] = float("nan")
+    transitions = _synthetic_transitions(3)
+    transitions[1] = Transition(
+        obs=transitions[1].obs, action=transitions[1].action,
+        reward=transitions[1].reward, next_obs=transitions[1].next_obs,
+        done=True, asset_id=0, symbol="BADCOIN",
+        opened_at_iso="2026-08-01T00:00:00+00:00",
+    )
+    with pytest.raises(ValueError, match="BADCOIN.*2026-08-01"):
+        _assert_finite_obs(obs, transitions, stage="test")
+
+
+def test_assert_finite_obs_catches_inf_too() -> None:
+    obs = torch.zeros((2, OBS_DIM))
+    obs[0, 0] = float("inf")
+    transitions = _synthetic_transitions(2)
+    with pytest.raises(ValueError, match="non-finite"):
+        _assert_finite_obs(obs, transitions, stage="test")
+
+
+def test_train_ppo_raises_on_nan_reward_input() -> None:
+    """Guard 1/3: bad input data caught before any compute is wasted."""
+    transitions = _synthetic_transitions(16)
+    transitions[3] = Transition(
+        obs=transitions[3].obs, action=transitions[3].action,
+        reward=float("nan"), next_obs=transitions[3].next_obs,
+        done=True, asset_id=0, symbol=transitions[3].symbol,
+        opened_at_iso=transitions[3].opened_at_iso,
+    )
+    cfg = TrainConfig(epochs=1, batch_size=8, ppo_epochs_per_batch=1)
+    with pytest.raises(ValueError, match="non-finite.*reward"):
+        train_ppo(policy=PolicyNetwork(), transitions=transitions, asset_table=_asset_table(), config=cfg)
+
+
+def test_train_ppo_raises_on_nan_obs_input() -> None:
+    """Guard 1/3: NaN in the observation tensor itself, not just reward."""
+    transitions = _synthetic_transitions(16)
+    bad_obs = transitions[0].obs.copy()
+    bad_obs[10] = float("nan")
+    transitions[0] = Transition(
+        obs=bad_obs, action=transitions[0].action,
+        reward=transitions[0].reward, next_obs=transitions[0].next_obs,
+        done=True, asset_id=0, symbol=transitions[0].symbol,
+        opened_at_iso=transitions[0].opened_at_iso,
+    )
+    cfg = TrainConfig(epochs=1, batch_size=8, ppo_epochs_per_batch=1)
+    with pytest.raises(ValueError, match="non-finite input observations"):
+        train_ppo(policy=PolicyNetwork(), transitions=transitions, asset_table=_asset_table(), config=cfg)
+
+
+def test_train_ppo_raises_on_already_corrupted_warm_start_weights() -> None:
+    """Guard 2/3: a poisoned warm-started checkpoint is caught on the
+    FIRST forward pass, before this run's own data/dynamics could be
+    blamed — distinguishes "prior run corrupted the checkpoint" from
+    "this run's data/hyperparameters caused it"."""
+    policy = PolicyNetwork()
+    with torch.no_grad():
+        for p in policy.parameters():
+            p.fill_(float("nan"))
+            break  # corrupting one parameter tensor is enough
+    transitions = _synthetic_transitions(16)
+    cfg = TrainConfig(epochs=1, batch_size=8, ppo_epochs_per_batch=1)
+    with pytest.raises(ValueError, match="warm-started checkpoint's weights are already corrupted"):
+        train_ppo(policy=policy, transitions=transitions, asset_table=_asset_table(), config=cfg)
