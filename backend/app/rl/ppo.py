@@ -93,6 +93,37 @@ class TrainResult:
     final_state_dict: dict | None = None
 
 
+def _assert_finite_obs(
+    obs: torch.Tensor, transitions: Sequence[Transition], *, stage: str,
+) -> None:
+    """Raise with the offending transition(s) named.
+
+    2026-08-05 (Phase 1.2): the training loop used to let a NaN/Inf ride
+    silently into the network, surfacing many steps later as an opaque
+    ``torch.distributions.Categorical`` "invalid values" error with no
+    indication of which transition or stage was responsible — 16
+    consecutive nightly cron failures with only that generic traceback
+    to diagnose from. Fail at the boundary instead, with the exact
+    transitions named, so the NEXT failure (if this is the cause) is
+    immediately actionable instead of requiring a full code audit.
+    """
+    finite_per_row = torch.isfinite(obs).all(dim=1)
+    if bool(finite_per_row.all()):
+        return
+    bad_rows = (~finite_per_row).nonzero(as_tuple=True)[0].tolist()
+    examples = []
+    for i in bad_rows[:10]:
+        bad_dims = (~torch.isfinite(obs[i])).nonzero(as_tuple=True)[0].tolist()
+        examples.append(
+            f"{transitions[i].symbol}@{transitions[i].opened_at_iso} "
+            f"(obs dims {bad_dims})"
+        )
+    raise ValueError(
+        f"train_ppo: {len(bad_rows)}/{obs.shape[0]} transition(s) have "
+        f"non-finite {stage} — first offenders: {'; '.join(examples)}"
+    )
+
+
 def _stack_transitions(
     transitions: Sequence[Transition],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -156,6 +187,19 @@ def train_ppo(
         n, cfg.batch_size, cfg.epochs, dev,
     )
 
+    # NaN guard 1/3: bad INPUT data (obs or reward), before any compute.
+    _assert_finite_obs(obs, transitions, stage="input observations")
+    if not bool(torch.isfinite(rewards).all()):
+        bad = (~torch.isfinite(rewards)).nonzero(as_tuple=True)[0].tolist()
+        bad_desc = "; ".join(
+            f"{transitions[i].symbol}@{transitions[i].opened_at_iso}"
+            for i in bad[:10]
+        )
+        raise ValueError(
+            f"train_ppo: {len(bad)}/{n} transition(s) have non-finite "
+            f"reward — first offenders: {bad_desc}"
+        )
+
     policy = policy.to(dev)
     asset_table.module.to(dev)
     emb_dim = asset_table.emb_dim
@@ -183,9 +227,29 @@ def train_ppo(
     policy.eval()
     with torch.no_grad():
         old_obs_live = _live_obs(obs, asset_ids).detach()
-        old_log_probs, _, old_values = policy.evaluate_actions(
-            old_obs_live, actions,
-        )
+        # NaN guard 2/3: this is the FIRST forward pass of this run, before
+        # any optimizer.step() has happened here — no gradient from THIS
+        # run could have corrupted the weights yet. torch.distributions.
+        # Categorical validates its own `logits` arg and RAISES internally
+        # the instant they're non-finite (confirmed empirically — a
+        # post-hoc torch.isfinite() check on the return value is
+        # unreachable dead code, since evaluate_actions() never returns
+        # when the policy is already poisoned; it raises from inside).
+        # So the catch has to wrap the call, not inspect its result.
+        try:
+            old_log_probs, _, old_values = policy.evaluate_actions(
+                old_obs_live, actions,
+            )
+        except ValueError as e:
+            raise ValueError(
+                "train_ppo: policy produced non-finite output on the "
+                "FIRST forward pass of this run, before any optimizer "
+                "step — the warm-started checkpoint's weights are "
+                "already corrupted (not this run's data). Discard the "
+                "warm-start .pt and cold-start, or roll back to the "
+                "last known-good checkpoint in rl-cache/. "
+                f"Original error: {e}"
+            ) from e
     policy.train()
 
     # Advantages on this single-step setup: A = R - V(s) (no GAE needed —
@@ -226,9 +290,34 @@ def train_ppo(
                 b_returns = returns[idx]
                 b_old_log_probs = old_log_probs[idx]
 
-                new_log_probs, entropy, new_values = policy.evaluate_actions(
-                    b_obs_live, b_actions,
-                )
+                # NaN guard 3/3: corruption emerging DURING this run's own
+                # training (guards 1/2 passed — input data and the warm-
+                # started checkpoint were both clean). Pinpoints the exact
+                # epoch/minibatch instead of an opaque crash inside
+                # torch.distributions.Categorical several frames deeper.
+                # Same reason as guard 2: wrap the call, don't inspect its
+                # return value — Categorical raises internally on invalid
+                # logits, it doesn't return them.
+                try:
+                    new_log_probs, entropy, new_values = policy.evaluate_actions(
+                        b_obs_live, b_actions,
+                    )
+                except ValueError as e:
+                    bad_syms = "; ".join(
+                        f"{transitions[int(j)].symbol}@{transitions[int(j)].opened_at_iso}"
+                        for j in idx[:10]
+                    )
+                    raise ValueError(
+                        f"train_ppo: policy diverged to non-finite outputs "
+                        f"at epoch={epoch} inner_pass={_inner} "
+                        f"batch_start={start} (n_in_batch={len(idx)}) — "
+                        f"transitions in this batch: {bad_syms}. Likely an "
+                        f"unstable update from a prior minibatch in THIS "
+                        f"run (grad clip alone doesn't protect a NaN that "
+                        f"originates from a non-finite loss, only bounds "
+                        f"an exploding-but-finite gradient). "
+                        f"Original error: {e}"
+                    ) from e
                 ratio = torch.exp(new_log_probs - b_old_log_probs)
                 clip_low = 1.0 - cfg.clip_eps
                 clip_high = 1.0 + cfg.clip_eps

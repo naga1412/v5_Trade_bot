@@ -282,12 +282,22 @@ async def lifespan(_app: FastAPI):
         # AUTONOMOUS_TRADING_ENABLED — snapshots are useful in all modes
         # (manual / telegram-approve / fully-auto). The dispatcher gate
         # consumes these snapshots only when SYMBOL_ALLOWLIST_ENABLED=True.
+        # Healer B1 (2026-08-05): was started directly (bypassing
+        # worker_supervisor), so worker_watchdog's auto-restart-on-
+        # heartbeat_error could never actually reach it despite the
+        # WorkerSpec's `stateful=False  # safe to auto-restart` — it fell
+        # through to "alert (not_supervised)" every time. Route through
+        # _wrap() like every other non-stateful worker so the existing
+        # B1 restart path can act on it.
         from app.workers.symbol_allowlist_refresh import (
             start_symbol_allowlist_refresh,
         )
         from app.config import get_settings as _get_pr10_for_loop
-        symbol_allowlist_task = start_symbol_allowlist_refresh(
-            get_session_factory(), _get_pr10_for_loop,
+        symbol_allowlist_task = _wrap(
+            "symbol_allowlist_refresh",
+            lambda: start_symbol_allowlist_refresh(
+                get_session_factory(), _get_pr10_for_loop,
+            ),
         )
 
         # PR10.5 / FU-28 — UI data-pipeline freshness monitor. NOT gated
