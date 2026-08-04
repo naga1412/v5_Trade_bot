@@ -5,6 +5,7 @@ import pytest
 import respx
 
 from app.data.adapters.binance_futures_intermarket import (
+    _OI_HIST,
     BinanceFuturesIntermarketAdapter,
     IntermarketSnapshot,
 )
@@ -36,7 +37,7 @@ async def test_fetch_snapshot_returns_full_record() -> None:
             mock.get("https://fapi.binance.com/fapi/v1/premiumIndex").mock(
                 return_value=httpx.Response(200, json=_PREMIUM_INDEX_PAYLOAD)
             )
-            mock.get("https://fapi.binance.com/fapi/v1/openInterestHist").mock(
+            mock.get("https://fapi.binance.com/futures/data/openInterestHist").mock(
                 return_value=httpx.Response(200, json=_OI_HIST_PAYLOAD)
             )
             snap = await adapter.fetch_snapshot("BTC/USDT")
@@ -70,7 +71,7 @@ async def test_fetch_snapshot_partial_oi_failure_keeps_funding(caplog) -> None:
             mock.get("https://fapi.binance.com/fapi/v1/premiumIndex").mock(
                 return_value=httpx.Response(200, json=_PREMIUM_INDEX_PAYLOAD)
             )
-            mock.get("https://fapi.binance.com/fapi/v1/openInterestHist").mock(
+            mock.get("https://fapi.binance.com/futures/data/openInterestHist").mock(
                 side_effect=httpx.ConnectError("oi down")
             )
             snap = await adapter.fetch_snapshot("BTC/USDT")
@@ -89,7 +90,7 @@ async def test_fetch_snapshot_translates_canonical_symbol_to_native() -> None:
                 "https://fapi.binance.com/fapi/v1/premiumIndex"
             ).mock(return_value=httpx.Response(200, json=_PREMIUM_INDEX_PAYLOAD))
             oi = mock.get(
-                "https://fapi.binance.com/fapi/v1/openInterestHist"
+                "https://fapi.binance.com/futures/data/openInterestHist"
             ).mock(return_value=httpx.Response(200, json=_OI_HIST_PAYLOAD))
             await adapter.fetch_snapshot("BTC/USDT")
     assert premium.calls.last.request.url.params["symbol"] == "BTCUSDT"
@@ -121,3 +122,37 @@ async def test_fetch_snapshot_returns_none_on_invalid_symbol() -> None:
             )
             snap = await adapter.fetch_snapshot("FAKECOIN/USDT")
     assert snap is None
+
+
+def test_oi_hist_endpoint_is_not_under_fapi_v1() -> None:
+    """Regression guard (2026-08-05): `/fapi/v1/openInterestHist` does not
+    exist on Binance Futures and 404s on every call — this silently zeroed
+    out open_interest for every symbol since the adapter shipped. The real
+    endpoint lives under `/futures/data/`. Pin the path family so a
+    revert/typo can't reintroduce the same 100%-silent-failure bug."""
+    assert _OI_HIST == "/futures/data/openInterestHist"
+    assert not _OI_HIST.startswith("/fapi/v1/")
+
+
+@pytest.mark.asyncio
+async def test_fetch_snapshot_logs_warning_not_debug_on_oi_4xx(caplog) -> None:
+    """A systematic OI failure must be visible at WARNING, not swallowed at
+    DEBUG — that swallow is exactly what hid the wrong-endpoint bug for
+    every symbol until 2026-08-05."""
+    async with httpx.AsyncClient() as http:
+        adapter = BinanceFuturesIntermarketAdapter(http=http)
+        with respx.mock() as mock:
+            mock.get("https://fapi.binance.com/fapi/v1/premiumIndex").mock(
+                return_value=httpx.Response(200, json=_PREMIUM_INDEX_PAYLOAD)
+            )
+            mock.get("https://fapi.binance.com/futures/data/openInterestHist").mock(
+                return_value=httpx.Response(404)
+            )
+            with caplog.at_level("WARNING"):
+                snap = await adapter.fetch_snapshot("BTC/USDT")
+    assert snap is not None
+    assert snap.open_interest is None
+    assert any(
+        r.levelname == "WARNING" and "openInterestHist" in r.message
+        for r in caplog.records
+    )

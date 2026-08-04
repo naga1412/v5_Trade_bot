@@ -1,8 +1,8 @@
 """Binance Futures intermarket adapter (SP-3.5 Phase B1).
 
 Pulls funding rate + mark price from /fapi/v1/premiumIndex and the most
-recent 5m open-interest bucket from /fapi/v1/openInterestHist. Returns a
-single :class:`IntermarketSnapshot` per ``fetch_snapshot()`` call.
+recent 5m open-interest bucket from /futures/data/openInterestHist. Returns
+a single :class:`IntermarketSnapshot` per ``fetch_snapshot()`` call.
 
 Each snapshot costs 2 weight against the Binance Futures 2400/min bucket;
 top-30 universe at 5min cadence = 60 weight per tick = ~720/hr.
@@ -11,6 +11,15 @@ Failure modes:
 * premiumIndex network error → ``None`` returned (caller skips the symbol).
 * openInterestHist network error → snapshot returned with ``open_interest=None``
   (funding decay trap can still fire; squeeze cascade trap silently abstains).
+
+BUG FIX (2026-08-05): ``_OI_HIST`` previously pointed at
+``/fapi/v1/openInterestHist``, which does not exist on Binance Futures —
+every call 404'd. The 404 was caught and logged at DEBUG under the
+(incorrect) assumption that it meant "this symbol has no OI history",
+so ``open_interest`` was silently ``None`` for 100% of symbols, 100% of
+the time, since this adapter shipped. The real endpoint lives under
+``/futures/data/`` (a different path family than ``/fapi/v1/``), not
+under ``/fapi/v1/``. Verified against the live API before fixing.
 """
 from __future__ import annotations
 
@@ -27,7 +36,7 @@ log = logging.getLogger(__name__)
 
 _BASE_URL = "https://fapi.binance.com"
 _PREMIUM_INDEX = "/fapi/v1/premiumIndex"
-_OI_HIST = "/fapi/v1/openInterestHist"
+_OI_HIST = "/futures/data/openInterestHist"
 
 
 @dataclass(frozen=True)
@@ -111,20 +120,17 @@ class BinanceFuturesIntermarketAdapter:
             if oi_rows:
                 oi_value = float(oi_rows[0]["sumOpenInterest"])
         except httpx.HTTPStatusError as e:
-            # Many futures symbols don't have OI history (newer / thin-
-            # volume listings). The endpoint returns 404 with
-            # {"code": -1121, "msg": "Invalid symbol."} for those. Drop
-            # to DEBUG so the warning channel stays signal-only — the
-            # snapshot is still useful for the funding-decay trap with
-            # open_interest=None.
-            if e.response.status_code in (400, 404):
-                log.debug(
-                    "binance_futures openInterestHist 4xx for %s "
-                    "(no OI history available)",
-                    native,
-                )
-            else:
-                log.warning("binance_futures openInterestHist error: %s", e)
+            # A genuinely delisted/never-listed-on-futures symbol can
+            # still 4xx here (Binance returns JSON {"code": -1121, "msg":
+            # "Invalid symbol."} for those, not a bare 404). Logged at
+            # WARNING, not DEBUG: a wrong-endpoint-class bug produces the
+            # exact same symptom (4xx on every call) and must not be able
+            # to hide silently again the way it did before 2026-08-05 —
+            # see module docstring.
+            log.warning(
+                "binance_futures openInterestHist 4xx for %s (status=%s): %s",
+                native, e.response.status_code, e,
+            )
         except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPError,
                 KeyError, TypeError, ValueError, IndexError) as e:
             log.warning("binance_futures openInterestHist error: %s", e)
