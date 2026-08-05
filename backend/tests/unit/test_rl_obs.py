@@ -23,8 +23,6 @@ def _market(regime: str = "bull_breakout") -> MarketFeatures:
         atr_pct=0.02,
         funding_rate=0.0001,
         oi_delta_24h=0.05,
-        dxy_corr_30d=-0.3,
-        gold_corr_30d=0.1,
         regime=regime,
     )
 
@@ -35,20 +33,20 @@ def _position(cur: int = 0) -> PositionState:
 
 def _macro() -> MacroFeatures:
     return MacroFeatures(
-        hours_to_next_high_impact=12.0,
-        fomc_window=False,
         weekend=False,
         asia_open=True,
     )
 
 
 def test_observation_dimension_constants_match_spec() -> None:
-    """Spec sec D1: 32 (emb) + 9 (layers) + 10 (market) + 3 (pos) + 4 (macro) = 58.
+    """PR-OBS-DIM-REDUCE: 32 (emb) + 9 (layers) + 8 (market) + 3 (pos) + 2 (macro) = 54.
 
-    The original spec quoted 57 (arithmetic error — counted 5 numeric +
-    5 regime one-hot as 9 instead of 10); spec corrected to match.
+    market = 3 numeric (ATR%, funding, OI Δ24h) + 5 regime one-hot.
+    dxy_corr_30d, gold_corr_30d, hours_to_next_high_impact, fomc_window were
+    dropped 2026-08-05 — zero live collector ever, permanent hardcoded
+    constants in every observation ever captured.
     """
-    assert OBS_DIM == 58
+    assert OBS_DIM == 54
     assert EMB_DIM == 32
     assert N_LAYER_SCORES == 9
     assert len(REGIME_NAMES) == 5
@@ -75,16 +73,16 @@ def test_observation_packs_components_in_documented_order() -> None:
     assert np.allclose(obs[:32], 7.0)
     # Next 9 floats are the layer scores 1..9
     assert np.allclose(obs[32:41], np.arange(1, 10, dtype=np.float32))
-    # Then 5 numeric market features (ATR%, funding, OI Δ24h, DXY, gold)
+    # Then 3 numeric market features (ATR%, funding, OI Δ24h)
     assert np.allclose(
-        obs[41:46], [0.02, 0.0001, 0.05, -0.3, 0.1], atol=1e-6,
+        obs[41:44], [0.02, 0.0001, 0.05], atol=1e-6,
     )
     # Then 5 floats for the regime one-hot
-    assert obs[46:51].sum() == 1.0
+    assert obs[44:49].sum() == 1.0
     # Then 3 position floats (cur=0, unrealized=0, bars=0)
-    assert np.allclose(obs[51:54], [0.0, 0.0, 0.0])
-    # Then 4 macro floats (12h, FOMC=0, weekend=0, asia=1)
-    assert np.allclose(obs[54:58], [12.0, 0.0, 0.0, 1.0])
+    assert np.allclose(obs[49:52], [0.0, 0.0, 0.0])
+    # Then 2 macro floats (weekend=0, asia=1)
+    assert np.allclose(obs[52:54], [0.0, 1.0])
 
 
 def test_layer_scores_must_be_exactly_nine() -> None:
@@ -127,8 +125,8 @@ def test_position_signed_to_match_action_space() -> None:
     long_ = build_observation(
         asset, (0.0,) * 9, _market(), _position(cur=+1), _macro(),
     )
-    assert short[51] == -1.0
-    assert long_[51] == +1.0
+    assert short[49] == -1.0
+    assert long_[49] == +1.0
 
 
 def test_observation_is_deterministic_for_same_inputs() -> None:

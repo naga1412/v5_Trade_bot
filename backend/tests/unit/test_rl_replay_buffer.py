@@ -305,8 +305,6 @@ async def _insert_observation(
             "funding_rate": funding_rate,
             "open_interest": open_interest,
             "oi_delta_24h": 0.0,
-            "dxy_corr_30d": -0.4,
-            "gold_corr_30d": 0.5,
             "regime": regime,
         },
         "position": {
@@ -315,8 +313,6 @@ async def _insert_observation(
             "bars_in_position": 0,
         },
         "macro": {
-            "hours_to_next_high_impact": 24.0,
-            "fomc_window": False,
             "weekend": False,
             "asia_open": True,
         },
@@ -350,13 +346,13 @@ async def test_obs_components_path_uses_stored_market_features(
     # Obs is a numpy float32 array — we can't directly inspect "regime"
     # but we can confirm the observation came from build_observation
     # using the EXACT funding_rate the JSON stored.
-    # OBS layout: emb(32) + ls(9) + market(5: atr_pct,funding,oi_delta,dxy,gold)
-    #           + regime(5) + position(3) + macro(4)
+    # OBS layout: emb(32) + ls(9) + market(3: atr_pct,funding,oi_delta)
+    #           + regime(5) + position(3) + macro(2)
     obs = out[0].obs
     funding_idx = 32 + 9 + 1  # second slot of market block
     assert obs[funding_idx] == pytest.approx(0.0008, abs=1e-6)
-    # Regime one-hot at indices 32+9+5 .. 32+9+5+4. bear_crash is index 1.
-    regime_base = 32 + 9 + 5
+    # Regime one-hot at indices 32+9+3 .. 32+9+3+4. bear_crash is index 1.
+    regime_base = 32 + 9 + 3
     assert obs[regime_base + 1] == pytest.approx(1.0)
     assert obs[regime_base + 0] == pytest.approx(0.0)
 
@@ -516,7 +512,6 @@ def test_macro_from_ts_iso_invalid_ts_falls_back_to_defaults() -> None:
     macro = _macro_from_ts_iso("not-a-date")
     assert macro.weekend is False
     assert macro.asia_open is False
-    assert macro.hours_to_next_high_impact == pytest.approx(24.0)
 
 
 @pytest.mark.asyncio
@@ -525,8 +520,8 @@ async def test_legacy_trade_macro_derives_weekend_from_opened_at(
 ) -> None:
     """End-to-end: legacy trade opened on a Saturday gets weekend=True in obs.
 
-    obs layout: emb(32) + ls(9) + market(5) + regime(5) + position(3) + macro(4)
-    macro slot order: hours_to_next_high_impact, fomc_window, weekend, asia_open
+    obs layout: emb(32) + ls(9) + market(3) + regime(5) + position(3) + macro(2)
+    macro slot order: weekend, asia_open
     """
     # 2024-04-06 is a Saturday; hour=10 is not asia_open
     await _insert_trade(
@@ -535,10 +530,10 @@ async def test_legacy_trade_macro_derives_weekend_from_opened_at(
     out = await load_from_shadow_trades(session, window_days=365)
     assert len(out) == 1
     obs = out[0].obs
-    macro_base = 32 + 9 + 5 + 5 + 3   # emb + ls + market + regime + position
-    # macro slot 2 = weekend (0-indexed: hours=0, fomc=1, weekend=2, asia=3)
-    assert obs[macro_base + 2] == pytest.approx(1.0)   # weekend=True → 1.0
-    assert obs[macro_base + 3] == pytest.approx(0.0)   # asia_open=False → 0.0
+    macro_base = 32 + 9 + 3 + 5 + 3   # emb + ls + market + regime + position
+    # macro slot 0 = weekend, slot 1 = asia_open
+    assert obs[macro_base + 0] == pytest.approx(1.0)   # weekend=True → 1.0
+    assert obs[macro_base + 1] == pytest.approx(0.0)   # asia_open=False → 0.0
 
 
 @pytest.mark.asyncio
