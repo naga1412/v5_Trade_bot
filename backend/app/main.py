@@ -151,6 +151,7 @@ async def lifespan(_app: FastAPI):
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
+    p_win_refit_task = None  # PR5
     ui_freshness_monitor_task = None  # PR10.5 / FU-28
     healer_detector_task = None  # Healer Phase 0
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
@@ -298,6 +299,15 @@ async def lifespan(_app: FastAPI):
             lambda: start_symbol_allowlist_refresh(
                 get_session_factory(), _get_pr10_for_loop,
             ),
+        )
+
+        # PR5: daily p_win isotonic calibration refit. Record-only
+        # (predictions.p_win) — no live-money decision depends on this;
+        # see app/core/scoring/p_win_calibrator.py module docstring.
+        from app.workers.p_win_refit import start_p_win_refit
+        p_win_refit_task = _wrap(
+            "p_win_refit",
+            lambda: start_p_win_refit(get_session_factory()),
         )
 
         # PR10.5 / FU-28 — UI data-pipeline freshness monitor. NOT gated
@@ -677,6 +687,8 @@ async def lifespan(_app: FastAPI):
             mtf_cache_ttl_refresh_task.cancel()
         if symbol_allowlist_task is not None:
             symbol_allowlist_task.cancel()
+        if p_win_refit_task is not None:
+            p_win_refit_task.cancel()
         if ui_freshness_monitor_task is not None:
             ui_freshness_monitor_task.cancel()
         if healer_detector_task is not None:

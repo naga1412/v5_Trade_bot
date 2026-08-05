@@ -56,6 +56,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "symbol_allowlist_refresh": "app/workers/symbol_allowlist_refresh.py",
     "ui_freshness_monitor": "app/workers/ui_freshness_monitor.py",
     "healer_detector_task": "app/healer/runner.py",
+    "p_win_refit": "app/workers/p_win_refit.py",
 }
 
 
@@ -204,6 +205,7 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "intermarket_cleanup_task": 24 * 60 * 60,
     "auto_promote_task": 24 * 60 * 60,
     "symbol_allowlist_refresh": 24 * 60 * 60,
+    "p_win_refit": 24 * 60 * 60,
 }
 
 
