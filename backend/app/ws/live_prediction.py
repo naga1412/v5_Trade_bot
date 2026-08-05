@@ -89,6 +89,22 @@ async def _persist_prediction_and_schedule_validation(
     return pred_id
 
 
+# PR1's compute_realized_vol_20d (app/core/scoring/vol_normalization.py)
+# requires >= MIN_DAILY_BARS_FOR_VOL (20) distinct calendar days of history
+# before it will compute effective_score/realized_vol_20d instead of
+# returning None. At the 1h timeframe this worker always runs at, 300 bars
+# is only 12.5 days — every backend restart reset the REST seed back below
+# the floor, so the aggregator hook needed ~7.5 more days of *uninterrupted*
+# uptime to ever populate those two columns. Deploy cadence went from ~1-2
+# commits/day to several/day starting 2026-07-14, so no restart since then
+# has had that much runway — hence realized_vol_20d/effective_score going
+# 100% NULL in `predictions` from that date forward (root-caused 2026-08-05).
+# 504 bars = 21 days gives a 1-day safety margin over the 20-day floor so
+# the columns populate from the FIRST candle after every restart, with zero
+# dependency on inter-deploy uptime.
+HISTORY_SEED_BARS: int = 504
+
+
 async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h") -> None:
     """Seed REST history, subscribe to Binance WS, on each closed candle:
     1. Append candle to in-memory DataFrame (last 1000 bars)
@@ -101,7 +117,9 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
 
     async with httpx.AsyncClient() as http:
         client = BinanceClient(http=http)
-        history = await client.fetch_klines(binance_symbol, timeframe, limit=300)
+        history = await client.fetch_klines(
+            binance_symbol, timeframe, limit=HISTORY_SEED_BARS,
+        )
     bars = pd.DataFrame([c.__dict__ for c in history])
     bars["ts"] = pd.to_datetime(bars["ts"], utc=True)
     bars = bars.set_index("ts")[["open", "high", "low", "close", "volume"]]
