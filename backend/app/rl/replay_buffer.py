@@ -33,7 +33,9 @@ import numpy as np
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.ml.regimes import REGIME_WINDOWS
+from app.trading.symbol_allowlist import is_stablecoin_pair
 from app.rl.obs import (
     AssetState,
     MacroFeatures,
@@ -296,17 +298,10 @@ def _macro_from_ts_iso(opened_at_iso: str) -> MacroFeatures:
         ts = datetime.fromisoformat(opened_at_iso.replace("Z", "+00:00"))
         ts = ts.astimezone(timezone.utc)
     except ValueError:
-        return MacroFeatures(
-            hours_to_next_high_impact=24.0,
-            fomc_window=False,
-            weekend=False,
-            asia_open=False,
-        )
+        return MacroFeatures(weekend=False, asia_open=False)
     weekday = ts.weekday()   # 0=Mon .. 6=Sun
     hour = ts.hour
     return MacroFeatures(
-        hours_to_next_high_impact=24.0,
-        fomc_window=False,
         weekend=weekday >= 5,
         asia_open=0 <= hour < 8,
     )
@@ -339,6 +334,29 @@ async def load_from_shadow_trades(
     raw = await _fetch_closed_trades(session, window_days=window_days)
     if not raw:
         log.info("replay buffer empty — no closed shadow_trades found")
+        return []
+
+    # PR-OBS-DIM-REDUCE (2026-08-05): SHADOW_STABLECOIN_EXCLUDE_LIST only
+    # prevents NEW shadow-universe entries — it is not applied retroactively,
+    # so pre-blacklist stablecoin trades (e.g. USD1USDT, near-zero realized
+    # volatility) still sit in this training pool. A stablecoin's near-flat
+    # price series is a plausible source of divide-by-near-zero/extreme-ratio
+    # blowups in ATR/return-derived features, and one such transition
+    # (USD1USDT@2026-06-20) was named in the 2026-08-05 03:30 UTC PPO
+    # divergence. Filtering here closes that gap for every future training
+    # run, not just prospectively.
+    settings = get_settings()
+    excluded = [tr for tr in raw if is_stablecoin_pair(tr.symbol, settings)]
+    if excluded:
+        log.info(
+            "replay buffer: excluding %d stablecoin-pair trade(s) "
+            "(symbols: %s)",
+            len(excluded),
+            sorted({tr.symbol for tr in excluded}),
+        )
+        raw = [tr for tr in raw if not is_stablecoin_pair(tr.symbol, settings)]
+    if not raw:
+        log.info("replay buffer empty after stablecoin exclusion")
         return []
 
     embed_zero = np.zeros(32, dtype=np.float32)
@@ -406,16 +424,10 @@ async def load_from_shadow_trades(
                 atr_pct=float(mkt.get("atr_pct", 0.0) or 0.0),
                 funding_rate=float(mkt.get("funding_rate") or 0.0),
                 oi_delta_24h=float(mkt.get("oi_delta_24h") or 0.0),
-                dxy_corr_30d=float(mkt.get("dxy_corr_30d") or 0.0),
-                gold_corr_30d=float(mkt.get("gold_corr_30d") or 0.0),
                 regime=str(mkt.get("regime") or "sideways_grind"),
             )
             mc = comp.get("macro") or {}
             macro = MacroFeatures(
-                hours_to_next_high_impact=float(
-                    mc.get("hours_to_next_high_impact", 24.0)
-                ),
-                fomc_window=bool(mc.get("fomc_window", False)),
                 weekend=bool(mc.get("weekend", False)),
                 asia_open=bool(mc.get("asia_open", False)),
             )
@@ -429,8 +441,6 @@ async def load_from_shadow_trades(
                 atr_pct=tr.entry_atr / tr.entry_price if tr.entry_price > 0 else 0.0,
                 funding_rate=funding,
                 oi_delta_24h=oi_delta,
-                dxy_corr_30d=0.0,
-                gold_corr_30d=0.0,
                 regime=_resolve_regime(tr.opened_at_iso),
             )
             macro = _macro_from_ts_iso(tr.opened_at_iso)

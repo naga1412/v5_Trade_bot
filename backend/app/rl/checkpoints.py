@@ -234,7 +234,19 @@ async def load_active_checkpoint(
         model.load_state_dict(state["policy"])
         model.eval()
     except Exception as e:  # noqa: BLE001
-        log.error("torch load failed: %s; RL inference disabled", e)
+        # Most commonly a shape/key mismatch (RuntimeError from
+        # load_state_dict) after an OBS_DIM change — the active checkpoint
+        # was trained under a different observation vector width than
+        # model_factory() now builds. This is the intended fail-open path:
+        # brain_adjust stays 1.0 (pure equal-weight, no-op) for every
+        # prediction until a new checkpoint is trained + activated under
+        # the current OBS_DIM — never a crash.
+        log.error(
+            "RL brain checkpoint load failed for %s v%s (id=%s): %s — "
+            "FALLING BACK TO EQUAL-WEIGHT MODE (brain_adjust=1.0 for every "
+            "prediction) until a compatible checkpoint is activated",
+            ck.model_name, ck.version, ck.id, e,
+        )
         return None
 
     global _active_asset_table_state
