@@ -7,6 +7,25 @@ from unittest import mock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_model_cache():
+    """_LOADED_MODELS is a module-level dict shared across the whole test
+    session. Without this, test_fit_creates_pkl_files (and friends,
+    below) leave a REAL fitted model cached after fit_p_win_models runs
+    for real (this file's tests run with sklearn installed, unlike some
+    local dev environments) — a later test in THIS file or ANY other
+    file asserting "no model available" would then observe a real
+    prediction instead of None. Caught in CI (2026-08-05): had only
+    added this fixture to tests/core/scoring/test_p_win_calibrator.py,
+    not here — test_predict_p_win_still_returns_none failed with
+    "assert 1.0 is None" because an earlier test in this same file had
+    already populated the cache."""
+    import app.core.scoring.p_win_calibrator as mod
+    mod._LOADED_MODELS.clear()
+    yield
+    mod._LOADED_MODELS.clear()
+
+
 def _make_rows(n_long: int = 60, n_short: int = 40) -> list:
     """Synthetic shadow_trade rows with a monotone signal→win relationship."""
     rows = []
@@ -116,8 +135,12 @@ async def test_fit_skips_direction_with_insufficient_rows(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_predict_p_win_still_returns_none() -> None:
-    """predict_p_win must still return None — no behavior change until threshold chosen."""
+async def test_predict_p_win_returns_none_with_no_model_on_disk() -> None:
+    """No model has been fitted at the real P_WIN_MODEL_PATH_{LONG,SHORT}
+    paths in a fresh checkout (these are runtime-generated artifacts,
+    not committed) — predict_p_win must return None, not raise, and
+    (per the autouse fixture above) this isn't polluted by the fit
+    tests above it in this same file having cached a real model."""
     from app.core.scoring.p_win_calibrator import predict_p_win
     from app.core.scoring.types import Direction
 

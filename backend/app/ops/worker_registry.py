@@ -362,6 +362,22 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=15 * 60,  # 5-min cadence + 10-min slack
         stateful=False,
     ),
+    # 22. PR5 — daily p_win isotonic calibration refit. Writes
+    #     long.pkl/short.pkl consumed by predict_p_win at prediction
+    #     time. Record-only column (predictions.p_win) — no live-money
+    #     decision depends on this worker's output.
+    WorkerSpec(
+        name="p_win_refit",
+        description=(
+            "Daily re-fit of per-direction isotonic p_win calibration "
+            "models against closed shadow_trades (PR5)."
+        ),
+        liveness_query=HEARTBEAT,
+        # Cadence + ~10% grace, matching symbol_allowlist_refresh's
+        # daily-cadence treatment (Healer B2).
+        max_staleness_seconds=26 * 60 * 60,
+        stateful=False,  # safe to auto-restart
+    ),
 )
 
 
