@@ -83,7 +83,7 @@ def _reset_state() -> None:
 def _market() -> MarketFeatures:
     return MarketFeatures(
         atr_pct=0.02, funding_rate=0.0001, oi_delta_24h=0.05,
-        dxy_corr_30d=-0.3, gold_corr_30d=0.1, regime="bull_breakout",
+        regime="bull_breakout",
     )
 
 
@@ -92,10 +92,7 @@ def _position() -> PositionState:
 
 
 def _macro() -> MacroFeatures:
-    return MacroFeatures(
-        hours_to_next_high_impact=12.0,
-        fomc_window=False, weekend=False, asia_open=False,
-    )
+    return MacroFeatures(weekend=False, asia_open=False)
 
 
 def _layers() -> tuple[float, ...]:

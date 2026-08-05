@@ -43,6 +43,19 @@ class _TinyPolicy(nn.Module):
         return self.fc(x)
 
 
+class _TinyPolicyWiderInput(nn.Module):
+    """Same shape as _TinyPolicy except the input layer is wider — stands
+    in for 'checkpoint trained under an old OBS_DIM' vs 'model_factory now
+    builds a network for the new OBS_DIM' (e.g. PR-OBS-DIM-REDUCE 58->54)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(6, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(x)
+
+
 def _save_production_format(path: Path, policy: nn.Module, *, asset_table_state: dict | None = None) -> str:
     """Save checkpoint in train_brain.py production format; return sha256."""
     payload = {
@@ -222,6 +235,47 @@ async def test_load_returns_none_on_sha_mismatch(
 
     out = await load_active_checkpoint(session, model_factory=_TinyPolicy)
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_load_returns_none_on_obs_dim_mismatch(
+    session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint saved under an old OBS_DIM (e.g. pre PR-OBS-DIM-REDUCE,
+    58-wide input) must fail open, not raise, when the current model_factory
+    builds a network for the new OBS_DIM (54-wide).
+
+    torch.load_state_dict(strict=True) raises RuntimeError on a shape
+    mismatch — the loader's broad except must catch it and return None,
+    exactly like every other failure mode (missing file, bad sha, wrong
+    format). This is the exact scenario the champion checkpoint (id=62,
+    trained under the 58-dim vector) hits after an OBS_DIM-shrinking
+    deploy — this test proves it degrades to the pre-SP-4 equal-weight
+    path (get_active_policy_and_checkpoint() stays None,
+    compute_brain_adjust_and_persist falls back to brain_adjust=1.0)
+    instead of crashing the live prediction path.
+    """
+    monkeypatch.setenv("RL_CACHE_DIR", str(tmp_path / "cache"))
+    # Checkpoint was trained with a WIDER input layer than what the current
+    # model_factory (_TinyPolicy, unchanged) now builds.
+    src = _TinyPolicyWiderInput()
+    ckpt_path = tmp_path / "ppo_policy_v1_old_obs_dim.pt"
+    sha = _save_production_format(ckpt_path, src)
+
+    file_uri = ckpt_path.resolve().as_uri()
+    await session.execute(sa.text("""
+        INSERT INTO rl_checkpoints
+        (model_name, version, checkpoint_uri, sha256, trained_at,
+         train_data_window, eval_results, is_active)
+        VALUES ('ppo_policy_v1', 'v1-old-obs-dim', :u, :h,
+                '2026-07-15T03:30:00+00:00', 'window', '{}', 1)
+    """), {"u": file_uri, "h": sha})
+    await session.commit()
+
+    out = await load_active_checkpoint(session, model_factory=_TinyPolicy)
+    assert out is None
+    # Module state must NOT be pinned to a half-loaded/broken model.
+    assert get_active_policy_and_checkpoint() is None
 
 
 @pytest.mark.asyncio

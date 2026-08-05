@@ -307,14 +307,10 @@ async def test_persist_then_load_round_trips_components(
         "market": {
             "atr_pct": 0.01, "funding_rate": 0.0008,
             "open_interest": 2.0e9, "oi_delta_24h": 0.0,
-            "dxy_corr_30d": -0.4, "gold_corr_30d": 0.5,
             "regime": "bear_crash",
         },
         "position": {"cur_position": 0, "unrealized_pnl_R": 0.0, "bars_in_position": 0},
-        "macro": {
-            "hours_to_next_high_impact": 24.0, "fomc_window": False,
-            "weekend": False, "asia_open": True,
-        },
+        "macro": {"weekend": False, "asia_open": True},
     }
     await persist_observation(
         session, signal_id="sig-rt-1", user_id=1, symbol="ETHUSDT",

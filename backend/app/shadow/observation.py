@@ -1,7 +1,7 @@
 """Snapshot full RL observation components at shadow-trade-open time.
 
 When the shadow worker opens a new position, we serialize the components
-needed to reconstruct the 58-float observation that the brain's PPO
+needed to reconstruct the 54-float observation that the brain's PPO
 policy would see at that exact moment. Stored as a JSONB blob in the
 `shadow_observations` table (migration 0019), one row per position,
 keyed on `signal_id` (which survives the move from
@@ -27,8 +27,6 @@ so future obs-layout changes can re-assemble from stored components):
             "funding_rate": 0.0001 | None,
             "open_interest": 1234567.0 | None,
             "oi_delta_24h": 0.0 | None,
-            "dxy_corr_30d": 0.0,
-            "gold_corr_30d": 0.0,
             "regime": "neutral"
         },
         "position": {
@@ -37,19 +35,16 @@ so future obs-layout changes can re-assemble from stored components):
             "bars_in_position": 0
         },
         "macro": {
-            "hours_to_next_high_impact": 24.0,
-            "fomc_window": false,
             "weekend": false,
             "asia_open": true
         }
     }
 
-A few components (DXY corr, gold corr, hours_to_next_high_impact) are
-currently not computed at signal time and are stored as best-effort
-defaults. They become exact data the moment those workers start writing
-their own snapshots — the loader at training time can still reconstruct
-from the same JOIN pattern then. For everything ELSE, this is the
-canonical record.
+PR-OBS-DIM-REDUCE (2026-08-05): dropped dxy_corr_30d, gold_corr_30d,
+hours_to_next_high_impact, fomc_window from both `market` and `macro` —
+none ever had a live collector (no FX/gold feed, no econ-calendar
+source), so every row ever captured had these as hardcoded constants,
+not signal. See app/rl/obs.py's module docstring for the full rationale.
 """
 from __future__ import annotations
 
@@ -84,7 +79,7 @@ SCHEMA_VERSION: int = 2
 
 
 def _macro_from_ts(ts: datetime) -> dict[str, Any]:
-    """Derive the 4 macro features from a single timestamp (no DB needed)."""
+    """Derive the 2 macro features from a single timestamp (no DB needed)."""
     ts = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     weekday = ts.weekday()  # 0=Mon ... 6=Sun
     hour = ts.hour
@@ -92,11 +87,6 @@ def _macro_from_ts(ts: datetime) -> dict[str, Any]:
     asia_open = 0 <= hour < 8
     weekend = weekday >= 5
     return {
-        # Placeholder — real impl needs an econ-calendar DB. Default to "far away"
-        # so the policy doesn't get spurious panic-near-news signals.
-        "hours_to_next_high_impact": 24.0,
-        # FOMC days aren't yet wired to a calendar source. Default False.
-        "fomc_window": False,
         "weekend": weekend,
         "asia_open": asia_open,
     }
@@ -195,8 +185,6 @@ def _build_components(
             "funding_rate": funding,
             "open_interest": open_interest,
             "oi_delta_24h": intermarket.get("oi_delta_24h") if intermarket else None,
-            "dxy_corr_30d": 0.0,
-            "gold_corr_30d": 0.0,
             "regime": regime,
         },
         # At open, every position is by definition flat/just-opened.

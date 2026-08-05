@@ -1,19 +1,26 @@
 """Observation builder for the SP-4 PPO policy (L10).
 
-Spec sec D1 — assembles a 57-float vector that the policy network sees on
-each prediction tick:
+Assembles a 54-float vector that the policy network sees on each
+prediction tick:
 
     asset_embedding (32)
   + layer_scores L1..L9 (9)
-  + market_state (10: ATR%, funding, OI Δ24h, DXY corr, gold corr,
-                      regime one-hot[5])
+  + market_state (8: ATR%, funding, OI Δ24h, regime one-hot[5])
   + position_state (3: cur_pos {-1,0,+1}, unrealized_pnl_R, bars_in_position)
-  + macro_calendar (4: hours_to_next_HI, FOMC_window, weekend, asia_open)
-  = 58
+  + macro_calendar (2: weekend, asia_open)
+  = 54
 
-NOTE: spec sec D1 quoted "57" — that was an arithmetic error (it counted
-the 5 numeric market features + 5 regime one-hot as 9 instead of 10).
-Implementation uses 58 and the spec was corrected to match.
+PR-OBS-DIM-REDUCE (2026-08-05): dropped 4 dims that had zero live collector
+and were never going to be populated without new infrastructure —
+dxy_corr_30d, gold_corr_30d (no FX/gold feed exists), hours_to_next_high_impact,
+fomc_window (no econ-calendar source wired). All four were permanent
+hardcoded constants (0.0 / 24.0 / False) for every observation ever
+captured — pure dead weight, not signal. Per
+[[observation_vector_audit_2026_08_04]]: remove now rather than backfill
+later, since populating fabricated historical values for a feature live
+still can't see would manufacture train/serve skew. This is an OBS_DIM
+change — incompatible with every prior checkpoint, forces a from-scratch
+retrain (operator-accepted tradeoff).
 
 The exact same function runs at training-time (replay buffer
 construction) and inference-time (production) — that's the spec sec 8
@@ -27,7 +34,7 @@ from typing import Literal, Sequence
 import numpy as np
 
 
-OBS_DIM: int = 58
+OBS_DIM: int = 54
 EMB_DIM: int = 32
 N_LAYER_SCORES: int = 9
 
@@ -61,7 +68,7 @@ class AssetState:
 
 @dataclass(frozen=True)
 class MarketFeatures:
-    """5 numeric market features + 1 regime label.
+    """3 numeric market features + 1 regime label.
 
     `regime` should be one of REGIME_NAMES; unknown labels gracefully
     degrade to a zero one-hot so the brain at least sees the rest of the
@@ -71,8 +78,6 @@ class MarketFeatures:
     atr_pct: float
     funding_rate: float
     oi_delta_24h: float
-    dxy_corr_30d: float
-    gold_corr_30d: float
     regime: str
 
 
@@ -85,8 +90,6 @@ class PositionState:
 
 @dataclass(frozen=True)
 class MacroFeatures:
-    hours_to_next_high_impact: float
-    fomc_window: bool
     weekend: bool
     asia_open: bool
 
@@ -111,7 +114,7 @@ def build_observation(
     position: PositionState,
     macro: MacroFeatures,
 ) -> np.ndarray:
-    """Assemble a single (57,) float32 observation. See module docstring."""
+    """Assemble a single (54,) float32 observation. See module docstring."""
     if len(layer_scores) != N_LAYER_SCORES:
         raise ValueError(
             f"expected 9 layer scores (L1..L9), got {len(layer_scores)}"
@@ -129,8 +132,6 @@ def build_observation(
             market.atr_pct,
             market.funding_rate,
             market.oi_delta_24h,
-            market.dxy_corr_30d,
-            market.gold_corr_30d,
         ], dtype=np.float32),
         encode_regime(market.regime),
         np.array([
@@ -139,8 +140,6 @@ def build_observation(
             float(position.bars_in_position),
         ], dtype=np.float32),
         np.array([
-            float(macro.hours_to_next_high_impact),
-            float(macro.fomc_window),
             float(macro.weekend),
             float(macro.asia_open),
         ], dtype=np.float32),
