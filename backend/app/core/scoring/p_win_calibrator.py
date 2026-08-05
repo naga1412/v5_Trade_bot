@@ -1,19 +1,21 @@
-"""Per-direction Bayesian p_win calibrator (PR1 stub).
+"""Per-direction Bayesian p_win calibrator (PR5).
 
-PR1 contract: predict_p_win ALWAYS returns None (caller treats as
-'p_win unavailable — column persists as NULL'). fit_p_win_models is
-a callable NOOP that logs the deferred-to-PR5 intent.
+fit_p_win_models fits sklearn.isotonic.IsotonicRegression against closed
+shadow_trades outcomes (per direction) and persists to
+backend/app/data/p_win_models/{long,short}.pkl. predict_p_win lazy-loads
+the fitted model and applies the isotonic transform.
 
-PR5 will:
-  - Replace fit_p_win_models body with sklearn.isotonic.IsotonicRegression
-    fitting against shadow_trades closed-trade outcomes (per direction).
-  - Persist fitted models to backend/app/data/p_win_models/{long,short}.pkl
-  - Replace predict_p_win body with lazy-load + isotonic transform.
-  - Register a nightly worker (every 24h) that re-fits both models.
-
-This stub lets Tasks 3.4 (aggregator hook) + 3.5 (predictor wire-up) ship
-their None-handling code paths now, with PR5 swapping the implementation
-behind the stable function signatures.
+2026-08-05 scope note: this ships the RECORDING path only — predict_p_win
+feeding predictions.p_win (a documented "PR1 record-only analytics field"
+per predictor.py's _compute_aggregator_hook_fields docstring: never
+modifies final_score/confidence/direction/layer_scores). It does NOT wire
+p_win into live-money position sizing. `app/trading/dynamic_sizing.py`'s
+`_resolve_p_win` still uses the confidence_pct proxy — its docstring
+already documents that flipping SIZING_USE_P_WIN_WHEN_AVAILABLE requires
+making the sizing call chain async, cascading up to the dispatcher, and
+is deliberately deferred as its own follow-up. That follow-up is
+PR9-class (live-money sizing) and needs its own soak + explicit operator
+sign-off — out of scope here.
 """
 from __future__ import annotations
 
@@ -26,10 +28,17 @@ from app.core.scoring.types import Direction
 log = logging.getLogger(__name__)
 
 
-# PR5 will load + cache fitted models here. Empty in PR1.
+# Per-process model cache, populated either by fit_p_win_models() (same
+# process ran the nightly refit) or lazily by predict_p_win() on first
+# call (a prior process's fit already wrote the .pkl to disk).
 _LOADED_MODELS: dict[Direction, Any] = {}
 
-# .pkl file paths — directory created lazily by PR5's fit worker.
+# Sentinel distinguishing "checked, no model available" from "never
+# checked" in _LOADED_MODELS — avoids re-stat'ing a missing .pkl on
+# every single prediction.
+_NO_MODEL: Any = object()
+
+# .pkl file paths — directory created lazily by the fit worker.
 P_WIN_MODEL_DIR: Path = Path(__file__).parent.parent.parent / "data" / "p_win_models"
 P_WIN_MODEL_PATH_LONG: Path = P_WIN_MODEL_DIR / "long.pkl"
 P_WIN_MODEL_PATH_SHORT: Path = P_WIN_MODEL_DIR / "short.pkl"
@@ -113,15 +122,55 @@ async def fit_p_win_models(session: Any) -> None:
         )
 
 
+_MODEL_PATH_FOR_DIRECTION: dict[Direction, Path] = {
+    Direction.LONG: P_WIN_MODEL_PATH_LONG,
+    Direction.SHORT: P_WIN_MODEL_PATH_SHORT,
+}
+
+
+def _load_model(direction: Direction) -> Any | None:
+    """Return the cached model for ``direction``, lazy-loading from disk
+    on first use in this process. Caches a explicit sentinel (not just
+    "absent from dict") for "no model available" so a missing .pkl
+    doesn't re-stat the filesystem on every single prediction — the
+    nightly refit worker is what invalidates this, by writing directly
+    into _LOADED_MODELS itself (see fit_p_win_models)."""
+    if direction in _LOADED_MODELS:
+        model = _LOADED_MODELS[direction]
+        return model if model is not _NO_MODEL else None
+
+    path = _MODEL_PATH_FOR_DIRECTION.get(direction)
+    if path is None or not path.exists():
+        _LOADED_MODELS[direction] = _NO_MODEL
+        return None
+
+    try:
+        import pickle
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+    except Exception:  # noqa: BLE001 — corrupt/unreadable pkl must not break predictions
+        log.warning(
+            "p_win_calibrator: failed to load %s; treating as unavailable",
+            path, exc_info=True,
+        )
+        _LOADED_MODELS[direction] = _NO_MODEL
+        return None
+
+    _LOADED_MODELS[direction] = model
+    return model
+
+
 async def predict_p_win(
     final_score: float,
     direction: Direction,
 ) -> float | None:
-    """PR1: ALWAYS returns None.
+    """Calibrated win probability from the per-direction isotonic model.
 
-    PR5 will lazy-load the per-direction model and apply isotonic
-    transform: long.pkl for LONG, short.pkl for SHORT. NEUTRAL has no
-    model (always None even post-PR5).
+    Lazy-loads long.pkl for LONG / short.pkl for SHORT (cached per
+    process after first load — see _load_model). NEUTRAL has no model
+    and always returns None. Same abs(score) transform as the fit side
+    (see fit_p_win_models) — both LONG and SHORT are monotone-increasing
+    in signal strength after abs().
 
     Args:
         final_score: aggregated signal score in [-1, +1].
@@ -129,14 +178,31 @@ async def predict_p_win(
 
     Returns:
         Calibrated win probability in [0, 1], or None when:
-          - PR1 (always)
           - direction is NEUTRAL
-          - model file does not exist (PR5)
-          - sklearn import failed (PR5)
+          - no model file has been fitted yet
+          - the model file is unreadable/corrupt (including: sklearn is
+            unavailable, so the pickled IsotonicRegression can't be
+            unpickled — surfaces through _load_model's own except, not
+            a separate check here, since an already-cached model (e.g.
+            this process ran fit_p_win_models itself) needs no sklearn
+            re-verification on every call)
     """
-    # PR5 will lazy-import sklearn inside this function, lazy-load the
-    # .pkl, apply isotonic transform. PR1 short-circuits.
-    return None
+    if direction not in (Direction.LONG, Direction.SHORT):
+        return None
+
+    model = _load_model(direction)
+    if model is None:
+        return None
+
+    try:
+        pred = model.predict([abs(final_score)])
+        return float(max(0.0, min(1.0, pred[0])))
+    except Exception:  # noqa: BLE001 — never break the predictor over a calibration failure
+        log.warning(
+            "p_win_calibrator: predict failed for direction=%s score=%s",
+            direction, final_score, exc_info=True,
+        )
+        return None
 
 
 __all__ = [
