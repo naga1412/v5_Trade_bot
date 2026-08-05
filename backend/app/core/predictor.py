@@ -562,8 +562,6 @@ async def build_prediction(
         atr_pct=_btc_atr_pct(bars) or 0.0,
         funding_rate=context.funding_rate or 0.0,
         oi_delta_24h=context.open_interest_delta_24h or 0.0,
-        dxy_corr_30d=0.0,
-        gold_corr_30d=0.0,
         regime=_REGIME_MAP[await get_cached_market_regime()],
     )
     brain_position = PositionState(
@@ -575,10 +573,6 @@ async def build_prediction(
     _weekday = int(_candle_ts.weekday())
     _hour = int(_candle_ts.hour)
     brain_macro = MacroFeatures(
-        hours_to_next_high_impact=float(
-            context.next_news_event_minutes_until or 60 * 24
-        ) / 60.0,
-        fomc_window=False,
         weekend=_weekday >= 5,
         asia_open=0 <= _hour < 8,
     )
