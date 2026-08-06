@@ -51,8 +51,7 @@ def test_compute_returns_null_for_unknown_symbol() -> None:
 
 def _make_mock_transport(
     ls_rows: list | None = None,
-    buy_rows: list | None = None,
-    sell_rows: list | None = None,
+    taker_rows: list | None = None,
     oi_rows: list | None = None,
     *,
     raise_on: str | None = None,
@@ -66,11 +65,10 @@ def _make_mock_transport(
         if "globalLongShortAccountRatio" in path:
             data = ls_rows if ls_rows is not None else [{"longAccount": "0.52"}]
             return httpx.Response(200, json=data)
-        if "takerbuyvolume" in path:
-            data = buy_rows if buy_rows is not None else [{"buyVol": "600.0"}]
-            return httpx.Response(200, json=data)
-        if "takersellvolume" in path:
-            data = sell_rows if sell_rows is not None else [{"sellVol": "400.0"}]
+        if "takerlongshortRatio" in path:
+            data = taker_rows if taker_rows is not None else [
+                {"buyVol": "600.0", "sellVol": "400.0"}
+            ]
             return httpx.Response(200, json=data)
         if "openInterestHist" in path:
             data = oi_rows if oi_rows is not None else [
@@ -97,8 +95,7 @@ async def test_ls_account_ratio_computed_correctly() -> None:
 @pytest.mark.asyncio
 async def test_taker_buy_sell_ratio_math() -> None:
     transport = _make_mock_transport(
-        buy_rows=[{"buyVol": "60.0"}],
-        sell_rows=[{"sellVol": "40.0"}],
+        taker_rows=[{"buyVol": "60.0", "sellVol": "40.0"}],
     )
     async with httpx.AsyncClient(transport=transport) as http:
         await update_flow_cache("BTCUSDT", http=http, base_url="https://fapi.binance.com")
@@ -136,8 +133,7 @@ async def test_ls_error_returns_none_for_that_key_others_still_computed() -> Non
     """Network error on one endpoint → that key is None; others succeed."""
     transport = _make_mock_transport(
         raise_on="globalLongShortAccountRatio",
-        buy_rows=[{"buyVol": "70.0"}],
-        sell_rows=[{"sellVol": "30.0"}],
+        taker_rows=[{"buyVol": "70.0", "sellVol": "30.0"}],
     )
     async with httpx.AsyncClient(transport=transport) as http:
         await update_flow_cache("XRPUSDT", http=http, base_url="https://fapi.binance.com")
@@ -167,10 +163,8 @@ async def test_slash_symbol_normalised() -> None:
         seen_symbols.append(sym)
         if "globalLongShortAccountRatio" in req.url.path:
             return httpx.Response(200, json=[{"longAccount": "0.50"}])
-        if "takerbuyvolume" in req.url.path:
-            return httpx.Response(200, json=[{"buyVol": "50.0"}])
-        if "takersellvolume" in req.url.path:
-            return httpx.Response(200, json=[{"sellVol": "50.0"}])
+        if "takerlongshortRatio" in req.url.path:
+            return httpx.Response(200, json=[{"buyVol": "50.0", "sellVol": "50.0"}])
         if "openInterestHist" in req.url.path:
             return httpx.Response(200, json=[
                 {"sumOpenInterest": "100.0"},
@@ -190,8 +184,7 @@ async def test_slash_symbol_normalised() -> None:
 @pytest.mark.asyncio
 async def test_taker_ratio_none_when_total_volume_zero() -> None:
     transport = _make_mock_transport(
-        buy_rows=[{"buyVol": "0.0"}],
-        sell_rows=[{"sellVol": "0.0"}],
+        taker_rows=[{"buyVol": "0.0", "sellVol": "0.0"}],
     )
     async with httpx.AsyncClient(transport=transport) as http:
         await update_flow_cache("AVAXUSDT", http=http, base_url="https://fapi.binance.com")
@@ -239,8 +232,7 @@ async def test_update_and_persist_writes_a_row(monkeypatch, _session_factory) ->
     monkeypatch.setattr(flow_mod, "get_session_factory", lambda: _session_factory)
     transport = _make_mock_transport(
         ls_rows=[{"longAccount": "0.42"}],
-        buy_rows=[{"buyVol": "70.0"}],
-        sell_rows=[{"sellVol": "30.0"}],
+        taker_rows=[{"buyVol": "70.0", "sellVol": "30.0"}],
     )
     async with httpx.AsyncClient(transport=transport) as http:
         await update_flow_cache_and_persist(
