@@ -22,6 +22,9 @@ import logging
 from typing import Final
 
 import httpx
+import sqlalchemy as sa
+
+from app.db.session import get_session_factory
 
 log = logging.getLogger(__name__)
 
@@ -136,8 +139,61 @@ async def update_flow_cache(
             await http.aclose()
 
 
+async def update_flow_cache_and_persist(
+    symbol: str,
+    *,
+    http: httpx.AsyncClient | None = None,
+    base_url: str = _BASE_URL,
+) -> None:
+    """Refresh the in-process cache, then durably record the same values.
+
+    Storage only — this table is not read by any scoring or gating path.
+    `update_flow_cache` already fetches these 3 values on every 1h shadow
+    candle across the universe but only ever kept them in `_FLOW_CACHE`
+    (lost on restart) or captured them once per symbol at shadow-trade-open
+    time (`shadow_observations`, sparse). This gives the same already-
+    fetched values a continuous per-symbol time series at zero new API
+    cost. Best-effort: a persistence failure is logged and swallowed, never
+    propagated — this must not affect the fire-and-forget caller.
+
+    Deliberately uses the app's own global session factory
+    (`app.db.session.get_session_factory`) rather than accepting an
+    injected one from the caller: this is a fire-and-forget background
+    task, so it must never share a connection pool with — or become a
+    second concurrent consumer of — whatever session_factory the caller
+    (e.g. the shadow worker) was constructed with. In a test harness that
+    injects its own isolated DB (SQLite `:memory:`), a second concurrent
+    connection into that same pool is a different, empty database —
+    silently corrupting the caller's own subsequent reads/writes. Using
+    the global factory keeps this telemetry write fully decoupled.
+    """
+    await update_flow_cache(symbol, http=http, base_url=base_url)
+    result = compute(symbol)
+    if all(v is None for v in result.values()):
+        return
+    try:
+        async with get_session_factory()() as session:
+            await session.execute(
+                sa.text(
+                    "INSERT INTO flow_feature_snapshots "
+                    "(symbol, ls_account_ratio, taker_buy_sell_ratio, oi_4h_delta) "
+                    "VALUES (:s, :ls, :tbsr, :oi)"
+                ),
+                {
+                    "s": symbol,
+                    "ls": result["ls_account_ratio"],
+                    "tbsr": result["taker_buy_sell_ratio"],
+                    "oi": result["oi_4h_delta"],
+                },
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("flow_feature_snapshots persist failed for %s: %s", symbol, exc)
+
+
 __all__ = [
     "compute",
     "get_cached",
     "update_flow_cache",
+    "update_flow_cache_and_persist",
 ]
