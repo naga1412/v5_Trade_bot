@@ -41,6 +41,7 @@ from app.core.scoring.tiers import classify_tier
 from app.core.scoring.traps.base import TrapContext
 from app.core.scoring.types import Direction, LayerScore
 from app.core.regime.market_regime import get_cached_market_regime
+from app.core.features.flow_features import compute as compute_flow_features
 
 # Maps the 3-class market_regime classifier output to the 5-class obs regime
 # string. Must stay in sync with shadow/observation.py REGIME_MAPPING.
@@ -615,6 +616,13 @@ async def build_prediction(
         fires=fires,
         tier=tier,
     )
+    # W4 (2026-08-06 promotion, collection-only): record-only order-flow
+    # features. NOT wired into scoring/gating -- extras["features"] is a
+    # persistence-only bag, never read by aggregate() or any gate. W1/W2/
+    # W3/W5 stay dev-only per the operator's explicit scope ruling.
+    extras["features"] = {
+        **compute_flow_features(symbol),
+    }
 
     # SP-9 Phase F1: build the optional Tab 1 sentiment + news summaries.
     # Both are best-effort — any failure leaves the field as None so legacy

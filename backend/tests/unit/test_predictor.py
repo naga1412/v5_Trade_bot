@@ -178,3 +178,55 @@ async def test_build_prediction_extras_tier_matches_final_score() -> None:
         layer_results={},
     )
     assert extras["tier"] == classify_tier(final_obj)
+
+
+async def test_flow_features_do_not_reach_scoring() -> None:
+    """W4 promotion scope guard (2026-08-06): flow_features (ls_account_ratio,
+    taker_buy_sell_ratio, oi_4h_delta, oi_24h_delta) is collection-only.
+    extras["features"] is a persistence-only bag never read by aggregate()
+    or any of the L1-L9 layers — this proves it by forcing two wildly
+    different flow_features._FLOW_CACHE states (all-None vs extreme
+    non-None values) through the exact same bars/symbol and asserting the
+    scoring output (final score, direction, confidence, every layer_scores
+    entry) is bit-identical, while extras["features"] itself genuinely
+    differs — so the mock actually took effect and only the record-only
+    path saw it.
+    """
+    import app.core.features.flow_features as flow_mod
+
+    symbol = "BTCUSDT"
+    bars = make_bars(300)
+
+    flow_mod._clear_cache_for_tests()
+    pred_empty = await build_prediction(symbol=symbol, timeframe="1h", bars=bars)
+
+    flow_mod._FLOW_CACHE[symbol] = {
+        "ls_account_ratio": 0.99,
+        "taker_buy_sell_ratio": 0.01,
+        "oi_4h_delta": 5.0,
+        "oi_24h_delta": -5.0,
+    }
+    try:
+        pred_extreme = await build_prediction(symbol=symbol, timeframe="1h", bars=bars)
+    finally:
+        flow_mod._clear_cache_for_tests()
+
+    # Scoring is bit-identical regardless of flow_features state.
+    assert pred_empty.final.score == pred_extreme.final.score
+    assert pred_empty.final.direction == pred_extreme.final.direction
+    assert pred_empty.final.confidence == pred_extreme.final.confidence
+    for layer_id in [str(i) for i in range(1, 11)]:
+        a = pred_empty.layer_scores.get(layer_id)
+        b = pred_extreme.layer_scores.get(layer_id)
+        assert (a is None) == (b is None)
+        if a is not None:
+            assert a.model_dump() == b.model_dump()
+
+    # But the record-only features bag genuinely differs -- proving the
+    # mock reached persistence and the null result above isn't just
+    # because flow_features was never consulted at all.
+    empty_features = pred_empty.prediction_extras["features"]
+    extreme_features = pred_extreme.prediction_extras["features"]
+    assert empty_features["oi_4h_delta"] is None
+    assert extreme_features["oi_4h_delta"] == 5.0
+    assert empty_features != extreme_features
