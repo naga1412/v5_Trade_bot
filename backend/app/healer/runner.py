@@ -4,6 +4,12 @@ Runs every 5 minutes (adequate cadence — detectors look at hourly / 2-h
 lookbacks, so more frequent runs don't produce more signal). Heartbeats
 per tick so the worker_watchdog can catch a stalled healer.
 
+C5 (system_truth_detector.detect_system_truth) is the exception to the
+"5-min lookback" norm above: it self-gates to run once per 24h and
+diffs against yesterday's baseline, since it's a full field/layer/trap/
+endpoint liveness sweep rather than a targeted anomaly check — see its
+own module docstring.
+
 The critical-severity finding from any detector fans out to
 :func:`app.ops.alert_routing.alert_admin` at severity='critical' so the
 operator's phone lights up. Non-critical findings are structured-log
@@ -24,6 +30,7 @@ from app.healer.detectors import (
     detect_score_distribution_anomaly,
 )
 from app.healer.findings import HealerFinding, record_finding
+from app.healer.system_truth_detector import detect_system_truth
 from app.ops.alert_routing import alert_admin
 from app.ops.heartbeat import record_heartbeat
 
@@ -48,6 +55,10 @@ _DETECTORS: tuple[tuple[str, Detector], ...] = (
     ("C3_per_symbol_prediction_freshness",
      detect_per_symbol_prediction_freshness),
     ("C4_blocked_rate_anomaly", detect_blocked_rate_anomaly),
+    # C5: self-gated to run once per 24h regardless of the 5-min tick
+    # cadence (see system_truth_detector.SYSTEM_TRUTH_INTERVAL_HOURS) --
+    # every other tick this returns [] near-instantly.
+    ("C5_system_truth", detect_system_truth),
 )
 
 
