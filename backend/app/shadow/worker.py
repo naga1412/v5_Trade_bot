@@ -388,9 +388,14 @@ class ShadowWorker:
         # fire-and-forget background task on each 1h candle.  The previous
         # hour's cached value is used for the current observation — at most
         # 1h stale, immaterial for slow order-flow signals.
+        # Leading-indicators item 3 (2026-08-06): also persist the same
+        # already-fetched values to flow_feature_snapshots for a continuous
+        # per-symbol time series (storage only, zero new API cost).
         if tf == "1h":
             import asyncio as _aio
-            from app.core.features.flow_features import update_flow_cache as _upd_flow
+            from app.core.features.flow_features import (
+                update_flow_cache_and_persist as _upd_flow,
+            )
             _aio.create_task(_upd_flow(candle.symbol))
 
         key = (candle.symbol, tf)
