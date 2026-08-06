@@ -1,9 +1,10 @@
 """W4 flow_features — Binance Futures order-flow context (brain supervisor expansion).
 
-Records three per-symbol features from Binance Futures endpoints:
+Records four per-symbol features from Binance Futures endpoints:
   ls_account_ratio     — Long/(Long+Short) accounts [0, 1]
   taker_buy_sell_ratio — buy_vol/(buy_vol+sell_vol) from taker flow [0, 1]
   oi_4h_delta          — (oi_now - oi_4h_ago) / oi_4h_ago (fractional)
+  oi_24h_delta         — (oi_now - oi_24h_ago) / oi_24h_ago (fractional)
 
 Architecture: module-level per-symbol cache (_FLOW_CACHE).
   - Shadow worker calls update_flow_cache(symbol) as a fire-and-forget task
@@ -35,6 +36,7 @@ _NULL: Final[dict[str, float | None]] = {
     "ls_account_ratio": None,
     "taker_buy_sell_ratio": None,
     "oi_4h_delta": None,
+    "oi_24h_delta": None,
 }
 
 _FLOW_CACHE: dict[str, dict[str, float | None]] = {}
@@ -119,21 +121,44 @@ async def update_flow_cache(
         except Exception as exc:  # noqa: BLE001
             log.debug("flow_features taker_ratio error %s: %s", native, exc)
 
-        # 3. OI 4h delta: need 5 × 1h buckets (indices 0..4 → 4h span)
+        # 3. OI 4h + 24h delta from ONE call: 25 x 1h buckets covers a
+        # 24h span (indices 0..24), and the last 5 of those (indices
+        # -5..-1) already cover the 4h span — zero extra API cost for
+        # the second window. item-1 decisive analysis (2026-08-06)
+        # found real, weak, non-transformative separation in OI delta
+        # (best precision ~32% at 15.5% recall vs a 22.48% base rate);
+        # this collects both windows going forward for FORWARD
+        # validation, storage only, not wired into scoring.
+        #
+        # ENDPOINT BUG (found 2026-08-06 via the item-3 endpoint audit,
+        # same class as the taker-ratio fix): this called
+        # /fapi/v1/openInterestHist, which 404s -- confirmed live. The
+        # correct path is /futures/data/openInterestHist, already fixed
+        # in the sibling module app/data/adapters/binance_futures_
+        # intermarket.py by PR #393, but never applied here. oi_4h_delta
+        # has been silently None for every symbol, every prediction and
+        # shadow_observations row, since W4 shipped -- a third instance
+        # of the identical failure mode, discovered while extending this
+        # exact call for oi_24h_delta.
         try:
             resp = await http.get(
-                f"{base_url}/fapi/v1/openInterestHist",
-                params={"symbol": native, "period": "1h", "limit": "5"},
+                f"{base_url}/futures/data/openInterestHist",
+                params={"symbol": native, "period": "1h", "limit": "25"},
             )
             resp.raise_for_status()
             rows = resp.json()
             if len(rows) >= 5:
                 oi_now = float(rows[-1]["sumOpenInterest"])
-                oi_4h = float(rows[0]["sumOpenInterest"])
+                oi_4h = float(rows[-5]["sumOpenInterest"])
                 if oi_4h > 0:
                     result["oi_4h_delta"] = (oi_now - oi_4h) / oi_4h
+            if len(rows) >= 25:
+                oi_now = float(rows[-1]["sumOpenInterest"])
+                oi_24h = float(rows[0]["sumOpenInterest"])
+                if oi_24h > 0:
+                    result["oi_24h_delta"] = (oi_now - oi_24h) / oi_24h
         except Exception as exc:  # noqa: BLE001
-            log.debug("flow_features oi_4h_delta error %s: %s", native, exc)
+            log.debug("flow_features oi_delta error %s: %s", native, exc)
 
         _FLOW_CACHE[symbol] = result
     finally:
@@ -178,14 +203,16 @@ async def update_flow_cache_and_persist(
             await session.execute(
                 sa.text(
                     "INSERT INTO flow_feature_snapshots "
-                    "(symbol, ls_account_ratio, taker_buy_sell_ratio, oi_4h_delta) "
-                    "VALUES (:s, :ls, :tbsr, :oi)"
+                    "(symbol, ls_account_ratio, taker_buy_sell_ratio, "
+                    " oi_4h_delta, oi_24h_delta) "
+                    "VALUES (:s, :ls, :tbsr, :oi4, :oi24)"
                 ),
                 {
                     "s": symbol,
                     "ls": result["ls_account_ratio"],
                     "tbsr": result["taker_buy_sell_ratio"],
-                    "oi": result["oi_4h_delta"],
+                    "oi4": result["oi_4h_delta"],
+                    "oi24": result["oi_24h_delta"],
                 },
             )
             await session.commit()

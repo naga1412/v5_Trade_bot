@@ -29,20 +29,32 @@ def _reset_cache():
 
 def test_compute_returns_all_none_when_no_cache() -> None:
     result = compute("BTCUSDT")
-    assert result == {"ls_account_ratio": None, "taker_buy_sell_ratio": None, "oi_4h_delta": None}
+    assert result == {
+        "ls_account_ratio": None, "taker_buy_sell_ratio": None,
+        "oi_4h_delta": None, "oi_24h_delta": None,
+    }
 
 
 def test_compute_returns_copy_not_reference() -> None:
-    flow_mod._FLOW_CACHE["BTCUSDT"] = {"ls_account_ratio": 0.5, "taker_buy_sell_ratio": 0.6, "oi_4h_delta": 0.01}
+    flow_mod._FLOW_CACHE["BTCUSDT"] = {
+        "ls_account_ratio": 0.5, "taker_buy_sell_ratio": 0.6,
+        "oi_4h_delta": 0.01, "oi_24h_delta": 0.03,
+    }
     result = compute("BTCUSDT")
     result["ls_account_ratio"] = 99.9
     assert flow_mod._FLOW_CACHE["BTCUSDT"]["ls_account_ratio"] == 0.5  # cache unchanged
 
 
 def test_compute_returns_null_for_unknown_symbol() -> None:
-    flow_mod._FLOW_CACHE["ETHUSDT"] = {"ls_account_ratio": 0.4, "taker_buy_sell_ratio": 0.55, "oi_4h_delta": -0.02}
+    flow_mod._FLOW_CACHE["ETHUSDT"] = {
+        "ls_account_ratio": 0.4, "taker_buy_sell_ratio": 0.55,
+        "oi_4h_delta": -0.02, "oi_24h_delta": -0.05,
+    }
     result = compute("SOLUSDT")
-    assert result == {"ls_account_ratio": None, "taker_buy_sell_ratio": None, "oi_4h_delta": None}
+    assert result == {
+        "ls_account_ratio": None, "taker_buy_sell_ratio": None,
+        "oi_4h_delta": None, "oi_24h_delta": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -56,21 +68,31 @@ def _make_mock_transport(
     *,
     raise_on: str | None = None,
 ) -> httpx.MockTransport:
-    """Build a mock transport that returns configured responses per endpoint."""
+    """Build a mock transport that returns configured responses per endpoint.
+
+    Matches on EXACT path, not substring. A substring match (e.g.
+    ``"openInterestHist" in path``) would return 200 for *both* the
+    correct path (``/futures/data/openInterestHist``) and the wrong one
+    that 404s in production (``/fapi/v1/openInterestHist``) — that blind
+    spot is exactly why this mock never caught the real bug (found
+    2026-08-06 via the item-3 endpoint audit) despite the endpoint being
+    100% broken since inception. Exact-path matching makes a future
+    wrong-path regression fail here instead of shipping silently.
+    """
 
     def handler(req: httpx.Request) -> httpx.Response:
         path = req.url.path
         if raise_on and raise_on in path:
             raise httpx.NetworkError("mock network error")
-        if "globalLongShortAccountRatio" in path:
+        if path == "/futures/data/globalLongShortAccountRatio":
             data = ls_rows if ls_rows is not None else [{"longAccount": "0.52"}]
             return httpx.Response(200, json=data)
-        if "takerlongshortRatio" in path:
+        if path == "/futures/data/takerlongshortRatio":
             data = taker_rows if taker_rows is not None else [
                 {"buyVol": "600.0", "sellVol": "400.0"}
             ]
             return httpx.Response(200, json=data)
-        if "openInterestHist" in path:
+        if path == "/futures/data/openInterestHist":
             data = oi_rows if oi_rows is not None else [
                 {"sumOpenInterest": "100.0"},
                 {"sumOpenInterest": "102.0"},
@@ -79,6 +101,8 @@ def _make_mock_transport(
                 {"sumOpenInterest": "110.0"},
             ]
             return httpx.Response(200, json=data)
+        # Any other path (including the old, wrong /fapi/v1/openInterestHist
+        # or /futures/data/takerbuyvolume) 404s, exactly like real Binance.
         return httpx.Response(404, json={"msg": "unknown"})
 
     return httpx.MockTransport(handler)
@@ -161,11 +185,11 @@ async def test_slash_symbol_normalised() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         sym = req.url.params.get("symbol", "")
         seen_symbols.append(sym)
-        if "globalLongShortAccountRatio" in req.url.path:
+        if req.url.path == "/futures/data/globalLongShortAccountRatio":
             return httpx.Response(200, json=[{"longAccount": "0.50"}])
-        if "takerlongshortRatio" in req.url.path:
+        if req.url.path == "/futures/data/takerlongshortRatio":
             return httpx.Response(200, json=[{"buyVol": "50.0", "sellVol": "50.0"}])
-        if "openInterestHist" in req.url.path:
+        if req.url.path == "/futures/data/openInterestHist":
             return httpx.Response(200, json=[
                 {"sumOpenInterest": "100.0"},
                 {"sumOpenInterest": "102.0"},
@@ -205,6 +229,51 @@ async def test_oi_base_zero_returns_none() -> None:
     assert get_cached("DOTUSDT")["oi_4h_delta"] is None
 
 
+@pytest.mark.asyncio
+async def test_oi_4h_and_24h_delta_computed_from_one_25row_response() -> None:
+    """25 buckets covers a 24h span; 4h delta reuses the last 5 of them --
+    both windows come from a single openInterestHist call, zero extra cost.
+    """
+    rows = [{"sumOpenInterest": f"{100.0 + i}"} for i in range(25)]
+    # index 0 = 100.0 (24h ago), index 20 = 120.0 (4h ago), index 24 = 124.0 (now)
+    transport = _make_mock_transport(oi_rows=rows)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await update_flow_cache("INJUSDT", http=http, base_url="https://fapi.binance.com")
+    result = get_cached("INJUSDT")
+    # 4h: (124 - 120) / 120
+    assert result["oi_4h_delta"] == pytest.approx((124.0 - 120.0) / 120.0)
+    # 24h: (124 - 100) / 100
+    assert result["oi_24h_delta"] == pytest.approx((124.0 - 100.0) / 100.0)
+
+
+@pytest.mark.asyncio
+async def test_oi_24h_delta_none_when_fewer_than_25_rows() -> None:
+    """Fewer than 25 buckets: 4h delta still computes (needs only 5), 24h stays None."""
+    transport = _make_mock_transport(oi_rows=[
+        {"sumOpenInterest": "100.0"},
+        {"sumOpenInterest": "102.0"},
+        {"sumOpenInterest": "104.0"},
+        {"sumOpenInterest": "106.0"},
+        {"sumOpenInterest": "110.0"},
+    ])
+    async with httpx.AsyncClient(transport=transport) as http:
+        await update_flow_cache("PEPEUSDT", http=http, base_url="https://fapi.binance.com")
+    result = get_cached("PEPEUSDT")
+    assert result["oi_4h_delta"] == pytest.approx(0.10)
+    assert result["oi_24h_delta"] is None
+
+
+@pytest.mark.asyncio
+async def test_oi_24h_base_zero_returns_none() -> None:
+    rows = [{"sumOpenInterest": "0.0"}] + [
+        {"sumOpenInterest": f"{i}"} for i in range(1, 25)
+    ]
+    transport = _make_mock_transport(oi_rows=rows)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await update_flow_cache("FLOKIUSDT", http=http, base_url="https://fapi.binance.com")
+    assert get_cached("FLOKIUSDT")["oi_24h_delta"] is None
+
+
 # ---------------------------------------------------------------------------
 # update_flow_cache_and_persist() — item 3, continuous time series storage
 # ---------------------------------------------------------------------------
@@ -214,6 +283,7 @@ _CREATE_FLOW_SNAPSHOTS_TABLE = (
     "id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
     "captured_at TEXT NOT NULL DEFAULT (datetime('now')), "
     "ls_account_ratio REAL, taker_buy_sell_ratio REAL, oi_4h_delta REAL, "
+    "oi_24h_delta REAL, "
     "source TEXT NOT NULL DEFAULT 'binance_futures')"
 )
 
@@ -230,9 +300,11 @@ async def _session_factory():
 @pytest.mark.asyncio
 async def test_update_and_persist_writes_a_row(monkeypatch, _session_factory) -> None:
     monkeypatch.setattr(flow_mod, "get_session_factory", lambda: _session_factory)
+    oi_rows = [{"sumOpenInterest": f"{100.0 + i}"} for i in range(25)]
     transport = _make_mock_transport(
         ls_rows=[{"longAccount": "0.42"}],
         taker_rows=[{"buyVol": "70.0", "sellVol": "30.0"}],
+        oi_rows=oi_rows,
     )
     async with httpx.AsyncClient(transport=transport) as http:
         await update_flow_cache_and_persist(
@@ -240,12 +312,14 @@ async def test_update_and_persist_writes_a_row(monkeypatch, _session_factory) ->
         )
     async with _session_factory() as session:
         row = (await session.execute(sa.text(
-            "SELECT symbol, ls_account_ratio, taker_buy_sell_ratio, oi_4h_delta "
-            "FROM flow_feature_snapshots"
+            "SELECT symbol, ls_account_ratio, taker_buy_sell_ratio, "
+            "oi_4h_delta, oi_24h_delta FROM flow_feature_snapshots"
         ))).one()
     assert row.symbol == "ADAUSDT"
     assert row.ls_account_ratio == pytest.approx(0.42)
     assert row.taker_buy_sell_ratio == pytest.approx(0.70)
+    assert row.oi_4h_delta == pytest.approx((124.0 - 120.0) / 120.0)
+    assert row.oi_24h_delta == pytest.approx((124.0 - 100.0) / 100.0)
     # cache still updated exactly as update_flow_cache alone would do
     assert get_cached("ADAUSDT")["ls_account_ratio"] == pytest.approx(0.42)
 
