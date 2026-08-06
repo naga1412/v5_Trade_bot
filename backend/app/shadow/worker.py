@@ -28,9 +28,11 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.routes.ws import manager
+from app.config import get_settings
 from app.core.gates.entry_quality import AllowDecision, open_position_gate
 from app.core.predictor import _atr, build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
+from app.core.scoring.layer8_convlstm import GhostInput
 from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
 from app.ops.heartbeat import record_heartbeat
@@ -688,6 +690,36 @@ class ShadowWorker:
             )
             stats_lookup = None
 
+        # L8 ghost-candle vote (opt-in, L8_GHOST_SCORING_ENABLED). Unlike
+        # live_prediction.py / tab1.py, the shadow worker never computed a
+        # ghost candle before — there's no display/persistence use for it
+        # here, so the MC-dropout inference (predict_ghost_candle, 32
+        # forward passes) is skipped entirely (zero added cost per symbol
+        # per candle) unless the flag is on.
+        ghost_input: GhostInput | None = None
+        if get_settings().L8_GHOST_SCORING_ENABLED and len(buf) >= 256:
+            try:
+                from app.ml.checkpoints import get_active_model_and_checkpoint
+                from app.ml.inference import predict_ghost_candle
+
+                active = get_active_model_and_checkpoint()
+                if active is not None:
+                    model, _ck = active
+                    ghost = predict_ghost_candle(
+                        model=model,
+                        bars=buf,
+                        last_close=float(buf["close"].iloc[-1]),
+                    )
+                    ghost_input = GhostInput(
+                        ghost_close=ghost.close,
+                        ghost_uncertainty=ghost.uncertainty,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "predict_ghost_candle failed for %s/%s; L8 abstains: %s",
+                    candle.symbol, tf, e,
+                )
+
         # SP-9 Phase E2: build_prediction is async + may consult news_items
         # via the session. Open a short-lived L9 session per candle.
         try:
@@ -698,6 +730,7 @@ class ShadowWorker:
                     bars=buf,
                     pattern_stats_lookup=stats_lookup,
                     session=l9_session,
+                    ghost=ghost_input,
                 )
         except Exception as e:
             log.warning(
