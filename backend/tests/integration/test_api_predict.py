@@ -224,3 +224,70 @@ async def test_predict_omits_ghost_when_no_active_checkpoint(
     r = await bot_status_client.get("/api/v1/predict/BTC-USDT/1h")
     assert r.status_code == 200
     assert r.json()["ghost"] is None
+
+
+@pytest.mark.asyncio
+async def test_predict_l8_abstains_by_default_even_with_ghost(
+    monkeypatch, bot_status_client,
+) -> None:
+    """L8_GHOST_SCORING_ENABLED defaults False: ghost still displays (UI
+    unaffected) but layer_scores["8"] stays None — the aggregator does not
+    see it, matching pre-wiring behaviour bit-for-bit.
+    """
+    from app.ml.inference import GhostCandle
+
+    async def fake_fetch(symbol: str, timeframe: str, *, limit: int = 500):
+        return _fake_candles(min(limit, 260))
+
+    monkeypatch.setattr(tab1, "_fetch_recent_candles", fake_fetch)
+    monkeypatch.setattr(
+        tab1, "get_active_model_and_checkpoint",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        tab1, "predict_ghost_candle",
+        lambda **kwargs: GhostCandle(
+            open=150.0, high=152.0, low=148.0, close=151.0,
+            p5_low=147.0, p95_high=153.0, uncertainty=1.5,
+        ),
+    )
+
+    r = await bot_status_client.get("/api/v1/predict/BTC-USDT/1h")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ghost"] is not None  # display path unaffected
+    assert body["layer_scores"]["8"] is None  # scoring path untouched
+
+
+@pytest.mark.asyncio
+async def test_predict_l8_scores_when_flag_enabled(
+    monkeypatch, bot_status_client,
+) -> None:
+    """With L8_GHOST_SCORING_ENABLED=True and an active checkpoint, the
+    ghost vote reaches build_prediction and layer_scores["8"] is populated.
+    """
+    from app.config import get_settings
+    from app.ml.inference import GhostCandle
+
+    async def fake_fetch(symbol: str, timeframe: str, *, limit: int = 500):
+        return _fake_candles(min(limit, 260))
+
+    monkeypatch.setattr(tab1, "_fetch_recent_candles", fake_fetch)
+    monkeypatch.setattr(
+        tab1, "get_active_model_and_checkpoint",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(
+        tab1, "predict_ghost_candle",
+        lambda **kwargs: GhostCandle(
+            open=150.0, high=152.0, low=148.0, close=250.0,
+            p5_low=147.0, p95_high=253.0, uncertainty=0.1,
+        ),
+    )
+    monkeypatch.setattr(get_settings(), "L8_GHOST_SCORING_ENABLED", True)
+    r = await bot_status_client.get("/api/v1/predict/BTC-USDT/1h")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["layer_scores"]["8"] is not None
+    assert body["layer_scores"]["8"]["direction"] == "LONG"

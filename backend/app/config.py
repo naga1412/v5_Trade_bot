@@ -265,6 +265,17 @@ class Settings(BaseSettings):
     # Live dispatch is completely unaffected — the gate itself still denies.
     # Mirror of SHADOW_ALLOW_SHORTS (#303). Default False.
     SHADOW_IGNORE_MIN_SCORE: bool = False
+    # L8_GHOST_SCORING_ENABLED: when True, the L8 Conv-LSTM ghost-candle
+    # vote is threaded into build_prediction() and participates in the
+    # aggregator's equal-weight static score (full 1/N_active vote,
+    # same as any other active layer) at all 3 production call sites
+    # (tab1 REST, live_prediction WS, shadow worker). When False
+    # (default), ghost is still computed and persisted/displayed exactly
+    # as before, but never reaches build_prediction — L8 stays None,
+    # bit-identical to pre-wiring behaviour. Default False pending a
+    # correlation check: the ghost forecast's predictive value has never
+    # been measured against realized outcomes in this pipeline.
+    L8_GHOST_SCORING_ENABLED: bool = False
 
     # --- PR-HYBRID-CONFIDENCE-ROUTING (2026-05-23) -----------------------
     # Confidence-tiered routing modifier on the existing telegram-approve
