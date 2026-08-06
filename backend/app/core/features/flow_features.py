@@ -94,23 +94,25 @@ async def update_flow_cache(
         except Exception as exc:  # noqa: BLE001
             log.debug("flow_features ls_account_ratio error %s: %s", native, exc)
 
-        # 2. Taker buy-sell ratio (two separate endpoints per spec §3.5)
+        # 2. Taker buy-sell ratio. The spec's original two-endpoint design
+        # (/futures/data/takerbuyvolume + takersellvolume) does not exist on
+        # Binance's API — both 404 (confirmed via direct curl 2026-08-06,
+        # see item-3c movers-vs-control probe output: n=0 for every symbol
+        # despite funding/OI working fine on the same base URL). This has
+        # silently left taker_buy_sell_ratio None in every prediction and
+        # shadow_observations row since W4 shipped. The real, single,
+        # correct endpoint is /futures/data/takerlongshortRatio, which
+        # returns buyVol + sellVol together.
         try:
-            r_buy = await http.get(
-                f"{base_url}/futures/data/takerbuyvolume",
+            resp = await http.get(
+                f"{base_url}/futures/data/takerlongshortRatio",
                 params={"symbol": native, "period": "5m", "limit": "1"},
             )
-            r_sell = await http.get(
-                f"{base_url}/futures/data/takersellvolume",
-                params={"symbol": native, "period": "5m", "limit": "1"},
-            )
-            r_buy.raise_for_status()
-            r_sell.raise_for_status()
-            rows_buy = r_buy.json()
-            rows_sell = r_sell.json()
-            if rows_buy and rows_sell:
-                buy_vol = float(rows_buy[0]["buyVol"])
-                sell_vol = float(rows_sell[0]["sellVol"])
+            resp.raise_for_status()
+            rows = resp.json()
+            if rows:
+                buy_vol = float(rows[0]["buyVol"])
+                sell_vol = float(rows[0]["sellVol"])
                 total = buy_vol + sell_vol
                 if total > 0:
                     result["taker_buy_sell_ratio"] = buy_vol / total
