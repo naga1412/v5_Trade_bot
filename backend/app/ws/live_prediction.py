@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.core.execution.persistence import persist_prediction
 from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
+from app.core.scoring.layer8_convlstm import GhostInput
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
@@ -147,38 +148,16 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
             log.warning("pattern_stats lookup failed; running without L2: %s", e)
             stats_lookup = None
 
-        # SP-9 Phase E2: build_prediction is async + may consult news_items
-        # via the session. We open a short-lived session per candle so the
-        # L9 layer can query without holding a session across the WS loop.
-        try:
-            async with session_factory() as l9_session:
-                pred = await build_prediction(
-                    symbol=symbol_pair, timeframe=timeframe, bars=bars,
-                    pattern_stats_lookup=stats_lookup,
-                    session=l9_session,
-                )
-        except Exception as e:  # noqa: BLE001
-            log.warning("build_prediction failed: %s", e)
-            # FU-1 follow-up: error heartbeat so a sustained build_prediction
-            # failure (model crash, layer assertion, etc.) surfaces as
-            # last_status='error' instead of letting beat_at go stale — the
-            # WS loop is still alive but it's not producing predictions.
-            await record_heartbeat(
-                session_factory, WORKER_NAME,
-                status="error",
-                details={
-                    "stage": "build_prediction",
-                    "symbol": symbol_pair, "timeframe": timeframe,
-                    "error": str(e)[:200],
-                },
-            )
-            continue
-
-        # SP-1: ghost candle prediction (additive, never blocks).
+        # SP-1: ghost candle prediction (additive to persistence/display;
+        # also threaded into scoring below when L8_GHOST_SCORING_ENABLED).
         # `get_active_model_and_checkpoint` returns None when no active ML
         # checkpoint is loaded — in that case we persist + publish exactly
-        # as before (ghost columns NULL, payload["ghost"] = None).
+        # as before (ghost columns NULL, payload["ghost"] = None, L8 abstains).
+        # Computed BEFORE build_prediction (moved up from its original
+        # post-build_prediction position) so the L8 vote can reach the
+        # aggregator when the flag is on.
         ghost_payload: dict[str, Any] = {}
+        ghost_input: GhostInput | None = None
         try:
             from app.ml.checkpoints import get_active_model_and_checkpoint
             from app.ml.inference import predict_ghost_candle
@@ -205,10 +184,43 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
                     "ghost_uncertainty": ghost.uncertainty,
                     "model_checkpoint_id": checkpoint.id,
                 }
+                if get_settings().L8_GHOST_SCORING_ENABLED:
+                    ghost_input = GhostInput(
+                        ghost_close=ghost.close,
+                        ghost_uncertainty=ghost.uncertainty,
+                    )
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "predict_ghost_candle failed: %s; persisting without ghost", e
                 )
+
+        # SP-9 Phase E2: build_prediction is async + may consult news_items
+        # via the session. We open a short-lived session per candle so the
+        # L9 layer can query without holding a session across the WS loop.
+        try:
+            async with session_factory() as l9_session:
+                pred = await build_prediction(
+                    symbol=symbol_pair, timeframe=timeframe, bars=bars,
+                    pattern_stats_lookup=stats_lookup,
+                    session=l9_session,
+                    ghost=ghost_input,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("build_prediction failed: %s", e)
+            # FU-1 follow-up: error heartbeat so a sustained build_prediction
+            # failure (model crash, layer assertion, etc.) surfaces as
+            # last_status='error' instead of letting beat_at go stale — the
+            # WS loop is still alive but it's not producing predictions.
+            await record_heartbeat(
+                session_factory, WORKER_NAME,
+                status="error",
+                details={
+                    "stage": "build_prediction",
+                    "symbol": symbol_pair, "timeframe": timeframe,
+                    "error": str(e)[:200],
+                },
+            )
+            continue
 
         # Persist BEFORE publishing — audit chain is the source of truth.
         # SP-5 Phase F1: merge prediction_extras (traps_fired, tier, raw scores,
