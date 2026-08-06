@@ -16,8 +16,10 @@ from app.api.schemas import (
 )
 from app.auth.deps import current_user_or_impersonated
 from app.auth.models import User
+from app.config import get_settings
 from app.core.dataquality.validator import Candle
 from app.core.predictor import build_prediction
+from app.core.scoring.layer8_convlstm import GhostInput
 from app.data.adapters.binance import BinanceClient, BinanceFuturesAdapter
 from app.data.universe import is_tradable
 from app.db.session import get_session
@@ -192,15 +194,15 @@ async def predict(
     if len(candles) < 200:
         raise HTTPException(503, "Insufficient candles to compute prediction")
     bars = _candles_to_df(candles)
-    pred = await build_prediction(
-        symbol=pair, timeframe=timeframe, bars=bars, session=session,
-    )
 
     # SP-1: ghost candle for the REST initial-load case. The WS worker
     # attaches this on every closed-candle push; the REST endpoint did
     # not, which left the dashboard stuck on "no model" until the next
     # WS push arrived (potentially up to one timeframe interval after
     # page load). Mirror the WS worker's logic so initial paint is correct.
+    # Computed BEFORE build_prediction (not after, as originally) so that
+    # L8_GHOST_SCORING_ENABLED can thread it into the scoring layers below.
+    ghost = None
     active = get_active_model_and_checkpoint()
     if active is not None and len(bars) >= 256:
         model, _ck = active
@@ -210,13 +212,25 @@ async def predict(
                 bars=bars,
                 last_close=float(bars["close"].iloc[-1]),
             )
-            pred = pred.model_copy(update={"ghost": GhostOut(
-                open=ghost.open, high=ghost.high, low=ghost.low,
-                close=ghost.close, p5_low=ghost.p5_low,
-                p95_high=ghost.p95_high, uncertainty=ghost.uncertainty,
-            )})
         except Exception as e:  # noqa: BLE001
             _log.warning("predict_ghost_candle failed in REST predict: %s", e)
+
+    ghost_input = (
+        GhostInput(ghost_close=ghost.close, ghost_uncertainty=ghost.uncertainty)
+        if ghost is not None and get_settings().L8_GHOST_SCORING_ENABLED
+        else None
+    )
+    pred = await build_prediction(
+        symbol=pair, timeframe=timeframe, bars=bars, session=session,
+        ghost=ghost_input,
+    )
+
+    if ghost is not None:
+        pred = pred.model_copy(update={"ghost": GhostOut(
+            open=ghost.open, high=ghost.high, low=ghost.low,
+            close=ghost.close, p5_low=ghost.p5_low,
+            p95_high=ghost.p95_high, uncertainty=ghost.uncertainty,
+        )})
         # Feature 3: 20-step forward ghost path. Additive — failure to
         # produce the path leaves pred.ghost_path empty but the
         # single-bar ghost above still renders. Capped at 20 steps
