@@ -46,6 +46,14 @@ def _reset_c3_universe_stall_streak():
     detectors_mod._C3_UNIVERSE_STALL_STREAK.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_c3_per_symbol_drop_dedup():
+    """Wipe the in-memory per-symbol-drop dedup state between tests."""
+    detectors_mod._C3_LAST_PER_SYMBOL_DROP.clear()
+    yield
+    detectors_mod._C3_LAST_PER_SYMBOL_DROP.clear()
+
+
 # ---- fixtures -----------------------------------------------------------
 
 
@@ -345,6 +353,102 @@ async def test_c3_stale_symbol_alarms_warning(bypass_c3_boot_grace) -> None:
     assert findings[0].details["class"] == "per_symbol_drop"
     sample = findings[0].details["sample"]
     assert any(item["symbol"] == "STALE/USDT" for item in sample)
+
+
+async def _seed_one_stale_symbol(
+    *, fresh_symbol: str, stale_symbol: str,
+) -> async_sessionmaker:
+    """Shared fixture for the dedup tests below — one fresh, one stale,
+    identical shape to test_c3_stale_symbol_alarms_warning."""
+    engine = await _mk_predictions_engine(
+        seed_universe=[fresh_symbol.replace("/", ""), stale_symbol.replace("/", "")],
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    async with factory() as s:
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"sym": fresh_symbol, "t": (now - timedelta(minutes=30)).isoformat()})
+        await s.execute(sa.text(
+            "INSERT INTO predictions "
+            "(symbol, timeframe, ts, direction, final_score, confidence) "
+            "VALUES (:sym, '1h', :t, 'LONG', 0.3, 0.6)"
+        ), {"sym": stale_symbol, "t": (now - timedelta(hours=3)).isoformat()})
+        await s.commit()
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_c3_per_symbol_drop_suppresses_identical_repeat_tick(
+    bypass_c3_boot_grace,
+) -> None:
+    """Alert-fatigue fix (2026-08-08): live confirmed ACE/BABY/BICO/ERA
+    USDT/1h produced an unchanged per_symbol_drop warning every 5 minutes
+    for weeks (BABYUSDT: 50+ days stale, unbroken). Back-to-back ticks
+    with an IDENTICAL stale set must not both emit."""
+    factory = await _seed_one_stale_symbol(
+        fresh_symbol="FRESH/USDT", stale_symbol="STALE/USDT",
+    )
+    first = await detect_per_symbol_prediction_freshness(factory)
+    assert len(first) == 1
+    assert first[0].details["class"] == "per_symbol_drop"
+
+    second = await detect_per_symbol_prediction_freshness(factory)
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_c3_per_symbol_drop_reemits_when_stale_set_changes(
+    bypass_c3_boot_grace,
+) -> None:
+    """A genuinely NEW drop (different symbol) must still surface even
+    though a per_symbol_drop finding was already emitted this session —
+    dedup keys on the SET of stale pairs, not just "was there a finding
+    before."""
+    factory = await _seed_one_stale_symbol(
+        fresh_symbol="FRESH/USDT", stale_symbol="STALE/USDT",
+    )
+    first = await detect_per_symbol_prediction_freshness(factory)
+    assert len(first) == 1
+
+    factory2 = await _seed_one_stale_symbol(
+        fresh_symbol="FRESH/USDT", stale_symbol="OTHERSTALE/USDT",
+    )
+    second = await detect_per_symbol_prediction_freshness(factory2)
+    assert len(second) == 1
+    sample = second[0].details["sample"]
+    assert any(item["symbol"] == "OTHERSTALE/USDT" for item in sample)
+
+
+@pytest.mark.asyncio
+async def test_c3_per_symbol_drop_reemits_after_reminder_interval(
+    bypass_c3_boot_grace,
+) -> None:
+    """An UNCHANGED stale set must still get a periodic reminder rather
+    than going permanently silent — otherwise a real, never-fixed drop
+    (like the live BABYUSDT case) could vanish from operator attention
+    entirely instead of just being throttled."""
+    factory = await _seed_one_stale_symbol(
+        fresh_symbol="FRESH/USDT", stale_symbol="STALE/USDT",
+    )
+    first = await detect_per_symbol_prediction_freshness(factory)
+    assert len(first) == 1
+
+    # Simulate the reminder interval having elapsed since the last emit.
+    key = "per_symbol_drop"
+    stale_set, _last_emitted = detectors_mod._C3_LAST_PER_SYMBOL_DROP[key]
+    detectors_mod._C3_LAST_PER_SYMBOL_DROP[key] = (
+        stale_set,
+        datetime.now(timezone.utc) - timedelta(
+            seconds=detectors_mod.C3_PER_SYMBOL_DROP_REMINDER_SECONDS + 1,
+        ),
+    )
+
+    second = await detect_per_symbol_prediction_freshness(factory)
+    assert len(second) == 1
+    assert second[0].details["class"] == "per_symbol_drop"
 
 
 @pytest.mark.asyncio
