@@ -40,6 +40,7 @@ from app.trading.kill_switches import (
 from app.db.live_cooldowns import upsert_cooldown
 from app.db.live_exit_reasons import LiveExitReason
 from app.trading.cooldown_compute import compute_cooldown_duration
+from app.trading.pnl import compute_realized_pnl
 
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,8 @@ class OpenPosition:
     # row with the trade's mtf_agreement (consulted later when the next
     # signal on this symbol fires; see app/trading/cooldown_compute.py).
     mtf_agreement: int | None = None
+    # TIER 1 (defect sweep 2026-08-06): needed to compute pnl_usdt on close.
+    position_value_usdt: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,9 @@ class MonitorOutcome:
     symbol: str
     action: Literal["ok", "alert", "auto_closed", "error"]
     detail: str
+    # TIER 1 (defect sweep 2026-08-06): the mark price used for the buffer
+    # calc on auto_closed, so the DB write can compute pnl. None otherwise.
+    exit_price: float | None = None
 
 
 async def _list_open_positions(session: AsyncSession) -> list[OpenPosition]:
@@ -82,7 +88,7 @@ async def _list_open_positions(session: AsyncSession) -> list[OpenPosition]:
     rows = (await session.execute(
         sa.text(
             "SELECT id, user_id, symbol, direction, entry_price, stop_loss, "
-            "       mtf_agreement "
+            "       mtf_agreement, position_value_usdt "
             "FROM live_trades WHERE status = 'open'"
         )
     )).all()
@@ -92,6 +98,7 @@ async def _list_open_positions(session: AsyncSession) -> list[OpenPosition]:
             direction=r.direction, entry_price=float(r.entry_price),
             stop_loss_price=float(r.stop_loss),
             mtf_agreement=getattr(r, "mtf_agreement", None),
+            position_value_usdt=float(r.position_value_usdt),
         )
         for r in rows
     ]
@@ -101,6 +108,7 @@ async def _write_liquidation_buffer_close(
     session: AsyncSession,
     *,
     pos: OpenPosition,
+    exit_price: float,
     settings,
     now: datetime,
 ) -> None:
@@ -113,16 +121,32 @@ async def _write_liquidation_buffer_close(
     The cooldown duration is whatever the operator configures for
     LIQUIDATION_BUFFER_BREACH (default 24h). Fail-open: if either write
     raises, the caller logs and the loop continues.
+
+    TIER 1 (defect sweep 2026-08-06): pnl_usdt/pnl_pct were never written
+    by any close path. ``exit_price`` is the mark price evaluate_position
+    used for its buffer calculation — the real closing price for this
+    auto-close, always known (unlike live_exit_monitor's EXTERNAL_CLOSE
+    case), so pnl is always computable here.
     """
+    pnl_pct, pnl_usdt = compute_realized_pnl(
+        direction=pos.direction, entry_price=pos.entry_price,
+        exit_price=exit_price, position_value_usdt=pos.position_value_usdt,
+    )
     await session.execute(
         sa.text(
             "UPDATE live_trades SET "
             "  exit_reason = :reason, "
+            "  exit_price = COALESCE(exit_price, :px), "
+            "  pnl_pct = COALESCE(pnl_pct, :pnl_pct), "
+            "  pnl_usdt = COALESCE(pnl_usdt, :pnl_usdt), "
             "  closed_at = COALESCE(closed_at, :ts) "
             "WHERE id = :id"
         ),
         {
             "reason": LiveExitReason.LIQUIDATION_BUFFER_BREACH.value,
+            "px": exit_price,
+            "pnl_pct": pnl_pct,
+            "pnl_usdt": pnl_usdt,
             "ts": now,
             "id": pos.trade_id,
         },
@@ -215,6 +239,10 @@ async def evaluate_position(
         return MonitorOutcome(
             trade_id=pos.trade_id, symbol=pos.symbol, action="auto_closed",
             detail=msg,
+            # live_pos.entry_price is Binance's live mark-price proxy (see
+            # the comment above), not a re-entry — this is the actual
+            # closing price for pnl purposes.
+            exit_price=live_pos.entry_price,
         )
 
     # Buffer in the warning zone: alert but don't close.
@@ -292,9 +320,18 @@ async def run_liquidation_monitor_loop(
                         # Binance regardless.
                         if outcome.action == "auto_closed":
                             try:
+                                # TIER 1 (defect sweep 2026-08-06): evaluate_
+                                # position always sets exit_price when it
+                                # returns "auto_closed" — this is a genuine
+                                # invariant check, not defensive noise, so
+                                # pnl can never silently go unset here.
+                                assert outcome.exit_price is not None, (
+                                    "auto_closed outcome missing exit_price"
+                                )
                                 async with session_factory() as wsession:
                                     await _write_liquidation_buffer_close(
                                         wsession, pos=pos,
+                                        exit_price=outcome.exit_price,
                                         settings=pr8_settings,
                                         now=datetime.now(tz=timezone.utc),
                                     )

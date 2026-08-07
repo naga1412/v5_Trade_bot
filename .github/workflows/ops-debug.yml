@@ -34,6 +34,7 @@ on:
           - audit-history # READ-ONLY: dump auth_violations 'audit_chain_broken' rows + worker_heartbeats for audit_verifier_task. Answers "has the verifier been running, what did it find?"
           - staging-verify # READ-ONLY: deploy health verification. FIX 2026-08-05 — was hardcoded to STAGING regardless of the TARGET input, creating false confidence in prod checks; now genuinely branches on `target` (default `staging`, pass `target=prod` for a real post-main-deploy check). SELECT-only, docker inspect, log grep — no writes, no restarts, no config changes.
           - pr1-rows-spot-check # READ-ONLY: spot-check 10 most-recent predictions for PR1 analytics columns (mtf_agreement, p_win, effective_score, etc.). V5 verification.
+          - live-trade-pnl-verify # READ-ONLY: TIER 1 defect-sweep verification (2026-08-06). live_trades.pnl_usdt/pnl_pct were never written by any close path — 100%-coverage assertion, not the healer's statistical constant-detector (which needs n>=100 to even engage, useless at real live-trade volume). Flags every closed row with a known exit_price but NULL pnl as a hard violation. Permanent on-demand check — safe to re-run after every deploy that touches live_exit_monitor.py or liquidation_monitor.py.
           - live-worker-process-status # READ-ONLY: live_worker diagnostic — ps, /proc/1/status, worker_heartbeats, last 7d Binance WS + prediction logs. For investigating the predictions=0 silence since 2026-05-11.
           - pwin-calibration-report # fit clean isotonic p_win model (SHADOW_SPOT_BLACKLIST excluded) + decile calibration table on newest-20% val window (per direction)
           - brain-cron-trigger # WRITE: post-deploy verify of PR-BRAIN-BOOTSTRAP-FIX. Verifies the 3 fixes on disk, manually fires hetzner_brain_cron.sh, tails the resulting log, reports rl_checkpoints + rl-cache. Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint (is_active stays False).
@@ -298,6 +299,35 @@ jobs:
                  echo '=== alembic version ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT version_num FROM alembic_version;\""
+              ;;
+            live-trade-pnl-verify)
+              # READ-ONLY: TIER 1 defect-sweep verification (2026-08-06).
+              # Every live_trades row where a close price is KNOWN
+              # (exit_price IS NOT NULL) must also have pnl_usdt AND
+              # pnl_pct populated — the write path fixed in
+              # live_exit_monitor.py + liquidation_monitor.py computes
+              # both in the same UPDATE as exit_price, so this can never
+              # legitimately diverge. A 100%-coverage assertion query
+              # rather than the healer's statistical constant-detector,
+              # which needs n>=100 rows to even engage and would stay
+              # silent for a long time at real live-trade volume.
+              ssh -i ~/.ssh/hetzner_key "$USER_DEFAULTED@$HETZNER_HOST" \
+                "cd $DIR_DEFAULTED && \
+                 echo '=== violations: exit_price known but pnl NULL (should be 0 rows) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, symbol, direction, exit_reason, exit_price, \
+                       pnl_usdt, pnl_pct, closed_at \
+                     FROM live_trades \
+                     WHERE exit_price IS NOT NULL \
+                       AND (pnl_usdt IS NULL OR pnl_pct IS NULL) \
+                     ORDER BY closed_at DESC;\" && \
+                 echo '=== all closed rows, for context (legacy rows predate this fix) ===' && \
+                 docker compose exec -T postgres psql -U postgres -d trading_radar -c \
+                   \"SELECT id, symbol, status, exit_reason, exit_price, \
+                       pnl_usdt, pnl_pct, opened_at, closed_at \
+                     FROM live_trades \
+                     WHERE status = 'closed' \
+                     ORDER BY id;\""
               ;;
             health-summary)
               # One-page production health check: container status,
