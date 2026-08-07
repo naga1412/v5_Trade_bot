@@ -12,6 +12,24 @@ on:
 # Same Hetzner box, separate docker-compose stacks, separate volumes,
 # separate Postgres database. Staging hard-OFF for autonomous trading
 # regardless of .env contents (compose env override).
+#
+# Concurrency guard (added 2026-08-07 after a real incident): merging
+# multiple PRs within seconds of each other fired multiple `docker
+# compose up -d --build` runs against the SAME container name
+# concurrently -- one run's `Recreate` raced another's `Stop`, leaving
+# tr-backend deleted with neither run completing ("Error when
+# allocating new name: Conflict" / "No such container"). Prod was down
+# with no backend container until the next run was manually retried.
+# `cancel-in-progress: false` queues instead of killing a mid-flight
+# deploy (which could itself leave a worse partial state); GitHub only
+# keeps the single most-recently-queued run per group, so a burst of
+# pushes always converges on one clean deploy of the latest code, not
+# a pile of racing ones. Grouped per-ref so main (prod) and dev
+# (staging) deploys never block each other.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
