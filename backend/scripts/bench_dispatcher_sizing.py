@@ -1,16 +1,15 @@
 """PR9 Phase 9 — V-7 microbench for dispatcher dynamic-sizing path.
 
-Measures the marginal cost of compute_dynamic_size + split_entries
-on the dispatcher hot path. Default-OFF means production sees no
-behavior change; this bench validates that the math itself doesn't
-blow the V-7 budget when enabled.
+Measures the marginal cost of compute_dynamic_size on the dispatcher hot
+path. Default-OFF means production sees no behavior change; this bench
+validates that the math itself doesn't blow the V-7 budget when enabled.
 
 Two modes:
 
   --mode=baseline    DYNAMIC_SIZING_ENABLED=False — compute_dynamic_size
                      short-circuits to None.
-  --mode=dynamic-on  DYNAMIC_SIZING_ENABLED=True — full Kelly + tier +
-                     split-entries pipeline runs.
+  --mode=dynamic-on  DYNAMIC_SIZING_ENABLED=True — full Kelly + tier
+                     pipeline runs.
 
 V-7 budget:
   delta_p50 = dynamic-on.p50 - baseline.p50  ≤ 2ms
@@ -74,35 +73,28 @@ def _build_settings(enabled: bool):
             "small_max": 1_000.0, "medium_max": 10_000.0,
             "large_max": 100_000.0,
         },
-        SIZING_MULTI_ENTRY_THRESHOLD=0.75,
-        SIZING_MULTI_ENTRY_RATIOS=[0.6, 0.4],
-        SIZING_MULTI_ENTRY_DCA_BAND_PCT=0.5,
     )
 
 
 def _run_one(mode: str, n_warmup: int, n_samples: int) -> dict[str, Any]:
     """Time the sizing path N times; return p50/p99 in ms."""
-    from app.trading.dynamic_sizing import compute_dynamic_size, split_entries
+    from app.trading.dynamic_sizing import compute_dynamic_size
 
     settings = _build_settings(enabled=(mode == "dynamic-on"))
 
     # Warmup
     for _ in range(n_warmup):
-        margin = compute_dynamic_size(
+        compute_dynamic_size(
             balance_usdt=10_000.0, confidence_pct=70.0, settings=settings,
         )
-        if margin is not None:
-            split_entries(margin, 70.0, settings)
 
     # Measure
     times_ms: list[float] = []
     for _ in range(n_samples):
         start = time.perf_counter()
-        margin = compute_dynamic_size(
+        compute_dynamic_size(
             balance_usdt=10_000.0, confidence_pct=70.0, settings=settings,
         )
-        if margin is not None:
-            split_entries(margin, 70.0, settings)
         times_ms.append((time.perf_counter() - start) * 1000.0)
 
     return {

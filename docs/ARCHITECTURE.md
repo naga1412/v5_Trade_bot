@@ -533,8 +533,7 @@ can see throughput, not just liveness.
 
 ## 11d. Dynamic sizing + Telegram alert routing (PR9)
 
-**Files**: `app/trading/dynamic_sizing.py` (Kelly + tier + split — new),
-`app/trading/multi_entry.py` (sequential tranche placement — new),
+**Files**: `app/trading/dynamic_sizing.py` (Kelly + tier — new),
 `app/ops/alert_routing.py` (Telegram > SMTP > log precedence — new),
 `app/trading/execution/dispatcher.py` (routes through compute_dynamic_size),
 `app/api/routes/bot_status.py` (`/sizing` endpoint),
@@ -581,17 +580,9 @@ SignalProposal arrives → dispatcher.dispatch()
               dynamic_margin is not None → use it (PR9 path)
               dynamic_margin is None    → fall through to fixed/percent
                               ↓
-┌──────────────────────────────────────────────────────────────┐
-│  split_entries(total, confidence_pct, settings)               │
-│    confidence/100 >= SIZING_MULTI_ENTRY_THRESHOLD → [total]   │
-│    Else: split per SIZING_MULTI_ENTRY_RATIOS                  │
-└──────────────────────────────────────────────────────────────┘
-                              ↓
-              place_multi_entry_orders(tranche_qtys, ...)
-                  tranche 1: MARKET at signal entry
-                  tranche 2..N: LIMIT at entry ± DCA band%
-                  failure isolation: tranche 1 raises propagate;
-                                     tranche 2..N failures log + continue
+              margin → atomic_placement.place_with_sltp
+                  (single order, real exchange-side STOP_MARKET +
+                   TAKE_PROFIT_MARKET — see §11c)
 ```
 
 ### Balance tiers + caps
@@ -615,18 +606,27 @@ boundaries + caps via env (`SIZING_TIER_BOUNDARIES`,
 (0.5) is 2x more aggressive; eighth-Kelly (0.125) is 2x more
 conservative. Operator-tunable per env.
 
-### Multi-entry contract
+### Multi-entry / DCA split — built, never wired, deleted 2026-08
 
-When `confidence_pct/100 < SIZING_MULTI_ENTRY_THRESHOLD` (default 0.75):
-- Tranche 1: MARKET at signal entry_price.
-- Tranche 2..N: LIMIT at progressively-shifted DCA prices (`entry_price
-  ± SIZING_MULTI_ENTRY_DCA_BAND_PCT × idx`). Binance fills when price
-  moves to the LIMIT.
-- SL+TP managed at position level by `liquidation_monitor` +
-  `live_exit_monitor` — not set per-order.
-- Tranche 1 failure propagates (caller reports `blocked_error`).
-- Tranche 2..N failure logs + continues. Position is smaller than
-  designed but earlier tranches stay on Binance — not a safety issue.
+A `split_entries` + `place_multi_entry_orders` stage existed here
+(confidence below `SIZING_MULTI_ENTRY_THRESHOLD` would split the margin
+into tranches: 1 MARKET + N-1 LIMIT at DCA-shifted prices). Fully unit-
+tested, zero call sites in the dispatcher — never wired in. Removed by
+the 2026-08-06 defect sweep (TIER 4) rather than left as a trap for a
+future contributor to enable, for a concrete reason beyond "just unused":
+its placement path had **no equivalent to `place_with_sltp`'s atomic
+exchange-side STOP_MARKET/TAKE_PROFIT_MARKET** — the module's own
+docstring said exits would be "managed at the position level by
+`liquidation_monitor` + `live_exit_monitor`" instead, i.e. software-
+polled (30s cadence) rather than real Binance-side stops. Wiring it as
+designed would have meant every position from a sub-threshold-confidence
+signal (the majority, by construction) ran with materially weaker stop-
+loss protection than every other order in the system, for up to one poll
+cycle after entry. No backtest, shadow-parallel measurement, or live
+execution ever validated the strategy value either — shadow doesn't do
+position sizing at all. See git history (`app/trading/multi_entry.py`,
+`split_entries` in `dynamic_sizing.py`) if DCA-style entries are
+revisited with the SL/TP gap closed first.
 
 ### Alert routing precedence
 

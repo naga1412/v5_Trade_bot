@@ -1,8 +1,5 @@
 """PR9 dynamic sizing — Kelly-fractional × balance tier × hard caps.
 
-Phase 2: classify_balance_tier ships first; the Kelly compute lands in
-Phase 3, multi-entry split in Phase 4.
-
 The sizing pipeline (in order):
 
   1. _resolve_p_win(confidence_pct, settings)
@@ -13,11 +10,19 @@ The sizing pipeline (in order):
      → returns fraction of bankroll ∈ [0.0, tier_cap]
   4. compute_dynamic_size(balance, confidence, settings)
      → returns total margin_usdt for the position
-  5. split_entries(total, confidence, settings)
-     → returns list[float] of tranche sizes (1 elt if no split)
 
 Each function is pure (no DB / no I/O / no side effects). The dispatcher
-glue lives in dispatcher.py + multi_entry.py.
+glue lives in dispatcher.py.
+
+A multi-entry/DCA split-order stage (split_entries + multi_entry.py's
+place_multi_entry_orders) was built alongside this but deleted 2026-08
+(defect sweep TIER 4): it was never called by the dispatcher, and its
+placement path had no equivalent to atomic_placement.place_with_sltp's
+real exchange-side STOP_MARKET/TAKE_PROFIT_MARKET protection — wiring it
+as designed would have opened lower-confidence positions (the majority,
+by construction) with no stop-loss until the next 30s monitor poll. See
+git history for the removed implementation if DCA-style entries are
+revisited with that gap closed first.
 """
 from __future__ import annotations
 
@@ -37,8 +42,6 @@ class _SettingsProto(Protocol):
     SIZING_FRACTIONAL_KELLY: float
     SIZING_USE_P_WIN_WHEN_AVAILABLE: bool
     DYNAMIC_SIZING_ENABLED: bool
-    SIZING_MULTI_ENTRY_THRESHOLD: float
-    SIZING_MULTI_ENTRY_RATIOS: list[float]
 
 
 def classify_balance_tier(
@@ -146,42 +149,3 @@ def compute_dynamic_size(
             balance_usdt, confidence_pct, e,
         )
         return None
-
-
-def split_entries(
-    total_margin_usdt: float,
-    confidence_pct: float,
-    settings: _SettingsProto,
-) -> list[float]:
-    """Return tranche sizes for multi-entry placement.
-
-    When `confidence_pct/100 >= SIZING_MULTI_ENTRY_THRESHOLD` (default
-    0.75): returns `[total_margin_usdt]` — no split.
-
-    Below the threshold: splits into N tranches per
-    `SIZING_MULTI_ENTRY_RATIOS` (default [0.6, 0.4]). Rounding loss
-    accumulates in the LAST tranche so `sum(tranches) == total` exactly.
-
-    Invariant: ratios must sum to 1.0. Validated at call time — raises
-    ValueError on bad config rather than silently producing a different
-    total than the caller asked for.
-
-    total_margin_usdt < 0 raises (defensive — caller passed bad data).
-    """
-    if total_margin_usdt < 0.0:
-        raise ValueError(f"total_margin_usdt must be >= 0; got {total_margin_usdt}")
-    confidence = confidence_pct / 100.0
-    if confidence >= settings.SIZING_MULTI_ENTRY_THRESHOLD:
-        return [total_margin_usdt]
-
-    ratios = settings.SIZING_MULTI_ENTRY_RATIOS
-    if abs(sum(ratios) - 1.0) > 1e-6:
-        raise ValueError(
-            f"SIZING_MULTI_ENTRY_RATIOS must sum to 1.0; got {sum(ratios)}"
-        )
-
-    # Compute all-but-last tranche from ratios; last tranche absorbs
-    # rounding so the sum is exact.
-    tranches = [total_margin_usdt * r for r in ratios[:-1]]
-    tranches.append(total_margin_usdt - sum(tranches))
-    return tranches
