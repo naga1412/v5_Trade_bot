@@ -1,6 +1,8 @@
 """Tests for app.core.features.flow_features (W4 brain supervisor)."""
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import sqlalchemy as sa
@@ -19,8 +21,10 @@ from app.core.features.flow_features import (
 def _reset_cache():
     """Isolate tests by clearing the module-level cache between runs."""
     flow_mod._clear_cache_for_tests()
+    flow_mod._clear_failure_streaks_for_tests()
     yield
     flow_mod._clear_cache_for_tests()
+    flow_mod._clear_failure_streaks_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -386,3 +390,80 @@ async def test_update_and_persist_uses_global_factory_not_injected(monkeypatch) 
             "OPUSDT", http=http, base_url="https://fapi.binance.com",
         )
     assert calls == ["opened", "execute", "commit", "closed"]
+
+
+# ---------------------------------------------------------------------------
+# TIER 2a (defect sweep 2026-08-06): the broad-except+DEBUG-log pattern that
+# hid the taker-ratio and OI-delta wrong-endpoint bugs for months is still
+# live in this file. A single symbol failing (delisted, thin market) is a
+# legitimate quirk and must stay quiet; the SAME endpoint failing for every
+# symbol in a row is exactly what those two incidents looked like and must
+# now be loud. These tests assert the escalation threshold, not the fetch
+# logic (already covered above).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_isolated_single_failure_does_not_escalate(caplog) -> None:
+    """One bad symbol amid otherwise-successful calls must stay quiet."""
+    caplog.set_level(logging.DEBUG, logger="app.core.features.flow_features")
+    ok_transport = _make_mock_transport()
+    fail_transport = _make_mock_transport(raise_on="globalLongShortAccountRatio")
+    async with httpx.AsyncClient(transport=fail_transport) as http:
+        await update_flow_cache("BADSYMUSDT", http=http, base_url="https://fapi.binance.com")
+    async with httpx.AsyncClient(transport=ok_transport) as http:
+        await update_flow_cache("GOODSYMUSDT", http=http, base_url="https://fapi.binance.com")
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_100pct_failure_escalates_to_error(caplog) -> None:
+    """The same endpoint failing for every symbol in a row (the exact shape
+    of the taker-ratio and OI-delta incidents) must escalate to ERROR
+    before the streak reaches a full universe cycle."""
+    caplog.set_level(logging.DEBUG, logger="app.core.features.flow_features")
+    transport = _make_mock_transport(raise_on="globalLongShortAccountRatio")
+    async with httpx.AsyncClient(transport=transport) as http:
+        for i in range(flow_mod._CONSECUTIVE_FAILURE_ALERT_THRESHOLD):
+            await update_flow_cache(f"SYM{i}USDT", http=http, base_url="https://fapi.binance.com")
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert error_records, "expected an ERROR-level escalation once the streak hit threshold"
+    assert "ls_account_ratio" in error_records[-1].getMessage()
+    assert "consecutive" in error_records[-1].getMessage().lower()
+
+
+@pytest.mark.asyncio
+async def test_success_resets_the_failure_streak(caplog) -> None:
+    """A single success between failure runs must reset the streak, so two
+    separate short runs of failures (below threshold each) never combine
+    into a false escalation."""
+    caplog.set_level(logging.DEBUG, logger="app.core.features.flow_features")
+    fail_transport = _make_mock_transport(raise_on="globalLongShortAccountRatio")
+    ok_transport = _make_mock_transport()
+    half = flow_mod._CONSECUTIVE_FAILURE_ALERT_THRESHOLD - 1
+
+    async with httpx.AsyncClient(transport=fail_transport) as http:
+        for i in range(half):
+            await update_flow_cache(f"A{i}USDT", http=http, base_url="https://fapi.binance.com")
+    async with httpx.AsyncClient(transport=ok_transport) as http:
+        await update_flow_cache("RESETUSDT", http=http, base_url="https://fapi.binance.com")
+    async with httpx.AsyncClient(transport=fail_transport) as http:
+        for i in range(half):
+            await update_flow_cache(f"B{i}USDT", http=http, base_url="https://fapi.binance.com")
+
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_each_endpoint_tracked_independently(caplog) -> None:
+    """oi_delta failing repeatedly must not mask/trigger on ls_account_ratio's
+    counter, and vice versa — three endpoints, three independent streaks."""
+    caplog.set_level(logging.DEBUG, logger="app.core.features.flow_features")
+    transport = _make_mock_transport(raise_on="openInterestHist")
+    async with httpx.AsyncClient(transport=transport) as http:
+        for i in range(flow_mod._CONSECUTIVE_FAILURE_ALERT_THRESHOLD):
+            await update_flow_cache(f"OI{i}USDT", http=http, base_url="https://fapi.binance.com")
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert error_records
+    assert "oi_delta" in error_records[-1].getMessage()
+    assert "ls_account_ratio" not in error_records[-1].getMessage()
