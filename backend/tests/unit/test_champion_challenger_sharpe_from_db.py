@@ -8,7 +8,7 @@ import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.ml.champion_challenger import _evaluate_sharpe
+from app.ml.champion_challenger import MalformedSharpeError, _evaluate_sharpe
 
 
 CREATE_RL_CHECKPOINTS = (
@@ -104,15 +104,74 @@ async def test_evaluate_sharpe_returns_zero_for_insufficient_data(
 
 
 @pytest.mark.asyncio
-async def test_evaluate_sharpe_returns_zero_for_malformed_value(
+async def test_evaluate_sharpe_raises_for_malformed_string_value(
     session: AsyncSession,
 ) -> None:
-    """eval_results.sharpe is a non-numeric string → graceful 0.0."""
+    """eval_results.sharpe is a non-numeric string.
+
+    Operator ruling 2026-08-08: a malformed challenger Sharpe silently
+    coercing to 0.0 would BEAT a realistically-negative champion (e.g.
+    -7.02) and get promoted -- a promotion-gate bypass, not a logging
+    nit. Refuse outright instead of coercing.
+    """
     await _insert_checkpoint(
         session, cid=4, eval_results={"sharpe": "not-a-number"},
     )
-    sharpe = await _evaluate_sharpe(session, 4)
+    with pytest.raises(MalformedSharpeError) as exc_info:
+        await _evaluate_sharpe(session, 4)
+    assert exc_info.value.checkpoint_id == 4
+
+
+@pytest.mark.asyncio
+async def test_evaluate_sharpe_returns_zero_for_json_null(
+    session: AsyncSession,
+) -> None:
+    """eval_results.sharpe is JSON null (key present, value null).
+
+    Verified indistinguishable from "no sharpe key at all" at the SQL
+    layer: ``->>'sharpe'`` returns SQL NULL for both a JSON null value
+    and an absent key, so this correctly falls into the same
+    intentional 0.0 fallback as
+    ``test_evaluate_sharpe_returns_zero_for_missing_row`` -- not a
+    MalformedSharpeError case. Regression guard: confirms this stays
+    true after the malformed-value fix below.
+    """
+    await _insert_checkpoint(
+        session, cid=6, eval_results={"sharpe": None},
+    )
+    sharpe = await _evaluate_sharpe(session, 6)
     assert sharpe == 0.0
+
+
+@pytest.mark.asyncio
+async def test_evaluate_sharpe_raises_for_nan_value(
+    session: AsyncSession,
+) -> None:
+    """eval_results.sharpe is the string 'NaN'.
+
+    `float("nan")` does NOT raise -- it silently succeeds, producing a
+    NaN float that poisons every downstream comparison in
+    `sharpe_passes` (any comparison against NaN is False, which would
+    permanently block a real champion from ever being beaten). Must be
+    caught explicitly.
+    """
+    await _insert_checkpoint(
+        session, cid=7, eval_results={"sharpe": "NaN"},
+    )
+    with pytest.raises(MalformedSharpeError):
+        await _evaluate_sharpe(session, 7)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_sharpe_raises_for_infinite_value(
+    session: AsyncSession,
+) -> None:
+    """eval_results.sharpe is the string 'Infinity' -- same NaN-shaped risk."""
+    await _insert_checkpoint(
+        session, cid=8, eval_results={"sharpe": "Infinity"},
+    )
+    with pytest.raises(MalformedSharpeError):
+        await _evaluate_sharpe(session, 8)
 
 
 @pytest.mark.asyncio
