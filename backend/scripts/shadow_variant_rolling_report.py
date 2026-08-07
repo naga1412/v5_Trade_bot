@@ -325,7 +325,7 @@ async def _fetch_pairs(
             WHERE s.closed_at IS NOT NULL
               AND s.direction = 'LONG'
               AND s.entry_score >= 0.36
-              AND s.closed_at >= NOW() - (:window || ' days')::INTERVAL
+              AND s.closed_at >= NOW() - make_interval(days => :window)
               AND s.timeframe IN ('1h', '15m')
               AND s.entry_price > 0
               AND s.entry_atr > 0
