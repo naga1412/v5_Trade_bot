@@ -329,7 +329,15 @@ async def change_trading_mode(
         # disabled, SHORT shadow trades must not dilute the gate metrics.
         _gate_cfg = get_settings()
         _dir_filter = "LONG" if _gate_cfg.DISABLE_SHORT_SIGNALS else None
-        snapshot = await compute_gates_from_db(session, direction_filter=_dir_filter)
+        # TIER 3 (defect sweep 2026-08-06): SHADOW_15M_ELIGIBLE_FOR_PROMOTION
+        # previously only reached the /promotion-gate dashboard display
+        # (bot_status.py), never a real mode-upgrade authorization check —
+        # this manual TOTP-gated upgrade is the other one, alongside
+        # auto_promote.py's automated path. Mirrors direction_filter above.
+        _excl_tf = None if _gate_cfg.SHADOW_15M_ELIGIBLE_FOR_PROMOTION else ["15m"]
+        snapshot = await compute_gates_from_db(
+            session, direction_filter=_dir_filter, exclude_timeframes=_excl_tf,
+        )
 
     try:
         row_hash = await set_mode(

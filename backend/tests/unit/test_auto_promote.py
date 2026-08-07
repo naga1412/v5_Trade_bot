@@ -86,7 +86,7 @@ async def _setup_user_and_trades(
         await conn.execute(sa.text(
             "CREATE TABLE shadow_trades ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "symbol TEXT, direction TEXT,"
+            "symbol TEXT, direction TEXT, timeframe TEXT,"
             "pnl_pct REAL, opened_at TEXT, closed_at TEXT,"
             "prev_hash TEXT, row_hash TEXT)"
         ))
@@ -121,9 +121,9 @@ async def _setup_user_and_trades(
                 closed = opened + timedelta(minutes=30)
                 await conn.execute(sa.text(
                     "INSERT INTO shadow_trades "
-                    "(symbol, direction, pnl_pct, opened_at, closed_at,"
+                    "(symbol, direction, timeframe, pnl_pct, opened_at, closed_at,"
                     " prev_hash, row_hash) "
-                    "VALUES ('BTC/USDT', 'LONG', :p, :o, :c, '0', :h)"
+                    "VALUES ('BTC/USDT', 'LONG', '1h', :p, :o, :c, '0', :h)"
                 ), {
                     "p": pnl, "o": opened.isoformat(),
                     "c": closed.isoformat(),

@@ -221,6 +221,7 @@ async def compute_gates_from_db(
     window_days: int = 30,
     now: datetime | None = None,
     direction_filter: str | None = None,
+    exclude_timeframes: list[str] | None = None,
 ) -> GateSnapshot:
     """Read closed shadow_trades from the rolling window and compute gates.
 
@@ -231,6 +232,14 @@ async def compute_gates_from_db(
     direction_filter: when set (e.g. "LONG"), count only trades in that
     direction. Callers derive this from DISABLE_SHORT_SIGNALS so the gate
     only scores directions the live path is actually trading.
+
+    exclude_timeframes: when set (e.g. ["15m"]), drop trades on those
+    timeframes from the gate calculation. Callers derive this from
+    SHADOW_15M_ELIGIBLE_FOR_PROMOTION (defect sweep 2026-08-06, TIER 3) —
+    this parameter previously didn't exist here at all, so the flag only
+    ever affected the /promotion-gate DASHBOARD DISPLAY
+    (app/api/routes/bot_status.py), never the real auto-promotion decision
+    in app/trading/auto_promote.py.
     """
     n = now or datetime.now(timezone.utc)
     cutoff = n - timedelta(days=window_days)
@@ -245,6 +254,16 @@ async def compute_gates_from_db(
     if direction_filter is not None:
         sql += "  AND direction = :direction_filter "
         params["direction_filter"] = direction_filter
+    if exclude_timeframes:
+        # Parametrize each excluded TF (mirrors bot_status.py's
+        # _select_trades_since) so any value flows through asyncpg
+        # parameter-binding cleanly rather than string-interpolated.
+        placeholders = []
+        for i, tf in enumerate(exclude_timeframes):
+            key = f"excl_tf_{i}"
+            placeholders.append(f":{key}")
+            params[key] = tf
+        sql += f"  AND timeframe NOT IN ({', '.join(placeholders)}) "
     sql += "ORDER BY closed_at"
 
     rows = (await session.execute(sa.text(sql), params)).all()

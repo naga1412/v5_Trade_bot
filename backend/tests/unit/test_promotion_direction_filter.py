@@ -160,7 +160,7 @@ async def test_evaluate_user_passes_long_filter_when_shorts_disabled(
 
     captured_filter: list = []
 
-    async def fake_compute_gates(session, *, window_days, now, direction_filter=None):
+    async def fake_compute_gates(session, *, window_days, now, direction_filter=None, exclude_timeframes=None):
         captured_filter.append(direction_filter)
         from app.trading.promotion import compute_stats
         return compute_stats([], span_days=window_days, now=now)
@@ -194,7 +194,7 @@ async def test_evaluate_user_no_filter_when_shorts_enabled(
 
     captured_filter: list = []
 
-    async def fake_compute_gates(session, *, window_days, now, direction_filter=None):
+    async def fake_compute_gates(session, *, window_days, now, direction_filter=None, exclude_timeframes=None):
         captured_filter.append(direction_filter)
         from app.trading.promotion import compute_stats
         return compute_stats([], span_days=window_days, now=now)
