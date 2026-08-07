@@ -1067,3 +1067,51 @@ http:` per call, same pattern. A real fix needs a genuinely shared,
 worker-lifetime `RateLimitedClient` instance threaded into both the
 kline-seed path and `_upd_flow(candle.symbol, http=...)`, not just
 patching the one call site.
+
+### FU-41 — SHADOW_15M_ELIGIBLE_FOR_PROMOTION: real-authorization gap — ✅ FIXED
+
+**Class-2 defect**, real-money-adjacent authorization path. Discovered
+2026-08-06 (defect sweep, TIER 3).
+
+**Root cause**: `SHADOW_15M_ELIGIBLE_FOR_PROMOTION` (`config.py:92`,
+default `False`) was only ever read by `app/api/routes/bot_status.py`'s
+`/promotion-gate` endpoint — a **read-only dashboard display**.
+`app/trading/promotion.py::compute_gates_from_db`, the function that
+actually computes the gate snapshot for both real mode-upgrade paths, had
+no timeframe parameter at all. Mode upgrades always included 15m shadow
+trades regardless of the flag, in TWO real authorization call sites:
+- `app/trading/auto_promote.py::evaluate_user` — the daily automated
+  manual → telegram-approve → fully-auto promotion (`auto_promote_task`)
+- `app/api/routes/me.py:332` — the manual, TOTP-gated `PATCH
+  /me/trading-mode` upgrade endpoint
+
+`bot_status.py`'s own comment claimed the display "mirrors promotion.py
+gate logic... so the display matches what the actual authorization check
+will see" — true for `direction_filter`, false for the timeframe filter.
+
+**Fix**: `compute_gates_from_db` gained an `exclude_timeframes: list[str]
+| None` parameter (same parametrized `NOT IN` pattern
+`bot_status.py::_select_trades_since` already used). Both real call sites
+now derive `exclude_timeframes = None if
+_cfg.SHADOW_15M_ELIGIBLE_FOR_PROMOTION else ["15m"]`, mirroring the
+existing `direction_filter` derivation from `DISABLE_SHORT_SIGNALS`
+immediately above each call site.
+
+**Regression coverage**: `tests/unit/test_promotion_timeframe_filter.py`
+— SQL/param wiring, metric correctness with a blended 1h+15m fixture,
+composition with `direction_filter`, and both `evaluate_user` branches.
+`tests/unit/test_auto_promote.py`'s SQLite fixture predated the real
+`timeframe` column on `shadow_trades` — added it (seeded `'1h'`, matching
+its existing trades) so the new `NOT IN` predicate doesn't break on a
+stale test schema.
+
+**Live-execution caveat — this is the actual blocker to record**: per the
+2026-08-07 worker-heartbeat census, `auto_promote_task` has **zero beats
+ever** — `AUTO_PROMOTE_TO_TELEGRAM_ENABLED` and
+`AUTO_PROMOTE_TO_FULLYAUTO_ENABLED` have both been off for the entire
+project history. This fix has therefore never executed against real
+data. **Before either `AUTO_PROMOTE_TO_*` flag is ever enabled**: run a
+staging dry run (or at minimum the `/promotion-gate` endpoint against
+real prod shadow_trades with both flag values) to confirm
+`exclude_timeframes` behaves as expected against the real data shape,
+not just the SQLite fixtures above.

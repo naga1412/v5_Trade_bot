@@ -124,6 +124,12 @@ async def evaluate_user(
     # is true, filter to LONG so SHORT shadow trades don't dilute gate metrics.
     _cfg = get_settings()
     direction_filter = "LONG" if _cfg.DISABLE_SHORT_SIGNALS else None
+    # TIER 3 (defect sweep 2026-08-06): SHADOW_15M_ELIGIBLE_FOR_PROMOTION
+    # previously only reached the /promotion-gate dashboard display, never
+    # this real authorization decision. Mirrors direction_filter above.
+    exclude_timeframes = (
+        None if _cfg.SHADOW_15M_ELIGIBLE_FOR_PROMOTION else ["15m"]
+    )
 
     # Walk back N days; gates must pass for EVERY day's snapshot.
     passed = 0
@@ -133,6 +139,7 @@ async def evaluate_user(
         snap = await compute_gates_from_db(
             session, window_days=window_days, now=snapshot_now,
             direction_filter=direction_filter,
+            exclude_timeframes=exclude_timeframes,
         )
         if offset == 0:
             latest_snapshot = snap
