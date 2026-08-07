@@ -49,10 +49,13 @@ async def _mk_engine():
             "exit_price REAL, "
             "stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, "
+            "position_value_usdt REAL NOT NULL, "
             "opened_at TEXT NOT NULL, "
             "closed_at TEXT, "
             "mtf_agreement INTEGER, "
-            "exit_reason TEXT)"
+            "exit_reason TEXT, "
+            "pnl_usdt REAL, "
+            "pnl_pct REAL)"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE live_cooldowns ("
@@ -67,8 +70,8 @@ async def _mk_engine():
         await conn.execute(sa.text(
             "INSERT INTO live_trades "
             "(id, user_id, symbol, direction, entry_price, stop_loss, "
-            " take_profit, opened_at, mtf_agreement) "
-            "VALUES (1, 1, 'BTCUSDT', 'LONG', 100.0, 95.0, 110.0, "
+            " take_profit, position_value_usdt, opened_at, mtf_agreement) "
+            "VALUES (1, 1, 'BTCUSDT', 'LONG', 100.0, 95.0, 110.0, 200.0, "
             "        '2026-05-18T10:00:00+00:00', 5)"
         ))
     return engine
@@ -81,10 +84,11 @@ async def test_liquidation_buffer_write_stamps_exit_reason() -> None:
     pos = OpenPosition(
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss_price=95.0, mtf_agreement=5,
+        position_value_usdt=200.0,
     )
     async with factory() as s:
         await _write_liquidation_buffer_close(
-            s, pos=pos, settings=_settings(), now=_NOW,
+            s, pos=pos, exit_price=90.0, settings=_settings(), now=_NOW,
         )
         await s.commit()
     async with factory() as s:
@@ -102,10 +106,11 @@ async def test_liquidation_buffer_write_upserts_24h_cooldown() -> None:
     pos = OpenPosition(
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss_price=95.0, mtf_agreement=5,
+        position_value_usdt=200.0,
     )
     async with factory() as s:
         await _write_liquidation_buffer_close(
-            s, pos=pos, settings=_settings(), now=_NOW,
+            s, pos=pos, exit_price=90.0, settings=_settings(), now=_NOW,
         )
         await s.commit()
     async with factory() as s:
@@ -126,10 +131,11 @@ async def test_liquidation_buffer_write_handles_null_mtf() -> None:
     pos = OpenPosition(
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss_price=95.0, mtf_agreement=None,
+        position_value_usdt=200.0,
     )
     async with factory() as s:
         await _write_liquidation_buffer_close(
-            s, pos=pos, settings=_settings(), now=_NOW,
+            s, pos=pos, exit_price=90.0, settings=_settings(), now=_NOW,
         )
         await s.commit()
     async with factory() as s:

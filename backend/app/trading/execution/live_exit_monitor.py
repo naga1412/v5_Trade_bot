@@ -37,6 +37,7 @@ from app.db.live_exit_reasons import LiveExitReason
 from app.exchanges.binance_live import BinanceLiveClient, BinanceLiveError
 from app.ops.heartbeat import record_heartbeat
 from app.trading.cooldown_compute import compute_cooldown_duration
+from app.trading.pnl import compute_realized_pnl
 
 
 log = logging.getLogger(__name__)
@@ -62,6 +63,8 @@ class OpenLiveTrade:
     take_profit: float
     opened_at: datetime
     mtf_agreement: int | None  # PR2-populated; None for older rows
+    # TIER 1 (defect sweep 2026-08-06): needed to compute pnl_usdt on close.
+    position_value_usdt: float
 
 
 @dataclass(frozen=True)
@@ -95,7 +98,8 @@ async def _list_open_live_trades(
     """
     rows = (await session.execute(sa.text(
         "SELECT id, user_id, symbol, direction, entry_price, "
-        "       stop_loss, take_profit, opened_at, mtf_agreement "
+        "       stop_loss, take_profit, opened_at, mtf_agreement, "
+        "       position_value_usdt "
         "FROM live_trades "
         "WHERE closed_at IS NULL AND status = 'open'"
     ))).all()
@@ -108,6 +112,7 @@ async def _list_open_live_trades(
             take_profit=float(r.take_profit),
             opened_at=r.opened_at,
             mtf_agreement=getattr(r, "mtf_agreement", None),
+            position_value_usdt=float(r.position_value_usdt),
         )
         for r in rows
     ]
@@ -324,18 +329,48 @@ async def _close_live_trade_and_cooldown(
     now: datetime,
     settings,
 ) -> None:
-    """Single atomic close: UPDATE live_trades + UPSERT live_cooldowns."""
+    """Single atomic close: UPDATE live_trades + UPSERT live_cooldowns.
+
+    TIER 1 (defect sweep 2026-08-06): pnl_usdt/pnl_pct were never written by
+    any close path — structurally NULL forever on the real-money table.
+    Computed here whenever an exit_price is known (TP/SL/TIMEOUT). When
+    Binance reports the position already gone (EXTERNAL_CLOSE), there is no
+    price to compute pnl from — logged loudly rather than silently left
+    NULL, so this documented gap stays visible instead of looking like the
+    same bug recurring.
+    """
+    pnl_pct: float | None = None
+    pnl_usdt: float | None = None
+    if cls.exit_price is not None:
+        pnl_pct, pnl_usdt = compute_realized_pnl(
+            direction=pos.direction, entry_price=pos.entry_price,
+            exit_price=cls.exit_price,
+            position_value_usdt=pos.position_value_usdt,
+        )
+    else:
+        log.warning(
+            "live_exit_monitor: trade_id=%d closed as %s with no captured "
+            "exit_price — pnl_usdt/pnl_pct cannot be computed for this row "
+            "(known EXTERNAL_CLOSE gap; see live_exit_monitor.py module "
+            "docstring)",
+            pos.trade_id, cls.exit_reason.value,
+        )
+
     await session.execute(
         sa.text(
             "UPDATE live_trades SET "
             "  exit_reason = :reason, "
             "  exit_price = COALESCE(exit_price, :px), "
+            "  pnl_pct = COALESCE(pnl_pct, :pnl_pct), "
+            "  pnl_usdt = COALESCE(pnl_usdt, :pnl_usdt), "
             "  closed_at = :ts "
             "WHERE id = :id AND closed_at IS NULL"
         ),
         {
             "reason": cls.exit_reason.value,
             "px": cls.exit_price,
+            "pnl_pct": pnl_pct,
+            "pnl_usdt": pnl_usdt,
             "ts": now,
             "id": pos.trade_id,
         },
