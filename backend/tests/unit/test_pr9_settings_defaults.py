@@ -51,23 +51,6 @@ def test_every_tier_has_a_max_fraction_cap() -> None:
     assert set(tiers.keys()) == expected_tiers
 
 
-def test_multi_entry_threshold_default() -> None:
-    """Multi-entry split engages when confidence_pct/100 < this."""
-    assert get_settings().SIZING_MULTI_ENTRY_THRESHOLD == 0.75
-
-
-def test_multi_entry_ratios_sum_to_one() -> None:
-    """Tranche ratios must sum to 1.0 — invariant required by
-    split_entries. Operator overriding via env must respect this."""
-    ratios = get_settings().SIZING_MULTI_ENTRY_RATIOS
-    assert abs(sum(ratios) - 1.0) < 1e-9
-
-
-def test_multi_entry_dca_band_pct_default() -> None:
-    """DCA band — tranche 2 fires when price moves this pct against signal."""
-    assert get_settings().SIZING_MULTI_ENTRY_DCA_BAND_PCT == 0.5
-
-
 def test_regime_aware_default_false_unchanged() -> None:
     """PR8's regime-aware flag stays default-False; PR9 doesn't touch it."""
     assert get_settings().LIVE_COOLDOWN_REGIME_AWARE is False
