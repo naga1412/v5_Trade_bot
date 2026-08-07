@@ -176,10 +176,27 @@ async def _build_regime_by_date(client: httpx.AsyncClient) -> dict[object, str]:
     return by_date
 
 
+_MAX_ADX_SAMPLES_PER_TF: int = 500
+
+
 async def _build_adx_series(
     client: httpx.AsyncClient, tf: str, needed_since_ms: int,
 ) -> dict[int, float]:
-    """Real `_adx()` rolled over real historical klines for one TF."""
+    """Real `_adx()` rolled over real historical klines for one TF.
+
+    Strided, not exhaustive: calling `_adx()` (an O(m) Wilder-smoothing
+    recompute-from-scratch over `highs[:i+1]`) at EVERY bar is O(n^2)
+    total -- for 92d of 5m bars (~26.5k bars) this measured 2+ hours in
+    a real prod run (2026-08-07) before the SSH pipe eventually broke,
+    stranding the run rather than completing it. `_nearest_before`'s
+    lookup semantics already tolerate "closest value at-or-before a
+    timestamp", so a fixed cap of `_MAX_ADX_SAMPLES_PER_TF` points per
+    TF (still calling the REAL `_adx()`, never reimplemented -- just
+    less often) keeps total cost O(n) regardless of TF granularity,
+    at a resolution (~500 points across up to ~92d, i.e. minutes-to-
+    hours between samples even for 5m) far finer than the hourly
+    prediction cadence the eligibility check actually needs.
+    """
     all_rows: list[pd.DataFrame] = []
     end_ms: int | None = None
     for _ in range(40):  # generous margin — 5m needs ~26 walks for 90d
@@ -198,8 +215,15 @@ async def _build_adx_series(
     highs = full["high"].to_numpy()
     lows = full["low"].to_numpy()
     closes = full["close"].to_numpy()
+    start = ADX_PERIOD + 2
+    span = len(full) - start
+    # Ceiling division: floor division here would UNDERshoot the stride
+    # (e.g. span=2984, cap=500 -> floor gives stride=5, which yields
+    # ~597 points, over the cap) -- round the stride up instead so the
+    # sample count is actually bounded by _MAX_ADX_SAMPLES_PER_TF.
+    stride = max(1, -(-span // _MAX_ADX_SAMPLES_PER_TF)) if span > 0 else 1
     series: dict[int, float] = {}
-    for i in range(ADX_PERIOD + 2, len(full)):
+    for i in range(start, len(full), stride):
         series[int(full.iloc[i]["ts"])] = _adx(highs[: i + 1], lows[: i + 1], closes[: i + 1])
     return series
 

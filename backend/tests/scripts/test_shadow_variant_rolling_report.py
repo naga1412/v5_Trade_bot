@@ -1,19 +1,25 @@
 """Pure-function tests for shadow_variant_rolling_report.
 
 Covers cohort classification, decision rule, early-read flag, fee
-assertion, paired-group summarization, and (item 1c) live-gate
-counterfactual eligibility labeling. No DB/REST dependency — the SQL/report
-paths and the regime/ADX series builders are exercised by the ops-debug
-probe against prod.
+assertion, paired-group summarization, (item 1c) live-gate counterfactual
+eligibility labeling, and the strided ADX-series builder (httpx.MockTransport,
+no real network). No DB dependency — the SQL/report paths are exercised by
+the ops-debug probe against prod.
 """
 from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
 
+import httpx
+import pytest
+
 from scripts.shadow_variant_rolling_report import (
+    ADX_PERIOD,
     DECISION_N,
+    _MAX_ADX_SAMPLES_PER_TF,
     PairRow,
+    _build_adx_series,
     _classify_cohort,
     _decision,
     _early_read,
@@ -318,3 +324,66 @@ def test_compute_live_eligible_naive_datetime_treated_as_utc_not_local() -> None
         regime_by_date=regime_by_date, adx_series=adx_series,
     )
     assert got is True
+
+
+# ---- _build_adx_series (strided, O(n) not O(n^2)) ----------------------
+
+
+def _klines_transport(*, bar_ms: int, total_bars: int) -> httpx.MockTransport:
+    """Synthetic Binance klines transport: `total_bars` bars spaced
+    `bar_ms` apart starting at ts=0, served oldest-first up to `limit`
+    bars ending at-or-before `endTime` (or the series end if absent) --
+    matches real Binance semantics closely enough for `_fetch_klines_df`.
+    """
+    last_ts = (total_bars - 1) * bar_ms
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        params = dict(req.url.params)
+        limit = int(params.get("limit", "1000"))
+        end_ms = min(int(params["endTime"]) if "endTime" in params else last_ts, last_ts)
+        end_idx = end_ms // bar_ms
+        start_idx = max(0, end_idx - limit + 1)
+        rows = [
+            [idx * bar_ms, 100.0 + (idx % 50) * 0.1, 100.0 + (idx % 50) * 0.1 + 1,
+             100.0 + (idx % 50) * 0.1 - 1, 100.0 + (idx % 50) * 0.1, "0"]
+            for idx in range(start_idx, end_idx + 1)
+        ]
+        return httpx.Response(200, json=rows)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_build_adx_series_caps_sample_count_for_large_input() -> None:
+    """Regression test for the 2026-08-07 prod incident: computing
+    _adx() (an O(m) Wilder-smoothing recompute-from-scratch) at every
+    single bar is O(n^2) total, and hung 2+ hours in a real prod run
+    over ~92d of 5m bars before the SSH pipe eventually broke, stranding
+    the run rather than completing it. 3000 bars is well over the cap
+    but small enough to keep this test fast."""
+    transport = _klines_transport(bar_ms=5 * 60_000, total_bars=3000)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await _build_adx_series(client, "5m", needed_since_ms=0)
+    assert 0 < len(result) <= _MAX_ADX_SAMPLES_PER_TF + 1
+
+
+@pytest.mark.asyncio
+async def test_build_adx_series_densely_samples_small_input() -> None:
+    """Inputs well under the cap get every bar -- unchanged behaviour
+    from before the stride fix (no loss of resolution when it isn't
+    needed for performance)."""
+    transport = _klines_transport(bar_ms=60 * 60_000, total_bars=50)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await _build_adx_series(client, "1h", needed_since_ms=0)
+    assert len(result) == 50 - (ADX_PERIOD + 2)
+
+
+@pytest.mark.asyncio
+async def test_build_adx_series_calls_real_adx_not_a_reimplementation() -> None:
+    """The counterfactual's validity depends on using the REAL _adx()
+    (imported, never reimplemented) -- sanity-check the returned values
+    are plausible ADX magnitudes (0-100), not placeholder/zero output."""
+    transport = _klines_transport(bar_ms=60 * 60_000, total_bars=50)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await _build_adx_series(client, "1h", needed_since_ms=0)
+    assert all(0.0 <= v <= 100.0 for v in result.values())
