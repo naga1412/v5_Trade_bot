@@ -1022,3 +1022,48 @@ same symbol.
   undesigned exit level, at the moment the system is least healthy.
 The helper `get_open_position_trade_id` itself does NOT swallow
 exceptions — callers own their policy via try/except wraps.
+
+### FU-40 — W4 flow-features fire-and-forget tasks bypass the rate limiter
+
+**Problem**: `app/data/ratelimit.py`'s `RateLimitedClient` (token-bucket,
+Binance-response-header-aware) is the app's real rate-limiting
+mechanism, and `update_flow_cache`'s own docstring says it "reuses an
+injected httpx.AsyncClient when provided (preferred in the shadow
+worker to reuse the shared connection pool)". In practice the shadow
+worker's actual call site never injects one:
+`backend/app/shadow/worker.py:399` —
+`_aio.create_task(_upd_flow(candle.symbol))` — passes only `symbol`.
+`update_flow_cache` (`app/core/features/flow_features.py:82-84`) falls
+back to `http = httpx.AsyncClient(timeout=_TIMEOUT)`, a fresh unmanaged
+client per call, with no shared bucket and no coordination across
+symbols.
+
+**Blast radius**: this fires once per symbol on every 1h candle close
+(`if tf == "1h"`), i.e. one unmanaged client + 3 concurrent Binance
+Futures GETs (`globalLongShortAccountRatio`,
+`takerlongshortRatio`-class endpoint, OI history) per symbol, for the
+whole shadow universe (~30-46 symbols per the 2026-08-06 system-truth
+run), all within the same few seconds at the top of every hour — a
+burst the app's own rate limiter exists specifically to smooth out.
+
+**Why not yet a real incident**: current call volume is small — 3
+endpoints × ~30-46 symbols (per system-truth's `shadow_trades`/
+`predictions` distinct-symbol counts) ≈ 90-138 calls in the same
+few-second burst once per hour, far under Binance's published limits
+even unthrottled — and each
+`update_flow_cache` call independently catches + logs (DEBUG) any
+network/parse error without crashing the worker — a 429 here just
+leaves that symbol's flow_feature_snapshots row partially null for one
+hour, not a cascading failure. Flagged by the operator (2026-08-06,
+system-truth follow-up) as "worth a line in KNOWN_ISSUES — harmless
+now, but the kind of thing that bites at scale": as the shadow universe
+grows or Binance tightens limits, this burst pattern has no backoff and
+no shared budget with the rest of the app's Binance traffic.
+
+**Fix (not yet scoped/authorized)**: the shadow worker doesn't currently
+hold a long-lived client either — its own kline-seed fetch
+(`worker.py:203`) opens a scoped `async with httpx.AsyncClient() as
+http:` per call, same pattern. A real fix needs a genuinely shared,
+worker-lifetime `RateLimitedClient` instance threaded into both the
+kline-seed path and `_upd_flow(candle.symbol, http=...)`, not just
+patching the one call site.
