@@ -21,6 +21,7 @@ MAE which is lower-is-better).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
@@ -204,6 +205,29 @@ async def _evaluate_mae(  # pragma: no cover — TDD seam, mocked in tests
     return max(0.0, min(1.0, 1.0 - result.win_rate))
 
 
+class MalformedSharpeError(ValueError):
+    """A checkpoint's stored Sharpe is present but cannot be trusted.
+
+    Operator ruling 2026-08-08 (defect-sweep item #19): distinct from
+    "no Sharpe recorded" (row missing, NULL, or a documented ``_status``
+    sentinel), which is an intentional 0.0 fallback — see
+    ``_evaluate_sharpe``'s docstring. This exception is for the case
+    where a Sharpe VALUE IS present but is unusable (unparseable, NaN,
+    or infinite). Silently coercing that to 0.0 would let a
+    corrupted/broken checkpoint beat a realistically-negative champion
+    (e.g. -7.02) and get promoted — a promotion-gate bypass, not a
+    logging nit. Never caught internally; must propagate to the caller.
+    """
+
+    def __init__(self, checkpoint_id: int, raw_value: object) -> None:
+        self.checkpoint_id = checkpoint_id
+        self.raw_value = raw_value
+        super().__init__(
+            f"checkpoint id={checkpoint_id} has a malformed sharpe value "
+            f"{raw_value!r} — refusing to coerce to 0.0"
+        )
+
+
 async def _evaluate_sharpe(
     session: "AsyncSession",
     checkpoint_id: int,
@@ -225,6 +249,11 @@ async def _evaluate_sharpe(
     head-to-head comparisons, 0.0 means "any new checkpoint with a real
     Sharpe wins" — appropriate behaviour while we accumulate replay
     data.
+
+    Raises :class:`MalformedSharpeError` (operator ruling 2026-08-08)
+    when the ``sharpe`` key IS present but is unparseable, NaN, or
+    infinite — those are refused outright rather than coerced to 0.0,
+    which would otherwise silently bypass the champion-challenger gate.
     """
     row = (await session.execute(
         sa.text(
@@ -236,6 +265,9 @@ async def _evaluate_sharpe(
     if row is None or row.sharpe is None:
         return 0.0
     try:
-        return float(row.sharpe)
-    except (TypeError, ValueError):
-        return 0.0
+        value = float(row.sharpe)
+    except (TypeError, ValueError) as e:
+        raise MalformedSharpeError(checkpoint_id, row.sharpe) from e
+    if math.isnan(value) or math.isinf(value):
+        raise MalformedSharpeError(checkpoint_id, row.sharpe)
+    return value
