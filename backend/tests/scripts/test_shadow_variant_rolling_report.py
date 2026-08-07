@@ -1,12 +1,15 @@
 """Pure-function tests for shadow_variant_rolling_report.
 
 Covers cohort classification, decision rule, early-read flag, fee
-assertion, and paired-group summarization. No DB dependency — the
-SQL/report paths are exercised by the ops-debug probe against prod.
+assertion, paired-group summarization, and (item 1c) live-gate
+counterfactual eligibility labeling. No DB/REST dependency — the SQL/report
+paths and the regime/ADX series builders are exercised by the ops-debug
+probe against prod.
 """
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 
 from scripts.shadow_variant_rolling_report import (
     DECISION_N,
@@ -16,7 +19,9 @@ from scripts.shadow_variant_rolling_report import (
     _early_read,
     _fee_assertion_flag,
     _mean_se,
+    _nearest_before,
     _summarize_group,
+    compute_live_eligible,
 )
 
 
@@ -182,3 +187,134 @@ def test_summarize_paired_deltas() -> None:
     assert math.isclose(share, 200.0 / 3.0, rel_tol=1e-6)
     # Δs = [+2, 0, +2] → mean=4/3, stdev=sqrt(4/3), se=sqrt(4/3)/sqrt(3)
     assert math.isclose(m, 4.0 / 3.0, rel_tol=1e-9)
+
+
+def test_pair_row_defaults_live_eligible_true() -> None:
+    """Pre-item-1c construction sites (this file's own _p helper, any
+    other caller) must keep working unchanged."""
+    p = _p(variant="breakeven_0.40R", cohort="atr_bound", tf="1h",
+           base=0.0, var=0.0, armed=False)
+    assert p.live_eligible is True
+
+
+# ---- live-gate eligibility counterfactual (item 1c) --------------------
+
+
+def test_nearest_before_finds_latest_value_at_or_before_ts() -> None:
+    series = {1000: 10.0, 2000: 20.0, 3000: 30.0}
+    assert _nearest_before(series, 2500) == 20.0
+    assert _nearest_before(series, 3000) == 30.0
+    assert _nearest_before(series, 999) is None
+
+
+def test_compute_live_eligible_long_in_bear_regime_without_override_blocked() -> None:
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    regime_by_date = {opened_at.date(): "bear"}
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series={},
+    )
+    assert got is False
+
+
+def test_compute_live_eligible_long_in_bear_regime_with_l2_override_allowed() -> None:
+    """L2 agreeing at high confidence (>= REGIME_OPPOSITE_PATTERN_OVERRIDE,
+    default 0.8) overrides an opposing regime per the real gate's rule 2."""
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    regime_by_date = {opened_at.date(): "bear"}
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction="LONG", l2_confidence=0.95,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series={},
+    )
+    assert got is True
+
+
+def test_compute_live_eligible_bull_regime_passes_regime_check() -> None:
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    regime_by_date = {opened_at.date(): "bull"}
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series={},
+    )
+    assert got is True
+
+
+def test_compute_live_eligible_missing_regime_day_falls_open_on_regime() -> None:
+    """No regime entry for that date -> market_regime=None -> the regime
+    check can't detect an opposing regime (None not in ('bull','bear')) --
+    falls open on that specific sub-gate, matching open_position_gate's
+    own documented fail-open behaviour."""
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date={}, adx_series={},
+    )
+    assert got is True
+
+
+def test_compute_live_eligible_low_adx_blocked() -> None:
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    regime_by_date = {opened_at.date(): "neutral"}
+    ts_ms = int(opened_at.timestamp() * 1000)
+    adx_series = {"1h": {ts_ms: 5.0}}  # well below the 25.0 default floor
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series=adx_series,
+    )
+    assert got is False
+
+
+def test_compute_live_eligible_missing_adx_falls_open() -> None:
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    regime_by_date = {opened_at.date(): "neutral"}
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series={},
+    )
+    assert got is True
+
+
+def test_compute_live_eligible_below_forced_entry_threshold_blocked() -> None:
+    """compute_live_eligible forces MIN_ENTRY_SCORE_LONG=0.36 (matching
+    the query's own entry_score>=0.36 filter) regardless of prod's
+    deployed threshold, so the counterfactual is self-consistent."""
+    opened_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    regime_by_date = {opened_at.date(): "neutral"}
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.20,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series={},
+    )
+    assert got is False
+
+
+def test_compute_live_eligible_naive_datetime_treated_as_utc_not_local() -> None:
+    """A naive opened_at (e.g. an asyncpg TIMESTAMP-without-timezone
+    round-trip) must be interpreted as UTC for both the regime-day lookup
+    and the ADX timestamp lookup -- not local system time. Regression
+    test: datetime.timestamp() on a naive value silently assumes local
+    tz, which would corrupt the ADX ts_ms lookup on any non-UTC host."""
+    opened_at = datetime(2026, 6, 1, 12, 0)  # naive
+    regime_by_date = {opened_at.date(): "bull"}
+    ts_ms_utc = int(opened_at.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    adx_series = {"1h": {ts_ms_utc: 30.0}}  # only present at the UTC-correct ts
+    got = compute_live_eligible(
+        direction="LONG", entry_score=0.50,
+        l2_direction=None, l2_confidence=None,
+        dominant_tf="1h", opened_at=opened_at,
+        regime_by_date=regime_by_date, adx_series=adx_series,
+    )
+    assert got is True

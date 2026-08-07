@@ -3,6 +3,20 @@
 READ-ONLY. Reports paired-comparison outcomes for the breakeven-variant
 lane (Amendment 3, 2026-07-31) added by PR #392.
 
+Item 1(c) of the 2026-08-06 gate-divergence follow-up: every paired row is
+also labeled `live_eligible` -- a counterfactual re-application of the 3
+PR#266 gates (REGIME_GATE_ENABLED, ADX_GATE_ENABLED, PATTERN_BOOST_ENABLED)
+that apply to LIVE dispatch but are no-op'd by shadow's own entry-quality
+shim. Uses the REAL `open_position_gate()` (imported, not reimplemented)
+against deterministically recomputed historical regime (walk-forward
+`compute_market_regime()`, no lookahead) and ADX (`_adx()` over real
+historical klines) -- same methodology as the gate-counterfactual ops-debug
+probe. Each window's report prints three blocks: ALL (unchanged, for
+continuity with every prior read), LIVE-ELIGIBLE, and LIVE-INELIGIBLE, so a
+breakeven conclusion is never drawn over a population live would never
+actually take. Per operator ruling: this labels the existing read only --
+it does NOT change what shadow trades or filters shadow's own population.
+
 For each (variant_name, cohort, timeframe, window):
     n_paired   : signals with both a shadow_trades row and a
                  shadow_trade_variants row for this variant.
@@ -57,9 +71,12 @@ import asyncio
 import math
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean, stdev
 
+import httpx
+import pandas as pd
 import sqlalchemy as sa
 
 # Repo path bootstrap so this script runs both inside the container
@@ -70,6 +87,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from app.config import get_settings  # noqa: E402
+from app.core.gates.entry_quality import open_position_gate  # noqa: E402
+from app.core.scoring.mtf_confluence import ADX_PERIOD, TIMEFRAMES as MTF_TIMEFRAMES, _adx  # noqa: E402
+from app.core.regime.market_regime import EMA_SLOW, compute_market_regime  # noqa: E402
 from app.db.session import get_session_factory  # noqa: E402
 
 
@@ -81,6 +101,7 @@ EARLY_READ_N: int = 30
 Z_95: float = 1.96
 Z_68: float = 1.00  # ~68% CI for the early directional read
 FEE_TOLERANCE: float = 1e-6  # Δ_after_fee must equal Δ_gross to this precision
+BINANCE_SPOT_KLINES_URL: str = "https://api.binance.com/api/v3/klines"
 
 
 @dataclass(frozen=True)
@@ -92,6 +113,10 @@ class PairRow:
     base_pnl_pct: float
     variant_pnl_pct: float
     armed: bool
+    # Item 1(c): counterfactual live-gate eligibility label. Defaults True
+    # so existing unit-test construction (pre-dating this field) is
+    # unaffected.
+    live_eligible: bool = True
 
 
 def _classify_cohort(entry_price: float, entry_atr: float) -> str:
@@ -105,7 +130,153 @@ def _blacklist() -> set[str]:
     return set(get_settings().SHADOW_SPOT_BLACKLIST)
 
 
-async def _fetch_pairs(window_days: int) -> list[PairRow]:
+# ---------------------------------------------------------------------------
+# Item 1(c): live-gate counterfactual eligibility labeling.
+#
+# No dispatch/decision-log table exists (confirmed via system-truth), so
+# whether live's 3 PR#266 gates (regime/ADX/pattern-boost) would have
+# allowed or rejected a given shadow trade can't be read back directly.
+# Instead this re-runs the REAL open_position_gate() against
+# deterministically recomputed historical regime + ADX -- same approach as
+# the gate-counterfactual ops-debug probe (items 1a/1b of the same
+# follow-up).
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_klines_df(
+    client: httpx.AsyncClient, symbol: str, interval: str, limit: int,
+    end_ms: int | None = None,
+) -> pd.DataFrame:
+    params: dict[str, str] = {"symbol": symbol, "interval": interval, "limit": str(limit)}
+    if end_ms is not None:
+        params["endTime"] = str(end_ms)
+    resp = await client.get(BINANCE_SPOT_KLINES_URL, params=params, timeout=15.0)
+    resp.raise_for_status()
+    rows = resp.json()
+    return pd.DataFrame({
+        "ts": [int(r[0]) for r in rows],
+        "high": [float(r[2]) for r in rows],
+        "low": [float(r[3]) for r in rows],
+        "close": [float(r[4]) for r in rows],
+    })
+
+
+async def _build_regime_by_date(client: httpx.AsyncClient) -> dict[object, str]:
+    """Walk-forward `compute_market_regime()` over real BTC daily klines.
+
+    Day D only ever sees data through day D (no lookahead).
+    """
+    daily = await _fetch_klines_df(client, "BTCUSDT", "1d", 1000)
+    by_date: dict[object, str] = {}
+    for i in range(EMA_SLOW + 2, len(daily)):
+        window = daily.iloc[: i + 1]
+        regime = compute_market_regime(window)
+        day = pd.Timestamp(int(daily.iloc[i]["ts"]), unit="ms", tz="UTC").date()
+        by_date[day] = regime
+    return by_date
+
+
+async def _build_adx_series(
+    client: httpx.AsyncClient, tf: str, needed_since_ms: int,
+) -> dict[int, float]:
+    """Real `_adx()` rolled over real historical klines for one TF."""
+    all_rows: list[pd.DataFrame] = []
+    end_ms: int | None = None
+    for _ in range(40):  # generous margin — 5m needs ~26 walks for 90d
+        df = await _fetch_klines_df(client, "BTCUSDT", tf, 1000, end_ms=end_ms)
+        if df.empty:
+            break
+        all_rows.append(df)
+        oldest = int(df.iloc[0]["ts"])
+        if oldest <= needed_since_ms:
+            break
+        end_ms = oldest - 1
+        await asyncio.sleep(0.1)
+    if not all_rows:
+        return {}
+    full = pd.concat(all_rows).drop_duplicates(subset="ts").sort_values("ts").reset_index(drop=True)
+    highs = full["high"].to_numpy()
+    lows = full["low"].to_numpy()
+    closes = full["close"].to_numpy()
+    series: dict[int, float] = {}
+    for i in range(ADX_PERIOD + 2, len(full)):
+        series[int(full.iloc[i]["ts"])] = _adx(highs[: i + 1], lows[: i + 1], closes[: i + 1])
+    return series
+
+
+def _nearest_before(series: dict[int, float], ts_ms: int) -> float | None:
+    best_ts: int | None = None
+    best_val: float | None = None
+    for t, v in series.items():
+        if t <= ts_ms and (best_ts is None or t > best_ts):
+            best_ts, best_val = t, v
+    return best_val
+
+
+def compute_live_eligible(
+    *,
+    direction: str,
+    entry_score: float | None,
+    l2_direction: str | None,
+    l2_confidence: float | None,
+    dominant_tf: str | None,
+    opened_at: datetime,
+    regime_by_date: dict[object, str],
+    adx_series: dict[str, dict[int, float]],
+) -> bool:
+    """True if the REAL open_position_gate() -- with all 3 PR#266 gates
+    forced on -- would allow this trade. Pure/injectable: no DB or REST
+    calls, so this is directly unit-testable.
+    """
+    # Naive datetimes (e.g. a raw Postgres TIMESTAMP round-trip) must be
+    # interpreted as UTC, not local system time -- normalize FIRST, before
+    # deriving either the ADX lookup timestamp or the regime day, since
+    # datetime.timestamp() on a naive value silently assumes local tz.
+    aware = opened_at if opened_at.tzinfo else opened_at.replace(tzinfo=timezone.utc)
+
+    adx_map: dict[str, float] | None = None
+    if dominant_tf and dominant_tf in adx_series:
+        ts_ms = int(aware.timestamp() * 1000)
+        v = _nearest_before(adx_series[dominant_tf], ts_ms)
+        if v is not None:
+            adx_map = {dominant_tf: v}
+
+    class _Sig:
+        pass
+
+    sig = _Sig()
+    sig.direction = direction  # type: ignore[attr-defined]
+    sig.entry_score = entry_score  # type: ignore[attr-defined]
+    sig.layer2_direction = l2_direction  # type: ignore[attr-defined]
+    sig.layer2_confidence = l2_confidence  # type: ignore[attr-defined]
+    sig.mtf_adx_by_tf = adx_map  # type: ignore[attr-defined]
+    sig.mtf_dominant_tf = dominant_tf  # type: ignore[attr-defined]
+
+    day = aware.astimezone(timezone.utc).date()
+    regime = regime_by_date.get(day)
+
+    real_settings = get_settings()
+
+    class _S:
+        REGIME_GATE_ENABLED = True
+        ADX_GATE_ENABLED = True
+        PATTERN_BOOST_ENABLED = True
+        DISABLE_SHORT_SIGNALS = False
+        MIN_ENTRY_SCORE_LONG = 0.36
+        MIN_ADX_TREND_STRENGTH = real_settings.MIN_ADX_TREND_STRENGTH
+        REGIME_OPPOSITE_PATTERN_OVERRIDE = real_settings.REGIME_OPPOSITE_PATTERN_OVERRIDE
+        PATTERN_BOOST_MIN_CONFIDENCE = real_settings.PATTERN_BOOST_MIN_CONFIDENCE
+        PATTERN_BOOST_AMOUNT = real_settings.PATTERN_BOOST_AMOUNT
+        PATTERN_PENALTY_AMOUNT = real_settings.PATTERN_PENALTY_AMOUNT
+
+    return open_position_gate(sig, _S(), market_regime=regime).allow
+
+
+async def _fetch_pairs(
+    window_days: int,
+    regime_by_date: dict[object, str],
+    adx_series: dict[str, dict[int, float]],
+) -> list[PairRow]:
     """One query per window; each returns paired (base, variant) rows
     with pre-computed cohort + BTCUSDT-or-rank<=20 filter."""
     sql = sa.text(
@@ -117,6 +288,11 @@ async def _fetch_pairs(window_days: int) -> list[PairRow]:
                 s.timeframe,
                 s.entry_price,
                 s.entry_atr,
+                s.entry_score,
+                s.direction,
+                s.mtf_dominant_tf,
+                s.layer_scores -> '2' ->> 'direction' AS l2_direction,
+                (s.layer_scores -> '2' ->> 'confidence')::float AS l2_confidence,
                 s.pnl_pct AS base_pnl_pct,
                 s.opened_at,
                 (SELECT MAX(snapshot_at) FROM asset_universe
@@ -146,7 +322,13 @@ async def _fetch_pairs(window_days: int) -> list[PairRow]:
             r.timeframe,
             r.entry_price,
             r.entry_atr,
-            r.rank_at_trade
+            r.rank_at_trade,
+            r.opened_at,
+            r.entry_score,
+            r.direction,
+            r.mtf_dominant_tf,
+            r.l2_direction,
+            r.l2_confidence
         FROM ranked r
         JOIN shadow_trade_variants v ON v.base_shadow_trade_id = r.base_id
         """
@@ -168,6 +350,16 @@ async def _fetch_pairs(window_days: int) -> list[PairRow]:
         cohort = _classify_cohort(
             float(r.entry_price), float(r.entry_atr),
         )
+        live_eligible = compute_live_eligible(
+            direction=str(r.direction),
+            entry_score=float(r.entry_score) if r.entry_score is not None else None,
+            l2_direction=r.l2_direction,
+            l2_confidence=r.l2_confidence,
+            dominant_tf=r.mtf_dominant_tf,
+            opened_at=r.opened_at,
+            regime_by_date=regime_by_date,
+            adx_series=adx_series,
+        )
         out.append(PairRow(
             variant_name=str(r.variant_name),
             trigger_r=float(r.trigger_r),
@@ -176,6 +368,7 @@ async def _fetch_pairs(window_days: int) -> list[PairRow]:
             base_pnl_pct=float(r.base_pnl_pct) if r.base_pnl_pct is not None else 0.0,
             variant_pnl_pct=float(r.variant_pnl_pct),
             armed=bool(r.armed),
+            live_eligible=live_eligible,
         ))
     return out
 
@@ -244,9 +437,9 @@ def _summarize_group(
 
 
 def _print_report(
-    window_days: int, pairs: list[PairRow],
+    window_days: int, pairs: list[PairRow], *, header_suffix: str = "",
 ) -> None:
-    print(f"\n=== window: last {window_days} days ===")
+    print(f"\n=== window: last {window_days} days{header_suffix} ===")
     if not pairs:
         print("  (no paired rows found)")
         return
@@ -365,9 +558,39 @@ async def main() -> None:
     print(f"decision rule: PASS/FAIL at n>={DECISION_N}; early read at n>={EARLY_READ_N}")
     print(f"cohorts: {COHORTS} (atr_bound is PRIMARY per FU-38 verification)")
 
+    print(
+        "\nbuilding live-gate eligibility inputs (item 1c): walk-forward regime "
+        "series + per-TF ADX series, real klines, no lookahead..."
+    )
+    async with httpx.AsyncClient() as client:
+        regime_by_date = await _build_regime_by_date(client)
+        distinct_regimes = sorted(set(regime_by_date.values()))
+        print(f"  regime series: {len(regime_by_date)} days, distinct values={distinct_regimes}")
+
+        needed_since_ms = int(
+            (datetime.now(timezone.utc) - timedelta(days=max(WINDOWS_DAYS) + 2)).timestamp() * 1000
+        )
+        adx_series: dict[str, dict[int, float]] = {}
+        for tf in MTF_TIMEFRAMES:
+            adx_series[tf] = await _build_adx_series(client, tf, needed_since_ms)
+            print(f"  {tf} ADX series: {len(adx_series[tf])} points")
+            await asyncio.sleep(0.2)
+
     for w in WINDOWS_DAYS:
-        pairs = await _fetch_pairs(w)
-        _print_report(w, pairs)
+        pairs = await _fetch_pairs(w, regime_by_date, adx_series)
+        n_eligible = sum(1 for p in pairs if p.live_eligible)
+        n_total = len(pairs)
+        pct = 100 * n_eligible / n_total if n_total else float("nan")
+        print(f"\n--- window={w}d: {n_eligible}/{n_total} ({pct:.1f}%) rows are live-eligible ---")
+        _print_report(w, pairs, header_suffix=" — ALL (aggregate, unchanged continuity view)")
+        _print_report(
+            w, [p for p in pairs if p.live_eligible],
+            header_suffix=" — LIVE-ELIGIBLE (would pass regime+ADX+pattern-boost)",
+        )
+        _print_report(
+            w, [p for p in pairs if not p.live_eligible],
+            header_suffix=" — LIVE-INELIGIBLE (would be rejected by live gates)",
+        )
 
 
 if __name__ == "__main__":
