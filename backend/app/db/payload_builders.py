@@ -130,6 +130,9 @@ def build_shadow_trade_payload(
     mtf_agreement: int | None = None,
     mtf_dominant_tf: str | None = None,
     mtf_directions_json: str | None = None,
+    # Item 4 (2026-08-13): per-timeframe ADX map. Same propagation +
+    # None-default contract as the 7 PR1 fields above.
+    mtf_adx_by_tf_json: str | None = None,
     p_win: float | None = None,
     effective_score: float | None = None,
     realized_vol_20d: float | None = None,
@@ -194,6 +197,11 @@ def build_shadow_trade_payload(
         # round-tripped a JSONB value into a dict at any point upstream,
         # serialize it here so the INSERT param binding stays valid.
         "mtf_directions_json": _normalize_mtf_directions_json(mtf_directions_json),
+        # Item 4 (2026-08-13): same belt-and-suspenders normalization as
+        # mtf_directions_json above — both are JSONB columns subject to
+        # the same asyncpg dict round-trip risk if a future caller reads
+        # this column back onto a ShadowPosition.
+        "mtf_adx_by_tf_json": _normalize_mtf_directions_json(mtf_adx_by_tf_json),
         "p_win": p_win,
         "effective_score": effective_score,
         "realized_vol_20d": realized_vol_20d,

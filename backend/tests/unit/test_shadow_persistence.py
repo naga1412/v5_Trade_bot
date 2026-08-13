@@ -71,6 +71,8 @@ _TRADES_DDL = (
     "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
     "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
     "realized_vol_20d REAL, funding_directional_adj REAL, "
+    # Item 4 (alembic 0034): per-TF ADX map, same NULL-when-absent treatment.
+    "mtf_adx_by_tf_json TEXT, "
     "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
 )
 
@@ -329,6 +331,62 @@ async def test_persist_closed_trade_writes_all_7_pr1_cols() -> None:
     assert row.effective_score == 0.42
     assert row.realized_vol_20d == 0.018
     assert row.funding_directional_adj == 0.003
+
+
+@pytest.mark.asyncio
+async def test_persist_closed_trade_writes_mtf_adx_by_tf_json() -> None:
+    """Item 4 (2026-08-13): when ShadowPosition carries mtf_adx_by_tf_json,
+    persist_closed_trade threads it through build_shadow_trade_payload and
+    it lands in shadow_trades — same getattr(pos, ..., None) pattern as the
+    7 PR1 fields above. Round-trip integration on SQLite."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(_TRADES_DDL))
+
+    sig = make_signal()
+    pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
+    pos.mtf_adx_by_tf_json = '{"5m":18.3,"1h":31.2}'
+    closed_at = datetime(2026, 8, 13, 18, tzinfo=timezone.utc)
+
+    async with AsyncSession(engine) as session:
+        await persist_closed_trade(
+            session, pos, user_id=1,
+            exit_price=80594.5, exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=closed_at, bars_held=4, inputs_hash="deadbeef",
+        )
+        await session.commit()
+        row = (await session.execute(
+            sa.text("SELECT mtf_adx_by_tf_json FROM shadow_trades")
+        )).first()
+    assert row is not None
+    assert row.mtf_adx_by_tf_json == '{"5m":18.3,"1h":31.2}'
+
+
+@pytest.mark.asyncio
+async def test_persist_closed_trade_mtf_adx_by_tf_json_defaults_null() -> None:
+    """A ShadowPosition without mtf_adx_by_tf_json set (default None on the
+    dataclass) persists NULL — same fail-open contract as the other MTF
+    analytics columns when the source pred lacked them."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(_TRADES_DDL))
+
+    sig = make_signal()
+    pos = ShadowPosition.from_signal(sig, position_size_usdt=30.0)
+    closed_at = datetime(2026, 8, 13, 18, tzinfo=timezone.utc)
+
+    async with AsyncSession(engine) as session:
+        await persist_closed_trade(
+            session, pos, user_id=1,
+            exit_price=80594.5, exit_reason=ExitReason.TAKE_PROFIT,
+            closed_at=closed_at, bars_held=4, inputs_hash="deadbeef2",
+        )
+        await session.commit()
+        row = (await session.execute(
+            sa.text("SELECT mtf_adx_by_tf_json FROM shadow_trades")
+        )).first()
+    assert row is not None
+    assert row.mtf_adx_by_tf_json is None
 
 
 # ────────────────────────────────────────────────────────────────────────────
