@@ -41,6 +41,40 @@ _NULL: Final[dict[str, float | None]] = {
 
 _FLOW_CACHE: dict[str, dict[str, float | None]] = {}
 
+# TIER 2a (defect sweep 2026-08-06): the taker-ratio and OI-delta wrong-
+# endpoint incidents both looked identical from here — every call to one
+# endpoint failing, silently, for months. A single symbol's fetch failing
+# (delisted, thin market) is a legitimate quirk that must stay quiet; the
+# SAME endpoint failing on every consecutive call is the exact shape those
+# two incidents had and must now be loud well before a full universe cycle
+# (~30 symbols) completes. Reset to 0 on any success for that endpoint.
+_CONSECUTIVE_FAILURE_ALERT_THRESHOLD: Final = 20
+_consecutive_failures: dict[str, int] = {
+    "ls_account_ratio": 0, "taker_buy_sell_ratio": 0, "oi_delta": 0,
+}
+
+
+def _record_endpoint_result(endpoint: str, *, ok: bool, symbol: str) -> None:
+    """Update the per-endpoint consecutive-failure streak; escalate once."""
+    if ok:
+        _consecutive_failures[endpoint] = 0
+        return
+    _consecutive_failures[endpoint] += 1
+    streak = _consecutive_failures[endpoint]
+    if streak >= _CONSECUTIVE_FAILURE_ALERT_THRESHOLD:
+        log.error(
+            "flow_features: %s has failed %d consecutive calls (latest "
+            "symbol=%s) — this endpoint looks broken for every symbol, not "
+            "a one-off per-symbol quirk. Same shape as the taker-ratio and "
+            "OI-delta wrong-endpoint incidents (2026-08-06).",
+            endpoint, streak, symbol,
+        )
+
+
+def _clear_failure_streaks_for_tests() -> None:
+    for key in _consecutive_failures:
+        _consecutive_failures[key] = 0
+
 
 def compute(symbol: str) -> dict[str, float | None]:
     """Return cached flow features for *symbol*.
@@ -93,8 +127,10 @@ async def update_flow_cache(
             rows = resp.json()
             if rows:
                 result["ls_account_ratio"] = float(rows[0]["longAccount"])
+            _record_endpoint_result("ls_account_ratio", ok=True, symbol=native)
         except Exception as exc:  # noqa: BLE001
             log.debug("flow_features ls_account_ratio error %s: %s", native, exc)
+            _record_endpoint_result("ls_account_ratio", ok=False, symbol=native)
 
         # 2. Taker buy-sell ratio. The spec's original two-endpoint design
         # (/futures/data/takerbuyvolume + takersellvolume) does not exist on
@@ -118,8 +154,10 @@ async def update_flow_cache(
                 total = buy_vol + sell_vol
                 if total > 0:
                     result["taker_buy_sell_ratio"] = buy_vol / total
+            _record_endpoint_result("taker_buy_sell_ratio", ok=True, symbol=native)
         except Exception as exc:  # noqa: BLE001
             log.debug("flow_features taker_ratio error %s: %s", native, exc)
+            _record_endpoint_result("taker_buy_sell_ratio", ok=False, symbol=native)
 
         # 3. OI 4h + 24h delta from ONE call: 25 x 1h buckets covers a
         # 24h span (indices 0..24), and the last 5 of those (indices
@@ -157,8 +195,10 @@ async def update_flow_cache(
                 oi_24h = float(rows[0]["sumOpenInterest"])
                 if oi_24h > 0:
                     result["oi_24h_delta"] = (oi_now - oi_24h) / oi_24h
+            _record_endpoint_result("oi_delta", ok=True, symbol=native)
         except Exception as exc:  # noqa: BLE001
             log.debug("flow_features oi_delta error %s: %s", native, exc)
+            _record_endpoint_result("oi_delta", ok=False, symbol=native)
 
         _FLOW_CACHE[symbol] = result
     finally:
