@@ -181,13 +181,6 @@ class Settings(BaseSettings):
         "medium_max": 10_000.0,
         "large_max": 100_000.0,
     }
-    # Multi-entry split kicks in when confidence_pct/100 < this threshold.
-    SIZING_MULTI_ENTRY_THRESHOLD: float = 0.75
-    # Tranche ratios — must sum to 1.0. Validated at sizing time.
-    SIZING_MULTI_ENTRY_RATIOS: list[float] = [0.6, 0.4]
-    # DCA band — tranche 2 placed when price moves this pct against signal.
-    SIZING_MULTI_ENTRY_DCA_BAND_PCT: float = 0.5
-
     # --- PR10 symbol allowlist + stablecoin filter -----------------------
     # Default-OFF for safe deploy. Operator flips after observing the
     # `/api/v1/bot-status/symbol-allowlist` endpoint for ~24h.
