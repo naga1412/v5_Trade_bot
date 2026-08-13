@@ -79,6 +79,27 @@ C3_UNIVERSE_STALL_STREAK_FOR_CRITICAL: int = 2
 # right semantics — a fresh restart resets the boot grace and the
 # streak together. Tests can monkey-patch this dict to seed a streak.
 _C3_UNIVERSE_STALL_STREAK: dict[str, int] = {}
+# C3 per-symbol-drop repeat suppression (alert-fatigue fix, 2026-08-08):
+# the per_symbol_drop branch below used to emit a new finding EVERY tick
+# (5 min) even when the stale set was byte-identical to the previous
+# tick. Confirmed live via the sql-select probe (2026-08-07): ACE/BABY/
+# BICO/ERA USDT@1h produced an unchanged warning every 5 minutes for
+# weeks — BABYUSDT had been stale 50+ days, unbroken, all still
+# correctly ranked in the live top-20 the whole time (not a universe-
+# rotation artifact). That is the exact alert-fatigue failure mode C3
+# exists to prevent becoming, not cause. Now only emits when the stale
+# SET changes, or after this many seconds have elapsed since the last
+# emission for an unchanged set — a standing drop still gets a periodic
+# reminder instead of vanishing from operator attention permanently.
+C3_PER_SYMBOL_DROP_REMINDER_SECONDS: int = 6 * 3600  # 6h
+
+# In-process dedup state for per_symbol_drop, keyed on the fixed string
+# "per_symbol_drop" (single detector scope, mirrors
+# _C3_UNIVERSE_STALL_STREAK's pattern). Value is (stale_set, emitted_at).
+# In-memory only; resets on container restart — a fresh restart
+# re-emits on its first stale tick, which is correct (operator should
+# see current state after a deploy, not inherit a pre-restart timer).
+_C3_LAST_PER_SYMBOL_DROP: dict[str, tuple[frozenset[tuple[str, str]], datetime]] = {}
 C4_BLOCKED_RATE_THRESHOLD: float = 0.95
 C4_LOOKBACK_HOURS: int = 2
 # C4 min-sample guard (Phase 0 completion): 2/2 = 100% is noise. Require
@@ -540,23 +561,41 @@ async def detect_per_symbol_prediction_freshness(
         # streak so a transient post-restart tick doesn't count toward
         # a later, unrelated stall.
         _C3_UNIVERSE_STALL_STREAK.pop("universe_stall", None)
-        findings.append(HealerFinding(
-            detector_name="per_symbol_prediction_freshness",
-            severity="warning",
-            summary=(
-                f"{len(stale_syms)}/{total_pairs} symbol/tf pair(s) with "
-                f"predictions older than {C3_TIMEFRAME_MULTIPLIER}× "
-                f"timeframe"
-            ),
-            details={
-                "stale_count": len(stale_syms),
-                "total_pairs": total_pairs,
-                "stale_ratio": stale_ratio,
-                "shadow_worker_fresh": shadow_fresh,
-                "sample": stale_syms[:20],
-                "class": "per_symbol_drop",
-            },
-        ))
+
+        # Alert-fatigue suppression: only emit when the stale SET
+        # changed since the last emission, or the reminder interval has
+        # elapsed for an unchanged set. See C3_PER_SYMBOL_DROP_REMINDER_
+        # SECONDS's module-level comment for the live incident that
+        # motivated this.
+        current_set = frozenset(
+            (str(item["symbol"]), str(item["timeframe"])) for item in stale_syms
+        )
+        dedup_key = "per_symbol_drop"
+        last = _C3_LAST_PER_SYMBOL_DROP.get(dedup_key)
+        should_emit = (
+            last is None
+            or last[0] != current_set
+            or (now - last[1]).total_seconds() >= C3_PER_SYMBOL_DROP_REMINDER_SECONDS
+        )
+        if should_emit:
+            _C3_LAST_PER_SYMBOL_DROP[dedup_key] = (current_set, now)
+            findings.append(HealerFinding(
+                detector_name="per_symbol_prediction_freshness",
+                severity="warning",
+                summary=(
+                    f"{len(stale_syms)}/{total_pairs} symbol/tf pair(s) with "
+                    f"predictions older than {C3_TIMEFRAME_MULTIPLIER}× "
+                    f"timeframe"
+                ),
+                details={
+                    "stale_count": len(stale_syms),
+                    "total_pairs": total_pairs,
+                    "stale_ratio": stale_ratio,
+                    "shadow_worker_fresh": shadow_fresh,
+                    "sample": stale_syms[:20],
+                    "class": "per_symbol_drop",
+                },
+            ))
     return findings
 
 
