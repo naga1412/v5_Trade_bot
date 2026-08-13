@@ -32,6 +32,7 @@ def _long_pos(**overrides) -> OpenLiveTrade:
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss=95.0, take_profit=110.0,
         opened_at=_NOW - timedelta(hours=2), mtf_agreement=5,
+        position_value_usdt=200.0,
     )
     defaults.update(overrides)
     return OpenLiveTrade(**defaults)
@@ -42,6 +43,7 @@ def _short_pos(**overrides) -> OpenLiveTrade:
         trade_id=2, user_id=1, symbol="ETHUSDT", direction="SHORT",
         entry_price=100.0, stop_loss=105.0, take_profit=90.0,
         opened_at=_NOW - timedelta(hours=2), mtf_agreement=4,
+        position_value_usdt=200.0,
     )
     defaults.update(overrides)
     return OpenLiveTrade(**defaults)
@@ -116,10 +118,13 @@ async def _mk_engine_with_live_trades():
             "exit_price REAL, "
             "stop_loss REAL NOT NULL, "
             "take_profit REAL NOT NULL, "
+            "position_value_usdt REAL NOT NULL, "
             "opened_at TEXT NOT NULL, "
             "closed_at TEXT, "
             "mtf_agreement INTEGER, "
-            "exit_reason TEXT)"
+            "exit_reason TEXT, "
+            "pnl_usdt REAL, "
+            "pnl_pct REAL)"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE live_cooldowns ("
@@ -134,8 +139,8 @@ async def _mk_engine_with_live_trades():
         await conn.execute(sa.text(
             "INSERT INTO live_trades "
             "(id, user_id, symbol, direction, entry_price, stop_loss, "
-            " take_profit, opened_at, mtf_agreement) "
-            "VALUES (1, 1, 'BTCUSDT', 'LONG', 100.0, 95.0, 110.0, "
+            " take_profit, position_value_usdt, opened_at, mtf_agreement) "
+            "VALUES (1, 1, 'BTCUSDT', 'LONG', 100.0, 95.0, 110.0, 200.0, "
             "        '2026-05-18T10:00:00+00:00', 5)"
         ))
     return engine
@@ -159,6 +164,7 @@ async def test_process_one_writes_exit_reason_and_cooldown_on_tp() -> None:
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss=95.0, take_profit=110.0,
         opened_at=_NOW - timedelta(hours=2), mtf_agreement=5,
+        position_value_usdt=200.0,
     )
     binance = MagicMock()
     binance.get_position = AsyncMock(return_value=SimpleNamespace(entry_price=111.0))
@@ -190,6 +196,75 @@ async def test_process_one_writes_exit_reason_and_cooldown_on_tp() -> None:
         assert cooldown.last_mtf_agreement == 5
 
 
+# --- TIER 1 (defect sweep 2026-08-06): pnl_usdt/pnl_pct write path -----
+
+
+@pytest.mark.asyncio
+async def test_process_one_writes_pnl_on_take_profit_close() -> None:
+    """A closed live trade must land with non-null pnl_usdt AND pnl_pct."""
+    engine = await _mk_engine_with_live_trades()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    pos = OpenLiveTrade(
+        trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
+        entry_price=100.0, stop_loss=95.0, take_profit=110.0,
+        opened_at=_NOW - timedelta(hours=2), mtf_agreement=5,
+        position_value_usdt=200.0,
+    )
+    binance = MagicMock()
+    binance.get_position = AsyncMock(return_value=SimpleNamespace(entry_price=110.0))
+    binance.aclose = AsyncMock()
+
+    async with factory() as session:
+        await _process_one(
+            pos=pos, binance=binance, session=session,
+            settings=_settings(), now_fn=lambda: _NOW,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        row = (await session.execute(sa.text(
+            "SELECT pnl_usdt, pnl_pct FROM live_trades WHERE id = 1"
+        ))).first()
+        assert row.pnl_usdt is not None
+        assert row.pnl_pct is not None
+        # LONG, entry=100 -> exit=110, position_value=200: +10% / +20 USDT
+        assert row.pnl_pct == pytest.approx(10.0)
+        assert row.pnl_usdt == pytest.approx(20.0)
+
+
+@pytest.mark.asyncio
+async def test_process_one_leaves_pnl_null_on_external_close_with_no_price() -> None:
+    """EXTERNAL_CLOSE with no captured exit_price can't compute pnl — must
+    stay NULL rather than silently writing a wrong number, and this must
+    not raise (the monitor loop continues processing other positions)."""
+    engine = await _mk_engine_with_live_trades()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    pos = OpenLiveTrade(
+        trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
+        entry_price=100.0, stop_loss=95.0, take_profit=110.0,
+        opened_at=_NOW - timedelta(hours=2), mtf_agreement=5,
+        position_value_usdt=200.0,
+    )
+    binance = MagicMock()
+    binance.get_position = AsyncMock(return_value=None)  # EXTERNAL_CLOSE, no price
+    binance.aclose = AsyncMock()
+
+    async with factory() as session:
+        cls = await _process_one(
+            pos=pos, binance=binance, session=session,
+            settings=_settings(), now_fn=lambda: _NOW,
+        )
+        await session.commit()
+    assert cls.exit_reason is LiveExitReason.EXTERNAL_CLOSE
+
+    async with factory() as session:
+        row = (await session.execute(sa.text(
+            "SELECT pnl_usdt, pnl_pct FROM live_trades WHERE id = 1"
+        ))).first()
+        assert row.pnl_usdt is None
+        assert row.pnl_pct is None
+
+
 @pytest.mark.asyncio
 async def test_process_one_no_cooldown_row_when_zero_duration() -> None:
     """external_close has 0h duration → no cooldown row created."""
@@ -199,6 +274,7 @@ async def test_process_one_no_cooldown_row_when_zero_duration() -> None:
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss=95.0, take_profit=110.0,
         opened_at=_NOW - timedelta(hours=2), mtf_agreement=5,
+        position_value_usdt=200.0,
     )
     binance = MagicMock()
     # Binance reports position no longer open → EXTERNAL_CLOSE
@@ -234,6 +310,7 @@ async def test_process_one_returns_none_when_still_open() -> None:
         trade_id=1, user_id=1, symbol="BTCUSDT", direction="LONG",
         entry_price=100.0, stop_loss=95.0, take_profit=110.0,
         opened_at=_NOW - timedelta(hours=2), mtf_agreement=5,
+        position_value_usdt=200.0,
     )
     binance = MagicMock()
     # Price still inside bracket

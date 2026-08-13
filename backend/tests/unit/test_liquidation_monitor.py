@@ -14,6 +14,7 @@ from app.exchanges.binance_live import (
 from app.trading.execution.liquidation_monitor import (
     OpenPosition,
     _list_open_positions,
+    _write_liquidation_buffer_close,
     evaluate_position,
 )
 
@@ -23,6 +24,7 @@ def _pos(**overrides) -> OpenPosition:
         trade_id=42, user_id=1,
         symbol="BTC/USDT", direction="LONG",
         entry_price=80_000.0, stop_loss_price=78_400.0,
+        position_value_usdt=800_000.0,
     )
     base.update(overrides)
     return OpenPosition(**base)
@@ -177,6 +179,9 @@ async def test_auto_close_when_buffer_below_10pct() -> None:
     assert closed_orders[0]["side"] == "SELL"
     assert closed_orders[0]["reduceOnly"] == "true"
     assert any("AUTO-CLOSED" in n for n in notifications)
+    # TIER 1 (defect sweep 2026-08-06): the mark price used for the
+    # buffer calc must be threaded out so the DB write can compute pnl.
+    assert out.exit_price == pytest.approx(72_500.0)
 
 
 # ---- Binance API failure ------------------------------------------------
@@ -214,16 +219,17 @@ async def test_list_open_positions_skips_may_bug_legacy_rows() -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "user_id INTEGER, symbol TEXT, direction TEXT, "
             "entry_price REAL, stop_loss REAL, mtf_agreement INTEGER, "
+            "position_value_usdt REAL, "
             "closed_at TEXT, status TEXT, exit_reason TEXT)"
         ))
         # Two legacy rows (May-bug shape) + one real open position.
         await conn.execute(sa.text(
             "INSERT INTO live_trades "
             "(user_id, symbol, direction, entry_price, stop_loss, "
-            " closed_at, status, exit_reason) "
-            "VALUES (1, 'BTC/USDT', 'LONG', 75881.8, 74000, NULL, 'closed', NULL), "
-            "       (1, 'WLD/USDT', 'LONG', 0.39, 0.36, NULL, 'closed', NULL), "
-            "       (1, 'ETH/USDT', 'LONG', 3500, 3400, NULL, 'open', NULL)"
+            " position_value_usdt, closed_at, status, exit_reason) "
+            "VALUES (1, 'BTC/USDT', 'LONG', 75881.8, 74000, 200.0, NULL, 'closed', NULL), "
+            "       (1, 'WLD/USDT', 'LONG', 0.39, 0.36, 250.0, NULL, 'closed', NULL), "
+            "       (1, 'ETH/USDT', 'LONG', 3500, 3400, 700.0, NULL, 'open', NULL)"
         ))
     async with AsyncSession(engine) as s:
         positions = await _list_open_positions(s)
@@ -232,3 +238,62 @@ async def test_list_open_positions_skips_may_bug_legacy_rows() -> None:
         f"{[p.symbol for p in positions]}"
     )
     assert positions[0].symbol == "ETH/USDT"
+
+
+# ---- TIER 1 (defect sweep 2026-08-06): pnl_usdt/pnl_pct write path ------
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+from app.config import get_settings  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_write_liquidation_buffer_close_writes_pnl() -> None:
+    """A liquidation-buffer auto-close must also land with non-null
+    pnl_usdt AND pnl_pct — this is the second of the two live_trades close
+    paths that never wrote them (the other is live_exit_monitor)."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE live_trades ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, symbol TEXT, direction TEXT, "
+            "entry_price REAL, stop_loss REAL, position_value_usdt REAL, "
+            "mtf_agreement INTEGER, exit_reason TEXT, exit_price REAL, "
+            "pnl_usdt REAL, pnl_pct REAL, closed_at TEXT, status TEXT)"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE live_cooldowns ("
+            "user_id INTEGER NOT NULL, symbol TEXT NOT NULL, "
+            "cooldown_until TEXT NOT NULL, last_exit_reason TEXT NOT NULL, "
+            "last_mtf_agreement INTEGER, updated_at TEXT NOT NULL, "
+            "PRIMARY KEY (user_id, symbol))"
+        ))
+        await conn.execute(sa.text(
+            "INSERT INTO live_trades "
+            "(id, user_id, symbol, direction, entry_price, stop_loss, "
+            " position_value_usdt, mtf_agreement, status) "
+            "VALUES (1, 1, 'BTC/USDT', 'LONG', 80000.0, 78400.0, "
+            "        800000.0, 5, 'open')"
+        ))
+
+    pos = _pos(trade_id=1, entry_price=80_000.0, position_value_usdt=800_000.0)
+
+    async with AsyncSession(engine) as session:
+        await _write_liquidation_buffer_close(
+            session, pos=pos, exit_price=72_500.0,
+            settings=get_settings(), now=datetime(2026, 8, 7, tzinfo=timezone.utc),
+        )
+        await session.commit()
+
+    async with AsyncSession(engine) as session:
+        row = (await session.execute(sa.text(
+            "SELECT pnl_usdt, pnl_pct, exit_price FROM live_trades WHERE id = 1"
+        ))).first()
+        assert row.exit_price == pytest.approx(72_500.0)
+        assert row.pnl_usdt is not None
+        assert row.pnl_pct is not None
+        # LONG, entry=80000 -> exit=72500, position_value=800000: -9.375%
+        assert row.pnl_pct == pytest.approx(-9.375)
+        assert row.pnl_usdt == pytest.approx(-75_000.0)
