@@ -102,6 +102,10 @@ class ShadowPosition:
     mtf_agreement: int | None = None
     mtf_dominant_tf: str | None = None
     mtf_directions_json: str | None = None
+    # Item 4 (2026-08-13): per-timeframe ADX map, same propagation shape
+    # as the 3 fields above. See app/db/payload_builders.py and
+    # app/db/audit.py NON_HASHED_ALLOW_LIST["shadow_trades"].
+    mtf_adx_by_tf_json: str | None = None
     p_win: float | None = None
     effective_score: float | None = None
     realized_vol_20d: float | None = None

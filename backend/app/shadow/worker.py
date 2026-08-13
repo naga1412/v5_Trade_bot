@@ -61,7 +61,7 @@ log = logging.getLogger(__name__)
 # §5.1 spec constants.
 SHADOW_POSITION_SIZE_USDT: float = 30.0
 COOLDOWN_MINUTES: int = 240  # 4 h — prevents repeat stop-outs on the same choppy signal
-HISTORY_BARS: int = 300
+HISTORY_BARS: int = 504  # 21 days of 1h bars — compute_realized_vol_20d's floor (PR #400 parity)
 MAX_BUFFERED_BARS: int = 1000
 SHADOW_TIMEFRAME: str = "1h"
 
@@ -192,9 +192,10 @@ class ShadowWorker:
 
         # Spec §4.3 D1: cache-hit threshold is SHADOW_PREWARM_BARS, NOT
         # HISTORY_BARS. PR1's prewarm caches 200 klines (MTF compute's
-        # need); HISTORY_BARS=300 was the legacy REST-fetch target. Using
-        # SHADOW_PREWARM_BARS here ensures any cache entry from PR1
-        # prewarm is reusable. The rolling buffer accumulates to ~300
+        # need); HISTORY_BARS=504 is the REST-fetch target (21 days of 1h
+        # bars, compute_realized_vol_20d's floor — see item 2, 2026-08-13).
+        # Using SHADOW_PREWARM_BARS here ensures any cache entry from PR1
+        # prewarm is reusable. The rolling buffer accumulates to ~504
         # as live candles flow in (spec §4.3 D2).
         _prewarm_bars = _get_settings_for_setup().SHADOW_PREWARM_BARS
 
@@ -827,6 +828,7 @@ class ShadowWorker:
         position.mtf_agreement = getattr(pred, "mtf_agreement", None)
         position.mtf_dominant_tf = getattr(pred, "mtf_dominant_tf", None)
         position.mtf_directions_json = getattr(pred, "mtf_directions_json", None)
+        position.mtf_adx_by_tf_json = getattr(pred, "mtf_adx_by_tf_json", None)
         position.p_win = getattr(pred, "p_win", None)
         position.effective_score = getattr(pred, "effective_score", None)
         position.realized_vol_20d = getattr(pred, "realized_vol_20d", None)

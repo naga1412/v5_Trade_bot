@@ -102,6 +102,11 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         # they describe POST-decision execution metadata, not the signal
         # inputs whose integrity the chain protects.
         "hold_scaling_factor", "hold_timeout_bars",
+        # Item 4 (alembic 2026_08_13_0034_shadow_mtf_adx_by_tf): per-TF ADX
+        # map the entry-quality gate already consults in-memory. Telemetry,
+        # not a signal input the chain protects — same treatment as the
+        # other MTF analytics columns above.
+        "mtf_adx_by_tf_json",
     }),
     "live_trades": frozenset({
         "id", "prev_hash", "row_hash",

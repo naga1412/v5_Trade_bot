@@ -160,14 +160,17 @@ async def test_setup_cache_miss_rest_fetches_and_populates_cache(
 
 @pytest.mark.asyncio
 async def test_setup_cache_with_insufficient_klines_falls_back_to_rest() -> None:
-    """Cache has < HISTORY_BARS klines (partial seed) → spec says treat
-    as miss + REST-fetch (cache reuse requires ≥SHADOW_PREWARM_BARS)."""
-    from app.shadow.worker import HISTORY_BARS
+    """Cache has < SHADOW_PREWARM_BARS klines (partial seed) → spec says
+    treat as miss + REST-fetch (cache reuse requires ≥SHADOW_PREWARM_BARS,
+    the actual threshold setup() branches on — NOT HISTORY_BARS, which
+    only sizes the REST-fallback fetch itself)."""
+    from app.config import get_settings
 
     mtf_confluence._KLINE_CACHE.clear()
-    # Half the required count — should NOT be reused
+    # Half the actual threshold — should NOT be reused
+    _prewarm_bars = get_settings().SHADOW_PREWARM_BARS
     mtf_confluence._cache_set(
-        "BTCUSDT", "1h", _make_kline_rows(HISTORY_BARS // 2),
+        "BTCUSDT", "1h", _make_kline_rows(_prewarm_bars // 2),
         fetched_at=time.time(),
     )
 
