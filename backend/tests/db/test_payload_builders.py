@@ -357,6 +357,7 @@ class TestBuildShadowTradePayload:
             "mtf_agreement": None,
             "mtf_dominant_tf": None,
             "mtf_directions_json": None,
+            "mtf_adx_by_tf_json": None,
             "p_win": None,
             "effective_score": None,
             "realized_vol_20d": None,
@@ -431,6 +432,7 @@ class TestBuildShadowTradePayload:
             "mtf_agreement": None,
             "mtf_dominant_tf": None,
             "mtf_directions_json": None,
+            "mtf_adx_by_tf_json": None,
             "p_win": None,
             "effective_score": None,
             "realized_vol_20d": None,
@@ -458,8 +460,9 @@ class TestBuildShadowTradePayload:
         assert result["pnl_pct"] < 0
 
     def test_22_keys_present(self) -> None:
-        """Output must have exactly 31 keys (22 PR1 + 2 PR3 G1 + 7 PR-strategy-1
-        analytics fields populated to None when not supplied)."""
+        """Output must have exactly 32 keys (22 PR1 + 2 PR3 G1 + 7 PR-strategy-1
+        analytics fields + 1 item-4 mtf_adx_by_tf_json, populated to None
+        when not supplied)."""
         pos = _make_pos(direction=Direction.LONG)
         result = build_shadow_trade_payload(
             pos,
@@ -470,7 +473,7 @@ class TestBuildShadowTradePayload:
             bars_held=4,
             inputs_hash="hash-22",
         )
-        assert len(result) == 31
+        assert len(result) == 32
 
     # --- PR-strategy-1: PR1 analytics column population ----------------------
 

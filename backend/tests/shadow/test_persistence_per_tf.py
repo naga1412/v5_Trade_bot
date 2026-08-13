@@ -86,6 +86,8 @@ async def _mk_engine() -> Any:
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, mtf_directions_json TEXT, "
             "p_win REAL, effective_score REAL, realized_vol_20d REAL, "
             "funding_directional_adj REAL, "
+            # Item 4 (alembic 0034)
+            "mtf_adx_by_tf_json TEXT, "
             # PR3 G1
             "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
             # audit chain

@@ -195,6 +195,7 @@ async def persist_closed_trade(
         mtf_agreement=getattr(pos, "mtf_agreement", None),
         mtf_dominant_tf=getattr(pos, "mtf_dominant_tf", None),
         mtf_directions_json=getattr(pos, "mtf_directions_json", None),
+        mtf_adx_by_tf_json=getattr(pos, "mtf_adx_by_tf_json", None),
         p_win=getattr(pos, "p_win", None),
         effective_score=getattr(pos, "effective_score", None),
         realized_vol_20d=getattr(pos, "realized_vol_20d", None),
