@@ -46,6 +46,33 @@ class AllowDecision:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class GateVerdict:
+    """One sub-gate's individual outcome, for the dispatch decision log
+    (item 3, 2026-08-14) — never used to make the actual dispatch
+    decision. ``verdict`` is one of "pass" / "block" / "not_evaluated"
+    (flag off, or this check doesn't apply to the signal's direction)."""
+
+    gate: str
+    verdict: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class _CheckResult:
+    """Internal: one sub-check's outcome, shared by open_position_gate's
+    short-circuit chain and evaluate_all_gates' unconditional sweep.
+    ``legacy_reason`` is the exact string open_position_gate has always
+    returned in AllowDecision.reason — kept byte-identical on purpose so
+    this refactor changes no observable behavior. ``verbose_reason`` is
+    a richer, always-present description for the decision log."""
+
+    evaluated: bool
+    blocked: bool
+    legacy_reason: str | None
+    verbose_reason: str
+
+
 def _direction_str(value: Any) -> str:
     """Coerce a direction-shaped value (Direction enum or str) to upper-cased
     string. Defensive against unusual inputs (returns "" → never matches)."""
@@ -114,6 +141,104 @@ def _dominant_tf_adx(signal: Any) -> float | None:
         return None
 
 
+def _check_short_disabled(direction: str, settings: Any) -> _CheckResult:
+    if direction == "SHORT" and getattr(settings, "DISABLE_SHORT_SIGNALS", False):
+        return _CheckResult(True, True, "short_disabled", "DISABLE_SHORT_SIGNALS=true")
+    return _CheckResult(True, False, None, "short signals not disabled, or direction != SHORT")
+
+
+def _check_regime(
+    direction: str, signal: Any, settings: Any, market_regime: str | None,
+) -> _CheckResult:
+    if not getattr(settings, "REGIME_GATE_ENABLED", False):
+        return _CheckResult(False, False, None, "REGIME_GATE_ENABLED=false")
+    if market_regime not in ("bull", "bear"):
+        return _CheckResult(
+            True, False, None, f"market_regime={market_regime!r}, no opposing case",
+        )
+    opposing = (
+        (direction == "LONG" and market_regime == "bear")
+        or (direction == "SHORT" and market_regime == "bull")
+    )
+    if not opposing:
+        return _CheckResult(
+            True, False, None,
+            f"regime={market_regime} does not oppose direction={direction}",
+        )
+    override_floor = float(getattr(settings, "REGIME_OPPOSITE_PATTERN_OVERRIDE", 0.8))
+    if _layer2_agrees_with_signal(direction, signal, override_floor):
+        return _CheckResult(
+            True, False, None,
+            f"opposing regime={market_regime} overridden by L2 agreement>={override_floor:.2f}",
+        )
+    reason = f"blocked_wrong_regime: regime={market_regime}, direction={direction}"
+    return _CheckResult(True, True, reason, reason)
+
+
+def _check_adx(signal: Any, settings: Any) -> _CheckResult:
+    if not getattr(settings, "ADX_GATE_ENABLED", False):
+        return _CheckResult(False, False, None, "ADX_GATE_ENABLED=false")
+    adx = _dominant_tf_adx(signal)
+    if adx is None:
+        return _CheckResult(
+            True, False, None, "mtf_adx_by_tf/dominant_tf missing -- fail-open",
+        )
+    threshold = float(getattr(settings, "MIN_ADX_TREND_STRENGTH", 25.0))
+    dominant = getattr(signal, "mtf_dominant_tf", None)
+    if adx < threshold:
+        reason = (
+            f"blocked_low_trend_strength: adx={adx:.1f} < "
+            f"{threshold:.1f} (dominant_tf={dominant})"
+        )
+        return _CheckResult(True, True, reason, reason)
+    return _CheckResult(
+        True, False, None,
+        f"adx={adx:.1f} >= {threshold:.1f} (dominant_tf={dominant})",
+    )
+
+
+def _check_min_score(direction: str, signal: Any, settings: Any) -> _CheckResult:
+    if direction != "LONG":
+        return _CheckResult(False, False, None, "direction != LONG")
+    long_threshold = getattr(settings, "MIN_ENTRY_SCORE_LONG", None)
+    entry_score = getattr(signal, "entry_score", None)
+    if long_threshold is None or entry_score is None:
+        return _CheckResult(
+            True, False, None, "threshold or entry_score missing -- fail-open",
+        )
+    effective_score = float(entry_score)
+    boost_detail: str | None = None
+    if getattr(settings, "PATTERN_BOOST_ENABLED", False):
+        min_conf = float(getattr(settings, "PATTERN_BOOST_MIN_CONFIDENCE", 0.6))
+        boost = float(getattr(settings, "PATTERN_BOOST_AMOUNT", 0.10))
+        penalty = float(getattr(settings, "PATTERN_PENALTY_AMOUNT", 0.15))
+        if _layer2_agrees_with_signal(direction, signal, min_conf):
+            effective_score = min(1.0, effective_score + boost)
+            boost_detail = (
+                f"effective_score={effective_score:.3f}, "
+                f"base={float(entry_score):.3f} + L2_boost={boost:.2f}, "
+                f"L2 conf={float(getattr(signal, 'layer2_confidence', 0.0)):.2f}"
+            )
+        elif _layer2_opposes_signal(direction, signal, min_conf):
+            effective_score = max(-1.0, effective_score - penalty)
+            boost_detail = (
+                f"effective_score={effective_score:.3f}, "
+                f"base={float(entry_score):.3f} - L2_penalty={penalty:.2f}, "
+                f"L2 conf={float(getattr(signal, 'layer2_confidence', 0.0)):.2f}"
+            )
+    if effective_score < float(long_threshold):
+        legacy = (
+            f"below_long_threshold ({boost_detail})"
+            if boost_detail is not None else "below_long_threshold"
+        )
+        verbose = f"effective_score={effective_score:.3f} < {float(long_threshold):.3f}"
+        if boost_detail is not None:
+            verbose += f" ({boost_detail})"
+        return _CheckResult(True, True, legacy, verbose)
+    verbose = f"effective_score={effective_score:.3f} >= {float(long_threshold):.3f}"
+    return _CheckResult(True, False, None, verbose)
+
+
 def open_position_gate(
     signal: Any,
     settings: Any,
@@ -142,77 +267,66 @@ def open_position_gate(
     this via ``app.core.regime.get_cached_market_regime()`` and passes it in.
     Keeping it as a kwarg (not a signal attribute) lets the test suite stub
     regimes without constructing a SignalProposal with that field.
+
+    2026-08-14: each sub-check's boolean/threshold logic now lives in a
+    shared ``_check_*`` helper also used by :func:`evaluate_all_gates`
+    (the dispatch decision log's unconditional, log-only sweep) — single
+    source of truth, so the log can never disagree with what actually
+    happened. This function's control flow and every returned reason
+    string are unchanged from before the refactor.
     """
     direction = _direction_str(getattr(signal, "direction", None))
 
-    # ---- 1. SHORT-disable (legacy PR-strategy-1) -----------------------
-    if direction == "SHORT" and getattr(settings, "DISABLE_SHORT_SIGNALS", False):
-        return AllowDecision(allow=False, reason="short_disabled")
+    r = _check_short_disabled(direction, settings)
+    if r.blocked:
+        return AllowDecision(allow=False, reason=r.legacy_reason)
 
-    # ---- 2. Market regime (PR-BOT-INTELLIGENCE-UPGRADE CHANGE 1) -------
-    if getattr(settings, "REGIME_GATE_ENABLED", False) and market_regime in ("bull", "bear"):
-        opposing = (
-            (direction == "LONG" and market_regime == "bear")
-            or (direction == "SHORT" and market_regime == "bull")
-        )
-        if opposing:
-            override_floor = float(
-                getattr(settings, "REGIME_OPPOSITE_PATTERN_OVERRIDE", 0.8)
-            )
-            if not _layer2_agrees_with_signal(direction, signal, override_floor):
-                return AllowDecision(
-                    allow=False,
-                    reason=f"blocked_wrong_regime: regime={market_regime}, direction={direction}",
-                )
+    r = _check_regime(direction, signal, settings, market_regime)
+    if r.blocked:
+        return AllowDecision(allow=False, reason=r.legacy_reason)
 
-    # ---- 3. Global ADX trend strength (CHANGE 3) -----------------------
-    if getattr(settings, "ADX_GATE_ENABLED", False):
-        adx = _dominant_tf_adx(signal)
-        if adx is not None:
-            threshold = float(getattr(settings, "MIN_ADX_TREND_STRENGTH", 25.0))
-            if adx < threshold:
-                dominant = getattr(signal, "mtf_dominant_tf", None)
-                return AllowDecision(
-                    allow=False,
-                    reason=(
-                        f"blocked_low_trend_strength: adx={adx:.1f} < "
-                        f"{threshold:.1f} (dominant_tf={dominant})"
-                    ),
-                )
+    r = _check_adx(signal, settings)
+    if r.blocked:
+        return AllowDecision(allow=False, reason=r.legacy_reason)
 
-    # ---- 4. LONG threshold + Layer-2 boost (CHANGE 2) ------------------
-    if direction == "LONG":
-        long_threshold = getattr(settings, "MIN_ENTRY_SCORE_LONG", None)
-        entry_score = getattr(signal, "entry_score", None)
-        if long_threshold is not None and entry_score is not None:
-            effective_score = float(entry_score)
-            boost_detail: str | None = None
-            if getattr(settings, "PATTERN_BOOST_ENABLED", False):
-                min_conf = float(
-                    getattr(settings, "PATTERN_BOOST_MIN_CONFIDENCE", 0.6)
-                )
-                boost = float(getattr(settings, "PATTERN_BOOST_AMOUNT", 0.10))
-                penalty = float(getattr(settings, "PATTERN_PENALTY_AMOUNT", 0.15))
-                if _layer2_agrees_with_signal(direction, signal, min_conf):
-                    effective_score = min(1.0, effective_score + boost)
-                    boost_detail = (
-                        f"effective_score={effective_score:.3f}, "
-                        f"base={float(entry_score):.3f} + L2_boost={boost:.2f}, "
-                        f"L2 conf={float(getattr(signal, 'layer2_confidence', 0.0)):.2f}"
-                    )
-                elif _layer2_opposes_signal(direction, signal, min_conf):
-                    effective_score = max(-1.0, effective_score - penalty)
-                    boost_detail = (
-                        f"effective_score={effective_score:.3f}, "
-                        f"base={float(entry_score):.3f} - L2_penalty={penalty:.2f}, "
-                        f"L2 conf={float(getattr(signal, 'layer2_confidence', 0.0)):.2f}"
-                    )
-            if effective_score < float(long_threshold):
-                if boost_detail is not None:
-                    return AllowDecision(
-                        allow=False,
-                        reason=f"below_long_threshold ({boost_detail})",
-                    )
-                return AllowDecision(allow=False, reason="below_long_threshold")
+    r = _check_min_score(direction, signal, settings)
+    if r.blocked:
+        return AllowDecision(allow=False, reason=r.legacy_reason)
 
     return AllowDecision(allow=True, reason=None)
+
+
+def evaluate_all_gates(
+    signal: Any,
+    settings: Any,
+    *,
+    market_regime: str | None = None,
+) -> list[GateVerdict]:
+    """Log-only: every sub-gate evaluated UNCONDITIONALLY, via the exact
+    same ``_check_*`` helpers :func:`open_position_gate` short-circuits
+    through — never used to make the actual dispatch decision, and
+    incapable of disagreeing with it about whether a given sub-check
+    would block, since both call the same functions.
+
+    This exists so the dispatch decision log (item 3, 2026-08-14) doesn't
+    reproduce open_position_gate's blind spot: a naive log of just the
+    final AllowDecision would still only show the FIRST blocking reason,
+    which is exactly what forced a 65-second kline-replay simulation to
+    answer "what would ADX have said" during the 2026-08 ADX-gate
+    argument. All 4 sub-checks are zero-I/O (market_regime is fetched
+    once by the caller and passed in), so evaluating every one costs
+    nothing dispatch-path-relevant.
+    """
+    direction = _direction_str(getattr(signal, "direction", None))
+
+    def _verdict(gate: str, r: _CheckResult) -> GateVerdict:
+        if not r.evaluated:
+            return GateVerdict(gate, "not_evaluated", r.verbose_reason)
+        return GateVerdict(gate, "block" if r.blocked else "pass", r.verbose_reason)
+
+    return [
+        _verdict("short_disabled", _check_short_disabled(direction, settings)),
+        _verdict("regime", _check_regime(direction, signal, settings, market_regime)),
+        _verdict("adx", _check_adx(signal, settings)),
+        _verdict("min_score", _check_min_score(direction, signal, settings)),
+    ]
