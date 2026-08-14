@@ -190,7 +190,14 @@ async def predict(
         if markers is None:
             raise HTTPException(404, f"Signal {signal} not found")
 
-    candles = await _fetch_recent_candles(pair, timeframe, limit=300)
+    # 504 = 21 days of 1h bars, compute_realized_vol_20d's floor (item 2,
+    # 2026-08-13/14 — same fix as shadow/worker.py's HISTORY_BARS and
+    # live_prediction.py's HISTORY_SEED_BARS). Only fully closes the gap
+    # for timeframe="1h"; compute_realized_vol_20d groups by calendar day
+    # regardless of the caller's native timeframe, so shorter timeframes
+    # (1m/5m/15m) still can't span 20 days at any bar count this endpoint
+    # fetches — a pre-existing, separate limitation, out of scope here.
+    candles = await _fetch_recent_candles(pair, timeframe, limit=504)
     if len(candles) < 200:
         raise HTTPException(503, "Insufficient candles to compute prediction")
     bars = _candles_to_df(candles)
