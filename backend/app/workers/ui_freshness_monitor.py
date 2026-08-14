@@ -2,10 +2,14 @@
 
 Every poll-interval (5 min default), check whether the pnl_tick WS
 stream is delivering events while there are open positions. If the
-stream is stale beyond threshold, log WARNING + heartbeat 'degraded';
-optionally recycle shadow_worker when FU28_AUTO_RECYCLE_ENABLED.
+stream is stale beyond threshold, log WARNING + heartbeat 'degraded'.
 
-Default-safe: recycle is OFF by default (shadow_worker is stateful).
+2026-08-14 (remediation work order E1): the optional shadow_worker
+auto-recycle path (FU28_AUTO_RECYCLE_ENABLED) was removed -- it was
+structurally inert (the production loop never passed the recycle
+callback), by design: shadow_worker is stateful, and auto-restarting
+it mid-flight needs real design work this module never had. Detection
++ heartbeat degradation stays; the dead recycle branch does not.
 
 PR-CLEANUP-BATCH-1 §H — per-symbol completeness:
     The pre-fix `relevant_emits` computation silently filtered
@@ -81,21 +85,10 @@ async def run_one_freshness_check(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Any,
     now_fn: Callable[[], datetime] = _utc_now,
-    recycle_fn: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict:
-    """One pass: returns the report dict + records heartbeat.
-
-    ``recycle_fn`` is optional + injection-friendly so unit tests can
-    assert the auto-recycle branch without monkey-patching. Production
-    callers leave it None — the loop never auto-recycles in that case
-    even if ``FU28_AUTO_RECYCLE_ENABLED`` is True, because
-    ``shadow_worker`` is registered as ``stateful=True`` and is NOT
-    listed in worker_supervisor's restart-safe set (see
-    ``app/ops/worker_supervisor.py`` safety contract).
-    """
+    """One pass: returns the report dict + records heartbeat."""
     now = now_fn()
     threshold = settings.FU28_STALE_PNL_TICK_THRESHOLD_SECONDS
-    auto_recycle = bool(settings.FU28_AUTO_RECYCLE_ENABLED)
     blacklist = set(getattr(settings, "SHADOW_SPOT_BLACKLIST", []) or [])
 
     try:
@@ -160,10 +153,9 @@ async def run_one_freshness_check(
         if degraded:
             log.warning(
                 "ui_freshness_monitor: degraded — open=%d, "
-                "newest_age=%s, threshold=%ds, missing=%s, stale=%s, "
-                "auto_recycle=%s",
+                "newest_age=%s, threshold=%ds, missing=%s, stale=%s",
                 open_count, newest_age_s, threshold,
-                missing_symbols, stale_symbols, auto_recycle,
+                missing_symbols, stale_symbols,
             )
             await record_heartbeat(
                 session_factory, "ui_freshness_monitor",
@@ -172,16 +164,10 @@ async def run_one_freshness_check(
                     "open": open_count,
                     "newest_age_s": newest_age_s,
                     "threshold_s": threshold,
-                    "auto_recycle": auto_recycle,
                     "missing_symbols": missing_symbols,
                     "stale_symbols": stale_symbols,
                 },
             )
-            if auto_recycle and recycle_fn is not None:
-                try:
-                    await recycle_fn("shadow_worker")
-                except Exception as e:  # noqa: BLE001
-                    log.error("ui_freshness_monitor: recycle failed: %s", e)
         else:
             await record_heartbeat(
                 session_factory, "ui_freshness_monitor", status="ok",
