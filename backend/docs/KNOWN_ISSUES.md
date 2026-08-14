@@ -336,13 +336,21 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
   - No `expires_at` / `max_hold_hours` column on `live_trades`. No
     timer worker. The spec assumed timer infrastructure that doesn't
     exist.
-- **PR2 disposition**: the FLAG and the THRESHOLD setting are shipped
-  (`SHORT_FUNDING_HALVE_HOLD: bool = False`,
-  `SHORT_FUNDING_HALVE_THRESHOLD_PCT: float = 0.05`). The HOOK is
-  deferred — there's nothing to hook into. The flag defaults OFF so
-  enabling it via env var has no effect today; the hook will be wired
-  by FU-19 once the underlying live-trade timeout infrastructure
-  lands.
+- **PR2 disposition (superseded 2026-08-14, see below)**: the FLAG and
+  the THRESHOLD setting were shipped (`SHORT_FUNDING_HALVE_HOLD: bool =
+  False`, `SHORT_FUNDING_HALVE_THRESHOLD_PCT: float = 0.05`). The HOOK
+  was deferred — there was nothing to hook into.
+- **2026-08-14 update (remediation work order E2)**: `SHORT_FUNDING_HALVE_HOLD`
+  and `SHORT_FUNDING_HALVE_THRESHOLD_PCT` have been **removed** from
+  `config.py`. They were dead config with zero code references beyond
+  the `Settings` declaration itself — a flag with no hook is not a
+  rollback lever, just a landmine for a future reader who assumes it
+  does something. The underlying infrastructure gap described above
+  (no live-trade hold-timeout enforcement) is unchanged and still
+  open; this update only removes the two placeholder settings, not
+  the problem. If FU-19's timeout infrastructure is ever built, the
+  flag/threshold pair should be reintroduced alongside the real hook
+  in the same PR — not ahead of it.
 - **Scope (estimated 2-3 days)**:
   1. Decide where to enforce live-trade timeouts (new worker that
      polls open `live_trades` and closes on age, OR `expires_at`
@@ -351,13 +359,14 @@ operator 2026-05-16. Not blocking PR1 or the 9-PR rollout.
   2. Add a `MAX_HOLD_HOURS` setting (default e.g. 24 to match shadow).
   3. Implement `effective_max_hold_hours(direction, base, funding_pct,
      settings)` per the sketch in
-     `docs/superpowers/plans/2026-05-17-pr2-mtf-gate-and-short-safety.md#task-53`.
+     `docs/superpowers/plans/2026-05-17-pr2-mtf-gate-and-short-safety.md#task-53`,
+     reintroducing `SHORT_FUNDING_HALVE_HOLD`/`_THRESHOLD_PCT` at this step.
   4. Wire the helper at the chosen enforcement site.
   5. 4 new tests covering Flag OFF, LONG, SHORT+low-funding,
      SHORT+high-funding cases.
 - **Tracking**: this file (FU-19). Surfaced during PR2 Phase 5 trace.
-- **Status**: queued; not blocking PR2 (default-OFF flag, no observed
-  ops gap).
+- **Status**: queued; not blocking PR2 (dead flags removed 2026-08-14,
+  no observed ops gap).
 
 ### FU-18 — staging-verify probe windows mismatched 1h cadence
 - **Problem**: The `staging-verify` and analogous prod-side probes

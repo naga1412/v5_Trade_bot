@@ -13,15 +13,16 @@ def test_mtf_gate_defaults() -> None:
 
 
 def test_short_safety_flags_default_off() -> None:
+    """SHORT_FUNDING_HALVE_HOLD removed 2026-08-14 (remediation work
+    order E2, FU-19): dead config, zero code references beyond the
+    Settings declaration itself. See config.py's comment."""
     s = Settings(database_url="postgresql://x", redis_url="redis://x")
-    assert s.SHORT_FUNDING_HALVE_HOLD is False
     assert s.SHORT_TIGHTEN_SL_LOW_MTF is False
     assert s.SHORT_VETO_HIGH_BORROW is False
 
 
 def test_short_threshold_knobs() -> None:
     s = Settings(database_url="postgresql://x", redis_url="redis://x")
-    assert s.SHORT_FUNDING_HALVE_THRESHOLD_PCT == 0.05
     assert s.SHORT_VETO_BORROW_APR_PCT == 10.0
     assert s.SHORT_TIGHTEN_SL_MTF_CUTOFF == 5
     assert s.SHORT_TIGHTEN_SL_PCT == 0.20
