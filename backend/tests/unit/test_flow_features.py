@@ -9,12 +9,14 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.core.features.flow_features as flow_mod
+from app.data.adapters import get_intermarket_adapter
 from app.core.features.flow_features import (
     compute,
     get_cached,
     update_flow_cache,
     update_flow_cache_and_persist,
 )
+from app.data.ratelimit import RateLimitedClient
 
 
 @pytest.fixture(autouse=True)
@@ -467,3 +469,115 @@ async def test_each_endpoint_tracked_independently(caplog) -> None:
     assert error_records
     assert "oi_delta" in error_records[-1].getMessage()
     assert "ls_account_ratio" not in error_records[-1].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# FU-40 (remediation work order B4, 2026-08-14): production calls must route
+# through the shared Binance Futures RateLimitedClient singleton instead of
+# a fresh, unthrottled httpx.AsyncClient per call.
+# ---------------------------------------------------------------------------
+
+
+def _fake_intermarket_singleton(monkeypatch) -> RateLimitedClient:
+    """Install a fake intermarket-adapter singleton with an inert transport.
+
+    Deliberately never touches the real ``_shared_http()``/``_HTTP``
+    globals — those back a real, live ``httpx.AsyncClient`` with no mock
+    transport. Leaking a reference to that real client into a test (or
+    leaving it un-closed) pollutes module-global state for the rest of
+    the process and breaks unrelated tests (e.g.
+    ``test_adapter_registry.py``'s ``aclose_all()``) depending on run
+    order — this was caught the hard way while writing these tests.
+    """
+    import app.data.adapters as adapters_mod
+
+    fake_http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"msg": "unused in these tests"})
+    ))
+    fake_rate_client = RateLimitedClient(
+        exchange="binance_futures",
+        http=fake_http,
+        buckets={"default": flow_mod.TokenBucket(capacity=2400.0, refill_per_sec=40.0)},
+    )
+
+    class _FakeAdapter:
+        rate_client = fake_rate_client
+
+    monkeypatch.setattr(adapters_mod, "_INTERMARKET_INSTANCE", _FakeAdapter())
+    return fake_rate_client
+
+
+def test_resolve_rate_client_reuses_shared_singleton_across_calls(monkeypatch) -> None:
+    """Two no-``http=`` calls must return the exact same RateLimitedClient —
+    proof the fix stops spinning up (and discarding) a fresh client on
+    every 1h-candle tick across the universe."""
+    fake_rate_client = _fake_intermarket_singleton(monkeypatch)
+    rc1 = flow_mod._resolve_rate_client(None)
+    rc2 = flow_mod._resolve_rate_client(None)
+    assert rc1 is rc2
+    assert rc1 is fake_rate_client
+    assert rc1 is get_intermarket_adapter().rate_client
+
+
+def test_resolve_rate_client_shares_binance_futures_exchange_bucket(monkeypatch) -> None:
+    """The no-``http=`` path must be the *same* RateLimitedClient the
+    intermarket adapter (premiumIndex/openInterestHist) already uses — not
+    a second, independently-tracked bucket that still stacks on top of the
+    real Binance IP-level weight limit."""
+    _fake_intermarket_singleton(monkeypatch)
+    rate_client = flow_mod._resolve_rate_client(None)
+    assert rate_client.exchange == "binance_futures"
+
+
+@pytest.mark.asyncio
+async def test_default_path_uses_shared_rate_client_for_all_three_calls(monkeypatch) -> None:
+    """End-to-end: with no ``http=`` override, all three fetches must be
+    issued through the injected shared rate client (proving the module no
+    longer builds its own client), tagged with distinct endpoint_keys."""
+    transport = _make_mock_transport(ls_rows=[{"longAccount": "0.61"}])
+    shared_http = httpx.AsyncClient(transport=transport)
+    shared_rate_client = RateLimitedClient(
+        exchange="binance_futures",
+        http=shared_http,
+        buckets={"default": flow_mod.TokenBucket(capacity=2400.0, refill_per_sec=40.0)},
+    )
+    seen_endpoint_keys: list[str] = []
+    real_request = shared_rate_client.request
+
+    async def _tracking_request(method, url, *, endpoint_key="default", **kw):
+        seen_endpoint_keys.append(endpoint_key)
+        return await real_request(method, url, endpoint_key=endpoint_key, **kw)
+
+    monkeypatch.setattr(shared_rate_client, "request", _tracking_request)
+
+    class _FakeAdapter:
+        rate_client = shared_rate_client
+
+    import app.data.adapters as adapters_mod
+    monkeypatch.setattr(adapters_mod, "_INTERMARKET_INSTANCE", _FakeAdapter())
+
+    try:
+        await update_flow_cache("SHAREDUSDT")  # no http= -> production path
+    finally:
+        await shared_http.aclose()
+
+    assert get_cached("SHAREDUSDT")["ls_account_ratio"] == pytest.approx(0.61)
+    assert seen_endpoint_keys == [
+        "globalLongShortAccountRatio", "takerlongshortRatio", "openInterestHist",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_http_override_still_bypasses_shared_client(monkeypatch) -> None:
+    """Regression guard for tests/standalone callers: passing ``http=``
+    explicitly must NOT touch the shared intermarket singleton at all."""
+    import app.data.adapters as adapters_mod
+
+    def _boom():
+        raise AssertionError("get_intermarket_adapter() must not be called when http= is given")
+
+    monkeypatch.setattr(adapters_mod, "get_intermarket_adapter", _boom)
+    transport = _make_mock_transport(ls_rows=[{"longAccount": "0.33"}])
+    async with httpx.AsyncClient(transport=transport) as http:
+        await update_flow_cache("EXPLICITUSDT", http=http, base_url="https://fapi.binance.com")
+    assert get_cached("EXPLICITUSDT")["ls_account_ratio"] == pytest.approx(0.33)
