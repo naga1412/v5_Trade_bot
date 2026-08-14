@@ -48,6 +48,17 @@ CONSTANT_MIN_N: int = 100
 BASELINE_DETECTOR_NAME: str = "system_truth_baseline"
 FINDING_DETECTOR_NAME: str = "system_truth"
 
+# 2026-08-14 severity recalibration: a table younger than this (by age
+# of its oldest row AND total row count) never has CONSTANT judged on
+# any of its columns at all — a newly-populating table's design-constant
+# field (e.g. flow_feature_snapshots.source) is not a regression, and
+# judging it before there's enough data to mean anything just pages the
+# operator for a non-event. Scoped to CONSTANT only: BROKEN/STALLED/
+# SUSPECT stay ungated since those ARE worth an immediate look even on
+# a young table.
+CONSTANT_GRACE_PERIOD_DAYS: float = 7.0
+CONSTANT_GRACE_PERIOD_MIN_ROWS: int = 200
+
 # Module-level last-run gate — resets on container restart, which is
 # fine: a restart just means the next tick re-checks immediately rather
 # than waiting out the rest of yesterday's window.
@@ -147,10 +158,36 @@ ENDPOINTS: list[tuple[str, str, dict, str | None]] = [
 ]
 
 
-async def _section1(session: AsyncSession) -> dict[str, list[str]]:
+async def _section1(
+    session: AsyncSession,
+) -> tuple[dict[str, list[str]], set[str]]:
+    """Returns (findings, mature_tables).
+
+    ``mature_tables`` is every table old enough (oldest row >=
+    CONSTANT_GRACE_PERIOD_DAYS) AND big enough (>= CONSTANT_GRACE_PERIOD_MIN_ROWS
+    total rows) for its columns' CONSTANT flag to mean anything. A query
+    failure is treated as NOT mature (fail-closed on this specific
+    check) — the whole point of the grace period is to avoid paging on
+    shaky-looking data, so an inability to even establish the table's
+    age is itself a reason not to judge it yet.
+    """
     findings: dict[str, list[str]] = {}
+    mature_tables: set[str] = set()
     for table, cfg in TABLES.items():
         ts_col = cfg["ts_col"]
+        try:
+            age_row = (await session.execute(sa.text(
+                f"SELECT MIN({ts_col}) AS first_ts, COUNT(*) AS total_rows FROM {table}"
+            ))).one()
+        except Exception as e:  # noqa: BLE001
+            log.warning("system_truth: maturity query failed for %s: %s", table, e)
+            age_row = None
+        if age_row is not None and age_row.first_ts is not None:
+            age_days = (datetime.now(timezone.utc) - age_row.first_ts).total_seconds() / 86400
+            if age_days >= CONSTANT_GRACE_PERIOD_DAYS and age_row.total_rows > CONSTANT_GRACE_PERIOD_MIN_ROWS:
+                mature_tables.add(table)
+        is_mature = table in mature_tables
+
         for col, kind, plausible in cfg["columns"]:
             is_num = kind == "num"
             extra = (
@@ -177,7 +214,7 @@ async def _section1(session: AsyncSession) -> dict[str, list[str]]:
             flags: list[str] = []
             if null_rate_7d is not None and null_rate_7d > 50:
                 flags.append("BROKEN")
-            if row.distinct_7d == 1 and row.nn_7d > CONSTANT_MIN_N:
+            if is_mature and row.distinct_7d == 1 and row.nn_7d > CONSTANT_MIN_N:
                 flags.append("CONSTANT")
             if row.last_non_null_at is not None:
                 age_h = (datetime.now(timezone.utc) - row.last_non_null_at).total_seconds() / 3600
@@ -193,7 +230,7 @@ async def _section1(session: AsyncSession) -> dict[str, list[str]]:
                     flags.append(f"SUSPECT(max>{hi})")
             if flags:
                 findings[f"{table}.{col}"] = flags
-    return findings
+    return findings, mature_tables
 
 
 async def _section2(session: AsyncSession) -> dict[str, list[str]]:
@@ -288,9 +325,11 @@ async def detect_system_truth(
     _LAST_RUN_AT = now_ts
 
     current: dict[str, list[str]] = {}
+    mature_tables: set[str] = set()
     try:
         async with session_factory() as session:
-            current.update(await _section1(session))
+            section1_findings, mature_tables = await _section1(session)
+            current.update(section1_findings)
             current.update(await _section2(session))
             current.update(await _section3(session))
         current.update(await _section4())
@@ -300,6 +339,7 @@ async def detect_system_truth(
 
     # ---- load yesterday's baseline (most recent baseline row) ----------
     previous: dict[str, list[str]] = {}
+    previous_ever_varying: set[str] = set()
     baseline_exists = False
     try:
         async with session_factory() as session:
@@ -315,12 +355,39 @@ async def detect_system_truth(
                 raw = row.details
                 parsed = json.loads(raw) if isinstance(raw, str) else raw
                 previous = dict(parsed.get("keys", {}))
+                # Absent on any baseline written before the 2026-08-14
+                # severity recalibration shipped -- defaults to empty.
+                # One-time, accepted blind spot: a column that regressed
+                # from varying to constant on the very first run after
+                # this deploy won't have prior-variance evidence yet, so
+                # it's filed at warning instead of critical that one day.
+                # Everything already flagged CONSTANT under the old code
+                # is in `previous` as a persisting key, not a new one, so
+                # it never hits this path at all.
+                previous_ever_varying = set(parsed.get("ever_varying", []))
     except Exception as e:  # noqa: BLE001
         log.warning("system_truth: baseline lookup failed: %s", e)
 
     new_keys = sorted(set(current) - set(previous))
     resolved_keys = sorted(set(previous) - set(current))
     persisting_keys = sorted(set(current) & set(previous))
+
+    # 2026-08-14 severity recalibration: cumulative "has this mature
+    # column ever been observed NOT constant" tracking. A CONSTANT
+    # finding with no such evidence on record is "constant since we
+    # started being able to judge it" (new field, by-design or
+    # coincidental) rather than a regression -- see the grace-period
+    # constants' docstring above for the paging rationale.
+    all_mature_column_keys = {
+        f"{table}.{col}"
+        for table in mature_tables
+        for col, _, _ in TABLES[table]["columns"]
+    }
+    today_non_constant_mature = {
+        key for key in all_mature_column_keys
+        if "CONSTANT" not in current.get(key, [])
+    }
+    ever_varying = previous_ever_varying | today_non_constant_mature
 
     out: list[HealerFinding] = []
 
@@ -338,12 +405,27 @@ async def detect_system_truth(
         ))
     else:
         for key in new_keys:
-            out.append(HealerFinding(
-                detector_name=FINDING_DETECTOR_NAME,
-                severity="critical",
-                summary=f"system-truth: NEW finding {key}: {current[key]}",
-                details={"key": key, "flags": current[key]},
-            ))
+            flags = current[key]
+            if flags == ["CONSTANT"] and key not in previous_ever_varying:
+                # New-field-constant: never observed varying while
+                # mature. Filed for triage, does not page the phone.
+                out.append(HealerFinding(
+                    detector_name=FINDING_DETECTOR_NAME,
+                    severity="warning",
+                    summary=(
+                        f"system-truth: NEW finding {key}: {flags} "
+                        "(constant since first observation, no prior "
+                        "variance on record — not paging)"
+                    ),
+                    details={"key": key, "flags": flags},
+                ))
+            else:
+                out.append(HealerFinding(
+                    detector_name=FINDING_DETECTOR_NAME,
+                    severity="critical",
+                    summary=f"system-truth: NEW finding {key}: {flags}",
+                    details={"key": key, "flags": flags},
+                ))
         if persisting_keys:
             out.append(HealerFinding(
                 detector_name=FINDING_DETECTOR_NAME,
@@ -369,12 +451,13 @@ async def detect_system_truth(
                 details=None,
             ))
 
-    # Always persist today's full set as tomorrow's baseline.
+    # Always persist today's full set (+ the cumulative ever-varying
+    # tracking set) as tomorrow's baseline.
     out.append(HealerFinding(
         detector_name=BASELINE_DETECTOR_NAME,
         severity="info",
         summary=f"system-truth baseline: {len(current)} finding(s) recorded",
-        details={"keys": current},
+        details={"keys": current, "ever_varying": sorted(ever_varying)},
     ))
 
     return out
