@@ -1,16 +1,19 @@
 """TrapFire dataclass + Trap Protocol + TrapContext — SP-5 Phase A."""
 from __future__ import annotations
 
+import logging
 from dataclasses import is_dataclass
 
 import pandas as pd
 import pytest
 
 from app.core.scoring.traps import ALL_TRAPS
+from app.core.scoring.traps import base as traps_base
 from app.core.scoring.traps.base import (
     Trap,
     TrapContext,
     TrapFire,
+    check_safe,
 )
 from app.core.scoring.types import Direction, LayerScore
 
@@ -82,3 +85,87 @@ def test_all_traps_have_unique_trap_ids() -> None:
 def test_all_traps_implement_protocol() -> None:
     for t in ALL_TRAPS:
         assert isinstance(t, Trap), f"{t!r} does not satisfy Trap protocol"
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-14 remediation work order B2: check_safe -- was a bare
+# `except Exception: continue` in run_traps.py's orchestrator, zero
+# logging, zero per-trap failure tracking. "A trap detector that silently
+# swallows is exactly how 7 of 17 traps could be dead without anyone
+# knowing." Same failure class as the flow_features endpoint-swallow
+# fixed in PR #423.
+# ---------------------------------------------------------------------------
+
+_CTX = TrapContext()
+
+
+class _RaisingTrap:
+    trap_id = "broken_trap"
+    severity = "medium"
+    side = "both"
+
+    def check(self, bars, *, current_idx, layer_scores, proposed_direction, context):
+        raise RuntimeError("boom")
+
+
+@pytest.fixture(autouse=True)
+def _reset_trap_failure_streaks():
+    traps_base._clear_trap_failure_streaks_for_tests()
+    yield
+    traps_base._clear_trap_failure_streaks_for_tests()
+
+
+def _check_safe(trap) -> TrapFire | None:
+    return check_safe(
+        trap, pd.DataFrame(), current_idx=0, layer_scores={},
+        proposed_direction=Direction.LONG, context=_CTX,
+    )
+
+
+def test_check_safe_returns_none_on_raise_without_bricking(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="app.core.scoring.traps.base")
+    assert _check_safe(_RaisingTrap()) is None
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+def test_check_safe_isolated_single_failure_does_not_escalate(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="app.core.scoring.traps.base")
+    for _ in range(5):
+        _check_safe(_RaisingTrap())
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+def test_check_safe_systematic_failure_escalates_to_error(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="app.core.scoring.traps.base")
+    for _ in range(traps_base._CONSECUTIVE_FAILURE_ALERT_THRESHOLD):
+        _check_safe(_RaisingTrap())
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert error_records, "expected an ERROR-level escalation once the streak hit threshold"
+    assert "broken_trap" in error_records[-1].getMessage()
+    assert "consecutive" in error_records[-1].getMessage().lower()
+
+
+def test_check_safe_success_resets_the_failure_streak(caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="app.core.scoring.traps.base")
+    threshold = traps_base._CONSECUTIVE_FAILURE_ALERT_THRESHOLD
+
+    class _FlakyTrap:
+        trap_id = "flaky_trap"
+        severity = "medium"
+        side = "both"
+        should_raise = True
+
+        def check(self, bars, *, current_idx, layer_scores, proposed_direction, context):
+            if self.should_raise:
+                raise RuntimeError("boom")
+            return None
+
+    flaky = _FlakyTrap()
+    for _ in range(threshold - 1):
+        _check_safe(flaky)
+    flaky.should_raise = False
+    _check_safe(flaky)  # success resets this trap's streak
+    flaky.should_raise = True
+    for _ in range(threshold - 1):
+        _check_safe(flaky)
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
