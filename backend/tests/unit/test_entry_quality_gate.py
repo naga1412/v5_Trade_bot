@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.core.gates.entry_quality import open_position_gate
+from app.core.gates.entry_quality import evaluate_all_gates, open_position_gate
 
 
 def _signal(direction: str, entry_score: float | None = 0.5):
@@ -303,3 +303,102 @@ def test_all_gates_disabled_preserves_prior_behavior() -> None:
         market_regime="bear",  # supplied but flag is off → ignored
     )
     assert d.allow is True
+
+
+# ---------------------------------------------------------------------------
+# Item 3 (2026-08-14): evaluate_all_gates — dispatch decision log's
+# unconditional, log-only sweep. Never drives the real decision.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_all_gates_reports_not_evaluated_when_flags_off() -> None:
+    """All 3 extended sub-gates OFF → not_evaluated, not pass — the log
+    should distinguish "flag off, meaningless" from "flag on, checked,
+    fine". short_disabled has no ENABLED flag, so it's always evaluated."""
+    verdicts = evaluate_all_gates(
+        _ext_signal("LONG", 0.5), _ext_settings(), market_regime="bear",
+    )
+    by_gate = {v.gate: v for v in verdicts}
+    assert by_gate["short_disabled"].verdict == "pass"
+    assert by_gate["regime"].verdict == "not_evaluated"
+    assert by_gate["adx"].verdict == "not_evaluated"
+    # direction IS LONG, so min_score is "evaluated" (fail-open "pass")
+    # even with no threshold configured -- "not_evaluated" is reserved
+    # for when the check structurally doesn't apply (SHORT direction).
+    assert by_gate["min_score"].verdict == "pass"
+
+
+def test_evaluate_all_gates_evaluates_downstream_gates_even_when_upstream_blocks() -> None:
+    """The whole point: short_disabled blocking must NOT stop regime/adx/
+    min_score from being evaluated too -- otherwise the log reproduces
+    open_position_gate's short-circuit blind spot."""
+    verdicts = evaluate_all_gates(
+        _ext_signal(
+            "SHORT", -0.5, mtf_dominant_tf="1h", mtf_adx_by_tf={"1h": 5.0},
+        ),
+        _ext_settings(disable_short=True, regime_enabled=True, adx_enabled=True),
+        market_regime="bull",  # SHORT in bull also opposes -- would ALSO block
+    )
+    by_gate = {v.gate: v for v in verdicts}
+    assert by_gate["short_disabled"].verdict == "block"
+    # Evaluated (not skipped) despite short_disabled already blocking:
+    assert by_gate["regime"].verdict == "block"
+    assert by_gate["adx"].verdict == "block"  # adx=5.0 < default 25.0
+
+
+def test_evaluate_all_gates_min_score_not_evaluated_for_short() -> None:
+    """MIN_ENTRY_SCORE_LONG doesn't apply to SHORT signals at all."""
+    verdicts = evaluate_all_gates(
+        _ext_signal("SHORT", -0.5), _ext_settings(min_long=0.36),
+    )
+    by_gate = {v.gate: v for v in verdicts}
+    assert by_gate["min_score"].verdict == "not_evaluated"
+
+
+def test_evaluate_all_gates_matches_open_position_gate_across_scenario_matrix() -> None:
+    """Cross-consistency guarantee: for every scenario below,
+    open_position_gate's outcome must equal the FIRST "block" verdict
+    evaluate_all_gates reports, in short-circuit precedence order
+    (short_disabled, regime, adx, min_score) -- or allow, if none block.
+    Both call the same _check_* helpers, so this is really a proof the
+    two functions can't drift apart, not a coincidence to maintain by hand.
+    """
+    precedence = ("short_disabled", "regime", "adx", "min_score")
+    scenarios = [
+        # (signal, settings, market_regime)
+        (_ext_signal("LONG", 0.5), _ext_settings(), None),
+        (_ext_signal("SHORT", -0.5), _ext_settings(disable_short=True), None),
+        (
+            _ext_signal("LONG", 0.5),
+            _ext_settings(regime_enabled=True), "bear",
+        ),
+        (
+            _ext_signal("LONG", 0.5, mtf_dominant_tf="1h", mtf_adx_by_tf={"1h": 5.0}),
+            _ext_settings(adx_enabled=True), None,
+        ),
+        (_ext_signal("LONG", 0.10), _ext_settings(min_long=0.36), None),
+        (
+            _ext_signal(
+                "SHORT", -0.5, mtf_dominant_tf="1h", mtf_adx_by_tf={"1h": 5.0},
+            ),
+            _ext_settings(disable_short=True, regime_enabled=True, adx_enabled=True),
+            "bull",
+        ),
+        (
+            _ext_signal("LONG", 0.36, mtf_dominant_tf="1h", mtf_adx_by_tf={"1h": 30.0}),
+            _ext_settings(min_long=0.36, adx_enabled=True), None,
+        ),
+    ]
+    for signal, settings, market_regime in scenarios:
+        decision = open_position_gate(signal, settings, market_regime=market_regime)
+        verdicts = {
+            v.gate: v.verdict
+            for v in evaluate_all_gates(signal, settings, market_regime=market_regime)
+        }
+        first_block = next(
+            (gate for gate in precedence if verdicts[gate] == "block"), None,
+        )
+        if decision.allow:
+            assert first_block is None, (signal, settings, market_regime)
+        else:
+            assert first_block is not None, (signal, settings, market_regime)

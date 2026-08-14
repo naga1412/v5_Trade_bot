@@ -1,7 +1,8 @@
 """SP-8 Phase J — live_prediction worker → dispatcher wiring."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -43,9 +44,19 @@ class _FakePrediction:
     # kill-switch evaluates real values. Default None matches predictor's
     # behavior when the intermarket lookup fails (gate fail-open).
     funding_rate_daily: float | None = None
+    # Item 3 (2026-08-14): the decision log records the candle ts each
+    # dispatch attempt is for, matching pred.ts used elsewhere (e.g.
+    # anchor_ts in _persist_prediction_and_schedule_validation).
+    ts: datetime = field(
+        default_factory=lambda: datetime(2026, 8, 14, tzinfo=timezone.utc),
+    )
+    mtf_adx_by_tf_json: str | None = None
 
 
 class _FakeSession:
+    def __init__(self) -> None:
+        self.executed: list[Any] = []
+
     async def __aenter__(self) -> "_FakeSession":
         return self
 
@@ -53,6 +64,12 @@ class _FakeSession:
         return None
 
     async def commit(self) -> None:
+        return None
+
+    async def execute(self, stmt: Any, params: Any = None) -> None:
+        # Item 3 (2026-08-14): record_dispatch_decision's INSERT lands
+        # here too, via the same session_factory as dispatch_if_eligible.
+        self.executed.append((stmt, params))
         return None
 
 
@@ -141,6 +158,91 @@ async def test_calls_dispatch_with_proposal_kwargs(monkeypatch) -> None:
     assert pk["take_profit_price"] == 80_000 * 1.04
     assert pk["inputs_hash"] == "abc"
     assert pk["layer_summary"] == {"L1": {"score": 0.85}}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_result_triggers_decision_log_write(monkeypatch) -> None:
+    """Item 3 (2026-08-14): a non-None dispatch result must be followed by
+    a record_dispatch_decision call carrying the real outcome/detail and
+    all 4 unconditionally-evaluated entry-quality gate verdicts."""
+    _vault_loaded()
+
+    async def _fake_dispatch(session, **kwargs):
+        return SimpleNamespace(outcome="blocked_entry_quality", detail="entry_quality_gate: short_disabled")
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_record(session_factory, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(live_prediction, "dispatch_if_eligible", _fake_dispatch)
+    monkeypatch.setattr(live_prediction, "record_dispatch_decision", _fake_record)
+    await live_prediction._maybe_dispatch(  # noqa: SLF001
+        _factory(), pred=_pred(direction="SHORT", entry=80_000), layer_payload={},
+    )
+
+    assert captured["symbol"] == "BTC/USDT"
+    assert captured["timeframe"] == "1h"
+    assert captured["outcome"] == "blocked_entry_quality"
+    assert captured["detail"] == "entry_quality_gate: short_disabled"
+    gates = {v.gate for v in captured["gate_verdicts"]}
+    assert gates == {"short_disabled", "regime", "adx", "min_score"}
+
+
+@pytest.mark.asyncio
+async def test_decision_log_failure_does_not_propagate_and_logs_distinct_error(
+    monkeypatch, caplog,
+) -> None:
+    """A failure while BUILDING the decision log (upstream of the write
+    itself) must not affect the caller and must log a marker distinct
+    from "dispatch_if_eligible failed" -- otherwise a telemetry-only
+    failure reads as a real dispatch failure."""
+    _vault_loaded()
+
+    async def _fake_dispatch(session, **kwargs):
+        return SimpleNamespace(outcome="emitted", detail="ok")
+
+    def _boom_evaluate(*args, **kwargs):
+        raise RuntimeError("gate evaluation exploded")
+
+    monkeypatch.setattr(live_prediction, "dispatch_if_eligible", _fake_dispatch)
+    monkeypatch.setattr(live_prediction, "evaluate_all_gates", _boom_evaluate)
+    # Must not raise -- worker survives a bad decision-log attempt too.
+    await live_prediction._maybe_dispatch(  # noqa: SLF001
+        _factory(), pred=_pred(), layer_payload={},
+    )
+    assert any(
+        "dispatch_decision_log_failed" in r.message for r in caplog.records
+    )
+    assert not any(
+        "dispatch_if_eligible failed" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_decision_log_db_write_failure_logs_distinct_error(
+    monkeypatch, caplog,
+) -> None:
+    """A real INSERT failure (session lacks the table / DB unreachable)
+    is caught inside record_dispatch_decision itself and logged loud,
+    not swallowed -- proven here with a session whose execute() raises."""
+    _vault_loaded()
+
+    class _BrokenSession(_FakeSession):
+        async def execute(self, stmt: Any, params: Any = None) -> None:
+            raise RuntimeError("relation \"dispatch_decisions\" does not exist")
+
+    async def _fake_dispatch(session, **kwargs):
+        return SimpleNamespace(outcome="emitted", detail="ok")
+
+    monkeypatch.setattr(live_prediction, "dispatch_if_eligible", _fake_dispatch)
+    await live_prediction._maybe_dispatch(  # noqa: SLF001
+        lambda: _BrokenSession(), pred=_pred(), layer_payload={},
+    )
+
+    assert any(
+        "dispatch_decision_write_failed" in r.message for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
