@@ -290,12 +290,15 @@ but left them NULL on every row. PR2 populates them from
 (`json.dumps(sort_keys=True, separators=(",",":")))`) defensive
 against FU-2 (JSONB canonicalization hole).
 
-**SHORT_FUNDING_HALVE_HOLD deferred**: the flag + threshold ship in
-PR2 (defaults OFF), but the hook is deferred to FU-19. The required
-live-trade hold-timeout infrastructure does not yet exist (the
-shadow `TIMEOUT_BARS=24` is hardcoded, shadow-only; live trades have
-no `expires_at` column and no timer worker). See
-`backend/docs/KNOWN_ISSUES.md` for the closure plan.
+**SHORT_FUNDING_HALVE_HOLD removed 2026-08-14**: PR2 shipped the flag
++ threshold with the hook deferred to FU-19, but the required
+live-trade hold-timeout infrastructure never landed (the shadow
+`TIMEOUT_BARS=24` is hardcoded, shadow-only; live trades have no
+`expires_at` column and no timer worker). A hookless flag is dead
+config, so both settings were removed (remediation work order E2).
+FU-19's infrastructure gap is still open; see
+`backend/docs/KNOWN_ISSUES.md` for the closure plan, which
+reintroduces the flag alongside the real hook if/when it's built.
 
 **V-7 budget**: spec §6.5 ≤50ms p50 / ≤200ms p99 delta. Measured at
 delta_p50 = 0.0002ms, delta_p99 = 0.0007ms via the

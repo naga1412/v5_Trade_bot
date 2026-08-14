@@ -18,13 +18,11 @@ _NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
 def _settings(
     *,
     threshold: int = 1800,
-    auto_recycle: bool = False,
     blacklist: list[str] | None = None,
 ):
     return SimpleNamespace(
         FU28_POLL_INTERVAL_SECONDS=300,
         FU28_STALE_PNL_TICK_THRESHOLD_SECONDS=threshold,
-        FU28_AUTO_RECYCLE_ENABLED=auto_recycle,
         SHADOW_SPOT_BLACKLIST=blacklist if blacklist is not None else [],
     )
 
@@ -90,13 +88,16 @@ async def test_fresh_tick_returns_ok() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_tick_returns_degraded_no_recycle() -> None:
+async def test_stale_tick_returns_degraded() -> None:
+    """2026-08-14 (remediation work order E1): the auto-recycle machinery
+    this test used to also exercise was removed as structurally inert
+    (see ui_freshness_monitor.py's module docstring) -- this now covers
+    just the detection + heartbeat-degradation behavior, unchanged."""
     from app.workers.ui_freshness_monitor import run_one_freshness_check
 
     sf = _session_factory()
     open_pos = [SimpleNamespace(symbol="BTCUSDT")]
     last_emit = {"BTCUSDT": _NOW - timedelta(hours=2)}  # 7200s > 1800
-    recycle = AsyncMock()
     with patch(
         "app.workers.ui_freshness_monitor.list_open_positions",
         new=AsyncMock(return_value=open_pos),
@@ -108,39 +109,11 @@ async def test_stale_tick_returns_degraded_no_recycle() -> None:
         new=AsyncMock(return_value=None),
     ) as hb:
         result = await run_one_freshness_check(
-            session_factory=sf, settings=_settings(auto_recycle=False),
-            now_fn=lambda: _NOW, recycle_fn=recycle,
+            session_factory=sf, settings=_settings(), now_fn=lambda: _NOW,
         )
     assert result["stale"] is True
     _args, kwargs = hb.call_args
     assert kwargs["status"] == "degraded"
-    recycle.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_stale_tick_with_auto_recycle_calls_recycle() -> None:
-    from app.workers.ui_freshness_monitor import run_one_freshness_check
-
-    sf = _session_factory()
-    open_pos = [SimpleNamespace(symbol="BTCUSDT")]
-    last_emit = {"BTCUSDT": _NOW - timedelta(hours=2)}
-    recycle = AsyncMock()
-    with patch(
-        "app.workers.ui_freshness_monitor.list_open_positions",
-        new=AsyncMock(return_value=open_pos),
-    ), patch(
-        "app.workers.ui_freshness_monitor.get_last_pnl_tick_at",
-        return_value=last_emit,
-    ), patch(
-        "app.workers.ui_freshness_monitor.record_heartbeat",
-        new=AsyncMock(return_value=None),
-    ):
-        result = await run_one_freshness_check(
-            session_factory=sf, settings=_settings(auto_recycle=True),
-            now_fn=lambda: _NOW, recycle_fn=recycle,
-        )
-    assert result["stale"] is True
-    recycle.assert_awaited_once_with("shadow_worker")
 
 
 # ---------- PR-CLEANUP-BATCH-1 §H extensions ----------------------------

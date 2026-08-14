@@ -60,8 +60,6 @@ _OPERATOR_TUNABLE_FLAGS: frozenset[str] = frozenset({
     "SHADOW_15M_ELIGIBLE_FOR_PROMOTION",
     # PR2 (2026-05-14)
     "MTF_MIN_AGREEMENT_1H",
-    # PR10.5 / FU-28 (2026-05-20)
-    "FU28_AUTO_RECYCLE_ENABLED",
 })
 
 
@@ -138,7 +136,6 @@ def test_settings_min_entry_score_long_default_none() -> None:
         ("LIVE_COOLDOWN_ENABLED", "true", True),
         ("HOLD_TP_SCALING_ENABLED", "true", True),
         ("SHADOW_15M_ELIGIBLE_FOR_PROMOTION", "true", True),
-        ("FU28_AUTO_RECYCLE_ENABLED", "true", True),
     ],
 )
 def test_settings_reads_boolean_strategy_flags_from_env(
