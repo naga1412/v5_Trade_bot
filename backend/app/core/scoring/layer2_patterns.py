@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.patterns import ALL_PATTERNS
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, detect_safe
 from app.core.scoring.types import Direction, LayerScore
 
 # Built once at import time — avoids per-call type checks on the hot path.
@@ -114,10 +114,7 @@ def score(
     for pat in ALL_PATTERNS:
         if enabled_patterns is not None and pat.pattern_id not in enabled_patterns:
             continue
-        try:
-            fire = pat.detect(bars, current_idx)
-        except Exception:  # noqa: BLE001 — pattern bug must not brick layer
-            continue
+        fire = detect_safe(pat, bars, current_idx)
         if fire is not None:
             fires.append(fire)
 
