@@ -16,6 +16,19 @@ Architecture: module-level per-symbol cache (_FLOW_CACHE).
 
 Graceful failure: any HTTP error or missing field sets that key to None.
 The shadow worker continues normally; None → 0.0 at obs assembly (Phase 2).
+
+FU-40 (remediation work order B4, 2026-08-14): every production call goes
+through the shared Binance Futures ``RateLimitedClient`` singleton (the
+same one ``app.data.adapters.binance_futures_intermarket`` uses for
+premiumIndex/openInterestHist) instead of a fresh, unthrottled
+``httpx.AsyncClient`` per call. The old default path built a brand-new
+client and closed it again on every single 1h-candle tick across the
+whole universe — no connection reuse, and completely invisible to
+Binance's real IP-level weight limit, stacking on top of whatever the
+intermarket adapter was already consuming against the same limit.
+Callers that inject their own ``http=`` (tests, standalone scripts) are
+unaffected — they get a permissive non-blocking bucket wrapping that
+client, preserving today's behavior exactly.
 """
 from __future__ import annotations
 
@@ -25,12 +38,18 @@ from typing import Final
 import httpx
 import sqlalchemy as sa
 
+from app.data.ratelimit import RateLimitedClient, TokenBucket
 from app.db.session import get_session_factory
 
 log = logging.getLogger(__name__)
 
 _BASE_URL: Final = "https://fapi.binance.com"
 _TIMEOUT: Final = 10.0
+
+# Effectively unlimited: only used to wrap a caller-supplied httpx client
+# (tests, standalone scripts) so the RateLimitedClient plumbing is shared
+# by both code paths without ever throttling non-production callers.
+_STANDALONE_BUCKET_CAPACITY: Final = 10_000.0
 
 _NULL: Final[dict[str, float | None]] = {
     "ls_account_ratio": None,
@@ -94,6 +113,36 @@ def _clear_cache_for_tests() -> None:
     _FLOW_CACHE.clear()
 
 
+def _resolve_rate_client(http: httpx.AsyncClient | None) -> RateLimitedClient:
+    """Route through the shared Binance Futures bucket, or wrap a caller's client.
+
+    No explicit ``http=``: production default. Reuses the same
+    ``RateLimitedClient`` singleton as the intermarket adapter, so this
+    module's traffic is counted against the real shared weight limit
+    instead of bypassing it.
+
+    Explicit ``http=``: tests/standalone callers. Wrapped in a permissive
+    bucket (effectively never blocks) purely so both paths share the same
+    ``.request()`` call shape — the caller's own client/transport is used
+    unchanged and remains caller-owned (not closed here).
+    """
+    if http is None:
+        from app.data.adapters import get_intermarket_adapter
+        rate_client = get_intermarket_adapter().rate_client
+        assert rate_client is not None
+        return rate_client
+    return RateLimitedClient(
+        exchange="binance_futures_flow_standalone",
+        http=http,
+        buckets={
+            "default": TokenBucket(
+                capacity=_STANDALONE_BUCKET_CAPACITY,
+                refill_per_sec=_STANDALONE_BUCKET_CAPACITY,
+            ),
+        },
+    )
+
+
 async def update_flow_cache(
     symbol: str,
     *,
@@ -106,22 +155,23 @@ async def update_flow_cache(
     Any network or parse error is caught and logged at DEBUG; partial results
     are stored (a failed endpoint leaves its key as None while others succeed).
 
-    Reuses an injected httpx.AsyncClient when provided (preferred in the
-    shadow worker to reuse the shared connection pool). Falls back to a
-    short-lived client when called standalone (e.g. from tests).
+    With no ``http=`` override (the production shadow-worker call site),
+    requests go through the shared Binance Futures ``RateLimitedClient``
+    singleton — see module docstring (FU-40). Pass ``http=`` to inject a
+    client for tests/standalone use; it is never closed here (caller-owned).
     """
     native = symbol.replace("/", "")
     result: dict[str, float | None] = dict(_NULL)
 
-    close_http = http is None
-    if http is None:
-        http = httpx.AsyncClient(timeout=_TIMEOUT)
+    rate_client = _resolve_rate_client(http)
     try:
         # 1. Long/Short account ratio
         try:
-            resp = await http.get(
-                f"{base_url}/futures/data/globalLongShortAccountRatio",
+            resp = await rate_client.request(
+                "GET", f"{base_url}/futures/data/globalLongShortAccountRatio",
+                endpoint_key="globalLongShortAccountRatio",
                 params={"symbol": native, "period": "5m", "limit": "1"},
+                timeout=_TIMEOUT,
             )
             resp.raise_for_status()
             rows = resp.json()
@@ -142,9 +192,11 @@ async def update_flow_cache(
         # correct endpoint is /futures/data/takerlongshortRatio, which
         # returns buyVol + sellVol together.
         try:
-            resp = await http.get(
-                f"{base_url}/futures/data/takerlongshortRatio",
+            resp = await rate_client.request(
+                "GET", f"{base_url}/futures/data/takerlongshortRatio",
+                endpoint_key="takerlongshortRatio",
                 params={"symbol": native, "period": "5m", "limit": "1"},
+                timeout=_TIMEOUT,
             )
             resp.raise_for_status()
             rows = resp.json()
@@ -179,9 +231,14 @@ async def update_flow_cache(
         # of the identical failure mode, discovered while extending this
         # exact call for oi_24h_delta.
         try:
-            resp = await http.get(
-                f"{base_url}/futures/data/openInterestHist",
+            resp = await rate_client.request(
+                "GET", f"{base_url}/futures/data/openInterestHist",
+                # Same endpoint_key the intermarket adapter registers for
+                # this literal Binance path, so both modules' calls draw
+                # from one coordinated weight count for it.
+                endpoint_key="openInterestHist",
                 params={"symbol": native, "period": "1h", "limit": "25"},
+                timeout=_TIMEOUT,
             )
             resp.raise_for_status()
             rows = resp.json()
@@ -200,10 +257,8 @@ async def update_flow_cache(
             log.debug("flow_features oi_delta error %s: %s", native, exc)
             _record_endpoint_result("oi_delta", ok=False, symbol=native)
 
-        _FLOW_CACHE[symbol] = result
     finally:
-        if close_http:
-            await http.aclose()
+        _FLOW_CACHE[symbol] = result
 
 
 async def update_flow_cache_and_persist(

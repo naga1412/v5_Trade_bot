@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import sqlalchemy as sa
@@ -27,6 +28,21 @@ from app.shadow.worker import ShadowWorker
 
 
 _NOW = datetime(2026, 5, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _stub_flow_features_fire_and_forget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_handle_candle fires app.core.features.flow_features as an un-awaited
+    background task on every 1h candle (W4) — irrelevant to the TF-routing
+    behavior this file tests, and left real it touches the process-global
+    Binance Futures RateLimitedClient singleton (app.data.adapters) across
+    this test's event loop, which then breaks unrelated tests reusing that
+    singleton in a later, different event loop (e.g. test_adapter_registry.py).
+    """
+    monkeypatch.setattr(
+        "app.core.features.flow_features.update_flow_cache_and_persist",
+        AsyncMock(return_value=None),
+    )
 
 
 async def _mk_engine() -> Any:
