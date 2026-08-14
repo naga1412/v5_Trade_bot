@@ -1188,3 +1188,47 @@ no unintended change or explicitly flag one.
 dev and main are due for a full settings reconciliation, or the
 breakeven-variant measurement concludes and shadow-side changes are
 back on the table.
+
+### FU-43 — 24h quote volume does NOT imply order-book depth (standing caution)
+
+**Discovered**: 2026-08-14, Phase 4 (futures signal coverage) liquidity-floor
+research.
+
+**Finding**: fetched real Binance USDT-M futures order-book depth and
+spread for the top 30 futures-only-by-24h-volume symbols. Several
+symbols carrying **$100M–$1.1B in 24h quote volume still had under
+$50k of resting depth within 0.5% of mid**:
+
+| Symbol | 24h qvol | Spread (bps) | Depth within 0.5% |
+|---|---|---|---|
+| AKEUSDT | $1,113,431,376 | 3.95 | $28,286 |
+| APRUSDT | $305,318,997 | 1.89 | $46,724 |
+| CYSUSDT | $244,863,941 | 3.36 | $34,825 |
+| VELVETUSDT | $178,677,903 | 4.26 | $26,240 |
+| BTWUSDT | $109,562,774 | 0.99 | $35,695 |
+
+By contrast, established symbols in the same sample (HYPEUSDT,
+1000PEPEUSDT, XMRUSDT) carried $52M–$294M volume with $172k–$3M depth
+— an order of magnitude more resting liquidity per dollar of volume
+traded. High 24h volume reflects **churn**, not standing order-book
+depth; a large trade or fast move can walk through a thin book
+regardless of how much notional traded that day.
+
+**Why this matters beyond Phase 4**: any current or future logic in
+this codebase that uses 24h volume alone as a liquidity/tradability
+proxy — universe ranking, symbol allowlists, position sizing caps —
+is measuring the wrong thing for "can this be exited without slippage
+right now." Phase 4's liquidity floor (see the Phase 4 design spec)
+checks quote volume AND spread AND resting depth together specifically
+because of this finding; volume-only filtering would have passed
+AKE/APR/CYS/VELVET/BTW despite each having a real risk of slippage on
+exit.
+
+**Action**: none required today — no existing volume-only filter in
+this codebase currently gates trade eligibility (today's universe
+selection and `SHADOW_SPOT_BLACKLIST` are not volume-threshold-based).
+Recorded here so this isn't rediscovered: any future liquidity-adjacent
+gate should check depth/spread directly rather than treating volume as
+a proxy for either.
+
+**Status**: informational, no code change.
