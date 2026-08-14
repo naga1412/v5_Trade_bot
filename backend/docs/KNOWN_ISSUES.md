@@ -1032,7 +1032,16 @@ same symbol.
 The helper `get_open_position_trade_id` itself does NOT swallow
 exceptions — callers own their policy via try/except wraps.
 
-### FU-40 — W4 flow-features fire-and-forget tasks bypass the rate limiter
+### FU-40 — W4 flow-features fire-and-forget tasks bypass the rate limiter — ✅ FIXED
+
+**2026-08-14 update (remediation work order B4)**: fixed. The no-`http=`-
+override (production) path in `update_flow_cache` now routes through the
+same `RateLimitedClient` singleton `app.data.adapters.get_intermarket_adapter()`
+already uses for `premiumIndex`/`openInterestHist`, sharing one coordinated
+Binance Futures weight bucket instead of spinning up an unmanaged client per
+call. Shipped dev `#450`, pending main cherry-pick after soak. The
+"problem"/"blast radius" sections below are kept as the historical record of
+what was wrong; the fix section describes what shipped.
 
 **Problem**: `app/data/ratelimit.py`'s `RateLimitedClient` (token-bucket,
 Binance-response-header-aware) is the app's real rate-limiting
@@ -1124,3 +1133,58 @@ staging dry run (or at minimum the `/promotion-gate` endpoint against
 real prod shadow_trades with both flag values) to confirm
 `exclude_timeframes` behaves as expected against the real data shape,
 not just the SQLite fixtures above.
+
+**Re-confirmed 2026-08-14** (remediation work order C2, independent
+worker-heartbeat census re-run): `auto_promote_task` still shows **zero
+beats ever** in prod's `worker_heartbeats` table — the finding above
+has not gone stale. Also fixed a separate, pre-existing bug in the
+ops-debug `settings-check` probe: it was reading
+`AUTO_PROMOTE_TO_TELEGRAM_ENABLED`/`AUTO_PROMOTE_TO_FULLYAUTO_ENABLED`/
+`AUTONOMOUS_TRADING_ENABLED` in the wrong case (the real `Settings`
+fields are lowercase), so every prior probe run silently reported
+`NOT_SET` regardless of the actual value — fixed in `#449`.
+
+### FU-42 — SHADOW_COOLDOWN_HOURS diverged dev (0.5h) vs main (4.0h), never reconciled
+
+**Discovered**: 2026-08-14, remediation work order session, while
+auditing dev/main for drift.
+
+**Root cause (git-confirmed)**: PR3 (`#189`, 2026-05-18) originally
+shipped `SHADOW_COOLDOWN_HOURS: dict[str, float] = {"1h": 0.5, "15m": 0.5}`
+identically to both dev and main (commits `7d31206` / `c646f47`) — 0.5h
+matched the pre-PR3 `COOLDOWN_MINUTES=30` module constant. Then PR #286
+(`fix(shadow): TIMEOUT-before-SL bug + 5% SL cap + 4h cooldown`,
+`18d6f73`, **2026-07-14, merged directly to main only**) bumped the
+value to `4.0` for both timeframes as an incident-driven safety fix,
+bundled with the same PR's 5% SL cap change. PR #286 was never
+back-merged to dev — `git log origin/dev -G'SHADOW_COOLDOWN_HOURS' --
+backend/app/config.py` shows only the original PR3 commit, nothing
+after. This predates the "same-day back-merge" standing rule
+(established 2026-08-14, same session as this finding) by exactly one
+month, so it wasn't caught by that discipline — it simply predates it.
+
+**Current state**: dev = `0.5h` (the stale, pre-incident-fix value),
+main/prod = `4.0h` (the intentional, incident-motivated value). **main's
+value is correct** — nothing here should be "fixed" by moving main
+toward dev's number.
+
+**Risk**: this is a landmine, not a curiosity. If dev's `0.5h` ever
+reaches main via an unrelated promotion (nobody specifically intends to
+touch this setting, it would ride along silently), shadow's cooldown
+between re-entries on the same symbol/timeframe drops 8x. That directly
+changes shadow's trade rate and re-entry behavior **mid-flight during
+the active breakeven-variant measurement**, breaking measurement
+continuity with everything already collected — exactly the class of
+change the variant measurement cannot tolerate.
+
+**Action taken**: none to the setting itself (explicitly out of scope
+while the breakeven-variant measurement is running — this is a
+shadow-behavior-affecting value). Added a pre-promotion check to
+`backend/docs/PROMOTION_CHECKLIST.md` (new) requiring any dev→main
+promotion to diff shadow-behavior-affecting settings and either confirm
+no unintended change or explicitly flag one.
+
+**Status**: open, informational — no code change queued. Revisit if/when
+dev and main are due for a full settings reconciliation, or the
+breakeven-variant measurement concludes and shadow-side changes are
+back on the table.
