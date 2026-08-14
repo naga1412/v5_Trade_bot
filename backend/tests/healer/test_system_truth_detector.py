@@ -49,21 +49,30 @@ async def _mk_healer_findings_engine():
     return engine
 
 
-async def _seed_baseline(session_factory, keys: dict[str, list[str]]) -> None:
+async def _seed_baseline(
+    session_factory, keys: dict[str, list[str]], *, ever_varying: list[str] | None = None,
+) -> None:
+    payload = {"keys": keys}
+    if ever_varying is not None:
+        payload["ever_varying"] = ever_varying
     async with session_factory() as session:
         await session.execute(sa.text(
             "INSERT INTO healer_findings (detector_name, severity, summary, details) "
             "VALUES (:d, 'info', 'seed', :p)"
-        ), {"d": BASELINE_DETECTOR_NAME, "p": json.dumps({"keys": keys})})
+        ), {"d": BASELINE_DETECTOR_NAME, "p": json.dumps(payload)})
         await session.commit()
 
 
-def _stub_sections(monkeypatch, findings: dict[str, list[str]]) -> None:
+def _stub_sections(
+    monkeypatch, findings: dict[str, list[str]], *, mature_tables: set[str] = frozenset(),
+) -> None:
     """Replace all 4 section-scan functions with stubs returning a fixed
     finding dict, split arbitrarily across sections 1/2 (3/4 return {})
-    -- the split doesn't matter, detect_system_truth merges them."""
+    -- the split doesn't matter, detect_system_truth merges them.
+    ``mature_tables`` feeds _section1's second return value (tables past
+    the CONSTANT grace period) for tests of the ever-varying tracking."""
     async def fake_section1(session):  # noqa: ARG001
-        return dict(findings)
+        return dict(findings), set(mature_tables)
 
     async def fake_section_empty(*a, **kw):  # noqa: ARG001
         return {}
@@ -117,6 +126,101 @@ async def test_new_key_pages_critical_persisting_key_does_not(monkeypatch) -> No
     infos = [f for f in out if f.severity == "info" and f.detector_name == FINDING_DETECTOR_NAME]
     persisting = next(f for f in infos if "persisting" in f.summary)
     assert persisting.details["keys"] == ["known.issue"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_pure_constant_key_with_no_prior_variance_warns_not_pages(
+    monkeypatch,
+) -> None:
+    """2026-08-14 recalibration: a NEW finding that is CONSTANT-only, on a
+    mature table, with no evidence it was ever observed varying, is a
+    new-field-constant (by design or coincidence) -- not a regression.
+    Files at warning (triage, no Telegram page), not critical."""
+    engine = await _mk_healer_findings_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed_baseline(factory, {}, ever_varying=[])
+    _stub_sections(
+        monkeypatch, {"flow_feature_snapshots.source": ["CONSTANT"]},
+        mature_tables={"flow_feature_snapshots"},
+    )
+
+    out = await detect_system_truth(factory)
+
+    assert not [f for f in out if f.severity == "critical"]
+    warnings = [f for f in out if f.severity == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0].details["key"] == "flow_feature_snapshots.source"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_pure_constant_key_with_prior_variance_still_pages_critical(
+    monkeypatch,
+) -> None:
+    """A CONSTANT finding for a key with prior-variance evidence on record
+    (it demonstrably varied before) IS a real regression -- still pages
+    critical even though it's a "new" key in yesterday/today diff terms."""
+    engine = await _mk_healer_findings_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed_baseline(factory, {}, ever_varying=["predictions.final_score"])
+    _stub_sections(
+        monkeypatch, {"predictions.final_score": ["CONSTANT"]},
+        mature_tables={"predictions"},
+    )
+
+    out = await detect_system_truth(factory)
+
+    criticals = [f for f in out if f.severity == "critical"]
+    assert len(criticals) == 1
+    assert criticals[0].details["key"] == "predictions.final_score"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_key_with_mixed_flags_still_pages_critical_even_if_constant(
+    monkeypatch,
+) -> None:
+    """CONSTANT alongside another flag (e.g. SUSPECT) is a stronger signal
+    than constancy alone -- the new-field-constant downgrade only applies
+    when CONSTANT is the ONLY flag present."""
+    engine = await _mk_healer_findings_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed_baseline(factory, {}, ever_varying=[])
+    _stub_sections(
+        monkeypatch, {"table.col": ["CONSTANT", "SUSPECT(min<0)"]},
+        mature_tables={"table"},
+    )
+    monkeypatch.setitem(
+        st_mod.TABLES, "table", {"ts_col": "ts", "columns": [("col", "cat", None)]},
+    )
+
+    out = await detect_system_truth(factory)
+
+    criticals = [f for f in out if f.severity == "critical"]
+    assert len(criticals) == 1
+    assert criticals[0].details["key"] == "table.col"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ever_varying_accumulates_and_persists_in_baseline(monkeypatch) -> None:
+    """A mature column observed NOT constant today is recorded into the
+    baseline's ever_varying set, unioned with whatever was there before."""
+    engine = await _mk_healer_findings_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    await _seed_baseline(factory, {}, ever_varying=["other.col"])
+    # table.col currently has no flags at all (healthy/varying) but its
+    # table is mature -- it should be added to ever_varying.
+    _stub_sections(monkeypatch, {}, mature_tables={"table"})
+    monkeypatch.setitem(
+        st_mod.TABLES, "table", {"ts_col": "ts", "columns": [("col", "cat", None)]},
+    )
+
+    out = await detect_system_truth(factory)
+
+    baseline = next(f for f in out if f.detector_name == BASELINE_DETECTOR_NAME)
+    assert set(baseline.details["ever_varying"]) == {"other.col", "table.col"}
     await engine.dispose()
 
 
