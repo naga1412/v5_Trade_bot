@@ -210,6 +210,16 @@ persisted only after the SAME candle's full processing (through
 the hash-chained `predictions` table's schema untouched; idempotency
 lives entirely in a new, non-chained table.
 
+**Required test**: a replay test is a proof obligation for this PR,
+not optional coverage — feed `futures_rest_poll_candles` (or the
+watermark-checking unit directly) the same closed candle twice in a
+row (simulating a restart-then-reprocess or an overlapping-tick race)
+and assert the second occurrence does **not** re-yield, does not
+produce a second `predictions` row, and does not fire a second
+Telegram send. This is the single most important test in the whole
+feature — a duplicate signal reaching the operator's phone is a real
+defect, not a cosmetic one.
+
 **Gap handling**: skip-forward, never backfill. A stale signal acted
 on late is worse than a missing one. Logged at ERROR with the gap size
 (in candle-intervals), and countable via a per-symbol in-memory
@@ -217,12 +227,21 @@ counter surfaced in the supervisor's own heartbeat `details` JSONB —
 no new table needed for this, matching how every other worker already
 reports counters.
 
-**Fail-loud**: reuses this session's own consecutive-failure-streak
-pattern (flow_features.py / patterns / traps) — per-symbol counter,
-resets on success, escalates to `log.error` once a threshold is
-crossed. Given the 60s cadence is far tighter than flow_features'
-hourly one, the default threshold should be tuned lower (this is a
-config detail for the implementation plan, not load-bearing here).
+**Fail-loud**: every fetch failure logs at **WARNING** immediately
+(never DEBUG — the pseudocode above omits the try/except for brevity;
+the real implementation wraps `_fetch_last_n_klines` and logs each
+failure as it happens, matching every other Binance-calling module in
+this codebase). On top of that per-attempt WARNING, this reuses this
+session's own consecutive-failure-streak pattern (flow_features.py /
+patterns / traps) — a per-symbol counter, reset on success, escalating
+to `log.error` once a threshold is crossed, so a systematic failure
+(this symbol's poller is actually broken, not just one transient
+network blip) is distinguishable from noise. Given the 60s cadence is
+far tighter than flow_features' hourly one, the default threshold
+should be tuned lower (a config detail for the implementation plan,
+not load-bearing here) — three DEBUG-level swallows have already hidden
+months-long outages in this codebase (the taker-ratio, OI-delta, and
+regime-classifier incidents); this poller does not get a fourth.
 
 **Rate-limit sharing + visibility**: the poller's REST calls route
 through the same `RateLimitedClient` singleton
@@ -374,6 +393,68 @@ drift apart.
   fast-move limitation sentence from above in short form.
 - **App view row**: a distinct badge/color (not just a text tag) plus
   the same three numbers in their own column.
+
+---
+
+## Open-position retention when a symbol drops out of the top-N
+
+**Verified against the actual code, not assumed**: the existing
+spot-WS keepalive fleet does **not** retain symbols with open
+positions today. `keepalive.py::_refresh_children` has zero
+open-position awareness — it cancels any symbol's child task
+unconditionally once that symbol drops out of the daily top-N
+reconciliation, regardless of whether a `live_trades` or
+`shadow_open_positions` row is still open on it. Separately,
+`liquidation_monitor.py::_list_open_positions` queries `live_trades
+WHERE status = 'open'` directly — completely independent of which
+symbols the keepalive fleet currently has children for. So a
+position's **exit monitoring is never orphaned** by a symbol dropping
+out of the pool (SL/TP/liquidation checks run off `live_trades`
+directly, not off the WS/poll fleet's state) — but the symbol **does**
+stop receiving new candle-close predictions/signals from that fleet
+until it re-enters the top-N, and that is true today for spot-backed
+symbols, not a new gap Phase 4 introduces.
+
+The futures-poller mirrors this **exact, verified** behavior — a
+dropped-out futures-only symbol's poller child is cancelled the same
+way the spot fleet already cancels dropped-out spot symbols, via the
+same reused `_run_child_with_restart`/reconciliation logic. This keeps
+both fleets consistent (an asymmetry between them would itself be a
+new, unjustified divergence — the exact failure class Step 0 exists to
+avoid) and requires no new position-awareness code.
+
+**If retention is actually wanted** — keeping a symbol's poller alive
+specifically because a position is open on it, so the operator keeps
+getting fresh signals on something they're currently holding — that
+would be genuinely new behavior, not a gap being closed, and the
+natural scope for it is both fleets together, not just the new one.
+Not building this now; flagged here so the choice is explicit rather
+than assumed. Either way, this needs a test: with the current
+mirrored-cancellation behavior, a test asserting an open-position
+symbol's poller child *is* cancelled when it drops out of top-N,
+matching the spot fleet's own (equally uncomfortable, already-shipped)
+behavior — not a retention test, since that's not what's being built.
+
+## Known limitation — manual execution is invisible to this bot's own data
+
+The operator executes every one of these trades **manually** on
+Binance, outside the bot's own `_place_live_order` path. That means
+`live_trades` will contain **zero rows** corresponding to what the
+operator actually did with a futures-only signal — that table only
+ever records trades the bot itself placed, and it doesn't place these.
+
+Consequently: **"did this coverage expansion actually help?" is only
+ever answerable in shadow terms** — did a parallel shadow position on
+the same signal turn out profitable — never in terms of the operator's
+real, manual outcome. This is worth writing down plainly so it isn't
+mis-read later: an absence of `live_trades` rows tagged
+`symbol_source='futures_poll'` does **not** mean the futures-only
+signals went unused. It means exactly what it says — the operator
+didn't execute through the bot — and says nothing about whether they
+executed manually on Binance instead. No measurement work is proposed
+here to close this gap; it's a structural property of "signal source,
+not execution engine," recorded so a future reader doesn't draw the
+wrong conclusion from `live_trades` being quiet.
 
 ---
 
