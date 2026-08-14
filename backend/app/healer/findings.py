@@ -62,7 +62,16 @@ async def record_finding(
                 sa.text(
                     "INSERT INTO healer_findings "
                     "(detector_name, severity, summary, details) "
-                    "VALUES (:d, :s, :m, CAST(:p AS JSONB))"
+                    # 2026-08-14 remediation work order B3: CAST(:p AS
+                    # JSONB) silently corrupts to the string '0' on
+                    # SQLite (unrecognized type name -> NUMERIC affinity
+                    # -> non-numeric-string cast collapses to 0). Binding
+                    # the JSON string directly works on both dialects --
+                    # asyncpg auto-adapts str -> JSONB when the column
+                    # type is JSONB; SQLite stores it as TEXT verbatim.
+                    # Same no-CAST pattern already used for shadow_trades/
+                    # predictions JSONB columns elsewhere in this codebase.
+                    "VALUES (:d, :s, :m, :p)"
                 ),
                 {"d": detector_name, "s": severity, "m": summary, "p": payload},
             )
