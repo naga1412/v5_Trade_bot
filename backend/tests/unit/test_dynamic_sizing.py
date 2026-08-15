@@ -2,11 +2,19 @@
 
 Phase 2: classify_balance_tier. Phase 3: _resolve_p_win,
 compute_kelly_fraction, compute_dynamic_size.
+
+_resolve_p_win and compute_dynamic_size are async as of the 2026-08-14
+remediation work order A2 fix -- see dynamic_sizing.py's module
+docstring.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from app.core.scoring.types import Direction
 from app.trading.dynamic_sizing import (
     classify_balance_tier,
     compute_dynamic_size,
@@ -94,24 +102,89 @@ def test_classify_respects_operator_override_boundaries() -> None:
 
 
 # --- _resolve_p_win -----------------------------------------------------
-# PR9 era: confidence proxy only. PR5 will land the real p_win integration
-# (which requires async refactoring up the dispatcher path) — these tests
-# pin the current behavior so PR5's refactor surfaces here first.
+# 2026-08-14 remediation work order A2: SIZING_USE_P_WIN_WHEN_AVAILABLE
+# was read into a throwaway variable and never branched on -- Kelly
+# sizing always used the confidence proxy regardless of the flag or
+# whether a calibrated model was available. Fixed: the flag now
+# actually gates a call to the real predict_p_win when final_score +
+# direction are supplied; without them (or with the flag off, or when
+# the model itself returns None) it's the same proxy behavior as before.
 
 
-def test_resolve_p_win_uses_confidence_proxy() -> None:
-    """PR9: always proxy. confidence_pct=70 → 0.7."""
-    assert _resolve_p_win(70.0, _settings()) == 0.7
+@pytest.mark.asyncio
+async def test_resolve_p_win_uses_confidence_proxy_when_no_signal_supplied() -> None:
+    """No final_score/direction -> always proxy, regardless of the flag.
+    confidence_pct=70 -> 0.7."""
+    assert await _resolve_p_win(70.0, _settings()) == 0.7
 
 
-def test_resolve_p_win_proxy_with_flag_off() -> None:
-    """Flag is a no-op until PR5 wires the real integration."""
-    assert _resolve_p_win(50.0, _settings(use_p_win=False)) == 0.5
+@pytest.mark.asyncio
+async def test_resolve_p_win_proxy_with_flag_off_even_with_signal() -> None:
+    """Flag off -> proxy even when a real signal IS available."""
+    with patch(
+        "app.core.scoring.p_win_calibrator.predict_p_win",
+        new=AsyncMock(return_value=0.99),
+    ) as mock_predict:
+        result = await _resolve_p_win(
+            50.0, _settings(use_p_win=False),
+            final_score=0.8, direction=Direction.LONG,
+        )
+    assert result == 0.5
+    mock_predict.assert_not_called()
 
 
-def test_resolve_p_win_clamps_to_unit_interval() -> None:
-    assert _resolve_p_win(150.0, _settings()) == 1.0
-    assert _resolve_p_win(-10.0, _settings()) == 0.0
+@pytest.mark.asyncio
+async def test_resolve_p_win_clamps_to_unit_interval() -> None:
+    assert await _resolve_p_win(150.0, _settings()) == 1.0
+    assert await _resolve_p_win(-10.0, _settings()) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_resolve_p_win_uses_calibrated_model_when_flag_on_and_signal_present() -> None:
+    """The actual A2 fix: flag on + real signal -> calls predict_p_win
+    and uses its result instead of the confidence proxy."""
+    with patch(
+        "app.core.scoring.p_win_calibrator.predict_p_win",
+        new=AsyncMock(return_value=0.63),
+    ) as mock_predict:
+        result = await _resolve_p_win(
+            70.0, _settings(use_p_win=True),
+            final_score=0.42, direction=Direction.LONG,
+        )
+    assert result == 0.63  # calibrated value, NOT confidence_pct/100 (0.7)
+    mock_predict.assert_awaited_once_with(0.42, Direction.LONG)
+
+
+@pytest.mark.asyncio
+async def test_resolve_p_win_falls_back_to_proxy_when_model_abstains() -> None:
+    """predict_p_win returning None (NEUTRAL direction, no fitted model,
+    calibration failure) falls through to the proxy -- same fail-open
+    contract as before the fix."""
+    with patch(
+        "app.core.scoring.p_win_calibrator.predict_p_win",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await _resolve_p_win(
+            70.0, _settings(use_p_win=True),
+            final_score=0.42, direction=Direction.LONG,
+        )
+    assert result == 0.7
+
+
+@pytest.mark.asyncio
+async def test_resolve_p_win_accepts_plain_string_direction() -> None:
+    """dispatcher.py's SignalProposal.direction is a plain string
+    Literal["LONG","SHORT"], not the Direction enum -- must coerce."""
+    with patch(
+        "app.core.scoring.p_win_calibrator.predict_p_win",
+        new=AsyncMock(return_value=0.55),
+    ) as mock_predict:
+        result = await _resolve_p_win(
+            70.0, _settings(use_p_win=True),
+            final_score=0.3, direction="SHORT",
+        )
+    assert result == 0.55
+    mock_predict.assert_awaited_once_with(0.3, Direction.SHORT)
 
 
 # --- compute_kelly_fraction --------------------------------------------
@@ -161,48 +234,71 @@ def test_kelly_eighth_kelly_via_env_override() -> None:
 # --- compute_dynamic_size -----------------------------------------------
 
 
-def test_dynamic_size_disabled_returns_none() -> None:
+@pytest.mark.asyncio
+async def test_dynamic_size_disabled_returns_none() -> None:
     """Default-OFF gate: caller falls back to legacy sizing."""
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=10_000.0, confidence_pct=70.0,
         settings=_settings(enabled=False),
     )
     assert result is None
 
 
-def test_dynamic_size_small_tier_capped() -> None:
-    """$500 user, 70% confidence:
+@pytest.mark.asyncio
+async def test_dynamic_size_small_tier_capped() -> None:
+    """$500 user, 70% confidence, no real signal supplied (proxy path):
     p_win=0.7 → edge=0.4 → quarter=0.1 → small-cap=0.01 → $5."""
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=500.0, confidence_pct=70.0, settings=_settings(),
     )
     assert result is not None
     assert abs(result - 5.0) < 1e-9
 
 
-def test_dynamic_size_whale_tier_can_take_10pct() -> None:
-    """$200k whale, 100% confidence: quarter=0.25 → whale-cap=0.10 → $20k."""
-    result = compute_dynamic_size(
+@pytest.mark.asyncio
+async def test_dynamic_size_whale_tier_can_take_10pct() -> None:
+    """$200k whale, 100% confidence, proxy path: quarter=0.25 → whale-cap=0.10 → $20k."""
+    result = await compute_dynamic_size(
         balance_usdt=200_000.0, confidence_pct=100.0, settings=_settings(),
     )
     assert result is not None
     assert abs(result - 20_000.0) < 1e-9
 
 
-def test_dynamic_size_no_edge_returns_zero() -> None:
+@pytest.mark.asyncio
+async def test_dynamic_size_no_edge_returns_zero() -> None:
     """Confidence at 50% → p_win=0.5 → no edge → 0 margin."""
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=10_000.0, confidence_pct=50.0, settings=_settings(),
     )
     assert result == 0.0
 
 
-def test_dynamic_size_fails_open_on_internal_error() -> None:
+@pytest.mark.asyncio
+async def test_dynamic_size_fails_open_on_internal_error() -> None:
     """Buggy compute → returns None so caller falls back to legacy."""
     bad_settings = _settings()
     # Make classify_balance_tier blow up by removing the boundary dict.
     bad_settings.SIZING_TIER_BOUNDARIES = None  # type: ignore[assignment]
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=1_000.0, confidence_pct=70.0, settings=bad_settings,
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_size_uses_calibrated_p_win_end_to_end() -> None:
+    """A2 fix, end to end: real signal + flag on -> the calibrated
+    p_win drives the Kelly compute, not the confidence proxy.
+    p_win=0.9 (calibrated, NOT confidence_pct=50%/2=0.5) -> edge=0.8 ->
+    quarter=0.2 -> whale-cap=0.10 -> $10k on a $100k balance."""
+    with patch(
+        "app.core.scoring.p_win_calibrator.predict_p_win",
+        new=AsyncMock(return_value=0.9),
+    ):
+        result = await compute_dynamic_size(
+            balance_usdt=100_000.0, confidence_pct=50.0, settings=_settings(),
+            final_score=0.6, direction=Direction.LONG,
+        )
+    assert result is not None
+    assert abs(result - 10_000.0) < 1e-9

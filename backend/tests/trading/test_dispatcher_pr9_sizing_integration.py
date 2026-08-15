@@ -11,6 +11,8 @@ Kelly math itself.
 """
 from __future__ import annotations
 
+import pytest
+
 from app.trading.execution.dispatcher import SignalProposal, UserContext
 
 
@@ -39,7 +41,8 @@ def _user_ctx(sizing_mode: str = "fixed", balance: float = 1000.0) -> UserContex
     )
 
 
-def test_compute_dynamic_size_returns_none_when_disabled() -> None:
+@pytest.mark.asyncio
+async def test_compute_dynamic_size_returns_none_when_disabled() -> None:
     """Sanity-check the pure function path that the dispatcher relies on:
     DYNAMIC_SIZING_ENABLED=False → returns None → dispatcher falls back
     to fixed/percent legacy sizing."""
@@ -55,15 +58,18 @@ def test_compute_dynamic_size_returns_none_when_disabled() -> None:
         SIZING_TIER_BOUNDARIES={"small_max": 1000.0, "medium_max": 10000.0,
                                 "large_max": 100000.0},
     )
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=10_000.0, confidence_pct=70.0, settings=settings,
     )
     assert result is None  # dispatcher falls through to legacy
 
 
-def test_compute_dynamic_size_returns_value_when_enabled() -> None:
+@pytest.mark.asyncio
+async def test_compute_dynamic_size_returns_value_when_enabled() -> None:
     """DYNAMIC_SIZING_ENABLED=True with a positive-edge signal → returns
-    Kelly × tier-cap × balance. Dispatcher uses this directly."""
+    Kelly × tier-cap × balance. Dispatcher uses this directly. No
+    final_score/direction passed here -> proxy path (see
+    test_dynamic_sizing.py for the calibrated-p_win path coverage)."""
     from types import SimpleNamespace
     from app.trading.dynamic_sizing import compute_dynamic_size
 
@@ -79,14 +85,15 @@ def test_compute_dynamic_size_returns_value_when_enabled() -> None:
     # $500 balance → tier=small → cap=0.01.
     # confidence_pct=70 → p_win=0.7 → edge=0.4 → quarter=0.1 → cap=0.01.
     # Result: 500 * 0.01 = 5.0
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=500.0, confidence_pct=70.0, settings=settings,
     )
     assert result is not None
     assert abs(result - 5.0) < 1e-9
 
 
-def test_compute_dynamic_size_fails_open_on_bad_settings() -> None:
+@pytest.mark.asyncio
+async def test_compute_dynamic_size_fails_open_on_bad_settings() -> None:
     """A broken settings shape → returns None (fail-open). Dispatcher
     falls through to legacy sizing rather than blocking the trade."""
     from types import SimpleNamespace
@@ -101,7 +108,7 @@ def test_compute_dynamic_size_fails_open_on_bad_settings() -> None:
         SIZING_TIER_MAX_FRACTION={"small": 0.01},  # missing other tiers
         SIZING_TIER_BOUNDARIES=None,  # type: ignore[arg-type]
     )
-    result = compute_dynamic_size(
+    result = await compute_dynamic_size(
         balance_usdt=10_000.0, confidence_pct=70.0, settings=bad_settings,
     )
     assert result is None

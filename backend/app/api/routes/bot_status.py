@@ -524,7 +524,10 @@ async def sizing_preview(
     balance = max(fixed_min * 5.0, 100.0)
 
     tier = classify_balance_tier(balance, pr9_settings)
-    margin = compute_dynamic_size(
+    # No real signal behind this hypothetical preview -- final_score/
+    # direction stay None, so this always uses the confidence-proxy
+    # path (see _resolve_p_win's docstring). Unchanged behavior.
+    margin = await compute_dynamic_size(
         balance_usdt=balance,
         confidence_pct=confidence_pct,
         settings=pr9_settings,

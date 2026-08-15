@@ -957,10 +957,16 @@ async def dispatch(
     from app.config import get_settings as _get_pr9_settings
     from app.trading.dynamic_sizing import compute_dynamic_size
     pr9_settings = _get_pr9_settings()
-    dynamic_margin = compute_dynamic_size(
+    dynamic_margin = await compute_dynamic_size(
         balance_usdt=user.portfolio_value_usdt,
         confidence_pct=proposal.confidence_pct,
         settings=pr9_settings,
+        # 2026-08-14 remediation work order A2: thread the real signal
+        # through so SIZING_USE_P_WIN_WHEN_AVAILABLE can actually use
+        # the calibrated model instead of always falling back to the
+        # confidence proxy.
+        final_score=proposal.entry_score,
+        direction=proposal.direction,
     )
 
     if dynamic_margin is not None:
