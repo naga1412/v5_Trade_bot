@@ -129,7 +129,7 @@ def build_observation(
     position: PositionState,
     macro: MacroFeatures,
 ) -> np.ndarray:
-    """Assemble a single (54,) float32 observation. See module docstring."""
+    """Assemble a single (53,) float32 observation. See module docstring."""
     if len(layer_scores) != N_LAYER_SCORES:
         raise ValueError(
             f"expected 8 layer scores (L1..L6, L8, L9), got {len(layer_scores)}"
