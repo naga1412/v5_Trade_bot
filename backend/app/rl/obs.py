@@ -1,14 +1,14 @@
 """Observation builder for the SP-4 PPO policy (L10).
 
-Assembles a 54-float vector that the policy network sees on each
+Assembles a 53-float vector that the policy network sees on each
 prediction tick:
 
     asset_embedding (32)
-  + layer_scores L1..L9 (9)
+  + layer_scores L1..L6, L8, L9 (8)
   + market_state (8: ATR%, funding, OI Δ24h, regime one-hot[5])
   + position_state (3: cur_pos {-1,0,+1}, unrealized_pnl_R, bars_in_position)
   + macro_calendar (2: weekend, asia_open)
-  = 54
+  = 53
 
 PR-OBS-DIM-REDUCE (2026-08-05): dropped 4 dims that had zero live collector
 and were never going to be populated without new infrastructure —
@@ -22,6 +22,21 @@ still can't see would manufacture train/serve skew. This is an OBS_DIM
 change — incompatible with every prior checkpoint, forces a from-scratch
 retrain (operator-accepted tradeoff).
 
+PR-RL-DROP-L7 (2026-08-15): Layer 7 (XGBoost, `app/core/scoring/layer7_xgboost.py`)
+has been a permanent stub returning `None` since inception — no model was
+ever trained, and the "L7/L8 matched pair" placeholder rationale died once
+L8 (ConvLSTM) went live behind a flag. L7 is dropped from the RL
+observation's layer-score tuple entirely (not renumbered — L1..L6, L8, L9
+keep their identifiers everywhere else: `predictions.layer_scores` JSONB,
+frontend, aggregator weight redistribution. This change is scoped to the
+RL observation assembly only). OBS_DIM 54 -> 53, N_LAYER_SCORES 9 -> 8.
+Checkpoint-incompatible with every prior .pt file (same tradeoff as
+PR-OBS-DIM-REDUCE above) — acceptable because no checkpoint is currently
+load-capable in production anyway (rl_checkpoints.id=62 has been
+dimensionally incompatible and silently non-loading since the 58->54
+change on 2026-08-05; see the accompanying migration + healer detector in
+this same PR).
+
 The exact same function runs at training-time (replay buffer
 construction) and inference-time (production) — that's the spec sec 8
 cross-cutting policy on training-serving skew.
@@ -34,9 +49,9 @@ from typing import Literal, Sequence
 import numpy as np
 
 
-OBS_DIM: int = 54
+OBS_DIM: int = 53
 EMB_DIM: int = 32
-N_LAYER_SCORES: int = 9
+N_LAYER_SCORES: int = 8
 
 # Frozen — same names as the SP-1 regimes table so eval/training joins
 # don't need a translation layer. KEEP IN SYNC with app.ml.regimes.
@@ -117,7 +132,7 @@ def build_observation(
     """Assemble a single (54,) float32 observation. See module docstring."""
     if len(layer_scores) != N_LAYER_SCORES:
         raise ValueError(
-            f"expected 9 layer scores (L1..L9), got {len(layer_scores)}"
+            f"expected 8 layer scores (L1..L6, L8, L9), got {len(layer_scores)}"
         )
     if asset.embedding.shape != (EMB_DIM,):
         raise ValueError(

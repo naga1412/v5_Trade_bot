@@ -56,7 +56,8 @@ def _macro() -> MacroFeatures:
 
 
 def _layers() -> tuple[float, ...]:
-    return tuple(0.1 * i for i in range(1, 10))
+    # 8 values (L1..L6, L8, L9) — L7 dropped, per PR-RL-DROP-L7.
+    return tuple(0.1 * i for i in range(1, 9))
 
 
 def _activate_policy_returning_action(action_idx: int) -> PolicyNetwork:
@@ -158,7 +159,7 @@ def test_obs_build_failure_returns_none() -> None:
 
     out = decide_action(
         asset_id=0, symbol="BTC/USDT", asset_table=table,
-        layer_scores=(0.1, 0.2),  # only 2 — should be 9
+        layer_scores=(0.1, 0.2),  # only 2 — should be 8
         market=_market(), position=_position(), macro=_macro(),
     )
     assert out is None

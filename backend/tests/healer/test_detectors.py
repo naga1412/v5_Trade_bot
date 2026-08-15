@@ -22,9 +22,16 @@ from app.healer.detectors import (
     detect_blocked_rate_anomaly,
     detect_dispatch_error_rate,
     detect_per_symbol_prediction_freshness,
+    detect_rl_checkpoint_load_health,
     detect_score_distribution_anomaly,
 )
 from app.healer.findings import DISPATCH_EXCEPTION_DETECTOR
+from app.rl.checkpoints import (
+    ActiveRlCheckpoint,
+    clear_active,
+    get_active_policy_and_checkpoint,
+    set_active,
+)
 
 
 @pytest.fixture
@@ -52,6 +59,16 @@ def _reset_c3_per_symbol_drop_dedup():
     detectors_mod._C3_LAST_PER_SYMBOL_DROP.clear()
     yield
     detectors_mod._C3_LAST_PER_SYMBOL_DROP.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_rl_checkpoint_module_state():
+    """Wipe app.rl.checkpoints' module-scope active-pair state between
+    tests so C6 tests don't leak into each other or into unrelated
+    detector tests that happen to run in the same session."""
+    clear_active()
+    yield
+    clear_active()
 
 
 # ---- fixtures -----------------------------------------------------------
@@ -148,6 +165,45 @@ async def _mk_telegram_signals_engine():
             "response TEXT)"
         ))
     return engine
+
+
+async def _mk_rl_checkpoints_engine():
+    """SQLite mirror of migration 0015's rl_checkpoints table (C6 tests)."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE rl_checkpoints ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "model_name TEXT NOT NULL, "
+            "version TEXT NOT NULL, "
+            "checkpoint_uri TEXT NOT NULL, "
+            "sha256 TEXT NOT NULL, "
+            "trained_at TEXT NOT NULL, "
+            "train_data_window TEXT NOT NULL, "
+            "eval_results TEXT NOT NULL, "
+            "is_active INTEGER NOT NULL DEFAULT 0, "
+            "activated_at TEXT, "
+            "deactivated_at TEXT, "
+            "notes TEXT)"
+        ))
+    return engine
+
+
+async def _insert_rl_checkpoint(
+    engine, *, id_: int, model_name: str = "ppo_policy_v1",
+    version: str = "v1", is_active: bool = True,
+) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "INSERT INTO rl_checkpoints "
+            "(id, model_name, version, checkpoint_uri, sha256, trained_at, "
+            " train_data_window, eval_results, is_active) "
+            "VALUES (:id, :mn, :v, 'file:///tmp/x.pt', :sha, "
+            " '2026-08-01', '30d', '{}', :active)"
+        ), {
+            "id": id_, "mn": model_name, "v": version,
+            "sha": "0" * 64, "active": int(is_active),
+        })
 
 
 # ---- C1 tests -----------------------------------------------------------
@@ -1034,3 +1090,98 @@ async def test_c3_btc_singleton_stays_expected_when_dropped_from_top_20(
         "when it drops out of the top-20 fleet slice; got sample: "
         f"{sample}"
     )
+
+
+# ---- C6 tests -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c6_active_but_not_loaded_alarms_critical() -> None:
+    """DB row is_active=TRUE, nothing loaded in-process → CRITICAL.
+
+    Reproduces the exact incident this detector exists to catch: an
+    OBS_DIM-incompatible checkpoint whose load_state_dict() raised, so
+    app.rl.checkpoints module state stayed empty (get_active_policy_and_
+    checkpoint() -> None) while the DB is_active flag was never cleared.
+    """
+    engine = await _mk_rl_checkpoints_engine()
+    await _insert_rl_checkpoint(engine, id_=62, version="v1", is_active=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    # clear_active() via the autouse fixture already guarantees no pair
+    # is loaded — assert the precondition explicitly for clarity.
+    assert get_active_policy_and_checkpoint() is None
+
+    findings = await detect_rl_checkpoint_load_health(factory)
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+    assert findings[0].detector_name == "rl_checkpoint_load_health"
+    assert "62" in findings[0].summary
+    assert findings[0].details is not None
+    assert findings[0].details["db_checkpoint_id"] == 62
+    assert findings[0].details["reason"] == "not_loaded"
+    assert findings[0].details["loaded_checkpoint_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_c6_active_but_mismatched_loaded_alarms_critical() -> None:
+    """DB row is_active=TRUE, but the loaded pair is a DIFFERENT
+    checkpoint id/version → CRITICAL (stale module state or a race)."""
+    engine = await _mk_rl_checkpoints_engine()
+    await _insert_rl_checkpoint(engine, id_=62, version="v1", is_active=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    dummy_model = object()
+    set_active(dummy_model, ActiveRlCheckpoint(
+        id=7, model_name="ppo_policy_v1", version="v-old",
+        sha256="1" * 64, checkpoint_uri="file:///tmp/old.pt",
+    ))
+
+    findings = await detect_rl_checkpoint_load_health(factory)
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+    assert findings[0].details["reason"] == "mismatch"
+    assert findings[0].details["db_checkpoint_id"] == 62
+    assert findings[0].details["loaded_checkpoint_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_c6_loaded_matches_db_active_no_finding() -> None:
+    """DB row is_active=TRUE AND the loaded pair matches it exactly →
+    healthy state, no finding."""
+    engine = await _mk_rl_checkpoints_engine()
+    await _insert_rl_checkpoint(engine, id_=62, version="v1", is_active=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    dummy_model = object()
+    set_active(dummy_model, ActiveRlCheckpoint(
+        id=62, model_name="ppo_policy_v1", version="v1",
+        sha256="2" * 64, checkpoint_uri="file:///tmp/x.pt",
+    ))
+
+    findings = await detect_rl_checkpoint_load_health(factory)
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_c6_no_active_row_no_finding() -> None:
+    """No rl_checkpoints row with is_active=TRUE at all → normal
+    pre-training-bootstrap state, must NOT manufacture a false positive."""
+    engine = await _mk_rl_checkpoints_engine()
+    # Table exists but is empty — no rows inserted at all.
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    findings = await detect_rl_checkpoint_load_health(factory)
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_c6_inactive_row_present_no_finding() -> None:
+    """A checkpoint row exists but is_active=FALSE (e.g. a deactivated or
+    never-activated checkpoint) → not scanned at all, no finding."""
+    engine = await _mk_rl_checkpoints_engine()
+    await _insert_rl_checkpoint(engine, id_=62, version="v1", is_active=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    findings = await detect_rl_checkpoint_load_health(factory)
+    assert findings == []

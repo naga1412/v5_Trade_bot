@@ -27,6 +27,7 @@ from app.healer.detectors import (
     detect_blocked_rate_anomaly,
     detect_dispatch_error_rate,
     detect_per_symbol_prediction_freshness,
+    detect_rl_checkpoint_load_health,
     detect_score_distribution_anomaly,
 )
 from app.healer.findings import HealerFinding, record_finding
@@ -59,6 +60,11 @@ _DETECTORS: tuple[tuple[str, Detector], ...] = (
     # cadence (see system_truth_detector.SYSTEM_TRUTH_INTERVAL_HOURS) --
     # every other tick this returns [] near-instantly.
     ("C5_system_truth", detect_system_truth),
+    # C6: DB is_active flag vs in-process loaded checkpoint divergence --
+    # see detect_rl_checkpoint_load_health's docstring for the incident
+    # this exists to make loud (10-day silent brain_decisions gap,
+    # 2026-08-05 -> 2026-08-15).
+    ("C6_rl_checkpoint_load_health", detect_rl_checkpoint_load_health),
 )
 
 

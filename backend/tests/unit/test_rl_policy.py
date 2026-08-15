@@ -97,7 +97,7 @@ def test_param_count_in_expected_range() -> None:
     """~50K params is what spec sec 3.3 quotes; allow some slack."""
     net = PolicyNetwork()
     n = count_params(net)
-    # 58*128 + 128*128 + 128*5 + 128*1 + biases ≈ 24K
+    # 53*128 + 128*128 + 128*5 + 128*1 + biases ≈ 24K
     # Spec quoted "~50K" for the policy + asset embedding combined.
     # Pure policy without embedding is closer to ~25K.
     assert 10_000 <= n <= 60_000

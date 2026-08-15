@@ -7,7 +7,7 @@ Wires the five Phase A modules together against an in-memory SQLite DB:
   the SQLite test suite)
 * shadow_trades fixtures
 * app.rl.replay_buffer.load_from_shadow_trades  → list[Transition]
-* app.rl.obs.build_observation                  → 58-float vectors
+* app.rl.obs.build_observation                  → 53-float vectors
 * app.rl.reward.compute_reward                  → in [-3, +3]
 * app.rl.adapter.AssetEmbeddingTable            → per-asset embeddings
 * app.rl.checkpoints.set_active / clear_active  → module-state pattern
@@ -164,7 +164,7 @@ async def test_phase_a_module_state_pattern_round_trip() -> None:
     class _Dummy(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.fc = nn.Linear(58, 5)
+            self.fc = nn.Linear(OBS_DIM, 5)
 
     model = _Dummy()
     ck = ActiveRlCheckpoint(

@@ -883,7 +883,14 @@ class ShadowWorker:
         # Build the 9-float layer_scores array (signed_strength * confidence,
         # per the aggregator's contribution formula) in deterministic L1..L9
         # order. None layers → 0.0. Used by the obs-snapshot for the brain's
-        # 58-float observation reconstruction.
+        # 53-float observation reconstruction (app/rl/obs.py).
+        # NOTE: this array is intentionally still 9 positional floats
+        # (L1..L9, storage format decoupled from obs-layout — see
+        # app/shadow/observation.py's module docstring) even though the RL
+        # observation itself now drops L7 (PR-RL-DROP-L7, 2026-08-15). L7's
+        # slot (index 6) is always 0.0 anyway since layer7_xgboost.py is a
+        # permanent stub. The drop happens at re-assembly time in
+        # app/rl/replay_buffer.py, not here.
         # Keys in pred.layer_scores are stringified ints ("1".."9") — see
         # core/predictor.py:471 — not raw ints. The int-keyed lookup was a
         # silent always-None bug masked by the None-guard below; mypy caught
