@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,7 @@ from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
 from app.ml.validator import record_pending_validation
 from app.ops.heartbeat import record_heartbeat
+from app.shadow.multi_stream import MultiStreamCandle
 from app.trading.execution.glue import (
     _parse_mtf_adx_by_tf_json,
     dispatch_if_eligible,
@@ -113,13 +115,28 @@ async def _persist_prediction_and_schedule_validation(
 HISTORY_SEED_BARS: int = 504
 
 
-async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h") -> None:
-    """Seed REST history, subscribe to Binance WS, on each closed candle:
+async def run_live_prediction(
+    symbol_pair: str = "BTC/USDT",
+    timeframe: str = "1h",
+    *,
+    candle_source: AsyncIterator[MultiStreamCandle] | None = None,
+    symbol_source: str = "established_top20",
+) -> None:
+    """Seed REST history, subscribe to Binance WS (or consume an injected
+    candle_source), on each closed candle:
     1. Append candle to in-memory DataFrame (last 1000 bars)
     2. Build prediction (compose layers + aggregate)
     3. Persist prediction row to predictions table via audit hash chain
     4. Publish payload over WebSocket so UI updates
     Persist comes BEFORE publish — if persist fails (DB down), do not publish.
+
+    ``candle_source``, when supplied, replaces the default Binance SPOT
+    WS subscription — used by the futures-only REST poller (Phase 4) so
+    this function's scoring/gating/dispatch/persistence logic is shared,
+    not duplicated, between the two candle-delivery mechanisms.
+    ``symbol_source`` is cohort metadata threaded into the persisted and
+    dispatched payloads; defaults to ``"established_top20"`` so every
+    existing caller is unaffected.
     """
     binance_symbol = symbol_pair.replace("/", "")
 
@@ -133,9 +150,20 @@ async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1
     bars = bars.set_index("ts")[["open", "high", "low", "close", "volume"]]
 
     session_factory = get_session_factory()
-    stream = BinanceKlineStream(symbol=binance_symbol, timeframe=timeframe)
+    # Annotated AsyncIterator[Any]: BinanceKlineStream.stream() actually
+    # yields app.core.dataquality.validator.Candle (aliased ValidatorCandle
+    # in app.data.adapters.binance), not MultiStreamCandle -- the two are
+    # duck-type compatible for every attribute this loop reads (.open,
+    # .high, .low, .close, .volume, .ts) but are not the same nominal type,
+    # so the local variable needs a looser annotation than the parameter's
+    # public AsyncIterator[MultiStreamCandle] contract to type-check both
+    # branches. Type-annotation-only change; no runtime effect.
+    source: AsyncIterator[Any] | None = candle_source
+    if source is None:
+        stream = BinanceKlineStream(symbol=binance_symbol, timeframe=timeframe)
+        source = stream.stream()
 
-    async for candle in stream.stream():
+    async for candle in source:
         new_row = pd.DataFrame(
             [[candle.open, candle.high, candle.low, candle.close, candle.volume]],
             columns=["open", "high", "low", "close", "volume"],
