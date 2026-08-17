@@ -25,7 +25,10 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.data.ratelimit import RateLimitedClient
+from app.ops.heartbeat import record_heartbeat
+from app.shadow.live_fleet_universe import LiveFleetEntry, has_open_position, load_live_fleet_universe
 from app.shadow.multi_stream import MultiStreamCandle
+from app.ws.live_prediction import run_live_prediction
 
 log = logging.getLogger(__name__)
 
@@ -228,3 +231,252 @@ async def futures_rest_poll_candles(
 
         if not await _sleep_or_stop(_sleep, poll_interval_s):
             return
+
+
+# --- Task 8: futures_poll_task supervisor -------------------------------
+#
+# Mirrors app.ws.keepalive's (post-Task-5b) fleet-of-independent-children
+# pattern -- own child-task set, own reconciliation loop, own heartbeat --
+# but the desired set comes from load_live_fleet_universe's futures_poll
+# cohort (Task 5's liquidity-floor selector) instead of a fixed top-N, and
+# each child is fed by futures_rest_poll_candles (Task 7) rather than a
+# Binance SPOT WS subscription.
+#
+# REDRAFTED 2026-08-17 (see the plan doc's own note above this section):
+# there is no rank-based selection here at all -- the liquidity floor
+# itself is the only membership criterion. FUTURES_POLL_SAFETY_MAX_N is a
+# fallback safety valve only (see _load_desired_futures_symbols), never
+# the primary selector. And the drop-out path carries the same hard
+# open-position override Task 5b shipped for the spot-WS fleet: a symbol
+# that no longer qualifies is retained, not cancelled, while it still has
+# an open live_trades/shadow_open_positions row.
+
+WORKER_NAME: str = "futures_poll_task"
+FUTURES_POLL_SAFETY_MAX_N: int = 30  # safety valve, not the selector -- see plan doc
+FUTURES_POLL_TIMEFRAME: str = "1h"
+FUTURES_POLL_REFRESH_SECONDS: int = 24 * 60 * 60  # 24h
+FUTURES_POLL_HEARTBEAT_SECONDS: int = 5 * 60  # 5min
+_CHILD_BACKOFF_BASE_S: float = 5.0
+_CHILD_BACKOFF_MAX_S: float = 120.0
+
+# Type alias for the per-symbol runner -- parameterized so tests can inject
+# a deterministic stand-in instead of hitting the real REST poller.
+FuturesRunner = Callable[[str, str], Awaitable[None]]
+
+
+async def _default_futures_runner(symbol_pair: str, timeframe: str) -> None:
+    """Production runner: run_live_prediction fed by an injected
+    futures_rest_poll_candles source -- the entire point of Phase 4 Step 0's
+    candle_source injection point is that scoring/gating/dispatch/
+    persistence stay byte-identical to the spot-WS fleet; only candle
+    delivery differs.
+
+    Local imports (matching app.core.features.flow_features's
+    _resolve_rate_client) so importing this module doesn't eagerly build a
+    DB session factory / shared httpx client at import time.
+    """
+    from app.data.adapters import get_intermarket_adapter
+    from app.db.session import get_session_factory
+
+    session_factory = get_session_factory()
+    rate_client = get_intermarket_adapter().rate_client
+    assert rate_client is not None
+    source = futures_rest_poll_candles(
+        symbol_pair, timeframe, rate_client=rate_client, session_factory=session_factory,
+    )
+    await run_live_prediction(
+        symbol_pair=symbol_pair, timeframe=timeframe,
+        candle_source=source, symbol_source="futures_poll",
+    )
+
+
+async def _run_futures_child_with_restart(
+    runner: FuturesRunner,
+    symbol_pair: str,
+    timeframe: str,
+    *,
+    backoff_base_s: float = _CHILD_BACKOFF_BASE_S,
+) -> None:
+    """Wrap a per-symbol runner in a restart-with-backoff loop -- mirrors
+    keepalive.py's _run_child_with_restart exactly. A single symbol
+    throwing repeatedly (delisted, Binance error, etc.) must not take down
+    the rest of the futures-poll fleet."""
+    backoff = backoff_base_s
+    while True:
+        try:
+            await runner(symbol_pair, timeframe)
+            backoff = backoff_base_s
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 -- resilient supervisor
+            log.warning(
+                "futures_poll child %s/%s crashed: %s; restart in %.1fs",
+                symbol_pair, timeframe, e, backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(_CHILD_BACKOFF_MAX_S, backoff * 2)
+
+
+async def _load_desired_futures_symbols(
+    session_factory: async_sessionmaker[AsyncSession], *, timeframe: str,
+) -> list[tuple[str, str]]:
+    """Read the futures_poll cohort from live_fleet_universe -- no top_n
+    slice, the liquidity floor itself is the only membership criterion
+    (Phase 4 liquidity-floor-selector addendum, 2026-08-17).
+
+    FUTURES_POLL_SAFETY_MAX_N is a fallback safety valve only, per the
+    addendum's cost-check section (b): if the floor-qualified futures-only
+    cohort ever exceeds it (a market-condition shift qualifying far more
+    symbols than today's measured 8-11), truncate to the top N ranked by
+    liquidity -- best qvol_24h, tie-broken by tightest spread_bps, then
+    highest depth_0_5pct_usdt -- never by volume alone. At today's scale
+    this branch never engages; it exists so such a shift can't silently
+    blow past whatever a staging soak validated.
+
+    Empty result (any failure, or a genuinely empty cohort) is logged but
+    not raised -- the supervisor retries on its next refresh tick, mirroring
+    _load_keepalive_symbols's failure handling.
+    """
+    from app.ws.keepalive import to_pair
+
+    try:
+        async with session_factory() as session:
+            entries: list[LiveFleetEntry] = await load_live_fleet_universe(
+                session, cohort="futures_poll",
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("futures_poll: load_live_fleet_universe failed: %s", e)
+        return []
+
+    if len(entries) > FUTURES_POLL_SAFETY_MAX_N:
+        log.warning(
+            "futures_poll: %d qualifying symbols exceeds safety valve %d -- "
+            "truncating by liquidity rank, this should be investigated "
+            "(staging soak may not cover this scale)",
+            len(entries), FUTURES_POLL_SAFETY_MAX_N,
+        )
+        entries = sorted(
+            entries, key=lambda e: (-e.qvol_24h, e.spread_bps, -e.depth_0_5pct_usdt),
+        )[:FUTURES_POLL_SAFETY_MAX_N]
+
+    return [(to_pair(e.symbol), timeframe) for e in entries]
+
+
+async def _refresh_futures_children(
+    children: dict[tuple[str, str], asyncio.Task[None]],
+    desired: list[tuple[str, str]],
+    *,
+    runner: FuturesRunner,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    """Reconcile running children with the desired set. Mirrors the
+    post-Task-5b keepalive.py's _refresh_children exactly, INCLUDING the
+    open-position override -- the liquidity-floor-selector addendum's hard
+    open-position override is a requirement on both fleets, not just the
+    spot-WS one.
+
+    - New symbols -> spawn a child task.
+    - Removed symbols -> cancel and await the old task, UNLESS the symbol
+      has an open live_trades/shadow_open_positions row, in which case it
+      is retained. The override is only checked when session_factory is
+      supplied (default None) -- callers that omit it get the prior
+      unconditional-cancel behavior unchanged, which is what makes this a
+      base case rather than a breaking change to every existing call site.
+    - Symbols still present -> left untouched (no churn, no reconnect).
+    """
+    desired_set = set(desired)
+    for key in list(children):
+        if key not in desired_set:
+            if session_factory is not None:
+                symbol_pair, _tf = key
+                async with session_factory() as session:
+                    if await has_open_position(session, symbol_pair):
+                        log.info("futures_poll: retaining %s/%s -- open position", *key)
+                        continue
+            log.info("futures_poll: dropping %s/%s", *key)
+            children[key].cancel()
+            try:
+                await children[key]
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            del children[key]
+    for key in desired:
+        if key in children:
+            continue
+        symbol_pair, timeframe = key
+        log.info("futures_poll: starting %s/%s", symbol_pair, timeframe)
+        children[key] = asyncio.create_task(
+            _run_futures_child_with_restart(runner, symbol_pair, timeframe),
+            name=f"futures_poll:{symbol_pair}:{timeframe}",
+        )
+
+
+async def run_futures_poll(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    timeframe: str = FUTURES_POLL_TIMEFRAME,
+    refresh_seconds: int = FUTURES_POLL_REFRESH_SECONDS,
+    heartbeat_seconds: int = FUTURES_POLL_HEARTBEAT_SECONDS,
+    runner: FuturesRunner = _default_futures_runner,
+) -> None:
+    """Main supervisor loop -- structurally identical to run_keepalive
+    (app.ws.keepalive), owning a completely separate child-task set so a
+    bug here can never reach the spot-WS fleet's tasks."""
+    log.info(
+        "futures_poll: starting (tf=%s, refresh=%ds, hb=%ds)",
+        timeframe, refresh_seconds, heartbeat_seconds,
+    )
+    children: dict[tuple[str, str], asyncio.Task[None]] = {}
+    try:
+        desired = await _load_desired_futures_symbols(session_factory, timeframe=timeframe)
+        await _refresh_futures_children(
+            children, desired, runner=runner, session_factory=session_factory,
+        )
+        await record_heartbeat(
+            session_factory, WORKER_NAME, status="ok",
+            details={
+                "children": len(children), "timeframe": timeframe,
+                "gap_counts": dict(_GAP_COUNT), "rate_limit_waits": dict(_RATE_LIMIT_WAIT_COUNT),
+            },
+        )
+        last_refresh = 0.0
+        loop = asyncio.get_event_loop()
+        while True:
+            await asyncio.sleep(heartbeat_seconds)
+            now = loop.time()
+            if now - last_refresh >= refresh_seconds:
+                desired = await _load_desired_futures_symbols(session_factory, timeframe=timeframe)
+                if desired:
+                    await _refresh_futures_children(
+                        children, desired, runner=runner, session_factory=session_factory,
+                    )
+                    last_refresh = now
+                else:
+                    log.info(
+                        "futures_poll: refresh returned 0 symbols; "
+                        "keeping existing fleet of %d", len(children),
+                    )
+            await record_heartbeat(
+                session_factory, WORKER_NAME, status="ok",
+                details={
+                    "children": len(children), "timeframe": timeframe,
+                    "gap_counts": dict(_GAP_COUNT), "rate_limit_waits": dict(_RATE_LIMIT_WAIT_COUNT),
+                },
+            )
+    finally:
+        for task in children.values():
+            task.cancel()
+        for task in children.values():
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+
+def start_futures_poll_task(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> asyncio.Task[None]:
+    """Spawn the supervisor as a single asyncio.Task. Mirrors
+    start_keepalive_task (app.ws.keepalive) for symmetry. Not yet called
+    from app/main.py -- that wiring is Phase 4 Task 17's own PR."""
+    return asyncio.create_task(run_futures_poll(session_factory))
