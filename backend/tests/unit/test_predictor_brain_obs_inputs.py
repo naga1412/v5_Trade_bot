@@ -46,10 +46,14 @@ async def _capture(monkeypatch: pytest.MonkeyPatch, bars: pd.DataFrame) -> dict:
 
 
 async def test_brain_layer_scores_include_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Layer scores passed to brain = signed_strength * confidence (not just signed_strength)."""
+    """Layer scores passed to brain = signed_strength * confidence (not just signed_strength).
+
+    8 values (L1..L6, L8, L9) — L7 (permanent XGBoost stub) is dropped
+    from the RL observation's layer-score tuple, per PR-RL-DROP-L7.
+    """
     captured = await _capture(monkeypatch, _bars())
     layer_scores = captured["layer_scores"]
-    assert len(layer_scores) == 9
+    assert len(layer_scores) == 8
     for score in layer_scores:
         assert -1.0 <= score <= 1.0
 

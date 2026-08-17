@@ -553,7 +553,11 @@ async def build_prediction(
     def _layer_obs_score(i: int) -> float:
         ls = layer_results[i]
         return ls.signed_strength * ls.confidence if ls is not None else 0.0
-    brain_layers = tuple(_layer_obs_score(i) for i in range(1, 10))
+    # L7 (XGBoost) is a permanent stub (see app/core/scoring/layer7_xgboost.py)
+    # and is excluded from the RL observation's layer-score tuple — dropped,
+    # not renumbered. L7 still exists in layer_results / the general scoring
+    # registry above (traps, aggregator, layer_scores JSONB) unaffected.
+    brain_layers = tuple(_layer_obs_score(i) for i in range(1, 10) if i != 7)
     # atr_pct: use the symbol's own ATR from bars (btc_atr_pct was disabled —
     # see _build_trap_context docstring).  _btc_atr_pct(bars) computes
     # ATR14 / last_close for whatever bars are passed in, which is exactly the

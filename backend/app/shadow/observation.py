@@ -1,7 +1,7 @@
 """Snapshot full RL observation components at shadow-trade-open time.
 
 When the shadow worker opens a new position, we serialize the components
-needed to reconstruct the 54-float observation that the brain's PPO
+needed to reconstruct the 53-float observation that the brain's PPO
 policy would see at that exact moment. Stored as a JSONB blob in the
 `shadow_observations` table (migration 0019), one row per position,
 keyed on `signal_id` (which survives the move from
@@ -45,6 +45,14 @@ hours_to_next_high_impact, fomc_window from both `market` and `macro` —
 none ever had a live collector (no FX/gold feed, no econ-calendar
 source), so every row ever captured had these as hardcoded constants,
 not signal. See app/rl/obs.py's module docstring for the full rationale.
+
+PR-RL-DROP-L7 (2026-08-15): the RL observation's layer-score tuple now
+drops L7 (permanent XGBoost stub) — OBS_DIM 54 -> 53. The stored
+`layer_scores` array in this module stays 9 floats (unchanged, by
+design — see this docstring's own note above that storage is decoupled
+from obs-layout precisely so future obs-layout changes can re-assemble
+from stored components). The drop happens at re-assembly time in
+app/rl/replay_buffer.py, not in this module.
 """
 from __future__ import annotations
 

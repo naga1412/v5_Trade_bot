@@ -172,7 +172,7 @@ async def _fetch_closed_trades(
 
 
 def _layer_scores_to_tuple(d: dict) -> tuple[float, ...]:
-    """Pull L1..L9 as signed floats for legacy shadow_trades rows.
+    """Pull L1..L6, L8, L9 as signed floats for legacy shadow_trades rows.
 
     Handles two key formats produced by different shadow worker versions:
     - "1".."9"  (current format — predictor.py stores stringified ints)
@@ -182,9 +182,17 @@ def _layer_scores_to_tuple(d: dict) -> tuple[float, ...]:
     of the form {"direction": "LONG", "strength": 0.15, "confidence": 0.8, ...}.
     Dict values are converted to sign*strength*confidence to match the shadow
     worker's own computation in shadow/worker.py.
+
+    PR-RL-DROP-L7 (2026-08-15): L7 (XGBoost) is a permanent stub — excluded
+    from the RL observation's layer-score tuple (dropped, not renumbered).
+    Produces an 8-tuple in L1..L6, L8, L9 order, matching N_LAYER_SCORES=8.
     """
     out: list[float] = []
-    for i, lk in enumerate(("L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"), start=1):
+    # (label, numeric-key) pairs — L7 intentionally skipped, not renumbered.
+    for lk, i in (
+        ("L1", 1), ("L2", 2), ("L3", 3), ("L4", 4),
+        ("L5", 5), ("L6", 6), ("L8", 8), ("L9", 9),
+    ):
         v = d.get(lk)
         if v is None:
             v = d.get(str(i))
@@ -413,11 +421,24 @@ async def load_from_shadow_trades(
             # EXACT path — use snapshot captured at trade-open.
             comp = tr.obs_components
             ls_array = comp.get("layer_scores") or [0.0] * 9
-            # Be defensive: shadow_observations stores 9 floats but pad/clip
-            # if the schema drifts.
+            # Be defensive: shadow_observations stores a positional 9-float
+            # array (index0=L1 .. index6=L7 .. index8=L9 — see the
+            # layer_scores_array builder in app/shadow/worker.py and the
+            # `obs_components` docstring in app/shadow/observation.py) but
+            # pad/clip if the schema drifts.
             ls_array = [float(x) for x in ls_array[:9]] + [0.0] * max(
                 0, 9 - len(ls_array)
             )
+            # PR-RL-DROP-L7 (2026-08-15): drop the L7 slot at index 6
+            # specifically — NOT a [:8] truncation, which would silently
+            # discard L9's real historical value while keeping L7's
+            # (always-zero, permanent-stub) value. Produces the 8-tuple in
+            # L1..L6, L8, L9 order, matching N_LAYER_SCORES=8. The stored
+            # array's positional format itself is unchanged (still 9
+            # floats, by design — see observation.py's module docstring:
+            # storage is decoupled from obs-layout so future obs-layout
+            # changes can re-assemble from stored components).
+            ls_array = ls_array[:6] + ls_array[7:9]
             layer_tuple = tuple(ls_array)
             mkt = comp.get("market") or {}
             market = MarketFeatures(

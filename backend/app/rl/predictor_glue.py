@@ -175,12 +175,13 @@ def _serialise_inputs(
 ) -> list[float]:
     """Compact input serialisation for the brain_decisions.observation column.
 
-    Stores the SAME values used to build the 54-float observation (sans
+    Stores the SAME values used to build the 53-float observation (sans
     embedding, which is reproducible from the asset_id), so a future
     replay can reconstruct the obs deterministically:
 
-      L1..L9 (9) + market 3 num + regime 1 string + position 3 + macro 2
-      = 17 floats + 1 string
+      L1..L6, L8, L9 (8; L7 dropped — permanent stub, see app/rl/obs.py)
+      + market 3 num + regime 1 string + position 3 + macro 2
+      = 16 floats + 1 string
 
     For Phase C we keep the layout simple — full canonical obs storage
     is a follow-up if it turns out to matter for brain_decisions audit.

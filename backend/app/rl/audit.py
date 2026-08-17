@@ -66,7 +66,8 @@ async def record_brain_decision(
         session: live AsyncSession.
         decision: the BrainDecision returned by ``decide_action``.
         symbol: market symbol the decision applies to (e.g. ``"BTC/USDT"``).
-        observation: 58-float observation vector — numpy array, list, or
+        observation: compact observation-input serialisation (see
+            ``predictor_glue._serialise_inputs``) — numpy array, list, or
             tuple. Serialised via :func:`_to_jsonable`.
         ts: timestamp the candle closed at; defaults to now-UTC if absent.
     """

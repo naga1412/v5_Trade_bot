@@ -96,7 +96,8 @@ def _macro() -> MacroFeatures:
 
 
 def _layers() -> tuple[float, ...]:
-    return tuple(0.1 * i for i in range(1, 10))
+    # 8 values (L1..L6, L8, L9) — L7 dropped, per PR-RL-DROP-L7.
+    return tuple(0.1 * i for i in range(1, 9))
 
 
 def _activate_long_full_policy() -> None:

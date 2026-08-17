@@ -1,4 +1,4 @@
-"""Healer Phase 0 detectors — C1, C2, C3, C4.
+"""Healer Phase 0 detectors — C1, C2, C3, C4, C6.
 
 Each detector is a pure async function that takes a session and returns
 a list of :class:`HealerFinding` (empty when nothing is wrong). The
@@ -20,6 +20,12 @@ Detector menu:
        (distinct from worker-heartbeat detection).
   C4 — blocked-rate anomaly: >95% of dispatches blocked for >2h → info
        (gates over-blocking; NOT critical in the current no-funds state).
+  C6 — RL checkpoint load-health: rl_checkpoints.is_active=TRUE but the
+       in-process loaded pair (app.rl.checkpoints.get_active_policy_and_
+       checkpoint) is None or doesn't match → the brain has silently
+       fallen back to equal-weight (brain_adjust=1.0) with no durable
+       signal that it happened → CRITICAL. (C5 lives in
+       :mod:`app.healer.system_truth_detector`, not this module.)
 """
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ from app.healer.findings import (
     HealerFinding,
     upsert_known_error_type,
 )
+from app.rl.checkpoints import get_active_policy_and_checkpoint
 from app.shadow.universe import load_current_universe
 from app.ws.keepalive import (
     DEFAULT_EXCLUDE,
@@ -669,6 +676,133 @@ async def detect_blocked_rate_anomaly(
     return findings
 
 
+# ---- C6: RL checkpoint load-health ---------------------------------------
+
+
+async def detect_rl_checkpoint_load_health(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[HealerFinding]:
+    """C6: rl_checkpoints.is_active=TRUE but the in-process pair disagrees.
+
+    ``app.rl.checkpoints.load_active_checkpoint()`` fails open on ANY load
+    error (most commonly a shape mismatch after an OBS_DIM change): it
+    logs once at ERROR and leaves module state empty (``_active_policy=
+    None``), but never clears the DB ``is_active`` flag and never raises
+    anywhere durable/queryable. From that point on, every prediction gets
+    ``brain_adjust=1.0`` (pure equal-weight, no-op) via
+    :func:`app.rl.predictor_glue.compute_brain_adjust_and_persist`'s
+    fail-open contract — silently, forever, until someone thinks to check
+    backend logs at exactly the right container's boot time.
+
+    This is precisely the incident that produced ZERO ``brain_decisions``
+    rows from 2026-08-05T12:30:09Z onward, undetected for 10 days (see
+    PR-RL-DROP-L7, 2026-08-15, which both fixes the specific stale row via
+    a migration and adds this detector so the failure mode has a durable,
+    alerting surface going forward).
+
+    Compares each DB row where ``is_active = TRUE`` against
+    :func:`app.rl.checkpoints.get_active_policy_and_checkpoint` (a pure
+    in-process read, no DB call). Two anomaly shapes, both CRITICAL:
+
+      * DB says active, nothing is loaded in-process at all.
+      * DB says active, but the loaded pair's id/version is a DIFFERENT
+        checkpoint than the DB-active row (stale module state from a
+        prior activation, or a race).
+
+    No DB-active row at all is the normal pre-training-bootstrap state —
+    NOT an anomaly, no finding. A loaded pair that matches the DB-active
+    row is the normal healthy state — no finding.
+
+    Scope: ``rl_checkpoints`` / the L10 PPO policy ONLY. Does not touch
+    ``ml_checkpoints`` (the separate L8 ConvLSTM checkpoint registry) —
+    out of scope for this incident class.
+
+    Detect-only, per this module's contract (see module docstring): never
+    deactivates the stale DB row itself. That is an operator decision —
+    the accompanying migration is the one-time, reviewed mechanism for
+    the row already known to be stale as of this PR; any FUTURE
+    occurrence still requires an operator/migration to clear, same as
+    today.
+
+    Known tradeoff (accepted, not fixed here): this detector re-fires
+    every 5-minute tick for as long as the condition persists — no dedup/
+    reminder-interval logic like C3 got after observing real alert
+    fatigue in prod. If this proves noisy in practice, that's a candidate
+    follow-up, not something to build proactively.
+    """
+    findings: list[HealerFinding] = []
+    try:
+        async with session_factory() as session:
+            rows = (await session.execute(
+                sa.text(
+                    "SELECT id, model_name, version FROM rl_checkpoints "
+                    "WHERE is_active = TRUE"
+                ),
+            )).all()
+    except Exception as e:  # noqa: BLE001
+        log.warning("healer C6: query failed: %s", e)
+        return []
+
+    if not rows:
+        # No DB-active checkpoint at all — normal pre-training-bootstrap
+        # state, not an anomaly.
+        return findings
+
+    pair = get_active_policy_and_checkpoint()
+
+    for r in rows:
+        db_id = int(r.id)
+        db_model_name = str(r.model_name)
+        db_version = str(r.version)
+
+        if pair is None:
+            findings.append(HealerFinding(
+                detector_name="rl_checkpoint_load_health",
+                severity="critical",
+                summary=(
+                    f"rl_checkpoints id={db_id} ({db_model_name} "
+                    f"v{db_version}) is DB-active but NOT loaded "
+                    f"in-process — brain_adjust has been neutral (1.0, "
+                    f"equal-weight no-op) since the load failure. Check "
+                    f"backend logs for \"RL brain checkpoint load failed\"."
+                ),
+                details={
+                    "db_checkpoint_id": db_id,
+                    "db_model_name": db_model_name,
+                    "db_version": db_version,
+                    "loaded_checkpoint_id": None,
+                    "loaded_version": None,
+                    "reason": "not_loaded",
+                },
+            ))
+            continue
+
+        _model, loaded_ck = pair
+        if loaded_ck.id != db_id or loaded_ck.version != db_version:
+            findings.append(HealerFinding(
+                detector_name="rl_checkpoint_load_health",
+                severity="critical",
+                summary=(
+                    f"rl_checkpoints id={db_id} ({db_model_name} "
+                    f"v{db_version}) is DB-active but the loaded checkpoint "
+                    f"is id={loaded_ck.id} v{loaded_ck.version} — mismatch. "
+                    f"brain_adjust has been neutral (1.0, equal-weight "
+                    f"no-op) for the DB-active row since the load failure. "
+                    f"Check backend logs for \"RL brain checkpoint load "
+                    f"failed\"."
+                ),
+                details={
+                    "db_checkpoint_id": db_id,
+                    "db_model_name": db_model_name,
+                    "db_version": db_version,
+                    "loaded_checkpoint_id": loaded_ck.id,
+                    "loaded_version": loaded_ck.version,
+                    "reason": "mismatch",
+                },
+            ))
+    return findings
+
+
 __all__ = [
     "C1_HOURLY_RATE_LIMIT",
     "C2_UNIVERSE_QUIET_LOOKBACK_MINUTES",
@@ -683,5 +817,6 @@ __all__ = [
     "detect_blocked_rate_anomaly",
     "detect_dispatch_error_rate",
     "detect_per_symbol_prediction_freshness",
+    "detect_rl_checkpoint_load_health",
     "detect_score_distribution_anomaly",
 ]
