@@ -90,6 +90,11 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         "mtf_agreement", "mtf_dominant_tf", "mtf_directions_json",
         "p_win", "effective_score", "realized_vol_20d",
         "funding_directional_adj",
+        # Phase 4 Task 3 (alembic 0038_symbol_source_tag, 2026-08-17):
+        # cohort lineage tag (established_top20/liquidity_added_spot/
+        # futures_poll). Metadata-only, not a signal input — same
+        # treatment as the other recording-only analytics columns above.
+        "symbol_source",
     }),
     "shadow_trades": frozenset({
         "id", "prev_hash", "row_hash",
@@ -107,6 +112,11 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         # not a signal input the chain protects — same treatment as the
         # other MTF analytics columns above.
         "mtf_adx_by_tf_json",
+        # Phase 4 Task 3 (alembic 0038_symbol_source_tag, 2026-08-17):
+        # cohort lineage tag, same rationale as on `predictions` above.
+        # Load-bearing for the reversal-criterion-#2 EV re-measurement,
+        # which reads it back but never contributes it to the chain.
+        "symbol_source",
     }),
     "live_trades": frozenset({
         "id", "prev_hash", "row_hash",
@@ -134,6 +144,9 @@ NON_HASHED_ALLOW_LIST: dict[str, frozenset[str]] = {
         # `binance_order_id` is now also a post-INSERT field — see
         # the HASH_PAYLOAD note above.
         "binance_order_id",
+        # Phase 4 Task 3 (alembic 0038_symbol_source_tag, 2026-08-17):
+        # cohort lineage tag, same rationale as on `predictions` above.
+        "symbol_source",
     }),
     "paper_trades": frozenset({
         "id", "prev_hash", "row_hash",
