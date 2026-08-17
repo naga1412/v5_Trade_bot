@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -10,15 +11,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.routes.ws import manager
 from app.config import get_settings
 from app.core.execution.persistence import persist_prediction
+from app.core.gates.entry_quality import evaluate_all_gates
 from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
+from app.db.dispatch_decisions import record_dispatch_decision
 from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
 from app.ml.validator import record_pending_validation
 from app.ops.heartbeat import record_heartbeat
-from app.trading.execution.glue import dispatch_if_eligible, vault_keys
+from app.trading.execution.glue import (
+    _parse_mtf_adx_by_tf_json,
+    dispatch_if_eligible,
+    vault_keys,
+)
 
 log = logging.getLogger(__name__)
 
@@ -419,6 +426,45 @@ async def _maybe_dispatch(
                 pred.symbol, pred.timeframe,
                 result.outcome, result.detail,
             )
+            # Item 3 (2026-08-14): persisted decision log. Fires AFTER the
+            # real dispatch decision above is made and (if applicable)
+            # acted on -- nothing here can block or alter a trade. Own
+            # try/except with a distinct error marker (not the generic
+            # "dispatch_if_eligible failed" below) so a telemetry failure
+            # is never mistaken for a real dispatch failure, and never
+            # trips the healer C1 dispatch-exception aggregation meant
+            # for actual trading-path errors.
+            try:
+                _eq_settings = get_settings()
+                _market_regime: str | None = None
+                if getattr(_eq_settings, "REGIME_GATE_ENABLED", False):
+                    from app.core.regime import get_cached_market_regime
+                    _market_regime = await get_cached_market_regime()
+                _gate_signal = SimpleNamespace(
+                    direction=pred.final.direction,
+                    entry_score=pred.final.score,
+                    layer2_direction=_l2_direction,
+                    layer2_confidence=_l2_confidence,
+                    mtf_dominant_tf=pred.mtf_dominant_tf,
+                    mtf_adx_by_tf=_parse_mtf_adx_by_tf_json(
+                        getattr(pred, "mtf_adx_by_tf_json", None),
+                    ),
+                )
+                gate_verdicts = evaluate_all_gates(
+                    _gate_signal, _eq_settings, market_regime=_market_regime,
+                )
+                await record_dispatch_decision(
+                    session_factory,
+                    symbol=pred.symbol, timeframe=pred.timeframe, ts=pred.ts,
+                    direction=pred.final.direction, final_score=pred.final.score,
+                    gate_verdicts=gate_verdicts,
+                    outcome=result.outcome, detail=result.detail,
+                )
+            except Exception as log_exc:  # noqa: BLE001
+                log.error(
+                    "dispatch_decision_log_failed: symbol=%s timeframe=%s -- %s",
+                    pred.symbol, pred.timeframe, log_exc,
+                )
     except Exception as e:  # noqa: BLE001
         log.error("dispatch_if_eligible failed: %s", e)
         # Healer C1 writer (Phase 0 completion): record the exception so

@@ -215,6 +215,16 @@ def test_verifier_covers_all_chained_tables() -> None:
     assert len(tables) >= 8
 
 
+def test_verifier_ignores_dispatch_decisions() -> None:
+    """Item 3 (2026-08-14): dispatch_decisions is telemetry, not a
+    financial ledger -- deliberately never registered in
+    HASH_PAYLOAD_COLUMNS or NON_HASHED_ALLOW_LIST. Since the verifier
+    only walks HASH_PAYLOAD_COLUMNS.keys(), it's structurally invisible
+    to the nightly audit-chain verifier without needing any guard code."""
+    assert "dispatch_decisions" not in set(_tables_to_verify())
+    assert "dispatch_decisions" not in HASH_PAYLOAD_COLUMNS
+
+
 @pytest.mark.asyncio
 async def test_verifier_calls_verify_chain_without_columns_kwarg(
     monkeypatch: pytest.MonkeyPatch,
