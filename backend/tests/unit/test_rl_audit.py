@@ -50,7 +50,7 @@ def _decision(action: str = "LONG_FULL", smoothed: str = "LONG_FULL") -> BrainDe
 
 @pytest.mark.asyncio
 async def test_first_row_uses_genesis_prev_hash(session: AsyncSession) -> None:
-    obs = np.zeros(58, dtype=np.float32)
+    obs = np.zeros(53, dtype=np.float32)
     new_hash = await record_brain_decision(
         session, decision=_decision(), symbol="BTC/USDT", observation=obs,
         ts=datetime(2024, 4, 1, 12, 0, tzinfo=timezone.utc),
@@ -72,7 +72,7 @@ async def test_first_row_uses_genesis_prev_hash(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_chain_links_correctly_across_rows(session: AsyncSession) -> None:
-    obs = np.arange(58, dtype=np.float32)
+    obs = np.arange(53, dtype=np.float32)
     h1 = await record_brain_decision(
         session, decision=_decision(), symbol="BTC/USDT", observation=obs,
     )
@@ -97,7 +97,7 @@ async def test_chain_links_correctly_across_rows(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_observation_serialised_as_json_string(session: AsyncSession) -> None:
-    obs = np.array([1.5, -2.0, 0.0] + [0.0] * 55, dtype=np.float32)
+    obs = np.array([1.5, -2.0, 0.0] + [0.0] * 50, dtype=np.float32)
     await record_brain_decision(
         session, decision=_decision(), symbol="BTC/USDT", observation=obs,
     )
@@ -107,14 +107,14 @@ async def test_observation_serialised_as_json_string(session: AsyncSession) -> N
     ))).first()
     deserialised = json.loads(row.observation)
     assert isinstance(deserialised, list)
-    assert len(deserialised) == 58
+    assert len(deserialised) == 53
     assert deserialised[0] == 1.5
     assert deserialised[1] == -2.0
 
 
 @pytest.mark.asyncio
 async def test_logits_serialised_as_json(session: AsyncSession) -> None:
-    obs = np.zeros(58, dtype=np.float32)
+    obs = np.zeros(53, dtype=np.float32)
     await record_brain_decision(
         session, decision=_decision(), symbol="BTC/USDT", observation=obs,
     )
@@ -129,7 +129,7 @@ async def test_logits_serialised_as_json(session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_accepts_plain_list_observation(session: AsyncSession) -> None:
     """Defensive: caller may pass a Python list instead of numpy array."""
-    obs = [0.0] * 58
+    obs = [0.0] * 53
     h = await record_brain_decision(
         session, decision=_decision(), symbol="BTC/USDT", observation=obs,
     )
@@ -140,7 +140,7 @@ async def test_accepts_plain_list_observation(session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_default_ts_is_now_utc(session: AsyncSession) -> None:
     """If caller doesn't supply ts, the row gets a fresh UTC timestamp."""
-    obs = np.zeros(58, dtype=np.float32)
+    obs = np.zeros(53, dtype=np.float32)
     before = datetime.now(timezone.utc)
     await record_brain_decision(
         session, decision=_decision(), symbol="BTC/USDT", observation=obs,

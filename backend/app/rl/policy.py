@@ -1,6 +1,6 @@
 """SP-4 Phase B1 — PPO PolicyNetwork.
 
-Spec sec 3.3 — small actor-critic MLP that consumes the 58-dim observation
+Spec sec 3.3 — small actor-critic MLP that consumes the 53-dim observation
 vector and outputs:
 
 * policy logits over the 5 discrete actions (LONG_FULL, LONG_HALF, FLAT,
@@ -9,7 +9,7 @@ vector and outputs:
 
 Architecture:
 
-    Linear(58 → 128) + ReLU
+    Linear(53 → 128) + ReLU
     Linear(128 → 128) + ReLU
     Dropout(0.1)
     ├── policy_head: Linear(128 → 5)        — action logits
