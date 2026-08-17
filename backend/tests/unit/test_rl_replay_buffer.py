@@ -173,7 +173,7 @@ async def test_reward_in_clip_range(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_layer_scores_extracted_from_jsonb(session: AsyncSession) -> None:
-    """L1..L9 from layer_scores JSONB land in obs[32:41]."""
+    """L1..L6, L8, L9 from layer_scores JSONB land in obs[32:40] (L7 dropped)."""
     # Custom layer scores so we can spot them in the obs vector.
     await session.execute(sa.text("""
         INSERT INTO shadow_trades
@@ -190,8 +190,8 @@ async def test_layer_scores_extracted_from_jsonb(session: AsyncSession) -> None:
     await session.commit()
     out = await load_from_shadow_trades(session, window_days=365)
     assert len(out) == 1
-    # Embedding=zeros (32) → layer scores start at obs[32]
-    layer_slice = out[0].obs[32:41]
+    # Embedding=zeros (32) → layer scores start at obs[32], 8 slots (L7 dropped)
+    layer_slice = out[0].obs[32:40]
     assert np.allclose(layer_slice, 0.5)
 
 
@@ -346,13 +346,13 @@ async def test_obs_components_path_uses_stored_market_features(
     # Obs is a numpy float32 array — we can't directly inspect "regime"
     # but we can confirm the observation came from build_observation
     # using the EXACT funding_rate the JSON stored.
-    # OBS layout: emb(32) + ls(9) + market(3: atr_pct,funding,oi_delta)
+    # OBS layout: emb(32) + ls(8, L7 dropped) + market(3: atr_pct,funding,oi_delta)
     #           + regime(5) + position(3) + macro(2)
     obs = out[0].obs
-    funding_idx = 32 + 9 + 1  # second slot of market block
+    funding_idx = 32 + 8 + 1  # second slot of market block
     assert obs[funding_idx] == pytest.approx(0.0008, abs=1e-6)
-    # Regime one-hot at indices 32+9+3 .. 32+9+3+4. bear_crash is index 1.
-    regime_base = 32 + 9 + 3
+    # Regime one-hot at indices 32+8+3 .. 32+8+3+4. bear_crash is index 1.
+    regime_base = 32 + 8 + 3
     assert obs[regime_base + 1] == pytest.approx(1.0)
     assert obs[regime_base + 0] == pytest.approx(0.0)
 
@@ -371,7 +371,7 @@ async def test_legacy_trade_without_observation_falls_back_to_reconstruction(
     assert len(out) == 1
     # Funding defaults to 0 in the legacy path because no intermarket row exists.
     obs = out[0].obs
-    funding_idx = 32 + 9 + 1
+    funding_idx = 32 + 8 + 1
     assert obs[funding_idx] == pytest.approx(0.0)
 
 
@@ -425,21 +425,21 @@ async def test_partial_components_handled_safely(
 
 
 def test_layer_scores_to_tuple_l_prefix_keys() -> None:
-    """Legacy 'L1'..'L9' key format returns correct floats."""
+    """Legacy 'L1'..'L9' key format returns correct floats (L7 dropped -> 8-tuple)."""
     d = {f"L{i}": float(i) * 0.1 for i in range(1, 10)}
     result = _layer_scores_to_tuple(d)
-    assert len(result) == 9
-    assert result[0] == pytest.approx(0.1)
-    assert result[8] == pytest.approx(0.9)
+    assert len(result) == 8
+    assert result[0] == pytest.approx(0.1)  # L1
+    assert result[7] == pytest.approx(0.9)  # L9 (last slot, L7 dropped)
 
 
 def test_layer_scores_to_tuple_string_int_keys() -> None:
     """Current shadow worker format uses '1'..'9' (stringified ints, no prefix)."""
     d = {str(i): float(i) * 0.1 for i in range(1, 10)}
     result = _layer_scores_to_tuple(d)
-    assert len(result) == 9
-    assert result[0] == pytest.approx(0.1)
-    assert result[8] == pytest.approx(0.9)
+    assert len(result) == 8
+    assert result[0] == pytest.approx(0.1)  # L1
+    assert result[7] == pytest.approx(0.9)  # L9 (last slot, L7 dropped)
 
 
 def test_layer_scores_to_tuple_dict_values_long() -> None:
@@ -474,7 +474,7 @@ def test_layer_scores_to_tuple_l_prefix_takes_priority_over_str_int() -> None:
 def test_layer_scores_to_tuple_missing_keys_default_to_zero() -> None:
     """Keys missing from both formats silently default to 0.0."""
     result = _layer_scores_to_tuple({})
-    assert result == tuple([0.0] * 9)
+    assert result == tuple([0.0] * 8)
 
 
 def test_macro_from_ts_iso_weekend_saturday() -> None:
@@ -520,7 +520,7 @@ async def test_legacy_trade_macro_derives_weekend_from_opened_at(
 ) -> None:
     """End-to-end: legacy trade opened on a Saturday gets weekend=True in obs.
 
-    obs layout: emb(32) + ls(9) + market(3) + regime(5) + position(3) + macro(2)
+    obs layout: emb(32) + ls(8, L7 dropped) + market(3) + regime(5) + position(3) + macro(2)
     macro slot order: weekend, asia_open
     """
     # 2024-04-06 is a Saturday; hour=10 is not asia_open
@@ -530,7 +530,7 @@ async def test_legacy_trade_macro_derives_weekend_from_opened_at(
     out = await load_from_shadow_trades(session, window_days=365)
     assert len(out) == 1
     obs = out[0].obs
-    macro_base = 32 + 9 + 3 + 5 + 3   # emb + ls + market + regime + position
+    macro_base = 32 + 8 + 3 + 5 + 3   # emb + ls + market + regime + position
     # macro slot 0 = weekend, slot 1 = asia_open
     assert obs[macro_base + 0] == pytest.approx(1.0)   # weekend=True → 1.0
     assert obs[macro_base + 1] == pytest.approx(0.0)   # asia_open=False → 0.0
@@ -542,7 +542,8 @@ async def test_legacy_trade_string_int_layer_keys_produce_nonzero_obs(
 ) -> None:
     """Pre-fix legacy path used 'L1' lookup on '1'-keyed data → all zeros.
 
-    After fix, '1'-keyed layer_scores must land correctly in obs[32:41].
+    After fix, '1'-keyed layer_scores must land correctly in obs[32:40]
+    (8 slots — L7 dropped).
     """
     # Insert a trade whose layer_scores use '1'..'9' (current shadow worker format)
     await session.execute(sa.text("""
@@ -560,6 +561,6 @@ async def test_legacy_trade_string_int_layer_keys_produce_nonzero_obs(
     await session.commit()
     out = await load_from_shadow_trades(session, window_days=365)
     assert len(out) == 1
-    layer_slice = out[0].obs[32:41]
-    # After fix all 9 slots must be 0.5; before fix they were all 0.0.
+    layer_slice = out[0].obs[32:40]
+    # After fix all 8 slots must be 0.5; before fix they were all 0.0.
     assert np.allclose(layer_slice, 0.5)

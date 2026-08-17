@@ -101,7 +101,7 @@ def decide_action(
       1. Look up the active (policy, checkpoint) pair from module state.
       2. Get the (cold-start-blended) embedding for ``symbol`` via the
          supplied :class:`AssetEmbeddingTable`.
-      3. Build the 58-float observation via
+      3. Build the 53-float observation via
          :func:`app.rl.obs.build_observation`.
       4. Run a deterministic forward (model.eval, ``deterministic=True``)
          and pull (action_idx, log_prob, value).
