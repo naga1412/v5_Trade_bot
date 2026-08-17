@@ -62,14 +62,23 @@ class Settings(BaseSettings):
     MTF_HIGHER_TF_VETO: bool = True
 
     # --- PR2: SHORT-side safety (default OFF; per-env enable) -------------
-    # All 3 flags must default False — spec §6.1 hard bound. Env var
-    # override allowed per-environment.
-    SHORT_FUNDING_HALVE_HOLD: bool = False
+    # Spec §6.1 hard bound: default False, env var override allowed
+    # per-environment.
+    #
+    # SHORT_FUNDING_HALVE_HOLD / SHORT_FUNDING_HALVE_THRESHOLD_PCT removed
+    # 2026-08-14 (remediation work order E2, FU-19): the flag+threshold
+    # shipped in PR2 but the hook was deferred to FU-19, which never
+    # landed -- the required live-trade hold-timeout infrastructure does
+    # not exist (shadow's TIMEOUT_BARS is hardcoded/shadow-only; live
+    # trades have no expires_at column or timer worker). Zero code
+    # references beyond this file, confirmed via grep and via A1's
+    # settings-check against prod (value was False, as it always has
+    # been -- nothing to preserve). Re-add if/when FU-19's live hold-
+    # timeout infra actually ships.
     SHORT_TIGHTEN_SL_LOW_MTF: bool = False
     SHORT_VETO_HIGH_BORROW: bool = False
 
     # --- PR2: SHORT-side thresholds (only consulted when flag ON) --------
-    SHORT_FUNDING_HALVE_THRESHOLD_PCT: float = 0.05   # %/8h
     SHORT_VETO_BORROW_APR_PCT: float = 10.0           # % APR
     SHORT_TIGHTEN_SL_MTF_CUTOFF: int = 5
     SHORT_TIGHTEN_SL_PCT: float = 0.20
@@ -203,13 +212,21 @@ class Settings(BaseSettings):
     SYMBOL_ALLOWLIST_CACHE_TTL_SECONDS: int = 3600
 
     # --- PR10.5 / FU-28 UI freshness monitor ----------------------------
-    # The monitor itself is observation-on by default. Only auto-recycle
-    # is gated: shadow_worker is currently stateful=True in worker_registry,
-    # so calling worker_supervisor.restart on it is unsafe without further
-    # design work. The flag exists for forward-compat.
+    # The monitor itself is observation-on by default.
+    #
+    # FU28_AUTO_RECYCLE_ENABLED removed 2026-08-14 (remediation work
+    # order E1): structurally inert, by design, not oversight --
+    # run_ui_freshness_monitor_loop (the only production caller) never
+    # passed recycle_fn to run_one_freshness_check, so the flag's True
+    # branch was unreachable regardless of its value. This was
+    # deliberate: shadow_worker is stateful=True in worker_registry, and
+    # auto-restarting it mid-flight is unsafe without further design
+    # work -- exactly the kind of shadow execution-logic change the
+    # active breakeven-variant measurement can't tolerate right now.
+    # Removed rather than wired for that reason. Re-add alongside real
+    # restart-safe design work if this is revisited.
     FU28_POLL_INTERVAL_SECONDS: int = 300
     FU28_STALE_PNL_TICK_THRESHOLD_SECONDS: int = 1800
-    FU28_AUTO_RECYCLE_ENABLED: bool = False
 
     # --- PR10.7: SPOT-invalid symbols ------------------------------------
     # Symbols that appear in the asset_universe (or persist in open
