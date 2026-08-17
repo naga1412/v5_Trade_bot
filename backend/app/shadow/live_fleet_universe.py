@@ -1,0 +1,290 @@
+"""Phase 4 liquidity-floor selector -- addendum to
+docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md
+(2026-08-17). Replaces top-N-by-volume with liquidity-floor pass/fail
+across the full market, with hysteresis. See the decision record at
+docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md.
+
+This is the single shared selector both `ws_keepalive_task` (Task 5b,
+spot-backed cohorts) and `futures_poll_task` (Task 8, futures-only
+cohort) read from -- "one mechanism closes both coverage gaps."
+
+Hysteresis (addendum section (a)):
+  - 5 samples per candidate, ~10s apart (order-book spread flickers
+    within seconds on thin-tick symbols -- a single point-in-time read
+    would inherit that noise at the selection layer).
+  - Entry: not-currently-a-member needs >=3 of 5 passes.
+  - Exit: currently-a-member needs a UNANIMOUS 5 of 5 fails (i.e. must
+    fail strictly more than EXIT_MAX_PASSES=0 passes to be retained).
+  - Order of operations matters: the previous snapshot ("is this symbol
+    currently a member?") is loaded BEFORE this tick's samples are
+    taken, because which threshold applies (3-of-5 vs unanimous-fail)
+    depends on that prior state, not on anything this tick measures.
+  - Minimum 24h dwell is satisfied structurally by the daily refresh
+    cadence itself (see note above Step 8 in the plan doc) -- no
+    separate dwell-timer state is tracked here.
+  - Open-position override: a symbol with an open live_trades or
+    shadow_open_positions row is never removed from the fleet while
+    that position is open, regardless of liquidity-check outcome. This
+    guards against REMOVAL of an existing member (addendum (a) point 4:
+    "never removed... until the position closes") -- it is not an
+    entry guarantee for a brand-new candidate that fails the 3-of-5
+    entry bar.
+
+Cold-start seeding (addendum section (c) / plan doc Task 5 note 2): the
+very first time this table is ever refreshed (no prior snapshot exists
+at all), a candidate that also appears in today's legacy top-20-by-
+volume fleet (`asset_universe` via `load_current_universe`, filtered to
+`KEEPALIVE_TOP_N`) is tagged `established_top20` instead of
+`liquidity_added_spot` -- a lineage marker for "was already covered
+before the cutover", not a live-recomputed rank. This branch is gated
+on `if not prior:` so it structurally cannot re-fire on any later
+refresh (the first successful refresh always persists at least one row,
+making every subsequent `prior` non-empty), and a symbol already a
+member on a later refresh always takes its cohort from
+`prior[sym].cohort` (sticky, never recomputed) rather than from this
+branch.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Literal
+
+import httpx
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.data.futures_liquidity import QVOL_FLOOR_USDT, check_liquidity
+from app.data.ratelimit import RateLimitedClient
+
+log = logging.getLogger(__name__)
+
+_FUTURES_BASE = "https://fapi.binance.com"
+_SPOT_BASE = "https://api.binance.com"
+
+N_SAMPLES: int = 5
+SAMPLE_GAP_SECONDS: float = 10.0
+ENTRY_MIN_PASSES: int = 3   # of N_SAMPLES
+EXIT_MAX_PASSES: int = 0    # exit requires unanimous failure -- 0 passes of 5
+
+Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
+
+
+@dataclass(frozen=True)
+class LiveFleetEntry:
+    symbol: str
+    cohort: Cohort
+    qvol_24h: float
+    spread_bps: float
+    depth_0_5pct_usdt: float
+
+
+async def has_open_position(session: AsyncSession, symbol_pair: str) -> bool:
+    """True if symbol_pair has an open live_trades OR shadow_open_positions
+    row. Checked before ANY exit -- hard override, not best-effort.
+
+    The two tables store the symbol in two DIFFERENT formats, which is
+    NOT a normalization nicety -- querying both with the same literal
+    string silently never matches one side:
+
+      - live_trades.symbol is the canonical BASE/QUOTE slash form (e.g.
+        "BTC/USDT") -- see
+        app.trading.execution.symbol_position_gate.get_open_position_trade_id's
+        docstring ("matches how live_trades.symbol is written").
+      - shadow_open_positions.symbol is Binance no-slash form (e.g.
+        "BTCUSDT") -- see app.api.routes.bot_status's comment ("Symbols
+        stored in shadow_open_positions are already in Binance no-slash
+        form").
+
+    `symbol_pair` (matching the naming/format `to_pair()` produces and
+    the format `app.ws.keepalive` passes around) is expected in slash
+    form; it is normalized per-table below.
+    """
+    no_slash = symbol_pair.replace("/", "")
+    row = (await session.execute(
+        sa.text(
+            "SELECT 1 FROM live_trades WHERE status = 'open' AND symbol = :sp "
+            "UNION ALL "
+            "SELECT 1 FROM shadow_open_positions WHERE symbol = :ns "
+            "LIMIT 1"
+        ),
+        {"sp": symbol_pair, "ns": no_slash},
+    )).first()
+    return row is not None
+
+
+async def load_live_fleet_universe(
+    session: AsyncSession, *, cohort: str | None = None,
+) -> list[LiveFleetEntry]:
+    """Read the latest snapshot, optionally filtered to one cohort."""
+    where_cohort = "AND cohort = :cohort " if cohort else ""
+    params: dict = {"cohort": cohort} if cohort else {}
+    rows = await session.execute(
+        sa.text(
+            "SELECT symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt "
+            "FROM live_fleet_universe "
+            "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM live_fleet_universe) "
+            + where_cohort
+        ),
+        params,
+    )
+    return [
+        LiveFleetEntry(
+            symbol=r.symbol, cohort=r.cohort, qvol_24h=r.qvol_24h,
+            spread_bps=r.spread_bps, depth_0_5pct_usdt=r.depth_0_5pct_usdt,
+        )
+        for r in rows
+    ]
+
+
+async def refresh_live_fleet_universe(
+    session_factory: async_sessionmaker[AsyncSession],
+    http: httpx.AsyncClient,
+    rate_client: RateLimitedClient,
+) -> list[LiveFleetEntry]:
+    """The daily job. See module docstring for the design this implements.
+
+    Order of operations (load-bearing for the hysteresis rule):
+      1. Fetch the full market (futures + spot symbol sets, bulk 24h
+         tickers) and cheap-prefilter candidates on qvol alone.
+      2. Load the PRIOR snapshot (and, only if there is none at all,
+         the cold-start legacy-fleet seed) -- this happens BEFORE any
+         of this tick's check_liquidity samples are taken, because
+         "is this symbol currently a member" determines which
+         hysteresis threshold (3-of-5 entry vs unanimous-fail exit)
+         applies to THIS tick's samples.
+      3. Sample check_liquidity N_SAMPLES times per candidate and apply
+         the direction-dependent threshold from step 2's prior state.
+      4. Re-add anything that failed exit but has an open position
+         (hard override), carrying its prior liquidity numbers forward
+         unchanged rather than re-sampling.
+      5. Persist the new snapshot and return it.
+    """
+    futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
+    futures_resp.raise_for_status()
+    fut_symbols = {
+        s["symbol"] for s in futures_resp.json()["symbols"]
+        if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL"
+        and s.get("status") == "TRADING"
+    }
+
+    spot_resp = await http.get(f"{_SPOT_BASE}/api/v3/exchangeInfo")
+    spot_resp.raise_for_status()
+    spot_symbols = {
+        s["symbol"] for s in spot_resp.json()["symbols"]
+        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+    }
+    futures_only = fut_symbols - spot_symbols
+
+    ticker_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/ticker/24hr")
+    ticker_resp.raise_for_status()
+    qvol_by_symbol = {t["symbol"]: float(t["quoteVolume"]) for t in ticker_resp.json()}
+
+    # Cheap pre-filter -- skip the 5x-sampled depth check entirely for
+    # anything that already fails on volume alone (the large majority).
+    candidates = sorted(s for s in fut_symbols if qvol_by_symbol.get(s, 0.0) >= QVOL_FLOOR_USDT)
+
+    async with session_factory() as session:
+        prior = {e.symbol: e for e in await load_live_fleet_universe(session)}
+
+        # Cold-start seed: no prior snapshot at all -- consult today's
+        # legacy top-20-by-volume fleet so pre-cutover coverage gets
+        # tagged established_top20, not liquidity_added_spot. Gated on
+        # `not prior` so this can only ever fire on the very first
+        # successful refresh (every refresh from here on persists at
+        # least one row, per step 5 below, so `prior` is non-empty on
+        # every subsequent call).
+        legacy_top20: set[str] = set()
+        if not prior:
+            from app.shadow.universe import load_current_universe
+            from app.ws.keepalive import KEEPALIVE_TOP_N, to_pair
+            try:
+                legacy_entries = await load_current_universe(session)
+                legacy_top20 = {
+                    to_pair(e.symbol).replace("/", "")
+                    for e in legacy_entries[:KEEPALIVE_TOP_N]
+                }
+            except Exception as e:  # noqa: BLE001 -- cold-start seed is best-effort
+                log.warning("live_fleet_universe: legacy top-20 seed failed: %s", e)
+
+    results: dict[str, LiveFleetEntry] = {}
+    for sym in candidates:
+        pass_count = 0
+        last_check = None
+        for i in range(N_SAMPLES):
+            try:
+                last_check = await check_liquidity(sym, rate_client)
+                if last_check.passed:
+                    pass_count += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
+            if i < N_SAMPLES - 1:
+                await asyncio.sleep(SAMPLE_GAP_SECONDS)
+        if last_check is None:
+            continue
+
+        currently_in = sym in prior
+        if currently_in:
+            keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
+        else:
+            keep = pass_count >= ENTRY_MIN_PASSES
+
+        if not keep:
+            continue
+
+        cohort: Cohort
+        if currently_in:
+            cohort = prior[sym].cohort  # sticky -- inherited, never recomputed
+        elif sym in legacy_top20:
+            cohort = "established_top20"
+        elif sym in futures_only:
+            cohort = "futures_poll"
+        else:
+            cohort = "liquidity_added_spot"
+
+        results[sym] = LiveFleetEntry(
+            symbol=sym, cohort=cohort, qvol_24h=qvol_by_symbol[sym],
+            spread_bps=last_check.spread_bps, depth_0_5pct_usdt=last_check.depth_0_5pct_usdt,
+        )
+
+    # Open-position override -- re-add anything that failed exit (or was
+    # never sampled this tick, e.g. dropped below the qvol pre-filter
+    # entirely) but has an open position, even though the loop above
+    # already excluded it. Scoped to PRIOR members only: this guards
+    # against REMOVING an existing member, per addendum (a) point 4
+    # ("never removed... until the position closes") -- it is not an
+    # entry guarantee for a brand-new candidate that simply fails the
+    # 3-of-5 entry bar (such a symbol was never "in the fleet" to be
+    # removed from).
+    async with session_factory() as session:
+        from app.ws.keepalive import to_pair
+        for sym, entry in prior.items():
+            if sym in results:
+                continue
+            if await has_open_position(session, to_pair(sym)):
+                log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
+                results[sym] = entry  # last-known-good liquidity numbers, not re-sampled
+
+        now = datetime.now(timezone.utc)
+        for entry in results.values():
+            await session.execute(
+                sa.text(
+                    "INSERT INTO live_fleet_universe "
+                    "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+                    "VALUES (:sym, :cohort, :qvol, :spread, :depth, :ts)"
+                ),
+                {"sym": entry.symbol, "cohort": entry.cohort, "qvol": entry.qvol_24h,
+                 "spread": entry.spread_bps, "depth": entry.depth_0_5pct_usdt, "ts": now},
+            )
+        await session.commit()
+
+    return list(results.values())
+
+
+__all__ = [
+    "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
+    "LiveFleetEntry", "has_open_position", "load_live_fleet_universe",
+    "refresh_live_fleet_universe",
+]
