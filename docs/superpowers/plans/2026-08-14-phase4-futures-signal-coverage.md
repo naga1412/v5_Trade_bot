@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy async / Alembic / pytest + pytest-asyncio / React + TypeScript + Tailwind (frontend).
 
-> **SUPERSEDED (2026-08-15) — read before executing Task 5, Task 8, or the Rollout section.** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the "Start at N=8, widen to 20-25" Stage A/B sizing below no longer applies. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) is unaffected and can proceed as written below** — the function itself is unchanged, only how its output is *used* to build the universe changes. Tasks 5 and 8, and the Rollout section's Stage A/B language, need re-drafting against the addendum before they execute — not yet done in this doc, tracked as follow-up work, not silently skippable.
+> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 below are now fully re-drafted against the addendum** (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched.
 
 **Spec:** `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`
 
@@ -18,11 +18,12 @@
 - Every existing test must pass **unchanged** after Task 1. A required test edit is a failure signal — stop and reconsider, don't just fix the test.
 - No DEBUG-level logging anywhere in the poller's failure paths — WARNING minimum per attempt, ERROR on systematic (consecutive-streak) failure.
 - The idempotency replay test (Task 7) is a required proof obligation, not optional coverage.
-- `symbol_source` defaults to `'spot_ws'` everywhere — every existing caller/row is unaffected without passing anything new.
+- `symbol_source` defaults to `'established_top20'` everywhere (corrected 2026-08-17 — was `'spot_ws'`, a transport-named default from the two-value scheme; the three-way liquidity-floor-selector addendum uses cohort-named values instead, and `'established_top20'` is the correct default for any call site that doesn't explicitly pass a cohort) — every existing caller/row is unaffected without passing anything new.
 - Liquidity thresholds are exact: `qvol_24h >= $20_000_000 AND spread_bps <= 5.0 AND depth_0_5pct_usdt >= $50_000`.
 - Poll cadence is exactly ~60s; closure detection is by open-time advancing, never wall-clock.
-- The futures-poller must mirror the existing `ws_keepalive_task`'s verified (not assumed) cancellation behavior — no new open-position retention logic.
+- **The futures-poller (and, since Task 5b, the spot-WS fleet too) has a hard open-position retention override — corrected 2026-08-17.** This constraint originally read "mirror the existing cancellation behavior, no new retention logic"; the liquidity-floor-selector addendum makes retention a hard requirement on both fleets. Left here as a corrected record, not deleted, so a reader who only skims Global Constraints doesn't pick up the stale version.
 - Follow this codebase's dual-dialect migration pattern (`is_pg = dialect.startswith("postgres")`) for every new table/column.
+- **Downstream tasks not yet redrafted as of 2026-08-17: Task 10 (dispatch-time re-check), Tasks 12-16 (app-view backend + frontend) still contain the stale two-value `Literal["spot_ws", "futures_poll"]` scheme and literal `"spot_ws"` defaults/filters.** These are far enough downstream (behind Tasks 1-9's sequential execution) that redrafting them now risks going stale again before they're reached — apply the SAME discipline used for Tasks 5/8/9/18 here: re-verify against the addendum and fix the value scheme immediately before each of these specific tasks executes, not before. Do not execute Task 10 or 12-16 as currently drafted without that check first.
 
 ---
 
@@ -34,7 +35,7 @@
 - Reference (do not modify): `backend/tests/integration/test_live_prediction_validator_isolation.py`, `backend/tests/unit/test_live_prediction_dispatch_hook.py`, `backend/tests/unit/test_live_prediction_history_seed.py`, `backend/tests/ops/test_ws_keepalive.py`, `backend/tests/unit/test_ws_live_prediction_ghost.py`
 
 **Interfaces:**
-- Produces: `run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h", *, candle_source: AsyncIterator[MultiStreamCandle] | None = None, symbol_source: str = "spot_ws") -> None` — the shared entrypoint every later task calls.
+- Produces: `run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h", *, candle_source: AsyncIterator[MultiStreamCandle] | None = None, symbol_source: str = "established_top20") -> None` — the shared entrypoint every later task calls. (Default corrected 2026-08-17 from `"spot_ws"` — see Global Constraints.)
 
 - [ ] **Step 1: Run the full existing test suite and record the baseline**
 
@@ -140,7 +141,7 @@ async def run_live_prediction(
     timeframe: str = "1h",
     *,
     candle_source: AsyncIterator[MultiStreamCandle] | None = None,
-    symbol_source: str = "spot_ws",
+    symbol_source: str = "established_top20",
 ) -> None:
     """Seed REST history, subscribe to Binance WS (or consume an injected
     candle_source), on each closed candle:
@@ -155,8 +156,8 @@ async def run_live_prediction(
     this function's scoring/gating/dispatch/persistence logic is shared,
     not duplicated, between the two candle-delivery mechanisms.
     ``symbol_source`` is cohort metadata threaded into the persisted and
-    dispatched payloads; defaults to ``"spot_ws"`` so every existing
-    caller is unaffected.
+    dispatched payloads; defaults to ``"established_top20"`` so every
+    existing caller is unaffected.
     """
     binance_symbol = symbol_pair.replace("/", "")
 
@@ -216,8 +217,10 @@ git commit -m "refactor(live-prediction): extract candle source as injectable pa
 
 ## Task 2: Migration — `live_prediction_watermarks` table
 
+> **Revision renumbered 2026-08-17.** Originally drafted as `0036_live_prediction_watermarks` — that ID was already at the exact 32-char `alembic_version` hard limit (zero margin, violates this project's own ≤30-char convention) AND `0036` has since been claimed by PR #456 (`0036_deactivate_rl_ckpt_62`, merged to dev). Renumbered to `0037` and shortened.
+
 **Files:**
-- Create: `backend/alembic/versions/2026_08_15_0036_live_prediction_watermarks.py`
+- Create: `backend/alembic/versions/2026_08_17_0037_live_pred_watermarks.py`
 - Test: `backend/tests/db/test_live_prediction_watermarks_migration.py` (new)
 
 **Interfaces:**
@@ -278,7 +281,7 @@ Expected: FAIL — relation "live_prediction_watermarks" does not exist. (If no 
 - [ ] **Step 3: Write the migration**
 
 ```python
-# backend/alembic/versions/2026_08_15_0036_live_prediction_watermarks.py
+# backend/alembic/versions/2026_08_17_0037_live_pred_watermarks.py
 """live_prediction_watermarks -- Phase 4 idempotency for the futures REST poller
 
 The REST poller can re-observe the same closed candle after a restart, a
@@ -287,17 +290,17 @@ watermark that guarantees a given (symbol, timeframe, candle open-time)
 is processed at most once, independent of the hash-chained predictions
 table's schema.
 
-Revision ID: 0036_live_prediction_watermarks
-Revises: 0035_dispatch_decisions
-Create Date: 2026-08-15
+Revision ID: 0037_live_pred_watermarks
+Revises: 0036_deactivate_rl_ckpt_62
+Create Date: 2026-08-17
 """
 from collections.abc import Sequence
 
 from alembic import op
 
 
-revision: str = "0036_live_prediction_watermarks"
-down_revision: str | None = "0035_dispatch_decisions"
+revision: str = "0037_live_pred_watermarks"
+down_revision: str | None = "0036_deactivate_rl_ckpt_62"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -330,20 +333,22 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/alembic/versions/2026_08_15_0036_live_prediction_watermarks.py backend/tests/db/test_live_prediction_watermarks_migration.py
+git add backend/alembic/versions/2026_08_17_0037_live_pred_watermarks.py backend/tests/db/test_live_prediction_watermarks_migration.py
 git commit -m "feat(db): add live_prediction_watermarks table (Phase 4 poller idempotency)"
 ```
 
 ---
 
-## Task 3: Migration — `symbol_source` column on three tables
+## Task 3: Migration — `symbol_source` column, four tables, three-way cohort values
+
+> **Redrafted 2026-08-17 against the liquidity-floor-selector addendum** (`docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`, ADDENDUM section (c)). Two corrections from the original draft: (1) renumbered `0037`→`0038` and shortened — `0037` is now Task 2's ID (itself renumbered), and the old `0037_symbol_source_cohort_tag` was already at the 30-char recommended ceiling with zero margin; (2) **`shadow_trades` added as a fourth tagged table** — missing from the original draft (and from the addendum's first cut, caught in operator review of PR #458). This isn't optional: the addendum's reversal criterion #2 (re-measuring the new cohort's EV) is methodologically the same `shadow_trades`-based split the 07-28 fleet-cap ratification itself used — without a tag on `shadow_trades`, that measurement can never be run. Value set also changes from two transport-named values (`spot_ws`/`futures_poll`) to three cohort-named values (`established_top20`/`liquidity_added_spot`/`futures_poll`) — see the addendum for why these aren't the same axis (transport vs. rationale) even though `futures_poll` happens to be spelled the same in both schemes.
 
 **Files:**
-- Create: `backend/alembic/versions/2026_08_15_0037_symbol_source_cohort_tag.py`
+- Create: `backend/alembic/versions/2026_08_17_0038_symbol_source_tag.py`
 - Test: `backend/tests/db/test_symbol_source_migration.py` (new)
 
 **Interfaces:**
-- Produces: `symbol_source TEXT NOT NULL DEFAULT 'spot_ws'` on `predictions`, `telegram_signals`, `live_trades`.
+- Produces: `symbol_source TEXT NOT NULL DEFAULT 'established_top20'` on `predictions`, `shadow_trades`, `telegram_signals`, `live_trades`.
 
 - [ ] **Step 1: Write the failing migration test**
 
@@ -364,8 +369,11 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table", ["predictions", "telegram_signals", "live_trades"])
-async def test_symbol_source_column_defaults_spot_ws(table: str) -> None:
+@pytest.mark.parametrize("table", ["predictions", "shadow_trades", "telegram_signals", "live_trades"])
+async def test_symbol_source_column_defaults_established_top20(table: str) -> None:
+    """Existing rows backfill to 'established_top20' -- they were all
+    covered under the pre-2026-08-15 top-N-by-volume selector, which is
+    what that tag denotes (a lineage marker, not a live-recomputed rank)."""
     engine = create_async_engine(os.environ["DATABASE_URL"])
     async with engine.begin() as conn:
         col = (await conn.execute(sa.text(
@@ -374,7 +382,7 @@ async def test_symbol_source_column_defaults_spot_ws(table: str) -> None:
             "WHERE table_name = :t AND column_name = 'symbol_source'"
         ), {"t": table})).one()
         assert col.is_nullable == "NO"
-        assert "spot_ws" in col.column_default
+        assert "established_top20" in col.column_default
     await engine.dispose()
 ```
 
@@ -386,38 +394,46 @@ Expected: FAIL — no such column.
 - [ ] **Step 3: Write the migration**
 
 ```python
-# backend/alembic/versions/2026_08_15_0037_symbol_source_cohort_tag.py
-"""symbol_source cohort tag -- Phase 4 spot_ws vs futures_poll
+# backend/alembic/versions/2026_08_17_0038_symbol_source_tag.py
+"""symbol_source cohort tag -- Phase 4, three-way (2026-08-17 redraft)
 
-Additive metadata column on predictions, telegram_signals, and
-live_trades so every downstream consumer (Telegram card, app view,
-future reporting) can split spot-backed vs futures-only-cohort rows
-from one source of truth. NOT part of any hash-chained payload's
-hashed content -- existing rows keep their existing row_hash values,
-matching the PR1 record-only column precedent.
+Additive metadata column on predictions, shadow_trades, telegram_signals,
+and live_trades so every downstream consumer (Telegram card, app view,
+future reporting, AND the reversal-criterion-#2 safety re-measurement --
+see the liquidity-floor-selector decision record) can split cohorts from
+one source of truth. NOT part of any hash-chained payload's hashed
+content on predictions/shadow_trades/live_trades -- existing rows keep
+their existing row_hash values, matching the PR1 record-only column
+precedent (telegram_signals is not hash-chained at all).
 
-Revision ID: 0037_symbol_source_cohort_tag
-Revises: 0036_live_prediction_watermarks
-Create Date: 2026-08-15
+Values: 'established_top20' (default -- pre-cutover coverage, a lineage
+tag assigned once and not recomputed), 'liquidity_added_spot' (spot-
+backed, newly covered, the larger and unproven of the two new cohorts),
+'futures_poll' (futures-only, unchanged name from the original two-value
+scheme but now one of three, not one of two).
+
+Revision ID: 0038_symbol_source_tag
+Revises: 0037_live_pred_watermarks
+Create Date: 2026-08-17
 """
 from collections.abc import Sequence
 
 from alembic import op
 
 
-revision: str = "0037_symbol_source_cohort_tag"
-down_revision: str | None = "0036_live_prediction_watermarks"
+revision: str = "0038_symbol_source_tag"
+down_revision: str | None = "0037_live_pred_watermarks"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_TABLES: tuple[str, ...] = ("predictions", "telegram_signals", "live_trades")
+_TABLES: tuple[str, ...] = ("predictions", "shadow_trades", "telegram_signals", "live_trades")
 
 
 def upgrade() -> None:
     for table in _TABLES:
         op.execute(
             f"ALTER TABLE {table} "
-            f"ADD COLUMN symbol_source TEXT NOT NULL DEFAULT 'spot_ws';"
+            f"ADD COLUMN symbol_source TEXT NOT NULL DEFAULT 'established_top20';"
         )
 
 
@@ -429,13 +445,13 @@ def downgrade() -> None:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `cd backend && alembic upgrade head && python -m pytest --no-cov -p no:cacheprovider tests/db/test_symbol_source_migration.py -v`
-Expected: PASS, all 3 parametrized cases.
+Expected: PASS, all 4 parametrized cases.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/alembic/versions/2026_08_15_0037_symbol_source_cohort_tag.py backend/tests/db/test_symbol_source_migration.py
-git commit -m "feat(db): add symbol_source cohort tag to predictions/telegram_signals/live_trades"
+git add backend/alembic/versions/2026_08_17_0038_symbol_source_tag.py backend/tests/db/test_symbol_source_migration.py
+git commit -m "feat(db): add symbol_source cohort tag to predictions/shadow_trades/telegram_signals/live_trades"
 ```
 
 ---
@@ -647,27 +663,140 @@ git commit -m "feat(futures): add check_liquidity pure function (Phase 4 liquidi
 
 ---
 
-## Task 5: Futures-only universe selection
+## Task 5: Live-fleet universe selector — liquidity floor, full market, hysteresis
+
+> **REDRAFTED 2026-08-17.** The original Task 5 built `fetch_top_n_usdt_futures_only`: rank futures-only symbols by 24h volume, walk down taking the first N that also pass `check_liquidity`. That is exactly the shape the liquidity-floor-selector addendum supersedes — volume-ranked with liquidity as a secondary filter, scoped to futures-only only. This redraft builds the addendum's actual selector: **every symbol across the full market (spot-backed and futures-only) that passes the liquidity floor, full stop — no rank, no N cutoff** — with the hysteresis rule (3-of-5 enter / unanimous 5-of-5 exit / 24h dwell / open-position override) from addendum section (a). This single function is the shared source both `ws_keepalive_task` (Task 5b, spot-backed rows) and `futures_poll_task` (Task 8, futures-only rows) read from — "one mechanism closes both gaps," per the addendum.
+>
+> `check_liquidity` (Task 4) itself is unchanged and reused verbatim — it's evaluated against **futures** market data for every candidate regardless of cohort, which is correct: the operator trades everything on Binance futures, so futures-side liquidity is what matters even for a spot-backed symbol's tradeability, not its spot order book.
 
 **Files:**
-- Modify: `backend/app/shadow/universe.py` (add alongside `fetch_top_n_usdt_spot`, do not modify it)
-- Test: `backend/tests/unit/test_universe_futures_only.py` (new)
+- Create: `backend/app/shadow/live_fleet_universe.py`
+- Create: `backend/alembic/versions/2026_08_17_0039_live_fleet_universe.py`
+- Test: `backend/tests/unit/test_live_fleet_universe.py` (new)
+- Test: `backend/tests/db/test_live_fleet_universe_migration.py` (new)
 
 **Interfaces:**
-- Consumes: `check_liquidity` (Task 4), `httpx.AsyncClient`.
-- Produces: `async def fetch_top_n_usdt_futures_only(http: httpx.AsyncClient, rate_client: RateLimitedClient, n: int = 8) -> list[AssetUniverseEntry]` — consumed by Task 8's supervisor.
+- Consumes: `check_liquidity` (Task 4), `httpx.AsyncClient`, `RateLimitedClient`, `load_current_universe` (existing, `app.shadow.universe` — cold-start seed only), `KEEPALIVE_TOP_N` (existing, `app.ws.keepalive` — cold-start seed only).
+- Produces:
+  - `@dataclass(frozen=True) class LiveFleetEntry: symbol: str; cohort: Literal["established_top20", "liquidity_added_spot", "futures_poll"]; qvol_24h: float; spread_bps: float; depth_0_5pct_usdt: float`
+  - `async def refresh_live_fleet_universe(session_factory, http: httpx.AsyncClient, rate_client: RateLimitedClient) -> list[LiveFleetEntry]` — the daily job. Fetches the full market, samples `check_liquidity` 5x per $20M-qvol-prefilter candidate, applies hysteresis against the previous snapshot, persists the new snapshot, returns it.
+  - `async def load_live_fleet_universe(session, *, cohort: str | None = None) -> list[LiveFleetEntry]` — read the latest snapshot, optionally filtered to one cohort. Consumed by Task 5b (`cohort in {"established_top20", "liquidity_added_spot"}`) and Task 8 (`cohort == "futures_poll"`).
+  - `async def has_open_position(session, symbol_pair: str) -> bool` — checks `live_trades WHERE status='open'` OR `shadow_open_positions`. Shared by Task 5b's and Task 8's reconciliation (open-position override).
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing migration test**
 
 ```python
-# backend/tests/unit/test_universe_futures_only.py
+# backend/tests/db/test_live_fleet_universe_migration.py
+from __future__ import annotations
+
+import os
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL", "").startswith("postgresql"),
+    reason="Postgres DATABASE_URL not set — migration tests are CI-only.",
+)
+
+
+@pytest.mark.asyncio
+async def test_live_fleet_universe_table_shape() -> None:
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('FOOUSDT', 'liquidity_added_spot', 25000000, 2.5, 60000, now())"
+        ))
+        row = (await conn.execute(sa.text(
+            "SELECT cohort FROM live_fleet_universe WHERE symbol = 'FOOUSDT'"
+        ))).one()
+        assert row.cohort == "liquidity_added_spot"
+    await engine.dispose()
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/db/test_live_fleet_universe_migration.py -v`
+Expected: FAIL — relation "live_fleet_universe" does not exist.
+
+- [ ] **Step 3: Write the migration**
+
+```python
+# backend/alembic/versions/2026_08_17_0039_live_fleet_universe.py
+"""live_fleet_universe -- Phase 4 liquidity-floor selector snapshots
+
+One row per (symbol, snapshot_at) -- mirrors asset_universe's own
+snapshot-keyed shape (same "latest snapshot_at wins" read pattern), but
+this is a SEPARATE table, not a repurposing of asset_universe: this one
+is liquidity-floor-selected across the full market for the live-fleet
+(WS + REST-poll) supervisors specifically; asset_universe stays exactly
+as-is (spot-top-30 by volume, still used by shadow_worker's own
+universe). Do not merge these two tables -- see the liquidity-floor-
+selector decision record's "open dependency question" for why they can
+legitimately diverge (a symbol can be liquidity-floor-qualified via deep
+FUTURES liquidity while ranking outside the spot-volume top-30).
+
+Revision ID: 0039_live_fleet_universe
+Revises: 0038_symbol_source_tag
+Create Date: 2026-08-17
+"""
+from collections.abc import Sequence
+
+from alembic import op
+
+
+revision: str = "0039_live_fleet_universe"
+down_revision: str | None = "0038_symbol_source_tag"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    dialect = op.get_bind().dialect.name
+    is_pg = dialect.startswith("postgres")
+    ts_type = "TIMESTAMPTZ" if is_pg else "TEXT"
+    ts_default = "DEFAULT now()" if is_pg else "DEFAULT CURRENT_TIMESTAMP"
+
+    op.execute(f"""
+        CREATE TABLE live_fleet_universe (
+            symbol VARCHAR(20) NOT NULL,
+            cohort TEXT NOT NULL,
+            qvol_24h DOUBLE PRECISION NOT NULL,
+            spread_bps DOUBLE PRECISION NOT NULL,
+            depth_0_5pct_usdt DOUBLE PRECISION NOT NULL,
+            snapshot_at {ts_type} NOT NULL {ts_default},
+            PRIMARY KEY (symbol, snapshot_at)
+        );
+    """)
+    op.execute(
+        "CREATE INDEX live_fleet_universe_snapshot_idx "
+        "ON live_fleet_universe (snapshot_at DESC);"
+    )
+
+
+def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS live_fleet_universe_snapshot_idx;")
+    op.execute("DROP TABLE IF EXISTS live_fleet_universe;")
+```
+
+- [ ] **Step 4: Run the migration test to verify it passes**
+
+Run: `cd backend && alembic upgrade head && python -m pytest --no-cov -p no:cacheprovider tests/db/test_live_fleet_universe_migration.py -v`
+
+- [ ] **Step 5: Write the failing unit tests**
+
+```python
+# backend/tests/unit/test_live_fleet_universe.py
 from __future__ import annotations
 
 import httpx
 import pytest
 
 from app.data.ratelimit import RateLimitedClient, TokenBucket
-from app.shadow.universe import fetch_top_n_usdt_futures_only
+from app.shadow.live_fleet_universe import LiveFleetEntry, refresh_live_fleet_universe
 
 
 def _rate_client(transport: httpx.MockTransport) -> RateLimitedClient:
@@ -678,26 +807,27 @@ def _rate_client(transport: httpx.MockTransport) -> RateLimitedClient:
     )
 
 
-def _handler_factory(futures_symbols, spot_symbols, tickers, depth_ok_symbols):
+def _handler_factory(futures_symbols, spot_symbols, tickers, deep_symbols):
+    """deep_symbols pass depth+spread on EVERY sample; everything else
+    fails every sample -- covers the two unambiguous cases (stable pass,
+    stable fail). Flicker/borderline behavior is exercised by the
+    hysteresis-specific tests below via a call-count-based handler."""
     def handler(req: httpx.Request) -> httpx.Response:
         path = req.url.path
         if path == "/fapi/v1/exchangeInfo":
             return httpx.Response(200, json={"symbols": [
-                {"symbol": s, "contractType": "PERPETUAL", "status": "TRADING"}
+                {"symbol": s, "quoteAsset": "USDT", "contractType": "PERPETUAL", "status": "TRADING"}
                 for s in futures_symbols
             ]})
         if path == "/api/v3/exchangeInfo":
             return httpx.Response(200, json={"symbols": [
-                {"symbol": s, "status": "TRADING"} for s in spot_symbols
+                {"symbol": s, "quoteAsset": "USDT", "status": "TRADING"} for s in spot_symbols
             ]})
-        if path == "/fapi/v1/ticker/24hr" and req.url.params.get("symbol") is None:
-            return httpx.Response(200, json=tickers)
         if path == "/fapi/v1/ticker/24hr":
-            sym = req.url.params["symbol"]
-            return httpx.Response(200, json=next(t for t in tickers if t["symbol"] == sym))
+            return httpx.Response(200, json=tickers)
         if path == "/fapi/v1/depth":
             sym = req.url.params["symbol"]
-            if sym in depth_ok_symbols:
+            if sym in deep_symbols:
                 return httpx.Response(200, json={
                     "bids": [("99.99", "10000")], "asks": [("100.01", "10000")],
                 })
@@ -707,144 +837,418 @@ def _handler_factory(futures_symbols, spot_symbols, tickers, depth_ok_symbols):
 
 
 @pytest.mark.asyncio
-async def test_excludes_symbols_with_spot_equivalent() -> None:
-    transport = _handler_factory(
-        futures_symbols=["BTCUSDT", "FOOUSDT"],
-        spot_symbols=["BTCUSDT"],
-        tickers=[
-            {"symbol": "BTCUSDT", "quoteVolume": "1000000000", "priceChangePercent": "1.0"},
-            {"symbol": "FOOUSDT", "quoteVolume": "25000000", "priceChangePercent": "1.0"},
-        ],
-        depth_ok_symbols={"FOOUSDT"},
-    )
-    entries = await fetch_top_n_usdt_futures_only(
-        httpx.AsyncClient(transport=transport), _rate_client(transport), n=8,
-    )
-    symbols = {e.symbol for e in entries}
-    assert "BTCUSDT" not in symbols  # has a spot equivalent
-    assert "FOOUSDT" in symbols
-
-
-@pytest.mark.asyncio
-async def test_excludes_symbols_failing_liquidity_floor() -> None:
-    transport = _handler_factory(
-        futures_symbols=["THINUSDT", "DEEPUSDT"],
-        spot_symbols=[],
-        tickers=[
-            {"symbol": "THINUSDT", "quoteVolume": "25000000", "priceChangePercent": "1.0"},
-            {"symbol": "DEEPUSDT", "quoteVolume": "25000000", "priceChangePercent": "1.0"},
-        ],
-        depth_ok_symbols={"DEEPUSDT"},  # THINUSDT fails depth
-    )
-    entries = await fetch_top_n_usdt_futures_only(
-        httpx.AsyncClient(transport=transport), _rate_client(transport), n=8,
-    )
-    symbols = {e.symbol for e in entries}
-    assert "THINUSDT" not in symbols
-    assert "DEEPUSDT" in symbols
-
-
-@pytest.mark.asyncio
-async def test_respects_n_limit_ranked_by_volume() -> None:
+async def test_cold_start_seeds_established_top20_from_legacy_fleet(session_factory) -> None:
+    """No prior live_fleet_universe snapshot exists. A symbol that (a)
+    passes the new floor AND (b) is in today's legacy top-20-by-volume
+    fleet gets tagged established_top20, not liquidity_added_spot."""
     tickers = [
-        {"symbol": f"SYM{i}USDT", "quoteVolume": str(30_000_000 - i * 1_000_000), "priceChangePercent": "1.0"}
-        for i in range(15)
+        {"symbol": "BTCUSDT", "quoteVolume": "1000000000"},
+        {"symbol": "NEWUSDT", "quoteVolume": "25000000"},
     ]
     transport = _handler_factory(
-        futures_symbols=[f"SYM{i}USDT" for i in range(15)],
-        spot_symbols=[],
-        tickers=tickers,
-        depth_ok_symbols={f"SYM{i}USDT" for i in range(15)},
+        futures_symbols=["BTCUSDT", "NEWUSDT"], spot_symbols=["BTCUSDT", "NEWUSDT"],
+        tickers=tickers, deep_symbols={"BTCUSDT", "NEWUSDT"},
     )
-    entries = await fetch_top_n_usdt_futures_only(
-        httpx.AsyncClient(transport=transport), _rate_client(transport), n=8,
+    # BTCUSDT is seeded as legacy-top-20 via a monkeypatched load_current_universe
+    # stub in the real test (fixture omitted here for brevity) -- NEWUSDT is not.
+    entries = await refresh_live_fleet_universe(
+        session_factory, httpx.AsyncClient(transport=transport), _rate_client(transport),
     )
-    assert len(entries) == 8
-    assert entries[0].symbol == "SYM0USDT"  # highest volume first
+    by_symbol = {e.symbol: e for e in entries}
+    assert by_symbol["BTCUSDT"].cohort == "established_top20"
+    assert by_symbol["NEWUSDT"].cohort == "liquidity_added_spot"
+
+
+@pytest.mark.asyncio
+async def test_entry_requires_three_of_five_passes(session_factory) -> None:
+    """A symbol passing exactly 3/5 samples enters; 2/5 does not."""
+    # Implementation samples check_liquidity 5x per candidate -- test injects
+    # a depth handler that alternates pass/fail by call count to hit exactly
+    # 3 passes of 5, asserts the symbol IS included; then 2 of 5, asserts
+    # it is NOT. (Full call-counting handler omitted here for brevity --
+    # follow the pattern in test_futures_liquidity.py's MockTransport use.)
+
+
+@pytest.mark.asyncio
+async def test_exit_requires_unanimous_five_of_five_fails(session_factory) -> None:
+    """A symbol already IN the universe (seeded via a prior snapshot row)
+    that fails 4/5 samples is RETAINED (not unanimous); failing 5/5 exits."""
+
+
+@pytest.mark.asyncio
+async def test_open_position_overrides_unanimous_exit(session_factory) -> None:
+    """A symbol failing 5/5 samples but with an open live_trades row is
+    retained anyway -- has_open_position short-circuits the exit."""
+
+
+@pytest.mark.asyncio
+async def test_new_entrant_never_tagged_established_top20(session_factory) -> None:
+    """Even on a WARM refresh (prior snapshot exists), a symbol newly
+    entering (not present in the prior snapshot) gets liquidity_added_spot
+    or futures_poll -- established_top20 is a cold-start-only tag, never
+    assigned retroactively post-cutover."""
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+*(The five test stubs above without bodies are proof obligations, not decoration — each needs its full arrange/act/assert before this task is done. Abbreviated here to keep this plan doc's Task 5 section a reasonable length; do not skip writing them out in full in the actual test file. `session_factory` is a fixture — mirror the one used in `tests/healer/test_detectors.py` for an in-memory SQLite `live_fleet_universe`/`live_trades` setup.)*
 
-Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_universe_futures_only.py -v`
-Expected: FAIL — `ImportError: cannot import name 'fetch_top_n_usdt_futures_only'`.
+- [ ] **Step 6: Run the tests to verify they fail**
 
-- [ ] **Step 3: Read the existing `fetch_top_n_usdt_spot` and `AssetUniverseEntry` to match the return shape**
+Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_fleet_universe.py -v`
+Expected: FAIL — `ImportError`.
 
-Run: `grep -n "class AssetUniverseEntry\|def fetch_top_n_usdt_spot" backend/app/shadow/universe.py`
-
-Match `AssetUniverseEntry`'s exact field names when constructing return values below.
-
-- [ ] **Step 4: Write the implementation**
-
-Add to `backend/app/shadow/universe.py` (new function, does not modify `fetch_top_n_usdt_spot`):
+- [ ] **Step 7: Write the implementation**
 
 ```python
-async def fetch_top_n_usdt_futures_only(
-    http: httpx.AsyncClient, rate_client: RateLimitedClient, n: int = 8,
-) -> list[AssetUniverseEntry]:
-    """Top-N USDT-M futures perpetuals with NO spot equivalent on Binance,
-    ranked by 24h quote volume, filtered through check_liquidity.
+# backend/app/shadow/live_fleet_universe.py
+"""Phase 4 liquidity-floor selector -- addendum to
+docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md
+(2026-08-17). Replaces top-N-by-volume with liquidity-floor pass/fail
+across the full market, with hysteresis. See the decision record at
+docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md.
+"""
+from __future__ import annotations
 
-    Kept separate from fetch_top_n_usdt_spot rather than merged so the
-    existing spot ranking's behavior is untouched (Phase 4, FU-43).
-    """
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Literal
+
+import httpx
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.data.futures_liquidity import QVOL_FLOOR_USDT, check_liquidity
+from app.data.ratelimit import RateLimitedClient
+
+log = logging.getLogger(__name__)
+
+_FUTURES_BASE = "https://fapi.binance.com"
+_SPOT_BASE = "https://api.binance.com"
+
+N_SAMPLES: int = 5
+SAMPLE_GAP_SECONDS: float = 10.0
+ENTRY_MIN_PASSES: int = 3   # of N_SAMPLES
+EXIT_MAX_PASSES: int = 0    # exit requires unanimous failure -- 0 passes of 5
+
+Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
+
+
+@dataclass(frozen=True)
+class LiveFleetEntry:
+    symbol: str
+    cohort: Cohort
+    qvol_24h: float
+    spread_bps: float
+    depth_0_5pct_usdt: float
+
+
+async def has_open_position(session: AsyncSession, symbol_pair: str) -> bool:
+    """True if symbol_pair has an open live_trades OR shadow_open_positions
+    row. Checked before ANY exit -- hard override, not best-effort."""
+    row = (await session.execute(
+        sa.text(
+            "SELECT 1 FROM live_trades WHERE status = 'open' AND symbol = :s "
+            "UNION ALL "
+            "SELECT 1 FROM shadow_open_positions WHERE symbol = :s LIMIT 1"
+        ),
+        {"s": symbol_pair},
+    )).first()
+    return row is not None
+
+
+async def load_live_fleet_universe(
+    session: AsyncSession, *, cohort: str | None = None,
+) -> list[LiveFleetEntry]:
+    where_cohort = "AND cohort = :cohort " if cohort else ""
+    params: dict = {"cohort": cohort} if cohort else {}
+    rows = await session.execute(
+        sa.text(
+            "SELECT symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt "
+            "FROM live_fleet_universe "
+            "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM live_fleet_universe) "
+            + where_cohort
+        ),
+        params,
+    )
+    return [
+        LiveFleetEntry(
+            symbol=r.symbol, cohort=r.cohort, qvol_24h=r.qvol_24h,
+            spread_bps=r.spread_bps, depth_0_5pct_usdt=r.depth_0_5pct_usdt,
+        )
+        for r in rows
+    ]
+
+
+async def refresh_live_fleet_universe(
+    session_factory: async_sessionmaker[AsyncSession],
+    http: httpx.AsyncClient,
+    rate_client: RateLimitedClient,
+) -> list[LiveFleetEntry]:
+    """The daily job. See module docstring for the design this implements."""
     futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
     futures_resp.raise_for_status()
-    futures_usdt_perp = {
+    fut_symbols = {
         s["symbol"] for s in futures_resp.json()["symbols"]
-        if s["symbol"].endswith("USDT")
-        and s["contractType"] == "PERPETUAL"
-        and s["status"] == "TRADING"
+        if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL"
+        and s.get("status") == "TRADING"
     }
 
     spot_resp = await http.get(f"{_SPOT_BASE}/api/v3/exchangeInfo")
     spot_resp.raise_for_status()
-    spot_usdt = {
+    spot_symbols = {
         s["symbol"] for s in spot_resp.json()["symbols"]
-        if s["symbol"].endswith("USDT") and s["status"] == "TRADING"
+        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
     }
-
-    futures_only = futures_usdt_perp - spot_usdt
+    futures_only = fut_symbols - spot_symbols
 
     ticker_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/ticker/24hr")
     ticker_resp.raise_for_status()
-    tick_by_symbol = {t["symbol"]: t for t in ticker_resp.json()}
+    qvol_by_symbol = {t["symbol"]: float(t["quoteVolume"]) for t in ticker_resp.json()}
 
-    ranked = sorted(
-        (
-            (sym, float(tick_by_symbol[sym]["quoteVolume"]))
-            for sym in futures_only if sym in tick_by_symbol
-        ),
-        key=lambda pair: -pair[1],
-    )
+    # Cheap pre-filter -- skip the 5x-sampled depth check entirely for
+    # anything that already fails on volume alone (the large majority).
+    candidates = sorted(s for s in fut_symbols if qvol_by_symbol.get(s, 0.0) >= QVOL_FLOOR_USDT)
 
-    entries: list[AssetUniverseEntry] = []
-    for sym, _qvol in ranked:
-        if len(entries) >= n:
-            break
-        try:
-            check = await check_liquidity(sym, rate_client)
-        except Exception as e:  # noqa: BLE001
-            log.warning("fetch_top_n_usdt_futures_only: liquidity check failed for %s: %s", sym, e)
+    async with session_factory() as session:
+        prior = {e.symbol: e for e in await load_live_fleet_universe(session)}
+
+        # Cold-start seed: no prior snapshot at all -- consult today's
+        # legacy top-20-by-volume fleet so pre-cutover coverage gets
+        # tagged established_top20, not liquidity_added_spot.
+        legacy_top20: set[str] = set()
+        if not prior:
+            from app.shadow.universe import load_current_universe
+            from app.ws.keepalive import KEEPALIVE_TOP_N, to_pair
+            try:
+                legacy_entries = await load_current_universe(session)
+                legacy_top20 = {
+                    to_pair(e.symbol).replace("/", "")
+                    for e in legacy_entries[:KEEPALIVE_TOP_N]
+                }
+            except Exception as e:  # noqa: BLE001 -- cold-start seed is best-effort
+                log.warning("live_fleet_universe: legacy top-20 seed failed: %s", e)
+
+    results: dict[str, LiveFleetEntry] = {}
+    for sym in candidates:
+        pass_count = 0
+        last_check = None
+        for i in range(N_SAMPLES):
+            try:
+                last_check = await check_liquidity(sym, rate_client)
+                if last_check.passed:
+                    pass_count += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
+            if i < N_SAMPLES - 1:
+                await asyncio.sleep(SAMPLE_GAP_SECONDS)
+        if last_check is None:
             continue
-        if not check.passed:
+
+        currently_in = sym in prior
+        if currently_in:
+            keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
+        else:
+            keep = pass_count >= ENTRY_MIN_PASSES
+
+        if not keep:
             continue
-        entries.append(AssetUniverseEntry(symbol=sym, rank=len(entries) + 1))
-    return entries
+
+        if currently_in:
+            cohort: Cohort = prior[sym].cohort  # sticky -- inherited, never recomputed
+        elif sym in legacy_top20:
+            cohort = "established_top20"
+        elif sym in futures_only:
+            cohort = "futures_poll"
+        else:
+            cohort = "liquidity_added_spot"
+
+        results[sym] = LiveFleetEntry(
+            symbol=sym, cohort=cohort, qvol_24h=qvol_by_symbol[sym],
+            spread_bps=last_check.spread_bps, depth_0_5pct_usdt=last_check.depth_0_5pct_usdt,
+        )
+
+    # Open-position override -- re-add anything that failed exit but has
+    # an open position, even though the loop above already dropped it.
+    async with session_factory() as session:
+        for sym, entry in prior.items():
+            if sym in results:
+                continue
+            from app.ws.keepalive import to_pair
+            if await has_open_position(session, to_pair(sym)):
+                log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
+                results[sym] = entry  # last-known-good liquidity numbers, not re-sampled
+
+        now = datetime.now(timezone.utc)
+        for entry in results.values():
+            await session.execute(
+                sa.text(
+                    "INSERT INTO live_fleet_universe "
+                    "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+                    "VALUES (:sym, :cohort, :qvol, :spread, :depth, :ts)"
+                ),
+                {"sym": entry.symbol, "cohort": entry.cohort, "qvol": entry.qvol_24h,
+                 "spread": entry.spread_bps, "depth": entry.depth_0_5pct_usdt, "ts": now},
+            )
+        await session.commit()
+
+    return list(results.values())
+
+
+__all__ = [
+    "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
+    "LiveFleetEntry", "has_open_position", "load_live_fleet_universe",
+    "refresh_live_fleet_universe",
+]
 ```
 
-Add imports at the top of `universe.py`: `from app.data.futures_liquidity import check_liquidity` and `from app.data.ratelimit import RateLimitedClient`. Confirm/add module constants `_FUTURES_BASE = "https://fapi.binance.com"` and `_SPOT_BASE = "https://api.binance.com"` if not already present under different names — check first with `grep -n "_BASE\|BASE_URL" backend/app/shadow/universe.py`.
+**Note on `EXIT_MAX_PASSES = 0`**: "unanimous 5-of-5 fail to exit" is equivalent to "keep unless pass_count is exactly 0" — written as `pass_count > EXIT_MAX_PASSES` so the threshold is a named constant, not a magic `0` buried in the conditional.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+**Note on dwell time**: no separate dwell-timer state is needed. `refresh_live_fleet_universe` only runs once per day (same cadence as `asset_universe`'s existing refresh), so a symbol structurally cannot be re-evaluated for removal more than once every 24h — the ≥24h minimum dwell from addendum (a) is satisfied by the daily cadence itself, not by additional tracked state. If this refresh cadence ever changes to run more than once a day, this note stops being true and dwell needs its own explicit tracking — flag that explicitly if it comes up.
 
-Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_universe_futures_only.py -v`
-Expected: PASS, all 3 tests.
+- [ ] **Step 8: Run the tests to verify they pass**
 
-- [ ] **Step 6: Commit**
+Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_fleet_universe.py tests/db/test_live_fleet_universe_migration.py -v`
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/shadow/universe.py backend/tests/unit/test_universe_futures_only.py
-git commit -m "feat(universe): add fetch_top_n_usdt_futures_only (Phase 4)"
+git add backend/app/shadow/live_fleet_universe.py backend/alembic/versions/2026_08_17_0039_live_fleet_universe.py backend/tests/unit/test_live_fleet_universe.py backend/tests/db/test_live_fleet_universe_migration.py
+git commit -m "feat(universe): add live_fleet_universe liquidity-floor selector with hysteresis (Phase 4 redraft)"
+```
+
+---
+
+## Task 5b: Wire `ws_keepalive_task` onto the new selector
+
+> **NEW TASK, not in the original 18-task list.** The original Phase 4 design's own Non-goals explicitly excluded touching `ws_keepalive_task`/`keepalive.py` ("No change to the existing spot-WS keepalive fleet's behavior for existing symbols"). The liquidity-floor-selector addendum supersedes that non-goal directly — the whole point is that the spot fleet's selection criterion changes. This task is the consequence of that, and without it Task 5's new selector has no consumer on the spot-backed side (only Task 8/futures_poll_task would read it, leaving keepalive.py silently still running the old top-20-by-volume logic — exactly "executing as drafted would build the wrong thing," just one level removed).
+
+**Files:**
+- Modify: `backend/app/ws/keepalive.py`
+- Test: `backend/tests/ops/test_ws_keepalive.py` (existing — extend, don't break)
+
+**Interfaces:**
+- Consumes: `load_live_fleet_universe`, `has_open_position` (Task 5).
+- Changes: `_load_keepalive_symbols` reads from `live_fleet_universe` (cohorts `established_top20` + `liquidity_added_spot`) instead of `asset_universe`/`load_current_universe`; drops the `top_n` slice entirely (the liquidity floor is now the only membership criterion — there is no separate rank cutoff on top of it). `_refresh_children` gains the open-position override before cancelling a dropped symbol.
+
+- [ ] **Step 1: Read the existing `_load_keepalive_symbols` and `_refresh_children` in full before changing either**
+
+Run: `grep -n "_load_keepalive_symbols\|_refresh_children" -A 30 backend/app/ws/keepalive.py`
+
+- [ ] **Step 2: Update the failing/changed tests**
+
+Existing tests in `test_ws_keepalive.py` that assert `_load_keepalive_symbols` reads `asset_universe`/respects `top_n` need updating to assert it now reads `live_fleet_universe` with no `top_n` — this is an intentional, pre-authorized behavior change per the addendum, not a regression to work around. Existing tests asserting `_refresh_children`'s unconditional-cancel-on-dropout need a new case added (not removed — the base behavior for a symbol with NO open position is unchanged) for the open-position override:
+
+```python
+@pytest.mark.asyncio
+async def test_refresh_children_retains_dropped_symbol_with_open_position(monkeypatch) -> None:
+    """A symbol no longer in the desired set, but with an open position,
+    is NOT cancelled -- addendum (a)'s hard open-position override."""
+    from app.ws import keepalive as kmod
+
+    async def fake_has_open_position(session, symbol_pair: str) -> bool:
+        return symbol_pair == "FOO/USDT"
+
+    monkeypatch.setattr(kmod, "has_open_position", fake_has_open_position)
+
+    async def fake_runner(symbol_pair: str, timeframe: str) -> None:
+        await asyncio.sleep(3600)
+
+    children: dict[tuple[str, str], asyncio.Task[None]] = {}
+    await kmod._refresh_children(children, [("FOO/USDT", "1h")], runner=fake_runner)
+    await asyncio.sleep(0)
+    await kmod._refresh_children(children, [], runner=fake_runner)  # FOO drops out
+    assert ("FOO/USDT", "1h") in children  # retained -- open position
+    children[("FOO/USDT", "1h")].cancel()
+```
+
+- [ ] **Step 3: Write the implementation changes**
+
+In `_load_keepalive_symbols`: replace the `load_current_universe(session)` call + `entries[:top_n]` slice with:
+
+```python
+from app.shadow.live_fleet_universe import load_live_fleet_universe
+
+async def _load_keepalive_symbols(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    exclude: frozenset[tuple[str, str]],
+    timeframe: str,
+) -> list[tuple[str, str]]:
+    """Read the liquidity-floor-qualified spot-backed cohort (both
+    established_top20 and liquidity_added_spot), normalize, apply
+    excludes. No top_n slice -- the floor IS the membership criterion."""
+    try:
+        async with session_factory() as session:
+            established = await load_live_fleet_universe(session, cohort="established_top20")
+            added = await load_live_fleet_universe(session, cohort="liquidity_added_spot")
+    except Exception as e:  # noqa: BLE001
+        log.warning("ws_keepalive: load_live_fleet_universe failed: %s", e)
+        return []
+
+    pairs: list[tuple[str, str]] = []
+    for entry in established + added:
+        pair = to_pair(entry.symbol)
+        key = (pair, timeframe)
+        if key in exclude:
+            continue
+        pairs.append(key)
+    return pairs
+```
+
+`top_n` parameter removed from the function signature and from `run_keepalive`'s call site — `KEEPALIVE_TOP_N` stays defined in the module (other code/tests may still reference it as a historical constant) but is no longer read by the selection path. Do not delete it outright in this task; a later cleanup pass can remove it once nothing references it, per this project's own "don't leave a stale decision record" discipline — same reasoning as the SUPERSEDED banner on the 07-28 doc.
+
+In `_refresh_children`, before the cancel:
+
+```python
+from app.shadow.live_fleet_universe import has_open_position
+
+async def _refresh_children(
+    children: dict[tuple[str, str], asyncio.Task[None]],
+    desired: list[tuple[str, str]],
+    *,
+    runner: SymbolRunner,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    desired_set = set(desired)
+    for key in list(children):
+        if key not in desired_set:
+            if session_factory is not None:
+                symbol_pair, _tf = key
+                async with session_factory() as session:
+                    if await has_open_position(session, symbol_pair):
+                        log.info("ws_keepalive: retaining %s/%s -- open position", *key)
+                        continue
+            log.info("ws_keepalive: dropping %s/%s", *key)
+            children[key].cancel()
+            try:
+                await children[key]
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            del children[key]
+    for key in desired:
+        if key in children:
+            continue
+        symbol_pair, timeframe = key
+        log.info("ws_keepalive: starting %s/%s", symbol_pair, timeframe)
+        children[key] = asyncio.create_task(
+            _run_child_with_restart(runner, symbol_pair, timeframe),
+            name=f"keepalive:{symbol_pair}:{timeframe}",
+        )
+```
+
+`session_factory` added as an optional kwarg (defaults `None`, preserving every existing test call site that doesn't pass it) rather than a required param — this keeps the function's existing signature-compatible for callers/tests that don't care about the override, while `run_keepalive`'s real call site always passes it.
+
+- [ ] **Step 4: Run the full keepalive test suite**
+
+Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/ops/test_ws_keepalive.py -v`
+Expected: PASS, including the new open-position-retention test. **If any OTHER existing test in this file needs editing beyond the two intentional changes above (the `top_n`-removal assertions and the unconditional-cancel test), STOP and report** — per the standing rule, an unexpected required test edit means behavior changed somewhere not accounted for here.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/ws/keepalive.py backend/tests/ops/test_ws_keepalive.py
+git commit -m "feat(keepalive): switch to liquidity-floor selector + open-position override (Phase 4)"
 ```
 
 ---
@@ -1397,15 +1801,19 @@ git commit -m "feat(futures-poll): add futures_rest_poll_candles generator (Phas
 
 ## Task 8: `futures_poll_task` supervisor
 
+> **REDRAFTED 2026-08-17.** Three changes from the original draft, all consequences of the liquidity-floor-selector addendum: (1) consumes the shared `load_live_fleet_universe` (Task 5) filtered to the `futures_poll` cohort, not the old rank-capped `fetch_top_n_usdt_futures_only`; (2) drops the fixed `FUTURES_POLL_TOP_N=8` as the *selection* mechanism — the floor itself determines how many symbols qualify (currently 8-11, per the decision record's measurement), no artificial cap on top of that; (3) gains the same hard open-position override as Task 5b — the original draft's `test_cancels_child_when_symbol_drops_out_matching_spot_fleet_behavior` explicitly asserted the OPPOSITE of what the addendum now requires ("NOT a retention test, since retention isn't what's being built" — it is now being built, deliberately, per the operator's explicit instruction). That test is rewritten, not silently left contradicting the addendum.
+
 **Files:**
 - Modify: `backend/app/ws/futures_poll.py`
 - Test: `backend/tests/ops/test_futures_poll_task.py` (new)
 
 **Interfaces:**
-- Consumes: `futures_rest_poll_candles` (Task 7), `fetch_top_n_usdt_futures_only` (Task 5), `run_live_prediction` (Task 1), `record_heartbeat` (existing, `app.ops.heartbeat`).
-- Produces: `WORKER_NAME = "futures_poll_task"`, `FUTURES_POLL_TOP_N: int = 8`, `async def run_futures_poll(session_factory, *, top_n=FUTURES_POLL_TOP_N, ...) -> None`, `def start_futures_poll_task(session_factory) -> asyncio.Task[None]`. Consumed by Task 17 (`main.py` wiring).
+- Consumes: `futures_rest_poll_candles` (Task 7), `load_live_fleet_universe`, `has_open_position` (Task 5), `run_live_prediction` (Task 1), `record_heartbeat` (existing, `app.ops.heartbeat`).
+- Produces: `WORKER_NAME = "futures_poll_task"`, `FUTURES_POLL_SAFETY_MAX_N: int = 30` (safety valve only, not the selector — see below), `async def run_futures_poll(session_factory, *, timeframe=FUTURES_POLL_TIMEFRAME, ...) -> None`, `def start_futures_poll_task(session_factory) -> asyncio.Task[None]`. Consumed by Task 17 (`main.py` wiring).
 
-- [ ] **Step 1: Read `app/ws/keepalive.py`'s `_run_child_with_restart`, `_refresh_children`, `run_keepalive` in full to mirror the structure exactly**
+**On the safety valve**: the addendum's cost-check (section (b)) recommends a staging `docker stats` gate before trusting N≈42 in prod, with an explicit fallback — "if it doesn't fit, drop to the largest workable N ranked by liquidity, never volume" — if that fallback is ever needed. `FUTURES_POLL_SAFETY_MAX_N` is that fallback's mechanism: a hard ceiling that, if the floor-qualified futures-only cohort ever exceeds it, truncates to the top N **by liquidity rank** (best `qvol_24h`, tie-broken by tightest `spread_bps`, then highest `depth_0_5pct_usdt` — the priority order the addendum specifies, never volume alone). At today's measured 8-11 futures-only qualifiers this never engages; it exists so a market-condition shift that suddenly qualifies many more symbols doesn't silently blow past whatever the staging soak validated.
+
+- [ ] **Step 1: Read `app/ws/keepalive.py`'s (post-Task-5b) `_run_child_with_restart`, `_refresh_children`, `run_keepalive` in full to mirror the structure exactly, including the open-position override added in Task 5b**
 
 Run: `cat backend/app/ws/keepalive.py`
 
@@ -1413,8 +1821,9 @@ Run: `cat backend/app/ws/keepalive.py`
 
 ```python
 # backend/tests/ops/test_futures_poll_task.py
-"""Mirrors tests/ops/test_ws_keepalive.py's structure -- same fleet
-pattern, same isolation guarantees, different candle source."""
+"""Mirrors tests/ops/test_ws_keepalive.py's (post-Task-5b) structure --
+same fleet pattern, same isolation guarantees, same open-position
+override, different candle source."""
 from __future__ import annotations
 
 import asyncio
@@ -1443,11 +1852,11 @@ async def test_spawns_a_child_per_desired_symbol() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancels_child_when_symbol_drops_out_matching_spot_fleet_behavior() -> None:
-    """Verified-behavior mirror test (design spec's Open-position
-    retention section): a dropped-out symbol's child is cancelled
-    unconditionally, exactly like ws_keepalive_task already does --
-    NOT a retention test, since retention isn't what's being built."""
+async def test_cancels_child_when_symbol_drops_out_and_no_open_position() -> None:
+    """REPLACES the original draft's 'unconditional cancel, retention
+    isn't being built' test -- retention IS being built now (addendum
+    (a), hard requirement). Base case unchanged: no open position means
+    the drop-out still cancels exactly as before."""
     async def fake_runner(symbol_pair: str, timeframe: str) -> None:
         await asyncio.sleep(3600)
 
@@ -1458,6 +1867,29 @@ async def test_cancels_child_when_symbol_drops_out_matching_spot_fleet_behavior(
 
     await _refresh_futures_children(children, [], runner=fake_runner)  # FOO drops out
     assert ("FOO/USDT", "1h") not in children
+
+
+@pytest.mark.asyncio
+async def test_retains_dropped_child_with_open_position(monkeypatch) -> None:
+    """NEW -- addendum (a)'s hard open-position override, futures-poll side."""
+    from app.ws import futures_poll as fmod
+
+    async def fake_has_open_position(session, symbol_pair: str) -> bool:
+        return symbol_pair == "FOO/USDT"
+
+    monkeypatch.setattr(fmod, "has_open_position", fake_has_open_position)
+
+    async def fake_runner(symbol_pair: str, timeframe: str) -> None:
+        await asyncio.sleep(3600)
+
+    children: dict[tuple[str, str], asyncio.Task[None]] = {}
+    await _refresh_futures_children(
+        children, [("FOO/USDT", "1h")], runner=fake_runner, session_factory=object(),
+    )
+    await asyncio.sleep(0)
+    await _refresh_futures_children(children, [], runner=fake_runner, session_factory=object())
+    assert ("FOO/USDT", "1h") in children  # retained
+    children[("FOO/USDT", "1h")].cancel()
 
 
 @pytest.mark.asyncio
@@ -1492,17 +1924,17 @@ Expected: FAIL — `ImportError`.
 
 - [ ] **Step 4: Write the implementation**
 
-Append to `backend/app/ws/futures_poll.py` (structure deliberately mirrors `keepalive.py`'s `_run_child_with_restart`/`_refresh_children`/`run_keepalive`):
+Append to `backend/app/ws/futures_poll.py` (structure deliberately mirrors the post-Task-5b `keepalive.py`'s `_run_child_with_restart`/`_refresh_children`/`run_keepalive`, including the open-position override):
 
 ```python
 from collections.abc import Callable as _Callable
 
 from app.ops.heartbeat import record_heartbeat
-from app.shadow.universe import fetch_top_n_usdt_futures_only
+from app.shadow.live_fleet_universe import has_open_position, load_live_fleet_universe
 from app.ws.live_prediction import run_live_prediction
 
 WORKER_NAME: str = "futures_poll_task"
-FUTURES_POLL_TOP_N: int = 8
+FUTURES_POLL_SAFETY_MAX_N: int = 30  # safety valve, not the selector -- see plan doc
 FUTURES_POLL_TIMEFRAME: str = "1h"
 FUTURES_POLL_REFRESH_SECONDS: int = 24 * 60 * 60
 FUTURES_POLL_HEARTBEAT_SECONDS: int = 5 * 60
@@ -1554,14 +1986,23 @@ async def _refresh_futures_children(
     desired: list[tuple[str, str]],
     *,
     runner,
+    session_factory=None,
 ) -> None:
-    """Reconcile running children with the desired set. Mirrors
-    keepalive.py's _refresh_children exactly: unconditional cancel on
-    drop-out, no open-position awareness (see the design spec's
-    verified-behavior section for why this is deliberate, not a gap)."""
+    """Reconcile running children with the desired set. Mirrors the
+    post-Task-5b keepalive.py's _refresh_children exactly, INCLUDING the
+    open-position override -- addendum (a) is a hard requirement on both
+    fleets, not just the spot-WS one. session_factory optional (defaults
+    None) so existing no-DB tests keep working unchanged; the real
+    supervisor call site always passes it."""
     desired_set = set(desired)
     for key in list(children):
         if key not in desired_set:
+            if session_factory is not None:
+                symbol_pair, _tf = key
+                async with session_factory() as session:
+                    if await has_open_position(session, symbol_pair):
+                        log.info("futures_poll: retaining %s/%s -- open position", *key)
+                        continue
             log.info("futures_poll: dropping %s/%s", *key)
             children[key].cancel()
             try:
@@ -1583,7 +2024,6 @@ async def _refresh_futures_children(
 async def run_futures_poll(
     session_factory,
     *,
-    top_n: int = FUTURES_POLL_TOP_N,
     timeframe: str = FUTURES_POLL_TIMEFRAME,
     refresh_seconds: int = FUTURES_POLL_REFRESH_SECONDS,
     heartbeat_seconds: int = FUTURES_POLL_HEARTBEAT_SECONDS,
@@ -1592,11 +2032,11 @@ async def run_futures_poll(
     """Main supervisor loop -- structurally identical to run_keepalive
     (app.ws.keepalive), owning a completely separate child-task set so
     nothing here can reach the spot-WS fleet's tasks."""
-    log.info("futures_poll: starting (top_n=%d, tf=%s)", top_n, timeframe)
+    log.info("futures_poll: starting (tf=%s)", timeframe)
     children: dict[tuple[str, str], asyncio.Task[None]] = {}
     try:
-        desired = await _load_desired_futures_symbols(session_factory, top_n=top_n, timeframe=timeframe)
-        await _refresh_futures_children(children, desired, runner=runner)
+        desired = await _load_desired_futures_symbols(session_factory, timeframe=timeframe)
+        await _refresh_futures_children(children, desired, runner=runner, session_factory=session_factory)
         await record_heartbeat(
             session_factory, WORKER_NAME, status="ok",
             details={"children": len(children), "timeframe": timeframe,
@@ -1608,9 +2048,9 @@ async def run_futures_poll(
             await asyncio.sleep(heartbeat_seconds)
             now = loop.time()
             if now - last_refresh >= refresh_seconds:
-                desired = await _load_desired_futures_symbols(session_factory, top_n=top_n, timeframe=timeframe)
+                desired = await _load_desired_futures_symbols(session_factory, timeframe=timeframe)
                 if desired:
-                    await _refresh_futures_children(children, desired, runner=runner)
+                    await _refresh_futures_children(children, desired, runner=runner, session_factory=session_factory)
                     last_refresh = now
             await record_heartbeat(
                 session_factory, WORKER_NAME, status="ok",
@@ -1628,18 +2068,33 @@ async def run_futures_poll(
 
 
 async def _load_desired_futures_symbols(
-    session_factory, *, top_n: int, timeframe: str,
+    session_factory, *, timeframe: str,
 ) -> list[tuple[str, str]]:
-    from app.data.adapters import get_intermarket_adapter
+    """No top_n -- the liquidity floor (Task 5) is the selector. The
+    FUTURES_POLL_SAFETY_MAX_N truncation below is a safety valve, only
+    engages if the qualifying cohort ever exceeds what a staging soak
+    validated -- ranked by liquidity (qvol desc, then spread asc, then
+    depth desc), never by volume alone, per the addendum's fallback."""
+    from app.ws.keepalive import to_pair
 
     try:
-        adapter = get_intermarket_adapter()
-        assert adapter.http is not None and adapter.rate_client is not None
-        entries = await fetch_top_n_usdt_futures_only(adapter.http, adapter.rate_client, n=top_n)
+        async with session_factory() as session:
+            entries = await load_live_fleet_universe(session, cohort="futures_poll")
     except Exception as e:  # noqa: BLE001
-        log.warning("futures_poll: fetch_top_n_usdt_futures_only failed: %s", e)
+        log.warning("futures_poll: load_live_fleet_universe failed: %s", e)
         return []
-    from app.ws.keepalive import to_pair
+
+    if len(entries) > FUTURES_POLL_SAFETY_MAX_N:
+        log.warning(
+            "futures_poll: %d qualifying symbols exceeds safety valve %d -- "
+            "truncating by liquidity rank, this should be investigated "
+            "(staging soak may not cover this scale)",
+            len(entries), FUTURES_POLL_SAFETY_MAX_N,
+        )
+        entries = sorted(
+            entries, key=lambda e: (-e.qvol_24h, e.spread_bps, -e.depth_0_5pct_usdt),
+        )[:FUTURES_POLL_SAFETY_MAX_N]
+
     return [(to_pair(e.symbol), timeframe) for e in entries]
 
 
@@ -1650,7 +2105,7 @@ def start_futures_poll_task(session_factory) -> asyncio.Task[None]:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/ops/test_futures_poll_task.py -v`
-Expected: PASS, all 3 tests.
+Expected: PASS, all 4 tests.
 
 - [ ] **Step 6: Run the full `futures_poll.py`-related test suite together**
 
@@ -1661,21 +2116,26 @@ Expected: PASS, all tests from Tasks 6-8.
 
 ```bash
 git add backend/app/ws/futures_poll.py backend/tests/ops/test_futures_poll_task.py
-git commit -m "feat(futures-poll): add futures_poll_task supervisor (Phase 4)"
+git commit -m "feat(futures-poll): add futures_poll_task supervisor, liquidity-floor selector + open-position override (Phase 4 redraft)"
 ```
 
 ---
 
-## Task 9: Thread `symbol_source` through persist + dispatch
+## Task 9: Thread `symbol_source` through persist + dispatch (+ shadow)
+
+> **Redrafted 2026-08-17.** Two corrections from the original draft: (1) the default value changes from `'spot_ws'` to `'established_top20'` throughout (matches Task 3's migration column default — a call site that doesn't explicitly pass a cohort, e.g. the `live_worker` BTC singleton, is legacy-established coverage, not a new transport-named default that no longer exists in the three-way scheme); `'futures_poll'` is unchanged, still spelled the same. (2) `shadow_trades.symbol_source` must also be populated — added as a new step below, not covered by the original draft's file list at all (predictions/telegram_signals/live_trades only). Without it, the addendum's reversal criterion #2 (re-measuring the new cohort's EV via a `shadow_trades` split) has nothing to read.
+>
+> **Open detail for the implementer, not fully resolved here**: `ws_keepalive_task`'s desired-symbol list (post-Task-5b) is `list[tuple[symbol_pair, timeframe]]` — it does not currently carry which of the two spot cohorts (`established_top20` vs `liquidity_added_spot`) each symbol belongs to. The runner that eventually calls `run_live_prediction(..., symbol_source=?)` needs that per-symbol answer, not a single fixed default, since keepalive.py now serves BOTH spot cohorts from one fleet. Resolve by either (a) widening the desired-set tuples to `(symbol_pair, timeframe, cohort)` and threading cohort through `_refresh_children`/the runner closure, or (b) having the runner look up the symbol's current cohort from `load_live_fleet_universe` at call time. Pick one, note the choice in the commit, and add a test asserting a `liquidity_added_spot` symbol's `predictions` row is actually tagged `liquidity_added_spot`, not silently defaulted to `established_top20` — that silent-default failure mode is exactly the kind of thing this task exists to prevent.
 
 **Files:**
 - Modify: `backend/app/ws/live_prediction.py` (the `async for candle in source:` body, and `_persist_prediction_and_schedule_validation`)
 - Modify: `backend/app/db/payload_builders.py::build_predictions_payload`
+- Modify: wherever `shadow_trades` rows are written on close (shadow worker's position-close path — grep for the existing `INSERT INTO shadow_trades` / ORM insert site before assuming a specific file)
 - Test: `backend/tests/unit/test_live_prediction_symbol_source.py` (new)
 
 **Interfaces:**
 - Consumes: `symbol_source` parameter added in Task 1.
-- Produces: `predictions.symbol_source`, `telegram_signals.symbol_source`, `live_trades.symbol_source` populated correctly on every write path.
+- Produces: `predictions.symbol_source`, `shadow_trades.symbol_source`, `telegram_signals.symbol_source`, `live_trades.symbol_source` populated correctly on every write path.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1705,7 +2165,7 @@ def test_build_predictions_payload_includes_symbol_source_default() -> None:
     payload = build_predictions_payload(
         _StubPred(), user_id=1, layer_payload={},
     )
-    assert payload["symbol_source"] == "spot_ws"
+    assert payload["symbol_source"] == "established_top20"
 
 
 def test_build_predictions_payload_threads_futures_poll() -> None:
@@ -1758,14 +2218,14 @@ async def test_maybe_dispatch_threads_symbol_source_into_proposal_kwargs() -> No
 
 
 @pytest.mark.asyncio
-async def test_maybe_dispatch_defaults_symbol_source_to_spot_ws() -> None:
+async def test_maybe_dispatch_defaults_symbol_source_to_established_top20() -> None:
     with patch("app.ws.live_prediction.vault_keys", return_value="fake-key"), \
          patch("app.ws.live_prediction.dispatch_if_eligible", new_callable=AsyncMock) as mock_dispatch, \
          patch("app.ws.live_prediction.get_settings"):
         mock_dispatch.return_value = None
         await _maybe_dispatch(AsyncMock(), pred=_StubDispatchPred(), layer_payload={})
     _, kwargs = mock_dispatch.call_args
-    assert kwargs["proposal_kwargs"]["symbol_source"] == "spot_ws"
+    assert kwargs["proposal_kwargs"]["symbol_source"] == "established_top20"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1775,33 +2235,37 @@ Expected: FAIL — `KeyError: 'symbol_source'` on the payload tests, `TypeError:
 
 - [ ] **Step 3: Update `build_predictions_payload`**
 
-In `backend/app/db/payload_builders.py`, add a `symbol_source: str = "spot_ws"` keyword parameter to `build_predictions_payload` and add `"symbol_source": symbol_source` to the returned `result` dict, next to the existing `"model_version"` key.
+In `backend/app/db/payload_builders.py`, add a `symbol_source: str = "established_top20"` keyword parameter to `build_predictions_payload` and add `"symbol_source": symbol_source` to the returned `result` dict, next to the existing `"model_version"` key.
 
 - [ ] **Step 4: Add `symbol_source` to `_maybe_dispatch`'s signature and thread it into `proposal_kwargs`**
 
 Run `grep -n "def _maybe_dispatch\|proposal_kwargs" backend/app/ws/live_prediction.py` first to confirm the exact call shape.
 
-In `backend/app/ws/live_prediction.py`, add `symbol_source: str = "spot_ws"` to `_maybe_dispatch`'s signature (this is the **only** task that adds this parameter — Task 10 later adds new *behavior* inside this already-parameterized function, it does not re-add the parameter). Add `"symbol_source": symbol_source` to the `proposal_kwargs` dict passed to `dispatch_if_eligible`.
+In `backend/app/ws/live_prediction.py`, add `symbol_source: str = "established_top20"` to `_maybe_dispatch`'s signature (this is the **only** task that adds this parameter — Task 10 later adds new *behavior* inside this already-parameterized function, it does not re-add the parameter). Add `"symbol_source": symbol_source` to the `proposal_kwargs` dict passed to `dispatch_if_eligible`.
 
 - [ ] **Step 5: Thread `symbol_source` through the two call sites inside `run_live_prediction`'s body**
 
 Inside the `async for candle in source:` loop: update the `build_predictions_payload(...)` call to pass `symbol_source=symbol_source`, and update the `_maybe_dispatch(...)` call to pass `symbol_source=symbol_source`.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 6: Thread `symbol_source` into the `shadow_trades` write path**
+
+Grep for the actual insert site first — `grep -rn "INSERT INTO shadow_trades\|class ShadowTrade\b" backend/app` — do not assume a specific file/ORM-vs-raw-SQL shape without checking. Add `symbol_source: str = "established_top20"` to whatever function persists a closed shadow trade, threaded from the same value `run_live_prediction`/the shadow worker already has for that symbol at open-time (per the addendum's open dependency question, this only produces real `liquidity_added_spot`/`futures_poll` rows for symbols shadow actually tracks — verify against that open question before assuming full coverage here).
+
+- [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_prediction_symbol_source.py -v`
-Expected: PASS, all 4 tests.
+Expected: PASS, all 4 tests, plus whatever new shadow_trades-side test Step 6 requires.
 
-- [ ] **Step 7: Run the Task 1 guard tests plus the broader live_prediction suite to confirm no regression**
+- [ ] **Step 8: Run the Task 1 guard tests plus the broader live_prediction suite to confirm no regression**
 
 Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_prediction_candle_source.py tests/integration/test_live_prediction_validator_isolation.py tests/unit/test_live_prediction_dispatch_hook.py -v`
 Expected: PASS, all.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add backend/app/db/payload_builders.py backend/app/ws/live_prediction.py backend/tests/unit/test_live_prediction_symbol_source.py
-git commit -m "feat(phase4): thread symbol_source cohort tag through persist + dispatch"
+git commit -m "feat(phase4): thread symbol_source cohort tag through persist + dispatch + shadow"
 ```
 
 ---
@@ -2667,47 +3131,49 @@ git commit -m "feat(phase4): wire futures_poll_task into app lifespan + worker r
 
 ## Task 18: Staging rollout verification (manual checklist, not code)
 
+> **Redrafted 2026-08-17.** The original checklist verified a fixed N=8 futures-only cohort against `symbol_source IN ('spot_ws', 'futures_poll')` and ended with "start at N=8, widen to 20-25 after one clean week" — a sizing ladder the liquidity-floor selector supersedes entirely (there is no N to widen; the floor determines membership directly). Replaced with verification against the actual three-way cohort split, and the addendum's cost-check gate substituted for the old widen-after-a-week step.
+
 **Files:** none — this task is a documented manual verification pass against the staging deployment, per the spec's rollout section.
 
 - [ ] **Step 1: Deploy Tasks 2-17 to staging** (Task 1 has already shipped and soaked separately per the Global Constraints).
 
-- [ ] **Step 2: Verify candles arriving for all N=8 futures-only symbols**
+- [ ] **Step 2: Verify candles arriving for every symbol the selector actually chose, across all three cohorts**
 
-Run the `sql-select` ops-debug probe: `SELECT symbol, timeframe, MAX(ts) AS last_pred, COUNT(*) AS n FROM predictions WHERE symbol_source = 'futures_poll' GROUP BY symbol, timeframe ORDER BY symbol` against staging.
-Expected: 8 distinct symbols, each with a recent `last_pred` timestamp.
+Run the `sql-select` ops-debug probe: `SELECT symbol_source, symbol, timeframe, MAX(ts) AS last_pred, COUNT(*) AS n FROM predictions WHERE ts >= NOW() - INTERVAL '24h' GROUP BY symbol_source, symbol, timeframe ORDER BY symbol_source, symbol` against staging.
+Expected: rows across all three `symbol_source` values, each symbol with a recent `last_pred`. Compare the per-cohort symbol COUNT against `live_fleet_universe`'s latest snapshot (`SELECT cohort, COUNT(*) FROM live_fleet_universe WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM live_fleet_universe) GROUP BY cohort`) — they should match exactly. Do not expect a fixed number here; expect it to match whatever the floor selected that day (per the decision record's 2026-08-15 measurement, roughly 34 spot-backed + 8-11 futures-only, but this drifts daily by design).
 
-- [ ] **Step 3: Verify `predictions` rows carry the correct `symbol_source`**
+- [ ] **Step 3: Verify `shadow_trades.symbol_source` is populated, not just `predictions`**
 
-Confirm the query in Step 2 returns rows only for `symbol_source = 'futures_poll'` and that a parallel query for `symbol_source = 'spot_ws'` still shows the existing spot-backed symbols unaffected.
+`SELECT symbol_source, COUNT(*) FROM shadow_trades WHERE opened_at >= NOW() - INTERVAL '24h' GROUP BY symbol_source` — confirm non-`established_top20` rows actually appear for any `liquidity_added_spot`/`futures_poll` symbol shadow is tracking (per Task 9's open dependency note, this may legitimately be zero for `futures_poll` if shadow doesn't track those symbols yet — confirm which case this is, don't assume).
 
 - [ ] **Step 4: Verify the Telegram card renders correctly end-to-end**
 
-Trigger a real signal on staging (or force one via the `test-trade-open`-class ops-debug probe against staging) for a futures-only symbol and visually inspect the actual rendered Telegram message — confirm the cohort banner, liquidity numbers, and limitation sentence all appear correctly, not just that the code path completed without erroring.
+Trigger a real signal on staging (or force one via the `test-trade-open`-class ops-debug probe against staging) for a `liquidity_added_spot` symbol AND a `futures_poll` symbol and visually inspect both actual rendered Telegram messages — confirm the cohort banner, liquidity numbers, and limitation sentence all appear correctly for both, not just that the code path completed without erroring.
 
-- [ ] **Step 5: Verify the app view renders**
+- [ ] **Step 5: Verify the app view renders, three-way filterable**
 
-Load the Signals tab against staging, confirm rows appear, filters work, auto-refresh fires after ~2 minutes, manual refresh works, full-precision values display correctly (compare against the raw API response, not a rounded eyeball check).
+Load the Signals tab against staging, confirm rows appear across all three cohorts, filtering by cohort works (not just by direction), auto-refresh fires after ~2 minutes, manual refresh works, full-precision values display correctly (compare against the raw API response, not a rounded eyeball check).
 
-- [ ] **Step 6: Verify existing spot-backed symbols are unaffected**
+- [ ] **Step 6: Verify `established_top20` symbols are unaffected**
 
-Compare pre-deploy and post-deploy prediction cadence for 3-4 existing spot-backed symbols (same `sql-select` pattern as Step 2, filtered to `symbol_source = 'spot_ws'`) — confirm no gap, no format change, no `symbol_source` drift on rows that predate this deploy.
+Compare pre-deploy and post-deploy prediction cadence for 3-4 symbols that were already in the legacy top-20 (same `sql-select` pattern as Step 2, filtered to `symbol_source = 'established_top20'`) — confirm no gap, no format change. **Also explicitly check ADA and NEAR** (the decision record's named symbols that stably fail the new floor) — confirm they either still appear tagged `established_top20` (if the hysteresis exit hasn't fired yet — expected on day one, unanimous 5/5 fail takes at least one full refresh) or have cleanly dropped out with no error, not a half-state.
 
-- [ ] **Step 7: Report the universe membership diff**
+- [ ] **Step 7: Verify the open-position override, not just the happy path**
 
-Run: `sql-select` probe comparing `asset_universe` (spot top-20, unaffected) against the new futures-only symbol set actually selected — report which 8 symbols were chosen and cross-check against the liquidity floor's 10-candidate pass list from the design spec.
+Manually open a staging position (testnet) on a symbol that's currently borderline/failing the floor, force a refresh, confirm the symbol is retained in `live_fleet_universe` and its WS/poll child is NOT cancelled, per addendum (a)'s hard requirement — Task 5b/8's unit tests cover this in isolation; this step is the end-to-end confirmation against a real refresh cycle.
 
-- [ ] **Step 8: Hold 24h, then re-run Steps 2-6**
+- [ ] **Step 8: Hold 24h, then re-run Steps 2-7**
 
-Confirm no gap-count escalations, no failure-streak escalations, no rate-limit-wait warnings indicating real contention (check the `futures_poll_task` heartbeat's `details` JSONB via the worker-heartbeat census).
+Confirm no gap-count escalations, no failure-streak escalations, no rate-limit-wait warnings indicating real contention (check both `ws_keepalive_task`'s and `futures_poll_task`'s heartbeat `details` JSONB via the worker-heartbeat census). **Also run the cost-check gate from the addendum**: `docker stats tr-staging-backend` before/after enabling the new selector, across this same 24h window including a candle-close burst — this is the addendum's explicit go/no-go gate for whether N≈42 fits, not an assumption.
 
 - [ ] **Step 9: Promote to main following the standing soak-class + promotion-checklist discipline**, including the FU-42-motivated settings-diff step from `backend/docs/PROMOTION_CHECKLIST.md`.
 
-- [ ] **Step 10: Start at N=8 in production. Do not widen to 20-25 until one full week of clean operation** (no sustained gap-count or failure-streak escalations) has passed.
+- [ ] **Step 10: No sizing ladder to walk — the floor determines membership directly, there is no N to widen.** If the Step 8 cost-check gate showed N≈42 doesn't fit, apply the addendum's fallback (`FUTURES_POLL_SAFETY_MAX_N` / an equivalent cap on the spot side, ranked by liquidity — qvol desc, spread asc, depth desc — never volume) rather than reverting to a fixed-N ladder.
 
 ---
 
 ## Self-Review Notes
 
-**Spec coverage**: every section of the design spec maps to a task — Step 0 → Task 1; data model → Tasks 2-3; liquidity floor → Task 4; universe selection → Task 5; poller (idempotency/gap/fail-loud/rate-limit) → Tasks 6-8; cohort tagging → Task 9; dispatch-time re-check + suppression → Task 10; visual distinction → Task 11; app view backend → Task 12; app view frontend → Tasks 13-16; wiring → Task 17; rollout → Task 18. Open-position retention (spec's dedicated section) is covered by Task 8's mirror-cancellation test. The manual-execution measurement limitation (spec's "Known limitation" section) requires no task — it's a documentation-only finding already recorded in the spec itself.
+**Spec coverage**: every section of the design spec maps to a task — Step 0 → Task 1; data model → Tasks 2-3; liquidity floor → Task 4; universe selection + hysteresis → Task 5; spot-fleet wiring → Task 5b (new, 2026-08-17); poller (idempotency/gap/fail-loud/rate-limit) → Tasks 6-8; cohort tagging (four tables, three-way) → Task 9; dispatch-time re-check + suppression → Task 10; visual distinction → Task 11; app view backend → Task 12; app view frontend → Tasks 13-16; wiring → Task 17; rollout → Task 18. **Open-position retention (spec's dedicated section) is now a hard requirement, covered by Task 5b's and Task 8's retention tests — corrected 2026-08-17; the original draft had this backwards (mirror-cancellation, explicitly not retention).** The manual-execution measurement limitation (spec's "Known limitation" section) requires no task — it's a documentation-only finding already recorded in the spec itself.
 
-**Deferred items** (matching the spec's own "Deferred" section, intentionally no task here): rate-limiter priority reweighting, shadow-side tracking of the futures-only cohort, degraded-vs-suppressed card alternative.
+**Deferred items** (matching the spec's own "Deferred" section, intentionally no task here): rate-limiter priority reweighting, degraded-vs-suppressed card alternative. **Shadow-side tracking of the futures-only cohort is no longer purely deferred** — Task 9's shadow_trades write depends on it for the `futures_poll` cohort specifically; flagged there, still not built in this plan, but no longer non-blocking the way the original spec framed it.
