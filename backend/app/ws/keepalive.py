@@ -8,10 +8,12 @@ artificially thin and the unlock-real-money milestone slipped further out
 the more we waited for organic user traffic.
 
 This supervisor fans out the existing ``run_live_prediction`` coroutine
-across the top-N universe symbols (default 20) on the 1h timeframe. Each
-symbol gets its own asyncio.Task running a Binance SPOT kline WS
-subscription; closed candles flow through the normal predictor →
-persist_prediction → record_pending_validation pipeline.
+across the liquidity-floor-qualified spot-backed cohorts of
+``live_fleet_universe`` (``established_top20`` + ``liquidity_added_spot``
+— see ``app.shadow.live_fleet_universe``, Phase 4 Task 5) on the 1h
+timeframe. Each symbol gets its own asyncio.Task running a Binance SPOT
+kline WS subscription; closed candles flow through the normal predictor
+→ persist_prediction → record_pending_validation pipeline.
 
 Design notes:
 - We reuse ``run_live_prediction`` verbatim — no divergent persist path,
@@ -22,16 +24,24 @@ Design notes:
   conflict on the predictions hash chain.
 - Per-symbol child tasks are wrapped in a restart-with-backoff loop so
   a transient Binance hiccup on one symbol doesn't kill the others.
-- Universe is re-read every 24h; symbols added to the top-N get a new
-  child task, symbols dropped get their task cancelled.
+- The fleet is re-read every 24h; symbols newly passing the liquidity
+  floor get a new child task, symbols failing it get their task
+  cancelled — UNLESS they have an open live_trades/shadow_open_positions
+  row, in which case cancellation is skipped (Phase 4 Task 5b hard
+  open-position override; see ``_refresh_children``). There is no
+  separate rank/top_n cutoff on top of the liquidity floor — the floor
+  itself is the only membership criterion (2026-08-17 liquidity-floor-
+  selector addendum superseded the prior top-20-by-volume selection).
 - The supervisor itself heartbeats every 5 min so the watchdog sees us
   even on quiet nights when no candles close.
 
 Geoblocking: this uses the SPOT WS endpoint (stream.binance.com:9443),
 which is NOT geoblocked from Hetzner Helsinki — see
-[[binance_futures_ws_geoblock]] for the Futures-side caveat. The
-top-N source ``load_current_universe`` is already SPOT-only since
-PR #123.
+[[binance_futures_ws_geoblock]] for the Futures-side caveat. Both
+cohorts this supervisor reads (``established_top20`` and
+``liquidity_added_spot``) are spot-backed by construction — the
+futures-only cohort (``futures_poll``) is served by a separate
+supervisor (Phase 4 Task 8), not this one.
 """
 
 from __future__ import annotations
@@ -43,7 +53,11 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.ops.heartbeat import record_heartbeat
-from app.shadow.universe import AssetUniverseEntry, load_current_universe
+from app.shadow.live_fleet_universe import (
+    LiveFleetEntry,
+    has_open_position,
+    load_live_fleet_universe,
+)
 from app.ws.live_prediction import run_live_prediction
 
 log = logging.getLogger(__name__)
@@ -51,6 +65,13 @@ log = logging.getLogger(__name__)
 
 # Knob defaults — kept module-level so tests can monkey-patch without
 # touching the supervisor's call sites.
+# KEEPALIVE_TOP_N is no longer read by this module's own selection path
+# (Phase 4 Task 5b switched _load_keepalive_symbols to the liquidity-floor
+# selector, which has no rank cutoff) — kept defined because
+# app.healer.detectors and tests/healer/test_detectors.py still import it
+# as the historical top-N constant for the C3 detector's own (separate,
+# asset_universe-based) "expected fleet" calculation. Do not delete
+# without checking those call sites first.
 KEEPALIVE_TOP_N: int = 20
 KEEPALIVE_TIMEFRAME: str = "1h"
 KEEPALIVE_REFRESH_SECONDS: int = 24 * 60 * 60  # 24h
@@ -113,11 +134,19 @@ async def _run_child_with_restart(
 async def _load_keepalive_symbols(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    top_n: int,
     exclude: frozenset[tuple[str, str]],
     timeframe: str,
 ) -> list[tuple[str, str]]:
-    """Read the top-N from asset_universe, normalize, and apply excludes.
+    """Read the liquidity-floor-qualified spot-backed cohorts
+    (``established_top20`` + ``liquidity_added_spot``) from
+    ``live_fleet_universe``, normalize, and apply excludes.
+
+    No ``top_n`` slice — the liquidity floor itself is now the only
+    membership criterion (Phase 4 liquidity-floor-selector addendum,
+    2026-08-17; see ``app.shadow.live_fleet_universe``). The
+    ``futures_poll`` cohort is intentionally excluded here — those
+    symbols are served by the separate futures REST-poll supervisor
+    (Phase 4 Task 8), not this spot-WS fleet.
 
     Returns a list of ``(symbol_pair, timeframe)`` tuples. Empty result on
     any failure is logged but not raised — the supervisor will retry on
@@ -125,13 +154,18 @@ async def _load_keepalive_symbols(
     """
     try:
         async with session_factory() as session:
-            entries: list[AssetUniverseEntry] = await load_current_universe(session)
+            established: list[LiveFleetEntry] = await load_live_fleet_universe(
+                session, cohort="established_top20",
+            )
+            added: list[LiveFleetEntry] = await load_live_fleet_universe(
+                session, cohort="liquidity_added_spot",
+            )
     except Exception as e:  # noqa: BLE001
-        log.warning("ws_keepalive: load_current_universe failed: %s", e)
+        log.warning("ws_keepalive: load_live_fleet_universe failed: %s", e)
         return []
 
     pairs: list[tuple[str, str]] = []
-    for entry in entries[:top_n]:
+    for entry in established + added:
         pair = to_pair(entry.symbol)
         key = (pair, timeframe)
         if key in exclude:
@@ -145,17 +179,35 @@ async def _refresh_children(
     desired: list[tuple[str, str]],
     *,
     runner: SymbolRunner,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     """Reconcile the running child tasks with the desired set.
 
     - New symbols → spawn a child task.
-    - Removed symbols → cancel and await the old task.
+    - Removed symbols → cancel and await the old task, UNLESS the symbol
+      has an open live_trades/shadow_open_positions row — Phase 4
+      liquidity-floor-selector addendum (a) point 4's hard open-position
+      override ("never removed... until the position closes"). The
+      override is only checked when ``session_factory`` is supplied;
+      callers that omit it (most existing tests, and any caller that
+      doesn't care about the override) get the prior unconditional-cancel
+      behavior unchanged.
     - Symbols still present → leave untouched (no churn).
     """
     desired_set = set(desired)
-    # Cancel symbols that left the top-N (delisted, dropped in rank, …).
+    # Cancel symbols that dropped below the liquidity floor (or were
+    # excluded/delisted), unless an open position retains them.
     for key in list(children):
         if key not in desired_set:
+            if session_factory is not None:
+                symbol_pair, _tf = key
+                async with session_factory() as session:
+                    if await has_open_position(session, symbol_pair):
+                        log.info(
+                            "ws_keepalive: retaining %s/%s -- open position",
+                            *key,
+                        )
+                        continue
             log.info("ws_keepalive: dropping %s/%s", *key)
             children[key].cancel()
             try:
@@ -163,7 +215,7 @@ async def _refresh_children(
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             del children[key]
-    # Spawn symbols that joined the top-N.
+    # Spawn symbols that joined the fleet.
     for key in desired:
         if key in children:
             continue
@@ -178,7 +230,6 @@ async def _refresh_children(
 async def run_keepalive(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    top_n: int = KEEPALIVE_TOP_N,
     timeframe: str = KEEPALIVE_TIMEFRAME,
     exclude: frozenset[tuple[str, str]] = DEFAULT_EXCLUDE,
     refresh_seconds: int = KEEPALIVE_REFRESH_SECONDS,
@@ -191,22 +242,24 @@ async def run_keepalive(
     The loop wakes on the shorter of ``heartbeat_seconds`` or
     ``refresh_seconds``. On each tick it heartbeats; on every Nth tick
     (where N = refresh_seconds / heartbeat_seconds) it re-reads the
-    universe and reconciles the fleet.
+    liquidity-floor-qualified fleet and reconciles the children.
     """
     log.info(
-        "ws_keepalive: starting (top_n=%d, tf=%s, refresh=%ds, hb=%ds)",
-        top_n, timeframe, refresh_seconds, heartbeat_seconds,
+        "ws_keepalive: starting (tf=%s, refresh=%ds, hb=%ds)",
+        timeframe, refresh_seconds, heartbeat_seconds,
     )
 
     children: dict[tuple[str, str], asyncio.Task[None]] = {}
     try:
-        # Initial population. If the universe is empty (first boot, table
+        # Initial population. If the fleet is empty (first boot, table
         # never populated), log + run with no children; the next refresh
-        # will pick them up once the daily universe_refresh_task runs.
+        # will pick them up once the daily live-fleet-universe refresh runs.
         desired = await _load_keepalive_symbols(
-            session_factory, top_n=top_n, exclude=exclude, timeframe=timeframe,
+            session_factory, exclude=exclude, timeframe=timeframe,
         )
-        await _refresh_children(children, desired, runner=runner)
+        await _refresh_children(
+            children, desired, runner=runner, session_factory=session_factory,
+        )
         await record_heartbeat(
             session_factory, WORKER_NAME,
             status="ok",
@@ -220,11 +273,13 @@ async def run_keepalive(
             now = loop.time()
             if now - last_refresh >= refresh_seconds:
                 desired = await _load_keepalive_symbols(
-                    session_factory, top_n=top_n, exclude=exclude,
-                    timeframe=timeframe,
+                    session_factory, exclude=exclude, timeframe=timeframe,
                 )
                 if desired:
-                    await _refresh_children(children, desired, runner=runner)
+                    await _refresh_children(
+                        children, desired, runner=runner,
+                        session_factory=session_factory,
+                    )
                     last_refresh = now
                 else:
                     log.info(
