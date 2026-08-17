@@ -3,10 +3,18 @@
 These cover the four pieces of the supervisor in isolation:
 
 1. ``to_pair`` — Binance no-slash ↔ slash-form normalization.
-2. ``_load_keepalive_symbols`` — top-N + exclude filtering against a
-   real (sqlite) asset_universe table; graceful empty on DB failure.
-3. ``_refresh_children`` — reconciliation diff: add new, cancel removed,
-   leave existing untouched.
+2. ``_load_keepalive_symbols`` — cohort read (``established_top20`` +
+   ``liquidity_added_spot``) + exclude filtering against a real (sqlite)
+   ``live_fleet_universe`` table; graceful empty on DB failure. No
+   ``top_n`` slice — Phase 4 Task 5b switched the selection source from
+   ``asset_universe``/``load_current_universe`` (rank-based top-N) to
+   ``live_fleet_universe`` (liquidity-floor pass/fail, no rank cutoff on
+   top of it). This is the intentional, pre-authorized source swap the
+   Phase 4 plan doc's Task 5b calls out — the fixture, seeding helper,
+   and the tests that read through them change accordingly below.
+3. ``_refresh_children`` — reconciliation diff: add new, cancel removed
+   (unless an open position retains it — Task 5b's new hard
+   open-position override), leave existing untouched.
 4. ``_run_child_with_restart`` — per-symbol crash isolation: throwing
    runner restarts with backoff; CancelledError propagates cleanly.
 
@@ -43,85 +51,123 @@ def test_to_pair_leaves_non_usdt_alone() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _load_keepalive_symbols — DB-backed, sqlite mirror of asset_universe.
+# _load_keepalive_symbols — DB-backed, sqlite mirror of live_fleet_universe.
 
 
 @pytest.fixture
-async def universe_factory():
+async def fleet_factory():
+    """In-memory sqlite standing in for live_fleet_universe. Schema mirrors
+    the real Postgres migration (backend/alembic/versions/2026_08_17_0039_
+    live_fleet_universe.py) with sqlite-equivalent column types — same
+    shape used by tests/unit/test_live_fleet_universe.py's own fixture."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         await conn.execute(sa.text(
-            "CREATE TABLE asset_universe ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "symbol TEXT NOT NULL, "
-            "quote_volume_usd_24h REAL NOT NULL, "
-            "rank INTEGER NOT NULL, "
-            "snapshot_at TIMESTAMP NOT NULL)"
+            "CREATE TABLE live_fleet_universe ("
+            "symbol TEXT NOT NULL, cohort TEXT NOT NULL, "
+            "qvol_24h REAL NOT NULL, spread_bps REAL NOT NULL, "
+            "depth_0_5pct_usdt REAL NOT NULL, "
+            "snapshot_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "PRIMARY KEY (symbol, snapshot_at))"
         ))
     yield factory
     await engine.dispose()
 
 
-async def _seed_universe(
-    factory: async_sessionmaker, *, symbols: list[str],
+async def _seed_fleet(
+    factory: async_sessionmaker, *, entries: list[tuple[str, str]],
 ) -> None:
+    """``entries``: list of ``(symbol_no_slash, cohort)`` tuples, all
+    sharing one ``snapshot_at`` so they all count as "the latest
+    snapshot" (``load_live_fleet_universe`` selects ``MAX(snapshot_at)``).
+    Liquidity numbers are fixed dummy pass values — irrelevant to these
+    tests, which only exercise cohort/exclude filtering, not the
+    liquidity floor itself (that's covered by test_live_fleet_universe.py
+    and test_futures_liquidity.py)."""
     async with factory() as session:
-        for i, sym in enumerate(symbols):
+        for sym, cohort in entries:
             await session.execute(
                 sa.text(
-                    "INSERT INTO asset_universe "
-                    "(symbol, quote_volume_usd_24h, rank, snapshot_at) "
-                    "VALUES (:s, :v, :r, :ts)"
+                    "INSERT INTO live_fleet_universe "
+                    "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+                    "VALUES (:s, :c, 25000000, 2.0, 60000, '2026-08-17T00:00:00')"
                 ),
-                {
-                    "s": sym, "v": 1e9 - i * 1e6,
-                    "r": i + 1, "ts": "2026-05-15T00:00:00",
-                },
+                {"s": sym, "c": cohort},
             )
         await session.commit()
 
 
 @pytest.mark.asyncio
-async def test_load_symbols_applies_top_n(universe_factory: Any) -> None:
-    await _seed_universe(
-        universe_factory,
-        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
+async def test_load_symbols_reads_established_and_liquidity_added_no_top_n(
+    fleet_factory: Any,
+) -> None:
+    """Both spot-backed cohorts are read in full — no top_n slice, since
+    the liquidity floor itself is now the only membership criterion."""
+    await _seed_fleet(
+        fleet_factory,
+        entries=[
+            ("BTCUSDT", "established_top20"),
+            ("ETHUSDT", "established_top20"),
+            ("SOLUSDT", "liquidity_added_spot"),
+            ("BNBUSDT", "liquidity_added_spot"),
+            ("XRPUSDT", "liquidity_added_spot"),
+        ],
     )
     result = await keepalive._load_keepalive_symbols(
-        universe_factory, top_n=3, exclude=frozenset(), timeframe="1h",
+        fleet_factory, exclude=frozenset(), timeframe="1h",
     )
-    # First 3 from rank order, all normalized to slash form.
-    assert result == [
-        ("BTC/USDT", "1h"),
-        ("ETH/USDT", "1h"),
-        ("SOL/USDT", "1h"),
-    ]
+    # All 5 rows across both cohorts come back — nothing sliced off.
+    assert set(result) == {
+        ("BTC/USDT", "1h"), ("ETH/USDT", "1h"), ("SOL/USDT", "1h"),
+        ("BNB/USDT", "1h"), ("XRP/USDT", "1h"),
+    }
 
 
 @pytest.mark.asyncio
-async def test_load_symbols_filters_excludes(universe_factory: Any) -> None:
-    """Default exclude {(BTC/USDT, 1h)} must drop the singleton-owned pair."""
-    await _seed_universe(
-        universe_factory, symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+async def test_load_symbols_excludes_futures_poll_cohort(fleet_factory: Any) -> None:
+    """``futures_poll`` rows belong to the separate futures REST-poll
+    supervisor (Phase 4 Task 8) — _load_keepalive_symbols must never
+    surface them, even though they live in the same table."""
+    await _seed_fleet(
+        fleet_factory,
+        entries=[
+            ("BTCUSDT", "established_top20"),
+            ("NEWCOINUSDT", "futures_poll"),
+        ],
     )
     result = await keepalive._load_keepalive_symbols(
-        universe_factory, top_n=3,
-        exclude=frozenset({("BTC/USDT", "1h")}), timeframe="1h",
+        fleet_factory, exclude=frozenset(), timeframe="1h",
     )
-    assert result == [("ETH/USDT", "1h"), ("SOL/USDT", "1h")]
-    # Same universe but on a different timeframe should NOT be excluded —
+    assert result == [("BTC/USDT", "1h")]
+
+
+@pytest.mark.asyncio
+async def test_load_symbols_filters_excludes(fleet_factory: Any) -> None:
+    """Default exclude {(BTC/USDT, 1h)} must drop the singleton-owned pair."""
+    await _seed_fleet(
+        fleet_factory,
+        entries=[
+            ("BTCUSDT", "established_top20"),
+            ("ETHUSDT", "established_top20"),
+            ("SOLUSDT", "liquidity_added_spot"),
+        ],
+    )
+    result = await keepalive._load_keepalive_symbols(
+        fleet_factory, exclude=frozenset({("BTC/USDT", "1h")}), timeframe="1h",
+    )
+    assert set(result) == {("ETH/USDT", "1h"), ("SOL/USDT", "1h")}
+    # Same fleet but on a different timeframe should NOT be excluded —
     # the exclude key is (pair, timeframe), not just pair.
     result_5m = await keepalive._load_keepalive_symbols(
-        universe_factory, top_n=3,
-        exclude=frozenset({("BTC/USDT", "1h")}), timeframe="5m",
+        fleet_factory, exclude=frozenset({("BTC/USDT", "1h")}), timeframe="5m",
     )
     assert ("BTC/USDT", "5m") in result_5m
 
 
 @pytest.mark.asyncio
 async def test_load_symbols_returns_empty_on_db_failure(monkeypatch: Any) -> None:
-    """Any exception in load_current_universe → empty list, no raise."""
+    """Any exception in load_live_fleet_universe → empty list, no raise."""
 
     class _Boom:
         def __call__(self) -> Any:
@@ -135,7 +181,7 @@ async def test_load_symbols_returns_empty_on_db_failure(monkeypatch: Any) -> Non
             return _Ctx()
 
     result = await keepalive._load_keepalive_symbols(
-        _Boom(), top_n=5, exclude=frozenset(), timeframe="1h",  # type: ignore[arg-type]
+        _Boom(), exclude=frozenset(), timeframe="1h",  # type: ignore[arg-type]
     )
     assert result == []
 
@@ -173,7 +219,7 @@ async def test_refresh_children_cancels_dropped() -> None:
     )
     sol_task = children[("SOL/USDT", "1h")]
 
-    # SOL leaves the universe; ETH stays; ADA joins.
+    # SOL leaves the fleet; ETH stays; ADA joins.
     await keepalive._refresh_children(
         children,
         [("BTC/USDT", "1h"), ("ETH/USDT", "1h"), ("ADA/USDT", "1h")],
@@ -206,6 +252,94 @@ async def test_refresh_children_no_churn_for_unchanged() -> None:
     finally:
         for task in children.values():
             task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# _refresh_children — Phase 4 Task 5b hard open-position override (new).
+#
+# Deviates from the plan doc's own illustrative test by explicitly passing
+# session_factory to _refresh_children: the override is gated on
+# ``session_factory is not None`` (see _refresh_children's docstring), so
+# a call site that omits it — as the plan doc's illustrative snippet did —
+# would never invoke has_open_position at all, regardless of what it's
+# monkeypatched to return. Verified directly against the real
+# _refresh_children implementation in this file, not assumed from the plan.
+
+
+@pytest.mark.asyncio
+async def test_refresh_children_retains_dropped_symbol_with_open_position(
+    monkeypatch: Any,
+) -> None:
+    """A symbol no longer in the desired set, but with an open position,
+    is NOT cancelled — liquidity-floor-selector addendum (a)'s hard
+    open-position override."""
+
+    async def fake_has_open_position(_session: Any, symbol_pair: str) -> bool:
+        return symbol_pair == "FOO/USDT"
+
+    monkeypatch.setattr(keepalive, "has_open_position", fake_has_open_position)
+
+    async def fake_runner(_symbol_pair: str, _timeframe: str) -> None:
+        await asyncio.sleep(3600)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    children: dict[tuple[str, str], asyncio.Task] = {}
+    try:
+        await keepalive._refresh_children(
+            children, [("FOO/USDT", "1h")], runner=fake_runner,
+            session_factory=session_factory,
+        )
+        await asyncio.sleep(0)
+        await keepalive._refresh_children(
+            children, [], runner=fake_runner, session_factory=session_factory,
+        )  # FOO drops out of the desired set
+        assert ("FOO/USDT", "1h") in children  # retained — open position
+        assert not children[("FOO/USDT", "1h")].done()
+    finally:
+        for task in children.values():
+            task.cancel()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refresh_children_cancels_dropped_without_open_position_even_with_session_factory(
+    monkeypatch: Any,
+) -> None:
+    """Companion to the retention test above: proves the override is
+    conditional on has_open_position's answer, not a blanket "passing
+    session_factory means never cancel" — a dropped symbol WITHOUT an
+    open position is still cancelled even when session_factory is
+    supplied."""
+
+    async def fake_has_open_position(_session: Any, _symbol_pair: str) -> bool:
+        return False
+
+    monkeypatch.setattr(keepalive, "has_open_position", fake_has_open_position)
+
+    async def fake_runner(_symbol_pair: str, _timeframe: str) -> None:
+        await asyncio.sleep(3600)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    children: dict[tuple[str, str], asyncio.Task] = {}
+    try:
+        await keepalive._refresh_children(
+            children, [("BAR/USDT", "1h")], runner=fake_runner,
+            session_factory=session_factory,
+        )
+        bar_task = children[("BAR/USDT", "1h")]
+        await keepalive._refresh_children(
+            children, [], runner=fake_runner, session_factory=session_factory,
+        )
+        assert ("BAR/USDT", "1h") not in children
+        assert bar_task.cancelled() or bar_task.done()
+    finally:
+        for task in children.values():
+            task.cancel()
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +402,26 @@ async def test_child_cancellation_propagates() -> None:
 
 @pytest.mark.asyncio
 async def test_run_keepalive_initial_load_and_clean_shutdown(
-    monkeypatch: Any, universe_factory: Any,
+    monkeypatch: Any, fleet_factory: Any,
 ) -> None:
-    """Boot the supervisor with a seeded universe, let it spawn children
-    via a stub runner, then cancel and verify clean shutdown."""
-    await _seed_universe(
-        universe_factory, symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    """Boot the supervisor with a seeded live_fleet_universe, let it spawn
+    children via a stub runner, then cancel and verify clean shutdown.
+
+    top_n is no longer a run_keepalive parameter (Phase 4 Task 5b removed
+    it along with the rank-cutoff selection it fed — the liquidity floor
+    is now the only membership criterion), so this test's seeding source
+    and call site both change from the pre-Task-5b version accordingly.
+    The initial-population path never reaches the open-position-override
+    branch (children starts empty, so nothing is up for cancellation),
+    so no live_trades/shadow_open_positions table is needed in the
+    fixture for this smoke test."""
+    await _seed_fleet(
+        fleet_factory,
+        entries=[
+            ("BTCUSDT", "established_top20"),
+            ("ETHUSDT", "established_top20"),
+            ("SOLUSDT", "liquidity_added_spot"),
+        ],
     )
 
     spawned: list[tuple[str, str]] = []
@@ -285,8 +433,7 @@ async def test_run_keepalive_initial_load_and_clean_shutdown(
     # Tight intervals so the initial heartbeat + child spawn happen
     # in a single event-loop turn before we cancel.
     task = asyncio.create_task(keepalive.run_keepalive(
-        universe_factory,
-        top_n=10,
+        fleet_factory,
         timeframe="1h",
         exclude=frozenset({("BTC/USDT", "1h")}),
         refresh_seconds=60,
