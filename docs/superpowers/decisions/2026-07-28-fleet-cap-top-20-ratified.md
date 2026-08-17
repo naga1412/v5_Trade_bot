@@ -1,5 +1,7 @@
 # Fleet cap ratified at top-20 by rank (2026-07-28)
 
+> **SUPERSEDED (2026-08-15).** See `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md`. The selector this record ratified (top-N by SPOT VOLUME rank) is no longer the active live-prediction universe selector — it was replaced by a liquidity-floor pass/fail criterion evaluated across the full market. This record stands as the historical measurement for the volume-rank regime it governed (its ratification data is not invalidated, just no longer the active logic) — added as a pointer, not amended, per this doc's own rule below.
+
 **Class:** governance / ratified decision record.
 **Do not amend by squash.** Any change to this decision requires a new decision record replayed in order.
 

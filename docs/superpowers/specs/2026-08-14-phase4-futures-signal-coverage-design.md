@@ -9,6 +9,78 @@ positive net edge" rule does not apply here: that rule governs
 autonomous execution risk, and there is none in this path — the
 operator is the decision layer on every trade.
 
+---
+
+## ADDENDUM (2026-08-15) — selector inverted: liquidity floor, not top-N by volume
+
+**Status: design, supersedes the Stage A/B sizing and the top-N-by-volume selector below. Ratified as `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md`. Tasks 5 and 8 of the plan doc, and the plan's Rollout section, need re-drafting against this addendum before they execute — not yet done, flagged as follow-up.**
+
+### What changed and why
+
+Measured (2026-08-15, live data): of the full 527-symbol USDT-M perpetual market, only **42 symbols stably pass** the liquidity floor already defined below (34 spot-backed, 8 futures-only), plus 7 that flicker pass/fail within seconds on live order-book noise. Today's selector — top-20 by **spot volume rank** — is a criterion unrelated to tradeability; that's the same volume-does-not-imply-depth asymmetry this floor exists to catch (see the FU-43 finding below), just applied to the *selector* itself, not only to individual symbol inclusion.
+
+**New selector: the live-prediction universe is every symbol passing the liquidity floor, full stop — not a rank cutoff over a volume-ordered list.** Expected size ~42, rechecked daily (it will drift as market conditions change).
+
+This closes both coverage gaps identified so far with one mechanism:
+- The 8-11 futures-only names (Goal 1 of the base design, below).
+- The spot-backed names that clear the liquidity floor but rank outside today's top-20-by-volume — a larger gap (34 vs 20 spot-backed slots) than the futures-only one, surfaced during the coverage-measurement pass that motivated this addendum.
+
+**Named, immediate consequence — not swept into "coverage roughly doubles":** cross-referencing the 07-28 fleet-cap decision's sample top-20 snapshot, **ADA** and **NEAR** — both established, currently-covered majors — stably fail the new floor on spread (ADA ≈5.59bps, NEAR ≈6.1bps, consistent across repeated sampling, not flicker). Under this selector they are candidates for exit via the hysteresis rule below, same as any other symbol. This is flagged explicitly so it is a known, named tradeoff decided with eyes open, not a silent side effect discovered later.
+
+**Open, unresolved dependency question (verify before Task 5 is re-drafted):** the floor is evaluated on **futures** market data; `asset_universe` is ranked by **spot** volume. Not yet confirmed whether all 34 liquidity-qualified spot-backed symbols are members of today's spot-ranked 30-symbol universe. Any that aren't need new universe-membership + shadow-tracking work in addition to a live-WS-subscription change — check `asset_universe` current rows against the qualifying list before implementation.
+
+### (a) Hysteresis — proposed rule
+
+Order-book spread on thin-tick symbols flickers within seconds (measured directly: AKEUSDT read 7.3bps → 2.1bps → 4.2bps across three queries a few seconds apart, straddling the 5bps line each time — genuine market microstructure, not measurement error). A universe that re-evaluates and flips membership on every daily refresh using a single point-in-time sample would inherit that noise at the selection layer.
+
+Proposed:
+
+1. **Multi-sample per refresh, not single-sample.** At each daily universe-refresh, sample `check_liquidity` **M=5** times, spaced ~10s apart (≈50s added latency total, negligible against a 24h cycle — reuses the existing daily-refresh cadence, doesn't add a new one).
+2. **Asymmetric N-of-M confirmation, biased toward retention (revised 2026-08-17, operator ruling):**
+   - **Entry**: a symbol not currently in the universe must pass **≥3 of 5** samples to be added.
+   - **Exit**: a symbol currently in the universe must fail **5 of 5** samples (unanimous) to be removed.
+   - The original draft of this addendum proposed symmetric 4-of-5 both ways, explicitly flagged as "not load-bearing, tune after observing real flip rates." The operator's revision is better-reasoned, not just a preference: the two error types are not equal cost. A false-negative exit strands coverage outright (and, absent the override below, could orphan an open position); a false-positive retention just means a marginally-thin symbol keeps showing its real liquidity numbers on the card/app row (per the base design's Visual distinction section, below) — the operator sees the numbers and self-filters. Biasing hard toward "stay in" (unanimous 5/5 to leave) costs little given that visibility, while biasing toward "get in easily" (3/5) keeps the coverage-expansion goal from being blunted by the same noise that motivated sampling in the first place.
+3. **Minimum dwell time**: once added, a symbol cannot be removed for **≥24h** (one full refresh cycle) regardless of subsequent readings, *unless* the open-position override below applies in the other direction (never dropped) or unless it fails so consistently that the next refresh's unanimous 5/5 exit check fires on schedule — dwell time bounds churn frequency, it doesn't block a confirmed exit, it just guarantees a symbol gets at least one full cycle before being re-evaluated for removal.
+4. **Open-position override — hard requirement, not best-effort:** a symbol with an open `live_trades` or `shadow_open_positions` row is **never removed from the live-prediction fleet**, regardless of liquidity-check outcome, until the position closes. This is a deliberate extension of the base design's existing behavior below (which explicitly chose *not* to build retention — see "Open-position retention" in the base design) — the operator is now requiring it. On position close, the symbol re-enters normal hysteresis evaluation on the next refresh (no automatic retention beyond the position's lifetime).
+
+**Required test**: a symbol failing 5/5 samples but holding an open position is retained; the same symbol with no open position is removed on schedule per the N-of-M/dwell rule above. Proof obligation, same standard as the base design's other required tests — not optional coverage.
+
+### (b) Cost check — rate limits clear; compute/memory not measured, recommend staging-soak gate
+
+**Rate-limit budget: no problem, computed exactly.**
+- Futures-only cohort (8-11 symbols) uses the REST poller — unaffected by this addendum, same math as the base design below (480-660 calls/hr against a 144,000/hr shared budget). The stable-pass futures-only count (8) already roughly matches the base design's planned starting N=8.
+- Spot-backed cohort (34 vs today's 20) uses WS subscriptions, not REST polling — Binance's documented per-IP WS connection limits (on the order of hundreds) are not a binding constraint at 34 concurrent connections; this was never the bottleneck.
+
+**Compute/memory: not measured — no existing benchmark to cite, and none should be invented.** No documented per-child-task memory/CPU cost exists anywhere in this codebase, and the backend container has no configured resource ceiling in `docker-compose.yml` to test against. What can be said with the existing architecture as evidence:
+- Each WS-fleet child is a lightweight asyncio task (one WS connection + a coroutine invoking the shared `run_live_prediction` body) — not a new process or thread; the same pattern already runs 20 of these today without documented issue.
+- A meaningful share of the marginal compute for symbols *already inside* today's 30-symbol shadow universe is already being paid — `shadow_worker` scores the full 30-symbol universe every candle close regardless of live-fleet membership. Going from 20 to 34 spot-backed live-fleet symbols adds WS-subscription + persist + dispatch overhead on top of scoring that may already be happening for a subset of those 34, not a fully new class of load. This does **not** cover the open dependency question above — any of the 34 that fall outside the current 30-symbol shadow universe entirely would add both scoring and fleet overhead, not just fleet overhead.
+
+**Recommendation, not a substitute for the above:** measure it — enable the liquidity-floor selector in **staging only** first (matching the base design's own staged-rollout philosophy below), and record `docker stats tr-staging-backend` CPU/memory before and after, across at least one full 24h cycle including a candle-close burst. Treat this as a go/no-go gate before promoting to prod at full N≈42, not an assumption to build on. **If the staging measurement shows N≈42 does not fit, fall back to the largest workable N ranked by liquidity** (highest `qvol_24h`/lowest `spread_bps`/highest `depth_0_5pct_usdt` among floor-passers, in that priority order — never volume alone) rather than reverting to a volume-based cutoff.
+
+### (c) Cohort tagging — three-way, not two
+
+**Table list correction (2026-08-17, operator caught this):** the base design's `symbol_source` column (below) is spec'd on `predictions`, `telegram_signals`, and `live_trades` only — it does **not** include `shadow_trades`. That gap matters more here than it did in the base design, because the entire safety case for this addendum rests on being able to re-run a `shadow_trades`-based split by cohort (reversal criterion #2 above, methodologically identical to the 07-28 ratification's own "30-day LONG `shadow_trades` split" — that measurement was built FROM `shadow_trades`, not `predictions`). Without a cohort tag on `shadow_trades` itself, criterion #2 cannot actually be evaluated. **`symbol_source` must be added to `shadow_trades` as a fourth tagged table**, not just the three below — this is a required correction to Task 9/10 of the plan doc's plumbing (the same class of gap already caught once there), not an optional extra.
+
+This has a real dependency, not yet resolved: for the `futures_poll` cohort specifically, a `shadow_trades.symbol_source` column only has something to tag once shadow actually tracks futures-only symbols at all — which the base design's Goal 1e explicitly defers as "secondary... a follow-up, not a blocker." That deferral needs revisiting now that the measurement plan depends on it; flagged here, not resolved in this addendum. For the `liquidity_added_spot` cohort, this dependency is generally moot wherever the open question in "What changed and why" above resolves positively (i.e. wherever those symbols already sit inside today's 30-symbol shadow universe) — existing rows just need the new column populated, no new shadow-tracking work.
+
+With that correction, the base design's `symbol_source` column becomes three values instead of two, on all four tables (`predictions`, `shadow_trades`, `telegram_signals`, `live_trades`):
+
+- `'established_top20'` — symbols that were live-covered under the pre-2026-08-15 volume-rank selector, tagged at cutover (a lineage/snapshot tag, not a dynamically-recomputed rank — once assigned at cutover, a symbol's tag doesn't change just because its historical volume rank moves).
+- `'liquidity_added_spot'` — spot-backed symbols newly covered because they clear the liquidity floor but were outside the old top-20-by-volume selector. **This is the larger of the two new-coverage gaps and the one carrying the real open risk**, per the operator's own framing: the 07-28 decision's "ranks 21-30 are net losers" finding was measured on a **volume-ranked** population (see the superseding decision record) and does not transfer to this **liquidity-ranked** population. It is not proven safe and not proven unsafe. It must be independently measurable from day one — same discipline as the original 07-28 ratification (30-day split at the live gate, adequate sample size, all-three-of-WR/avg-pnl/sum-pnl required before any safety claim), run fresh against this specific cohort, not inferred from the old finding.
+- `'futures_poll'` — unchanged from the base design below (Goal 1's futures-only cohort).
+
+Every downstream consumer (Telegram card, app view — both below) reads this three-way tag as the single source of truth, same "no second place this could drift" principle as the base design.
+
+### (d) Superseding the fleet-cap ratification
+
+`docs/superpowers/decisions/2026-07-28-fleet-cap-top-20-ratified.md` is **superseded, not silently abandoned** — see `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the formal decision record, the reversal-criterion citation, and the explicit statement of what does and does not carry over from the 07-28 measurement.
+
+---
+
+*(Base design below this line is the original 2026-08-14 spec. Its Goal 1/1a-1e, Step 0, and the visual-distinction/app-view sections are unaffected by this addendum except where explicitly noted above — Step 0 in particular still ships and soaks alone, unchanged, as the prerequisite for everything else. The liquidity-floor Safety section (S1) below is the same three-metric definition this addendum's measurement uses; only the *selection scope* — full market vs. futures-only-top-30-sample — and the *selector logic* — pass/fail vs. rank cutoff — change.)*
+
+---
+
 ## Problem
 
 The live prediction/dispatch path (`predictions` table → Telegram) is

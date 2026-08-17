@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy async / Alembic / pytest + pytest-asyncio / React + TypeScript + Tailwind (frontend).
 
+> **SUPERSEDED (2026-08-15) — read before executing Task 5, Task 8, or the Rollout section.** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the "Start at N=8, widen to 20-25" Stage A/B sizing below no longer applies. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) is unaffected and can proceed as written below** — the function itself is unchanged, only how its output is *used* to build the universe changes. Tasks 5 and 8, and the Rollout section's Stage A/B language, need re-drafting against the addendum before they execute — not yet done in this doc, tracked as follow-up work, not silently skippable.
+
 **Spec:** `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`
 
 ## Global Constraints
