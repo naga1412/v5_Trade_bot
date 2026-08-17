@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pandas as pd
@@ -44,6 +45,23 @@ from app.shadow.multi_stream import MultiStreamCandle
 from app.shadow.persistence import set_cooldown
 from app.shadow.worker import COOLDOWN_MINUTES, ShadowWorker
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+
+@pytest.fixture(autouse=True)
+def _stub_flow_features_fire_and_forget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_handle_candle fires app.core.features.flow_features as an un-awaited
+    background task on every 1h candle (W4). It's irrelevant to what this
+    file tests and, left real, touches the process-global Binance Futures
+    RateLimitedClient singleton (app.data.adapters) across this test's own
+    event loop — which then breaks unrelated tests (e.g.
+    test_adapter_registry.py) that reuse the same singleton in a later,
+    different event loop. Stub it out entirely; scenario assertions here
+    never depend on flow-feature data.
+    """
+    monkeypatch.setattr(
+        "app.core.features.flow_features.update_flow_cache_and_persist",
+        AsyncMock(return_value=None),
+    )
 
 # ---------------------------------------------------------------------------
 # Test fixtures (mirror test_shadow_worker.py — kept local to avoid coupling).
