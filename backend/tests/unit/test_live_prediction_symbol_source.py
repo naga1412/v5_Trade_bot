@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -138,6 +138,13 @@ def _vault_loaded() -> None:
     )
 
 
+# Task 10 correction (found while re-running this file's regression suite
+# against the new liquidity re-check, not part of the plan doc's original
+# text): _maybe_dispatch now runs a real liquidity re-check for any
+# symbol_source != "established_top20" -- this test's "futures_poll" now
+# exercises that new dependency too, so check_liquidity/get_intermarket_
+# adapter need mocking to reach dispatch_if_eligible at all, same as
+# Task 10's own test_dispatch_liquidity_recheck.py already does.
 @pytest.mark.asyncio
 async def test_maybe_dispatch_threads_symbol_source_into_proposal_kwargs() -> None:
     _vault_loaded()
@@ -147,7 +154,20 @@ async def test_maybe_dispatch_threads_symbol_source_into_proposal_kwargs() -> No
         captured.update(kwargs)
         return None
 
-    with patch.object(live_prediction, "dispatch_if_eligible", _fake_dispatch):
+    from app.data.futures_liquidity import LiquidityCheck
+
+    with patch.object(live_prediction, "dispatch_if_eligible", _fake_dispatch), \
+         patch.object(
+             live_prediction, "check_liquidity", new_callable=AsyncMock,
+             return_value=LiquidityCheck(
+                 passed=True, qvol_24h=25_000_000.0, spread_bps=2.0,
+                 depth_0_5pct_usdt=100_000.0,
+             ),
+         ), \
+         patch.object(
+             live_prediction, "get_intermarket_adapter",
+             return_value=MagicMock(rate_client=MagicMock()),
+         ):
         await _maybe_dispatch(
             _session_factory(), pred=_StubDispatchPred(), layer_payload={},
             symbol_source="futures_poll",
