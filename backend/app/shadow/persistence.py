@@ -200,6 +200,11 @@ async def persist_closed_trade(
         effective_score=getattr(pos, "effective_score", None),
         realized_vol_20d=getattr(pos, "realized_vol_20d", None),
         funding_directional_adj=getattr(pos, "funding_directional_adj", None),
+        # Phase 4 Task 9: cohort tag set on `pos` at open time (defaults
+        # to "established_top20" on ShadowPosition itself -- see
+        # app.shadow.engine). getattr() keeps pre-Task-9 duck-typed
+        # fixtures / restart-survivor positions working.
+        symbol_source=getattr(pos, "symbol_source", "established_top20"),
     )
     return await insert_with_chain(session, "shadow_trades", payload)
 

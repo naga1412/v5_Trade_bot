@@ -32,6 +32,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.db.payload_builders import build_predictions_payload
 from app.ws import keepalive
 
 
@@ -119,9 +120,35 @@ async def test_load_symbols_reads_established_and_liquidity_added_no_top_n(
     )
     # All 5 rows across both cohorts come back — nothing sliced off.
     assert set(result) == {
-        ("BTC/USDT", "1h"), ("ETH/USDT", "1h"), ("SOL/USDT", "1h"),
-        ("BNB/USDT", "1h"), ("XRP/USDT", "1h"),
+        ("BTC/USDT", "1h", "established_top20"),
+        ("ETH/USDT", "1h", "established_top20"),
+        ("SOL/USDT", "1h", "liquidity_added_spot"),
+        ("BNB/USDT", "1h", "liquidity_added_spot"),
+        ("XRP/USDT", "1h", "liquidity_added_spot"),
     }
+
+
+@pytest.mark.asyncio
+async def test_load_symbols_tags_each_symbol_with_its_own_cohort(
+    fleet_factory: Any,
+) -> None:
+    """Phase 4 Task 9: the cohort element must reflect which
+    live_fleet_universe query the symbol actually came from -- a
+    liquidity_added_spot symbol must never be silently tagged
+    established_top20 (or vice versa)."""
+    await _seed_fleet(
+        fleet_factory,
+        entries=[
+            ("BTCUSDT", "established_top20"),
+            ("NEWCOINUSDT", "liquidity_added_spot"),
+        ],
+    )
+    result = await keepalive._load_keepalive_symbols(
+        fleet_factory, exclude=frozenset(), timeframe="1h",
+    )
+    by_pair = {pair: cohort for pair, _tf, cohort in result}
+    assert by_pair["BTC/USDT"] == "established_top20"
+    assert by_pair["NEWCOIN/USDT"] == "liquidity_added_spot"
 
 
 @pytest.mark.asyncio
@@ -139,7 +166,7 @@ async def test_load_symbols_excludes_futures_poll_cohort(fleet_factory: Any) -> 
     result = await keepalive._load_keepalive_symbols(
         fleet_factory, exclude=frozenset(), timeframe="1h",
     )
-    assert result == [("BTC/USDT", "1h")]
+    assert result == [("BTC/USDT", "1h", "established_top20")]
 
 
 @pytest.mark.asyncio
@@ -156,13 +183,16 @@ async def test_load_symbols_filters_excludes(fleet_factory: Any) -> None:
     result = await keepalive._load_keepalive_symbols(
         fleet_factory, exclude=frozenset({("BTC/USDT", "1h")}), timeframe="1h",
     )
-    assert set(result) == {("ETH/USDT", "1h"), ("SOL/USDT", "1h")}
+    assert set(result) == {
+        ("ETH/USDT", "1h", "established_top20"),
+        ("SOL/USDT", "1h", "liquidity_added_spot"),
+    }
     # Same fleet but on a different timeframe should NOT be excluded —
     # the exclude key is (pair, timeframe), not just pair.
     result_5m = await keepalive._load_keepalive_symbols(
         fleet_factory, exclude=frozenset({("BTC/USDT", "1h")}), timeframe="5m",
     )
-    assert ("BTC/USDT", "5m") in result_5m
+    assert ("BTC/USDT", "5m", "established_top20") in result_5m
 
 
 @pytest.mark.asyncio
@@ -190,7 +220,7 @@ async def test_load_symbols_returns_empty_on_db_failure(monkeypatch: Any) -> Non
 # _refresh_children — reconciliation diff.
 
 
-async def _idle_runner(_symbol: str, _tf: str) -> None:
+async def _idle_runner(_symbol: str, _tf: str, _cohort: str) -> None:
     """Hangs forever — stands in for the real WS loop. Tests cancel it."""
     await asyncio.Event().wait()
 
@@ -198,10 +228,13 @@ async def _idle_runner(_symbol: str, _tf: str) -> None:
 @pytest.mark.asyncio
 async def test_refresh_children_spawns_new() -> None:
     children: dict[tuple[str, str], asyncio.Task] = {}
-    desired = [("BTC/USDT", "1h"), ("ETH/USDT", "1h")]
+    desired = [
+        ("BTC/USDT", "1h", "established_top20"),
+        ("ETH/USDT", "1h", "established_top20"),
+    ]
     await keepalive._refresh_children(children, desired, runner=_idle_runner)
     try:
-        assert set(children) == set(desired)
+        assert set(children) == {("BTC/USDT", "1h"), ("ETH/USDT", "1h")}
         for task in children.values():
             assert not task.done()
     finally:
@@ -214,7 +247,11 @@ async def test_refresh_children_cancels_dropped() -> None:
     children: dict[tuple[str, str], asyncio.Task] = {}
     await keepalive._refresh_children(
         children,
-        [("BTC/USDT", "1h"), ("ETH/USDT", "1h"), ("SOL/USDT", "1h")],
+        [
+            ("BTC/USDT", "1h", "established_top20"),
+            ("ETH/USDT", "1h", "established_top20"),
+            ("SOL/USDT", "1h", "liquidity_added_spot"),
+        ],
         runner=_idle_runner,
     )
     sol_task = children[("SOL/USDT", "1h")]
@@ -222,7 +259,11 @@ async def test_refresh_children_cancels_dropped() -> None:
     # SOL leaves the fleet; ETH stays; ADA joins.
     await keepalive._refresh_children(
         children,
-        [("BTC/USDT", "1h"), ("ETH/USDT", "1h"), ("ADA/USDT", "1h")],
+        [
+            ("BTC/USDT", "1h", "established_top20"),
+            ("ETH/USDT", "1h", "established_top20"),
+            ("ADA/USDT", "1h", "liquidity_added_spot"),
+        ],
         runner=_idle_runner,
     )
     try:
@@ -239,7 +280,10 @@ async def test_refresh_children_cancels_dropped() -> None:
 async def test_refresh_children_no_churn_for_unchanged() -> None:
     """A repeat call with the same desired set must NOT recreate tasks."""
     children: dict[tuple[str, str], asyncio.Task] = {}
-    desired = [("BTC/USDT", "1h"), ("ETH/USDT", "1h")]
+    desired = [
+        ("BTC/USDT", "1h", "established_top20"),
+        ("ETH/USDT", "1h", "established_top20"),
+    ]
     await keepalive._refresh_children(children, desired, runner=_idle_runner)
     snapshot = dict(children)
     await keepalive._refresh_children(children, desired, runner=_idle_runner)
@@ -249,6 +293,36 @@ async def test_refresh_children_no_churn_for_unchanged() -> None:
                 f"task identity for {key} changed across refresh — "
                 "this would reset Binance WS connection rate limits"
             )
+    finally:
+        for task in children.values():
+            task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_refresh_children_threads_cohort_into_runner() -> None:
+    """Phase 4 Task 9: the cohort element of a desired-set entry must
+    reach the runner call verbatim -- this is the mechanism
+    _default_runner relies on to thread symbol_source into
+    run_live_prediction."""
+    calls: list[tuple[str, str, str]] = []
+
+    async def _capturing_runner(symbol: str, tf: str, cohort: str) -> None:
+        calls.append((symbol, tf, cohort))
+        await asyncio.Event().wait()
+
+    children: dict[tuple[str, str], asyncio.Task] = {}
+    try:
+        await keepalive._refresh_children(
+            children,
+            [
+                ("BTC/USDT", "1h", "established_top20"),
+                ("NEWCOIN/USDT", "1h", "liquidity_added_spot"),
+            ],
+            runner=_capturing_runner,
+        )
+        await asyncio.sleep(0)  # let the spawned tasks reach the capture line
+        assert ("BTC/USDT", "1h", "established_top20") in calls
+        assert ("NEWCOIN/USDT", "1h", "liquidity_added_spot") in calls
     finally:
         for task in children.values():
             task.cancel()
@@ -279,7 +353,7 @@ async def test_refresh_children_retains_dropped_symbol_with_open_position(
 
     monkeypatch.setattr(keepalive, "has_open_position", fake_has_open_position)
 
-    async def fake_runner(_symbol_pair: str, _timeframe: str) -> None:
+    async def fake_runner(_symbol_pair: str, _timeframe: str, _cohort: str) -> None:
         await asyncio.sleep(3600)
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -288,7 +362,7 @@ async def test_refresh_children_retains_dropped_symbol_with_open_position(
     children: dict[tuple[str, str], asyncio.Task] = {}
     try:
         await keepalive._refresh_children(
-            children, [("FOO/USDT", "1h")], runner=fake_runner,
+            children, [("FOO/USDT", "1h", "established_top20")], runner=fake_runner,
             session_factory=session_factory,
         )
         await asyncio.sleep(0)
@@ -318,7 +392,7 @@ async def test_refresh_children_cancels_dropped_without_open_position_even_with_
 
     monkeypatch.setattr(keepalive, "has_open_position", fake_has_open_position)
 
-    async def fake_runner(_symbol_pair: str, _timeframe: str) -> None:
+    async def fake_runner(_symbol_pair: str, _timeframe: str, _cohort: str) -> None:
         await asyncio.sleep(3600)
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -327,7 +401,7 @@ async def test_refresh_children_cancels_dropped_without_open_position_even_with_
     children: dict[tuple[str, str], asyncio.Task] = {}
     try:
         await keepalive._refresh_children(
-            children, [("BAR/USDT", "1h")], runner=fake_runner,
+            children, [("BAR/USDT", "1h", "established_top20")], runner=fake_runner,
             session_factory=session_factory,
         )
         bar_task = children[("BAR/USDT", "1h")]
@@ -355,7 +429,7 @@ async def test_child_restart_on_exception(monkeypatch: Any) -> None:
 
     attempts = {"n": 0}
 
-    async def _flaky(_sym: str, _tf: str) -> None:
+    async def _flaky(_sym: str, _tf: str, _cohort: str) -> None:
         attempts["n"] += 1
         if attempts["n"] < 3:
             raise RuntimeError("Binance hiccup")
@@ -364,7 +438,7 @@ async def test_child_restart_on_exception(monkeypatch: Any) -> None:
         await asyncio.Event().wait()
 
     task = asyncio.create_task(
-        keepalive._run_child_with_restart(_flaky, "ETH/USDT", "1h"),
+        keepalive._run_child_with_restart(_flaky, "ETH/USDT", "1h", "established_top20"),
     )
     # Give the supervisor enough loop turns to hit the failure and restart.
     for _ in range(50):
@@ -388,7 +462,7 @@ async def test_child_cancellation_propagates() -> None:
     """CancelledError must escape the restart loop — clean shutdown path."""
 
     task = asyncio.create_task(
-        keepalive._run_child_with_restart(_idle_runner, "BTC/USDT", "1h"),
+        keepalive._run_child_with_restart(_idle_runner, "BTC/USDT", "1h", "established_top20"),
     )
     await asyncio.sleep(0)  # let it enter the runner
     task.cancel()
@@ -426,7 +500,7 @@ async def test_run_keepalive_initial_load_and_clean_shutdown(
 
     spawned: list[tuple[str, str]] = []
 
-    async def _track_runner(symbol_pair: str, timeframe: str) -> None:
+    async def _track_runner(symbol_pair: str, timeframe: str, _cohort: str) -> None:
         spawned.append((symbol_pair, timeframe))
         await asyncio.Event().wait()  # hold the slot open
 
@@ -455,3 +529,95 @@ async def test_run_keepalive_initial_load_and_clean_shutdown(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Task 9 — cohort tag reaches the predictions row (end-to-end,
+# minus real network I/O).
+#
+# The 2026-08-17 redraft calls this out explicitly: "add a test asserting
+# a liquidity_added_spot symbol's predictions row is actually tagged
+# liquidity_added_spot, not silently defaulted to established_top20 --
+# that silent-default failure mode is exactly the kind of thing this task
+# exists to prevent." This test drives the real production call chain --
+# live_fleet_universe (DB) -> _load_keepalive_symbols -> _refresh_children
+# -> _default_runner -- with only run_live_prediction itself stubbed out
+# (so no real Binance WS/REST calls happen), and has the stub build a
+# real predictions payload via build_predictions_payload (the same
+# function run_live_prediction's own body calls) so the assertion is
+# against the literal payload dict that would become the predictions row,
+# not an intermediate proxy value.
+
+
+class _StubFinalForTag:
+    score = 0.5
+    direction = "LONG"
+    confidence = 70.0
+
+
+class _StubPredForTag:
+    timeframe = "1h"
+    ts = None
+    final = _StubFinalForTag()
+    inputs_hash = "b" * 64
+    cold_start = False
+
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+
+
+@pytest.mark.asyncio
+async def test_liquidity_added_spot_symbol_tagged_through_to_predictions_row(
+    monkeypatch: Any, fleet_factory: Any,
+) -> None:
+    """established_top20 and liquidity_added_spot symbols served by the
+    SAME keepalive fleet must end up with DIFFERENT symbol_source values
+    on the predictions payload their run_live_prediction call would
+    persist -- proving the cohort survives live_fleet_universe ->
+    _load_keepalive_symbols -> _refresh_children -> _default_runner ->
+    run_live_prediction(symbol_source=...) -> build_predictions_payload."""
+    await _seed_fleet(
+        fleet_factory,
+        entries=[
+            ("BTCUSDT", "established_top20"),
+            ("NEWCOINUSDT", "liquidity_added_spot"),
+        ],
+    )
+
+    captured_payloads: dict[str, dict[str, Any]] = {}
+
+    async def fake_run_live_prediction(
+        symbol_pair: str, timeframe: str, *,
+        candle_source: Any = None, symbol_source: str = "established_top20",
+    ) -> None:
+        pred = _StubPredForTag(symbol_pair)
+        captured_payloads[symbol_pair] = build_predictions_payload(
+            pred, user_id=1, layer_payload={}, symbol_source=symbol_source,
+        )
+        await asyncio.Event().wait()  # simulate the long-running WS loop
+
+    # Patch the module-global run_live_prediction binding -- _default_runner
+    # looks this name up at call time (not a def-time-bound default), so
+    # this patch reaches it exactly like a real run_live_prediction bug
+    # fix would.
+    monkeypatch.setattr(keepalive, "run_live_prediction", fake_run_live_prediction)
+
+    desired = await keepalive._load_keepalive_symbols(
+        fleet_factory, exclude=frozenset(), timeframe="1h",
+    )
+    children: dict[tuple[str, str], asyncio.Task] = {}
+    try:
+        await keepalive._refresh_children(
+            children, desired, runner=keepalive._default_runner,
+        )
+        await asyncio.sleep(0)  # let the spawned tasks reach the capture line
+
+        # _load_keepalive_symbols normalizes to slash form (to_pair) before
+        # _refresh_children ever sees the symbol, so the runner (and this
+        # capture) receives "BTC/USDT" / "NEWCOIN/USDT", not the raw
+        # Binance no-slash form seeded into live_fleet_universe.
+        assert captured_payloads["BTC/USDT"]["symbol_source"] == "established_top20"
+        assert captured_payloads["NEWCOIN/USDT"]["symbol_source"] == "liquidity_added_spot"
+    finally:
+        for task in children.values():
+            task.cancel()

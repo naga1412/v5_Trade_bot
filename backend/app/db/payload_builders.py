@@ -65,6 +65,12 @@ def build_predictions_payload(
     effective_score: float | None = None,
     realized_vol_20d: float | None = None,
     funding_directional_adj: float | None = None,
+    # Phase 4 Task 9: cohort tag (Task 3's migration added the column;
+    # this is what actually populates it). Defaults to
+    # "established_top20" -- a call site that doesn't pass a cohort is
+    # legacy-established coverage, not a new transport-named default
+    # (2026-08-17 redraft; matches the migration's own column default).
+    symbol_source: str = "established_top20",
 ) -> dict[str, Any]:
     """Build the dict passed to ``persist_prediction`` for the predictions table.
 
@@ -106,6 +112,7 @@ def build_predictions_payload(
         "effective_score": effective_score,
         "realized_vol_20d": realized_vol_20d,
         "funding_directional_adj": funding_directional_adj,
+        "symbol_source": symbol_source,
     }
 
     if ghost_payload:
@@ -137,6 +144,15 @@ def build_shadow_trade_payload(
     effective_score: float | None = None,
     realized_vol_20d: float | None = None,
     funding_directional_adj: float | None = None,
+    # Phase 4 Task 9: cohort tag, threaded from the ShadowPosition's own
+    # `symbol_source` (set at open time; see app.shadow.engine). Defaults
+    # to "established_top20" -- today's shadow_worker selects its
+    # universe via `load_shadow_universe` (asset_universe top-30, no
+    # cohort concept at all), so every row this builder produces in
+    # production currently reads "established_top20" until shadow's own
+    # universe selection is cohort-aware -- out of this task's scope,
+    # see the PR description.
+    symbol_source: str = "established_top20",
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the shadow_trades table.
 
@@ -206,6 +222,7 @@ def build_shadow_trade_payload(
         "effective_score": effective_score,
         "realized_vol_20d": realized_vol_20d,
         "funding_directional_adj": funding_directional_adj,
+        "symbol_source": symbol_source,
     }
 
 
@@ -241,6 +258,12 @@ def build_live_trade_payload(
     # new lifecycle: Phase 1 INSERT → status='pending'; Phase 3 UPDATE
     # promotes to 'open' / 'failed'; live_exit_monitor moves to 'closed'.
     status: str = "pending",
+    # Phase 4 Task 9: cohort tag threaded from the SignalProposal that
+    # originated this trade (auto path: dispatcher.py's
+    # proposal.symbol_source; telegram-approve path: the symbol_source
+    # recovered from the telegram_signals row at approve time). Defaults
+    # to "established_top20" so pre-Task-9 callers stay bit-identical.
+    symbol_source: str = "established_top20",
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the live_trades table.
 
@@ -291,4 +314,5 @@ def build_live_trade_payload(
         # PR-FIX-PR275-PAYLOAD-STATUS: explicit pending so we override
         # the migration's server_default='closed'.
         "status": status,
+        "symbol_source": symbol_source,
     }

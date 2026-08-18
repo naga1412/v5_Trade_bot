@@ -90,6 +90,8 @@ async def _mk_engine() -> Any:
             "mtf_adx_by_tf_json TEXT, "
             # PR3 G1
             "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
+            # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
             # audit chain
             "prev_hash TEXT, row_hash TEXT)"
         ))

@@ -286,6 +286,7 @@ async def run_live_prediction(
             effective_score=pred.effective_score,
             realized_vol_20d=pred.realized_vol_20d,
             funding_directional_adj=pred.funding_directional_adj,
+            symbol_source=symbol_source,
         )
 
         # 2026-05-17 HOTFIX: two-session pattern. The validator INSERT lives
@@ -355,6 +356,7 @@ async def run_live_prediction(
         # candle loop.
         await _maybe_dispatch(
             session_factory, pred=pred, layer_payload=_layer_payload,
+            symbol_source=symbol_source,
         )
 
         # FU-1: heartbeat after each fully-processed candle. The watchdog
@@ -372,6 +374,7 @@ async def run_live_prediction(
 
 async def _maybe_dispatch(
     session_factory: Any, *, pred: Any, layer_payload: dict[str, Any],
+    symbol_source: str = "established_top20",
 ) -> None:
     """Bridge between the live-prediction loop and the execution glue.
 
@@ -438,6 +441,10 @@ async def _maybe_dispatch(
                     "layer2_direction": _l2_direction,
                     "layer2_confidence": _l2_confidence,
                     "mtf_adx_by_tf_json": getattr(pred, "mtf_adx_by_tf_json", None),
+                    # Phase 4 Task 9: cohort tag, threaded all the way to
+                    # proposal_from_prediction -> SignalProposal -> the
+                    # telegram_signals / live_trades write sites.
+                    "symbol_source": symbol_source,
                 },
                 # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): thread
                 # the live worker's session_factory through so

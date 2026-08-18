@@ -76,6 +76,8 @@ CREATE TABLE predictions (
     effective_score       REAL,
     realized_vol_20d      REAL,
     funding_directional_adj REAL,
+    -- Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+    symbol_source TEXT NOT NULL DEFAULT 'established_top20',
     -- audit chain metadata
     prev_hash        TEXT,
     row_hash         TEXT
