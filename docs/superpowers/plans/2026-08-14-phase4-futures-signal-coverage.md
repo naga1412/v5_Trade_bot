@@ -2595,6 +2595,8 @@ git commit -m "feat(phase4): visually distinct Telegram card for non-established
 ## Task 12: `/bot-status/telegram-signals` endpoint
 
 > **Redrafted 2026-08-18.** `symbol_source` is a three-valued cohort tag (Tasks 3/9/10/11), not the two-valued `spot_ws`/`futures_poll` scheme this task was originally drafted against. Every `Literal["spot_ws", "futures_poll"]` below becomes `Literal["established_top20", "liquidity_added_spot", "futures_poll"]`, and the filter test's `'spot_ws'` literal becomes `'established_top20'`. The `symbol_source` query filter itself needs no logic change — it was already a single-value equality filter, which works identically regardless of how many values the field can take.
+>
+> **Second correction, found during Task 12's implementation review (not a symbol_source issue).** `status: Literal["approved", "skipped", "timeout", "error"]` below only covers 4 of the 7 values `telegram_signals_response_check` actually allows (migration `0027_widen_response_check`, 2026-05-26). `'stale_price'` (price-drift guard), `'auto_skipped'` (auto-skip timeout worker), and `'approve_lost_race'` (approval-race handler) are all written by real, actively-running code — a row with any of them would fail Pydantic validation and 500 this endpoint. Widened to the real 7-value set below; **Task 13's matching TypeScript union has the identical gap and needs the same fix** when that task executes.
 
 **Files:**
 - Modify: `backend/app/api/schemas.py` (add `TelegramSignalOut`)
@@ -2689,7 +2691,16 @@ class TelegramSignalOut(BaseModel):
     rr_ratio: float
     confidence_pct: float
     sent_at: datetime
-    status: Literal["approved", "skipped", "timeout", "error"] | None
+    # Full 7-value set per telegram_signals_response_check (migration
+    # 0027_widen_response_check), corrected 2026-08-18 -- the original
+    # 4-value list missed 'stale_price'/'auto_skipped'/'approve_lost_race',
+    # all three written by real, actively-running code (the auto-skip
+    # timeout worker, the price-drift guard, the approval-race handler).
+    # A row with any of them would 500 this endpoint on real data.
+    status: Literal[
+        "approved", "skipped", "timeout", "error",
+        "stale_price", "auto_skipped", "approve_lost_race",
+    ] | None
     symbol_source: Literal["established_top20", "liquidity_added_spot", "futures_poll"]
     qvol_24h: float | None = None
     spread_bps: float | None = None
@@ -2771,7 +2782,7 @@ git commit -m "feat(api): add /bot-status/telegram-signals endpoint (Phase 4 app
 
 ## Task 13: Frontend API client additions
 
-> **Redrafted 2026-08-18.** Same fix as Task 12, mirrored on the TypeScript side: `symbol_source: "spot_ws" | "futures_poll"` becomes the three-value union `"established_top20" | "liquidity_added_spot" | "futures_poll"` in both `TelegramSignal` and `TelegramSignalsFilters`.
+> **Redrafted 2026-08-18.** Same fix as Task 12, mirrored on the TypeScript side: `symbol_source: "spot_ws" | "futures_poll"` becomes the three-value union `"established_top20" | "liquidity_added_spot" | "futures_poll"` in both `TelegramSignal` and `TelegramSignalsFilters`. Also carries Task 12's second correction: `status` widens from 4 to the real 7-value set (`stale_price`/`auto_skipped`/`approve_lost_race` are genuinely written by live code, not hypothetical) — found during Task 12's implementation review, applied here so Task 13 doesn't reintroduce the same gap on the frontend.
 
 **Files:**
 - Modify: `frontend/src/lib/api.ts`
@@ -2794,7 +2805,14 @@ export interface TelegramSignal {
   rr_ratio: number;
   confidence_pct: number;
   sent_at: string;
-  status: "approved" | "skipped" | "timeout" | "error" | null;
+  // Full 7-value set matching TelegramSignalOut.status (Task 12,
+  // corrected 2026-08-18) -- 'stale_price'/'auto_skipped'/
+  // 'approve_lost_race' are real values real code writes, not
+  // hypothetical.
+  status:
+    | "approved" | "skipped" | "timeout" | "error"
+    | "stale_price" | "auto_skipped" | "approve_lost_race"
+    | null;
   symbol_source: "established_top20" | "liquidity_added_spot" | "futures_poll";
   qvol_24h: number | null;
   spread_bps: number | null;
