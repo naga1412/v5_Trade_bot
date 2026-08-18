@@ -18,10 +18,13 @@ interface TabDef {
 // Order matters: spec §9.1 + SP-0.7 §I3 + SP-6 Phase A6 — Live Prediction →
 // Bot Status → Scanner → Settings → Admin. Settings + Scanner are always
 // rendered; Admin is filtered out when adminVisible is false.
+// Phase 4: Signals inserted after Scanner (both are candidate-surfacing
+// tabs) and ahead of the Autonomous/Settings/Admin utility tabs.
 const ALL_TABS: readonly TabDef[] = [
   { id: "live-prediction", label: "Live Prediction" },
   { id: "bot-status", label: "Bot Status" },
   { id: "scanner", label: "Scanner" },
+  { id: "signals", label: "Signals" },
   { id: "autonomous", label: "Autonomous" },
   { id: "settings", label: "Settings" },
   { id: "admin", label: "Admin" },
