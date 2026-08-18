@@ -289,6 +289,31 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # WS faster than Binance's per-IP rate window — alert-only is safer.
         stateful=True,
     ),
+    # 16b. Phase 4 Task 17 — REST-polling supervisor for futures-only
+    #      symbols (the liquidity-floor cohort that doesn't qualify for the
+    #      top-N spot-WS fleet above). Structurally mirrors ws_keepalive_task:
+    #      own child-task set, own reconciliation loop, 5-min heartbeat
+    #      cadence (FUTURES_POLL_HEARTBEAT_SECONDS). stateful=True for the
+    #      same open-position-safety reason ws_keepalive_task is stateful —
+    #      a watchdog-triggered restart would cancel every child task
+    #      (run_futures_poll's `finally` block), and on the fresh restart
+    #      the desired-symbol set is recomputed from the liquidity-floor
+    #      cohort only (_load_desired_futures_symbols), NOT from currently
+    #      open positions — so a symbol that has since dropped off the
+    #      liquidity floor but still has an open live position would not be
+    #      restarted, silently losing its candle feed. Auto-restart is only
+    #      safe within _refresh_futures_children's own reconciliation (which
+    #      does carry the open-position override); a supervisor-level
+    #      restart does not. Alert-only, matching ws_keepalive_task.
+    WorkerSpec(
+        name="futures_poll_task",
+        description="REST-polls Binance Futures klines for the liquidity-floor futures-only symbol cohort (1h)",
+        liveness_query=HEARTBEAT,
+        # 5-min heartbeat cadence + 10-min slack — identical budget to
+        # ws_keepalive_task, which shares the same cadence.
+        max_staleness_seconds=15 * 60,
+        stateful=True,
+    ),
     # 17. MTF cache pre-warm — single-shot at startup; loads the top-30
     #     universe and calls prewarm_cache (60s hard deadline, fail-open).
     #     FU-1 H9 + FU-15: emits ONE heartbeat with

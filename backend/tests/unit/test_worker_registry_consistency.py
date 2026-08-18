@@ -51,6 +51,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "scanner_batch_task": "app/scanner/batch.py",
     "prediction_validator_task": "app/ml/validator.py",
     "ws_keepalive_task": "app/ws/keepalive.py",
+    "futures_poll_task": "app/ws/futures_poll.py",
     "mtf_cache_prewarm_task": "app/core/scoring/mtf_confluence.py",
     "mtf_cache_ttl_refresh_task": "app/core/scoring/mtf_confluence.py",
     "symbol_allowlist_refresh": "app/workers/symbol_allowlist_refresh.py",
@@ -195,6 +196,7 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "health_pinger_task": 5 * 60,
     "intermarket_snapshot_task": 5 * 60,
     "ws_keepalive_task": 5 * 60,  # SUPERVISOR heartbeat cadence
+    "futures_poll_task": 5 * 60,  # SUPERVISOR heartbeat cadence (Phase 4 Task 17)
     "ui_freshness_monitor": 5 * 60,
     "healer_detector_task": 5 * 60,
     # 24h nightly

@@ -78,6 +78,7 @@ from app.trading.execution.liquidation_monitor import (
     start_liquidation_monitor,
 )
 from app.trading.preflight import check_audit_chain_intact, run_preflight
+from app.ws.futures_poll import start_futures_poll_task
 from app.ws.keepalive import start_keepalive_task
 from app.ws.live_prediction import start_background_worker
 from app.core.scoring.mtf_confluence import (
@@ -148,6 +149,7 @@ async def lifespan(_app: FastAPI):
     scanner_batch_task = None
     prediction_validator_task = None
     ws_keepalive_task = None
+    futures_poll_worker = None  # Phase 4 Task 17
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
@@ -267,6 +269,14 @@ async def lifespan(_app: FastAPI):
         # without anyone leaving a browser tab open. Replaces the
         # "open chart, leave tab open" trick we relied on before.
         ws_keepalive_task = start_keepalive_task(get_session_factory())
+
+        # Phase 4 Task 17: REST-polling supervisor for futures-only symbols
+        # (the liquidity-floor cohort that doesn't qualify for the spot-WS
+        # fleet above). Own child-task set, own reconciliation loop, own
+        # heartbeat — a bug here cannot reach ws_keepalive_task's tasks.
+        # Not gated by any feature flag: matches ws_keepalive_task's own
+        # unconditional start within this settings.worker_enabled block.
+        futures_poll_worker = start_futures_poll_task(get_session_factory())
 
         # PR1 Phase 3: MTF kline cache workers. The pre-warm is single-shot
         # (60s deadline, fail-open); the TTL-refresh loop runs indefinitely,
@@ -681,6 +691,8 @@ async def lifespan(_app: FastAPI):
             prediction_validator_task.cancel()
         if ws_keepalive_task is not None:
             ws_keepalive_task.cancel()
+        if futures_poll_worker is not None:
+            futures_poll_worker.cancel()
         if mtf_cache_prewarm_task is not None:
             mtf_cache_prewarm_task.cancel()
         if mtf_cache_ttl_refresh_task is not None:
