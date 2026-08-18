@@ -60,3 +60,36 @@ async def test_telegram_signals_filters_by_symbol_source(
     body = resp.json()
     assert len(body) == 1
     assert body[0]["symbol"] == "FOO/USDT"
+
+
+@pytest.mark.asyncio
+async def test_telegram_signals_accepts_all_response_check_constraint_values(
+    bot_status_client: Any, bot_status_factory: Any,
+) -> None:
+    """Guards against re-narrowing TelegramSignalOut.status: the DB's
+    telegram_signals_response_check constraint (migration
+    0027_widen_response_check) allows 7 values, not the 4 the original
+    Phase 4 plan doc's Step 4 snippet specified. 'stale_price' (price-
+    drift guard), 'auto_skipped' (timeout worker), and 'approve_lost_race'
+    (approval-race handler) are all written by real, actively-running
+    code -- a row with any of them would 500 this endpoint if the
+    Literal ever regresses back to the original 4-value list."""
+    values = ("approved", "skipped", "timeout", "error",
+              "stale_price", "auto_skipped", "approve_lost_race")
+    async with bot_status_factory() as session:
+        for i, resp_val in enumerate(values):
+            await session.execute(sa.text(
+                "INSERT INTO telegram_signals "
+                "(id, user_id, symbol, direction, sent_at, payload, response, symbol_source) "
+                "VALUES (:id, 1, :sym, 'LONG', :sent_at, '{}', :resp, 'established_top20')"
+            ), {
+                "id": f"sig-status-{i}", "sym": f"SYM{i}/USDT",
+                "sent_at": datetime.now(timezone.utc).isoformat(), "resp": resp_val,
+            })
+        await session.commit()
+
+    resp = await bot_status_client.get("/api/v1/bot-status/telegram-signals?limit=10")
+    assert resp.status_code == 200
+    body = resp.json()
+    returned_statuses = {row["status"] for row in body if row["symbol"].startswith("SYM")}
+    assert returned_statuses == set(values)
