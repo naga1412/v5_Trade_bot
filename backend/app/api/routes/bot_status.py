@@ -9,6 +9,7 @@ that complete data isolation; D8 wires the dep only).
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import UTC, datetime, timedelta
@@ -35,6 +36,7 @@ from app.api.schemas import (
     SymbolAllowlistOut,
     SymbolSearchHit,
     SymbolSearchOut,
+    TelegramSignalOut,
     TimeframeGateStatsOut,
     WindowStatsOut,
 )
@@ -697,6 +699,58 @@ async def recent_trades(
             exit_reason=r.exit_reason,  # type: ignore[arg-type]
             bars_held=r.bars_held,
             signal_id=r.signal_id,
+        ))
+    return out
+
+
+@router.get("/telegram-signals", response_model=list[TelegramSignalOut])
+async def telegram_signals(
+    limit: int = Query(default=100, ge=1, le=500),
+    direction: Literal["LONG", "SHORT"] | None = Query(default=None),
+    symbol_source: Literal["established_top20", "liquidity_added_spot", "futures_poll"] | None = Query(default=None),
+    current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[TelegramSignalOut]:
+    """Read-only, sourced directly from telegram_signals -- never
+    recomputed. Newest first."""
+    where: list[str] = ["user_id = :user_id"]
+    params: dict[str, Any] = {"user_id": current_user.id}
+    if direction is not None:
+        where.append("direction = :direction")
+        params["direction"] = direction
+    if symbol_source is not None:
+        where.append("symbol_source = :symbol_source")
+        params["symbol_source"] = symbol_source
+
+    sql = (
+        "SELECT id, symbol, direction, sent_at, payload, response, symbol_source "
+        "FROM telegram_signals "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY sent_at DESC LIMIT :limit"
+    )
+    params["limit"] = limit
+    rows = await session.execute(sa.text(sql), params)
+    out: list[TelegramSignalOut] = []
+    for r in rows:
+        payload = json.loads(r.payload) if isinstance(r.payload, str) else (r.payload or {})
+        sent_at = r.sent_at
+        if isinstance(sent_at, str):
+            sent_at = datetime.fromisoformat(sent_at)
+        out.append(TelegramSignalOut(
+            signal_id=r.id,
+            symbol=r.symbol,
+            direction=r.direction,  # type: ignore[arg-type]
+            entry_price=payload.get("entry_price", 0.0),
+            stop_loss_price=payload.get("stop_loss_price", 0.0),
+            take_profit_price=payload.get("take_profit_price", 0.0),
+            rr_ratio=payload.get("rr_ratio", 0.0),
+            confidence_pct=payload.get("confidence_pct", 0.0),
+            sent_at=sent_at,
+            status=r.response,  # type: ignore[arg-type]
+            symbol_source=r.symbol_source,  # type: ignore[arg-type]
+            qvol_24h=payload.get("qvol_24h"),
+            spread_bps=payload.get("spread_bps"),
+            depth_0_5pct_usdt=payload.get("depth_0_5pct_usdt"),
         ))
     return out
 

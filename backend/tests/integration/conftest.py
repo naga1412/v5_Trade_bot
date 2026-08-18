@@ -293,6 +293,25 @@ async def _create_shadow_tables(engine: Any) -> None:
             "row_hash TEXT NOT NULL UNIQUE, "
             "inputs_hash TEXT)"
         ))
+        # Phase 4 Task 12: telegram_signals SQLite mirror so the
+        # /bot-status/telegram-signals endpoint's integration tests can seed
+        # dispatched-signal rows. Mirror of migration 0016's SQLite branch
+        # (no CHECK constraints -- see 0027's SQLite no-op note) plus the
+        # symbol_source column added by migration 0038. Not hash-chained.
+        await conn.execute(sa.text(
+            "CREATE TABLE IF NOT EXISTS telegram_signals ("
+            "id TEXT PRIMARY KEY, "
+            "user_id INTEGER NOT NULL DEFAULT 1, "
+            "symbol TEXT NOT NULL, "
+            "direction TEXT NOT NULL, "
+            "sent_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "payload TEXT NOT NULL, "
+            "response TEXT, "
+            "response_at TEXT, "
+            "response_leverage INTEGER, "
+            "resulted_in_trade_id INTEGER, "
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20')"
+        ))
 
 
 @pytest_asyncio.fixture
