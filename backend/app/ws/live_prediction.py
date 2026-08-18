@@ -16,7 +16,9 @@ from app.core.gates.entry_quality import evaluate_all_gates
 from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
+from app.data.adapters import get_intermarket_adapter
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
+from app.data.futures_liquidity import check_liquidity
 from app.db.dispatch_decisions import record_dispatch_decision
 from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
@@ -391,6 +393,24 @@ async def _maybe_dispatch(
     ts = pred.trade_setup
     if ts is None or ts.entry is None or ts.stop_loss is None or ts.take_profit is None:
         return
+    if symbol_source != "established_top20":
+        try:
+            rate_client = get_intermarket_adapter().rate_client
+            assert rate_client is not None
+            check = await check_liquidity(pred.symbol.replace("/", ""), rate_client)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "dispatch-time liquidity re-check failed for %s (%s), suppressing: %s",
+                pred.symbol, symbol_source, e,
+            )
+            return
+        if not check.passed:
+            log.warning(
+                "dispatch-time liquidity re-check failed for %s (%s) "
+                "(qvol=%.0f spread=%.1fbps depth=%.0f) -- suppressing card",
+                pred.symbol, symbol_source, check.qvol_24h, check.spread_bps, check.depth_0_5pct_usdt,
+            )
+            return
     # PR-BOT-INTELLIGENCE-UPGRADE: extract Layer-2 pattern data from
     # pred.layer_scores so the dispatcher's entry-quality gate can apply
     # the pattern boost/penalty. Key shape is `str(int)` (see
