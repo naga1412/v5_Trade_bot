@@ -318,6 +318,23 @@ class RecentTradeOut(BaseModel):
     signal_id: str
 
 
+class TelegramSignalOut(BaseModel):
+    signal_id: str
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    entry_price: float
+    stop_loss_price: float
+    take_profit_price: float
+    rr_ratio: float
+    confidence_pct: float
+    sent_at: datetime
+    status: Literal["approved", "skipped", "timeout", "error"] | None
+    symbol_source: Literal["established_top20", "liquidity_added_spot", "futures_poll"]
+    qvol_24h: float | None = None
+    spread_bps: float | None = None
+    depth_0_5pct_usdt: float | None = None
+
+
 class LongShortBreakdownOut(BaseModel):
     long: WindowStatsOut
     short: WindowStatsOut
