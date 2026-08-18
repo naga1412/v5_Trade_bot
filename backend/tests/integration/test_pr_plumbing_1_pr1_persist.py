@@ -83,6 +83,8 @@ _TRADES_DDL = (
     "realized_vol_20d REAL, funding_directional_adj REAL, "
     # Item 4 (alembic 0034): per-TF ADX map, same NULL-when-absent treatment.
     "mtf_adx_by_tf_json TEXT, "
+    # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+    "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
     "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
 )
 

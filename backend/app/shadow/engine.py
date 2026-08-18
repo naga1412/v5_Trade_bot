@@ -110,6 +110,15 @@ class ShadowPosition:
     effective_score: float | None = None
     realized_vol_20d: float | None = None
     funding_directional_adj: float | None = None
+    # Phase 4 Task 9: cohort tag. Unlike the PR1 analytics fields above
+    # (which default None -- their columns are nullable), this defaults
+    # to a real string because shadow_trades.symbol_source is
+    # NOT NULL DEFAULT 'established_top20' (migration 0038). Restart-
+    # survivor positions (loaded from shadow_open_positions, which does
+    # not carry this column either) fall back to this same default --
+    # consistent with "no cohort data available" meaning
+    # "established_top20" everywhere else in this task.
+    symbol_source: str = "established_top20"
 
     # Amendment 3 (2026-07-31): in-memory bar buffer used by the
     # breakeven-variant lane to replay the position's price path at

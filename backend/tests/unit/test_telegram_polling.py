@@ -204,7 +204,9 @@ async def _mk_engine() -> Any:
             "CREATE TABLE telegram_signals ("
             "id TEXT PRIMARY KEY, user_id INTEGER, symbol TEXT, "
             "direction TEXT, sent_at TEXT, payload TEXT, "
-            "response TEXT, response_at TEXT, response_leverage INTEGER)"
+            "response TEXT, response_at TEXT, response_leverage INTEGER, "
+            # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20')"
         ))
         # Audit-chain table mirrors live_trades schema with prev_hash/row_hash.
         # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP columns (alembic 0028, 2026-05-26):
@@ -226,6 +228,8 @@ async def _mk_engine() -> Any:
             "mtf_directions_json TEXT, "
             "status TEXT NOT NULL DEFAULT 'pending', "
             "sl_order_id TEXT, tp_order_id TEXT, failure_reason TEXT, "
+            # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine
