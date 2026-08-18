@@ -1,8 +1,6 @@
 # backend/tests/unit/test_telegram_signals_cohort.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from app.telegram.signals import SignalCandidate, render_message
 
 
