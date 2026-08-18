@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy async / Alembic / pytest + pytest-asyncio / React + TypeScript + Tailwind (frontend).
 
-> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 below are now fully re-drafted against the addendum** (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched.
+> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched.
 
 **Spec:** `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`
 
@@ -23,7 +23,7 @@
 - Poll cadence is exactly ~60s; closure detection is by open-time advancing, never wall-clock.
 - **The futures-poller (and, since Task 5b, the spot-WS fleet too) has a hard open-position retention override — corrected 2026-08-17.** This constraint originally read "mirror the existing cancellation behavior, no new retention logic"; the liquidity-floor-selector addendum makes retention a hard requirement on both fleets. Left here as a corrected record, not deleted, so a reader who only skims Global Constraints doesn't pick up the stale version.
 - Follow this codebase's dual-dialect migration pattern (`is_pg = dialect.startswith("postgres")`) for every new table/column.
-- **Downstream tasks not yet redrafted as of 2026-08-17: Task 10 (dispatch-time re-check), Tasks 12-16 (app-view backend + frontend) still contain the stale two-value `Literal["spot_ws", "futures_poll"]` scheme and literal `"spot_ws"` defaults/filters.** These are far enough downstream (behind Tasks 1-9's sequential execution) that redrafting them now risks going stale again before they're reached — apply the SAME discipline used for Tasks 5/8/9/18 here: re-verify against the addendum and fix the value scheme immediately before each of these specific tasks executes, not before. Do not execute Task 10 or 12-16 as currently drafted without that check first.
+- **Downstream tasks — status as of 2026-08-18: all redrafted.** Tasks 10-16 (dispatch-time re-check, Telegram card, app-view backend + frontend) previously contained the stale two-value `Literal["spot_ws", "futures_poll"]` scheme and literal `"spot_ws"` defaults/filters; all have now been re-verified against the addendum and fixed (Tasks 10/11/12/13/15 had real changes, Tasks 14/16 needed none — see each task's own redraft/review note). **Task 17 (main.py wiring) and Task 18 (staging verification, already redrafted 2026-08-17) remain the two tasks ahead of main promotion** — Task 17 is a hard stop: it is the change that actually turns `futures_poll_task` on and starts sending the operator different signals than before, so it requires an explicit go before dispatch, not just sequential continuation.
 
 ---
 
@@ -2272,13 +2272,20 @@ git commit -m "feat(phase4): thread symbol_source cohort tag through persist + d
 
 ## Task 10: Dispatch-time liquidity re-check + card suppression
 
+> **Redrafted 2026-08-18.** The original draft (and the base design section it came from, written 2026-08-14 before the three-way cohort scheme existed) checked `symbol_source == "futures_poll"` and described the alternative as `symbol_source == "spot_ws"`. Under the addendum, `symbol_source` never takes the value `"spot_ws"` — it is a three-valued **analytical cohort** tag (`established_top20` / `liquidity_added_spot` / `futures_poll`, see Task 9 and the migration in Task 3), not an ingestion-mechanism tag. Two corrections follow:
+>
+> 1. **The recheck's condition changes from an equality check to a not-established check** (`symbol_source != "established_top20"`, not `== "futures_poll"`). This is a real scope change, confirmed with the operator before drafting: the base design's rationale for rechecking — "a symbol qualifying at universe-refresh can be thin by the time a real signal fires hours later" — is a property of *having just cleared the liquidity floor*, not of *how its candles arrive*. `liquidity_added_spot` clears the identical floor via the identical daily-refresh + hysteresis mechanism as `futures_poll` (Task 5's `refresh_live_fleet_universe` samples both cohorts together); it carries the same intraday-degradation risk and was previously getting zero freshness check purely because it happened not to be named `futures_poll`. `established_top20` is unaffected — still zero recheck overhead, same as before. The negative-form condition (`!= "established_top20"`) is deliberate over a positive membership check: an unrecognized future cohort value fails safe into "recheck" rather than silently into "skip."
+> 2. **Two axes, one field — resolved.** `symbol_source` stays the single source of truth; there is no separate ingestion-source column. Ingestion mechanism (spot WS vs. futures REST poll) is not stored per-row because it doesn't need to be — it's a structural invariant enforced by which supervisor's loader queries which cohort, not a fact that could silently drift per-symbol: `ws_keepalive.py::_load_keepalive_symbols` only ever queries `load_live_fleet_universe(cohort="established_top20")` and `load_live_fleet_universe(cohort="liquidity_added_spot")` (Task 5b); `futures_poll.py::_load_desired_futures_symbols` only ever queries `cohort="futures_poll"` (Task 8). So **"did this symbol's candles come via WS or poll?" is answered by one rule, not a lookup**: `futures_poll` cohort ⟺ REST poll, anything else ⟺ spot WS. If a future change ever breaks that 1:1 mapping (e.g. a symbol needs to migrate ingestion mechanism independent of its cohort), that is the trigger to add a second column then — not preemptively now.
+>
+> Task 11 (next) has the identical stale-scheme bug in its cohort-banner condition. It is redrafted the same way, for the same reason: the banner and the recheck exist to protect the operator from the same "thin, newly-qualified symbol" risk, and that risk doesn't care which fleet delivered the candle.
+
 **Files:**
 - Modify: `backend/app/ws/live_prediction.py::_maybe_dispatch`
 - Test: `backend/tests/unit/test_dispatch_liquidity_recheck.py` (new)
 
 **Interfaces:**
 - Consumes: `check_liquidity` (Task 4).
-- Produces: dispatch-time suppression for futures-only-cohort signals that fail a fresh liquidity check; spot-backed signals (`symbol_source == "spot_ws"`) are untouched by this check entirely.
+- Produces: dispatch-time suppression for any non-`established_top20` cohort signal (`liquidity_added_spot` and `futures_poll`) that fails a fresh liquidity check; `established_top20` signals are untouched by this check entirely.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2320,15 +2327,52 @@ class _StubPred:
 
 
 @pytest.mark.asyncio
-async def test_spot_signals_skip_liquidity_recheck_entirely() -> None:
+async def test_established_top20_signals_skip_liquidity_recheck_entirely() -> None:
     with patch("app.ws.live_prediction.vault_keys", return_value="fake-key"), \
          patch("app.ws.live_prediction.check_liquidity", new_callable=AsyncMock) as mock_check, \
          patch("app.ws.live_prediction.dispatch_if_eligible", new_callable=AsyncMock, return_value=None), \
          patch("app.ws.live_prediction.get_settings"):
         await _maybe_dispatch(
-            AsyncMock(), pred=_StubPred(), layer_payload={}, symbol_source="spot_ws",
+            AsyncMock(), pred=_StubPred(), layer_payload={}, symbol_source="established_top20",
         )
     mock_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_liquidity_added_spot_signal_dispatches_when_liquidity_passes() -> None:
+    from app.data.futures_liquidity import LiquidityCheck
+
+    with patch("app.ws.live_prediction.vault_keys", return_value="fake-key"), \
+         patch("app.ws.live_prediction.check_liquidity", new_callable=AsyncMock) as mock_check, \
+         patch("app.ws.live_prediction.dispatch_if_eligible", new_callable=AsyncMock, return_value=None) as mock_dispatch, \
+         patch("app.ws.live_prediction.get_settings"):
+        mock_check.return_value = LiquidityCheck(
+            passed=True, qvol_24h=25_000_000.0, spread_bps=2.0, depth_0_5pct_usdt=100_000.0,
+        )
+        await _maybe_dispatch(
+            AsyncMock(), pred=_StubPred(), layer_payload={}, symbol_source="liquidity_added_spot",
+        )
+    mock_check.assert_awaited_once()
+    mock_dispatch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_liquidity_added_spot_signal_suppressed_when_liquidity_fails(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.ws.live_prediction")
+    from app.data.futures_liquidity import LiquidityCheck
+
+    with patch("app.ws.live_prediction.vault_keys", return_value="fake-key"), \
+         patch("app.ws.live_prediction.check_liquidity", new_callable=AsyncMock) as mock_check, \
+         patch("app.ws.live_prediction.dispatch_if_eligible", new_callable=AsyncMock) as mock_dispatch, \
+         patch("app.ws.live_prediction.get_settings"):
+        mock_check.return_value = LiquidityCheck(
+            passed=False, qvol_24h=1_000_000.0, spread_bps=10.0, depth_0_5pct_usdt=5_000.0,
+        )
+        await _maybe_dispatch(
+            AsyncMock(), pred=_StubPred(), layer_payload={}, symbol_source="liquidity_added_spot",
+        )
+    mock_dispatch.assert_not_called()
+    assert any("liquidity" in r.getMessage().lower() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -2388,30 +2432,32 @@ Module-level, not a local import inside the function — the tests patch `app.ws
 At the top of `_maybe_dispatch`'s body, after the existing `vault_keys()`/`trade_setup` guard checks and before `dispatch_if_eligible` is called, add:
 
 ```python
-    if symbol_source == "futures_poll":
+    if symbol_source != "established_top20":
         try:
             rate_client = get_intermarket_adapter().rate_client
             assert rate_client is not None
             check = await check_liquidity(pred.symbol.replace("/", ""), rate_client)
         except Exception as e:  # noqa: BLE001
             log.warning(
-                "dispatch-time liquidity re-check failed for %s, suppressing: %s",
-                pred.symbol, e,
+                "dispatch-time liquidity re-check failed for %s (%s), suppressing: %s",
+                pred.symbol, symbol_source, e,
             )
             return
         if not check.passed:
             log.warning(
-                "dispatch-time liquidity re-check failed for %s "
+                "dispatch-time liquidity re-check failed for %s (%s) "
                 "(qvol=%.0f spread=%.1fbps depth=%.0f) -- suppressing card",
-                pred.symbol, check.qvol_24h, check.spread_bps, check.depth_0_5pct_usdt,
+                pred.symbol, symbol_source, check.qvol_24h, check.spread_bps, check.depth_0_5pct_usdt,
             )
             return
 ```
 
+`symbol_source` is now included in both log lines — with two cohorts (not one) able to trigger this path, the original single-cohort log message would no longer tell an operator reading logs which population a suppression came from.
+
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_dispatch_liquidity_recheck.py -v`
-Expected: PASS, all 3 tests.
+Expected: PASS, all 5 tests.
 
 - [ ] **Step 6: Run the full live_prediction test suite for regression**
 
@@ -2422,12 +2468,14 @@ Expected: PASS, all.
 
 ```bash
 git add backend/app/ws/live_prediction.py backend/tests/unit/test_dispatch_liquidity_recheck.py
-git commit -m "feat(phase4): dispatch-time liquidity re-check, suppress card on failure"
+git commit -m "feat(phase4): dispatch-time liquidity re-check, suppress card on failure (redraft: covers liquidity_added_spot + futures_poll)"
 ```
 
 ---
 
 ## Task 11: Telegram card visual distinction
+
+> **Redrafted 2026-08-18**, for the same reason and in the same way as Task 10 immediately above: `symbol_source` is a three-valued cohort tag (`established_top20` / `liquidity_added_spot` / `futures_poll`), not a two-valued ingestion tag, and the banner condition changes from `== "futures_poll"` to `!= "established_top20"`. The banner's own purpose — "the operator sees the numbers and self-filters" (design doc, base spec) — is about informing the operator that a symbol is newly-qualified-and-thin, a property `liquidity_added_spot` shares fully with `futures_poll`; there is no reason specific to Telegram rendering to treat the two new cohorts differently from each other, only both differently from `established_top20`. Default value also corrects from `'spot_ws'` (never a real value under the addendum) to `'established_top20'`, matching every other default fixed in Tasks 1/3/9/10.
 
 **Files:**
 - Modify: `backend/app/telegram/signals.py` (`SignalCandidate`, `render_message`)
@@ -2435,7 +2483,7 @@ git commit -m "feat(phase4): dispatch-time liquidity re-check, suppress card on 
 
 **Interfaces:**
 - Consumes: `symbol_source`, `LiquidityCheck` fields.
-- Produces: extended `SignalCandidate` with cohort + liquidity fields; `render_message` output includes the cohort banner and liquidity numbers when `symbol_source == "futures_poll"`.
+- Produces: extended `SignalCandidate` with cohort + liquidity fields; `render_message` output includes the cohort banner and liquidity numbers whenever `symbol_source != "established_top20"` (i.e. for both `liquidity_added_spot` and `futures_poll`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2458,10 +2506,23 @@ def _base_kwargs() -> dict:
     )
 
 
-def test_spot_signal_has_no_cohort_banner() -> None:
-    candidate = SignalCandidate(**_base_kwargs(), symbol_source="spot_ws")
+def test_established_top20_signal_has_no_cohort_banner() -> None:
+    candidate = SignalCandidate(**_base_kwargs(), symbol_source="established_top20")
     rendered = render_message(candidate, leverage=5, auto_skip_seconds=60)
     assert "NEW COHORT" not in rendered.body
+
+
+def test_liquidity_added_spot_signal_shows_cohort_banner_and_liquidity_numbers() -> None:
+    candidate = SignalCandidate(
+        **_base_kwargs(), symbol_source="liquidity_added_spot",
+        qvol_24h=22_000_000.0, spread_bps=3.5, depth_0_5pct_usdt=60_000.0,
+    )
+    rendered = render_message(candidate, leverage=5, auto_skip_seconds=60)
+    assert "NEW COHORT" in rendered.body
+    assert "22,000,000" in rendered.body or "22000000" in rendered.body
+    assert "3.5" in rendered.body
+    assert "60,000" in rendered.body or "60000" in rendered.body
+    assert "fast move" in rendered.body.lower() or "does not predict" in rendered.body.lower()
 
 
 def test_futures_poll_signal_shows_cohort_banner_and_liquidity_numbers() -> None:
@@ -2487,7 +2548,7 @@ Expected: FAIL — `TypeError: SignalCandidate.__init__() got an unexpected keyw
 In `backend/app/telegram/signals.py`, add to the `SignalCandidate` dataclass (after the existing `mtf_directions` field, keeping it `frozen=True`):
 
 ```python
-    symbol_source: str = "spot_ws"
+    symbol_source: str = "established_top20"
     qvol_24h: float | None = None
     spread_bps: float | None = None
     depth_0_5pct_usdt: float | None = None
@@ -2499,7 +2560,7 @@ In `render_message`, after computing `body` (before the `keyboard = _build_keybo
 
 ```python
     cohort_banner = ""
-    if candidate.symbol_source == "futures_poll":
+    if candidate.symbol_source != "established_top20":
         cohort_banner = (
             f"🆕 NEW COHORT — thinner liquidity, unvalidated\n"
             f"24h vol: ${candidate.qvol_24h:,.0f}  •  "
@@ -2515,7 +2576,7 @@ Prepend `cohort_banner` to the `body` string at its construction site (immediate
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_telegram_signals_cohort.py -v`
-Expected: PASS, both tests.
+Expected: PASS, all 3 tests.
 
 - [ ] **Step 6: Run the full telegram signals test suite for regression**
 
@@ -2526,12 +2587,14 @@ Expected: all existing tests still pass unchanged (find the existing test file w
 
 ```bash
 git add backend/app/telegram/signals.py backend/tests/unit/test_telegram_signals_cohort.py
-git commit -m "feat(phase4): visually distinct Telegram card for futures-only cohort"
+git commit -m "feat(phase4): visually distinct Telegram card for non-established cohorts (redraft: covers liquidity_added_spot + futures_poll)"
 ```
 
 ---
 
 ## Task 12: `/bot-status/telegram-signals` endpoint
+
+> **Redrafted 2026-08-18.** `symbol_source` is a three-valued cohort tag (Tasks 3/9/10/11), not the two-valued `spot_ws`/`futures_poll` scheme this task was originally drafted against. Every `Literal["spot_ws", "futures_poll"]` below becomes `Literal["established_top20", "liquidity_added_spot", "futures_poll"]`, and the filter test's `'spot_ws'` literal becomes `'established_top20'`. The `symbol_source` query filter itself needs no logic change — it was already a single-value equality filter, which works identically regardless of how many values the field can take.
 
 **Files:**
 - Modify: `backend/app/api/schemas.py` (add `TelegramSignalOut`)
@@ -2592,7 +2655,7 @@ async def test_telegram_signals_endpoint_returns_dispatched_rows(async_client, s
 @pytest.mark.asyncio
 async def test_telegram_signals_filters_by_symbol_source(async_client, session_factory) -> None:
     async with session_factory() as session:
-        for sym, src in [("FOO/USDT", "futures_poll"), ("BTC/USDT", "spot_ws")]:
+        for sym, src in [("FOO/USDT", "futures_poll"), ("BTC/USDT", "established_top20")]:
             await session.execute(sa.text(
                 "INSERT INTO telegram_signals "
                 "(id, user_id, symbol, direction, sent_at, payload, symbol_source) "
@@ -2627,7 +2690,7 @@ class TelegramSignalOut(BaseModel):
     confidence_pct: float
     sent_at: datetime
     status: Literal["approved", "skipped", "timeout", "error"] | None
-    symbol_source: Literal["spot_ws", "futures_poll"]
+    symbol_source: Literal["established_top20", "liquidity_added_spot", "futures_poll"]
     qvol_24h: float | None = None
     spread_bps: float | None = None
     depth_0_5pct_usdt: float | None = None
@@ -2642,7 +2705,7 @@ Add to `backend/app/api/routes/bot_status.py`, following `recent_trades`'s exact
 async def telegram_signals(
     limit: int = Query(default=100, ge=1, le=500),
     direction: Literal["LONG", "SHORT"] | None = Query(default=None),
-    symbol_source: Literal["spot_ws", "futures_poll"] | None = Query(default=None),
+    symbol_source: Literal["established_top20", "liquidity_added_spot", "futures_poll"] | None = Query(default=None),
     current_user: User = Depends(current_user_or_impersonated),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[TelegramSignalOut]:
@@ -2708,6 +2771,8 @@ git commit -m "feat(api): add /bot-status/telegram-signals endpoint (Phase 4 app
 
 ## Task 13: Frontend API client additions
 
+> **Redrafted 2026-08-18.** Same fix as Task 12, mirrored on the TypeScript side: `symbol_source: "spot_ws" | "futures_poll"` becomes the three-value union `"established_top20" | "liquidity_added_spot" | "futures_poll"` in both `TelegramSignal` and `TelegramSignalsFilters`.
+
 **Files:**
 - Modify: `frontend/src/lib/api.ts`
 
@@ -2730,7 +2795,7 @@ export interface TelegramSignal {
   confidence_pct: number;
   sent_at: string;
   status: "approved" | "skipped" | "timeout" | "error" | null;
-  symbol_source: "spot_ws" | "futures_poll";
+  symbol_source: "established_top20" | "liquidity_added_spot" | "futures_poll";
   qvol_24h: number | null;
   spread_bps: number | null;
   depth_0_5pct_usdt: number | null;
@@ -2739,7 +2804,7 @@ export interface TelegramSignal {
 export interface TelegramSignalsFilters {
   limit?: number;
   direction?: "LONG" | "SHORT";
-  symbol_source?: "spot_ws" | "futures_poll";
+  symbol_source?: "established_top20" | "liquidity_added_spot" | "futures_poll";
 }
 ```
 
@@ -2773,6 +2838,8 @@ git commit -m "feat(frontend): add telegramSignals API client (Phase 4)"
 ---
 
 ## Task 14: `useTelegramSignals` auto-refresh hook
+
+> **Reviewed 2026-08-18 against the three-way cohort scheme — no change needed.** This task's code passes `symbol_source` through generically via `TelegramSignalsFilters` (Task 13) without ever hardcoding one of its literal values; it inherits Task 13's fix automatically.
 
 **Files:**
 - Create: `frontend/src/tabs/Tab4Signals/hooks/useTelegramSignals.ts`
@@ -2864,6 +2931,11 @@ git commit -m "feat(frontend): add useTelegramSignals hook (Phase 4)"
 
 ## Task 15: `Tab4Signals` component
 
+> **Redrafted 2026-08-18.** Two fixes, following the same principle applied in Tasks 10/11 (the operator's ruling: both new cohorts carry the same "thin, newly-qualified" risk, so both get the same treatment, and only `established_top20` is exempt):
+>
+> 1. `SignalRow`'s `isFuturesOnly = s.symbol_source === "futures_poll"` becomes `isNewCohort = s.symbol_source !== "established_top20"`, matching Task 10/11's condition exactly — a `liquidity_added_spot` row was previously rendered with no badge and no liquidity numbers at all, identical to an established row, which is the same operator-facing gap Task 11's Telegram banner had. Unlike the Telegram banner, the app view has room to show *which* new cohort a row belongs to (not just that it's new) — the badge and liquidity-summary text now distinguish `liquidity_added_spot` from `futures_poll` rather than collapsing both into one "New Cohort" label, since a reader scanning a table (unlike a single pushed message) benefits from that extra specificity and it costs nothing extra to render.
+> 2. `CohortFilter` widens from `"all" | "spot_ws" | "futures_poll"` (2 real values) to `"all" | "established_top20" | "liquidity_added_spot" | "futures_poll"` (3 real values) so the operator can actually filter to each cohort individually, not just a strict/loose binary — the dropdown's old "Established only"/"New cohort only" framing forced exactly the collapse this whole redraft exists to undo.
+
 **Files:**
 - Create: `frontend/src/tabs/Tab4Signals/index.tsx`
 - Create: `frontend/src/tabs/Tab4Signals/SignalRow.tsx`
@@ -2893,10 +2965,15 @@ function fmtFullPrecision(n: number): string {
   return String(n);
 }
 
+const COHORT_BADGE_LABEL: Record<string, string> = {
+  liquidity_added_spot: "🆕 New — Spot",
+  futures_poll: "🆕 New — Futures",
+};
+
 export function SignalRow({ signal: s }: Props) {
-  const isFuturesOnly = s.symbol_source === "futures_poll";
+  const isNewCohort = s.symbol_source !== "established_top20";
   return (
-    <tr className={isFuturesOnly ? "bg-amber-950/30" : undefined}>
+    <tr className={isNewCohort ? "bg-amber-950/30" : undefined}>
       <td className="px-2 py-1 whitespace-nowrap">
         {new Date(s.sent_at).toLocaleString()}
       </td>
@@ -2911,16 +2988,16 @@ export function SignalRow({ signal: s }: Props) {
       <td className="px-2 py-1">{s.confidence_pct.toFixed(0)}%</td>
       <td className="px-2 py-1">{s.status ?? "pending"}</td>
       <td className="px-2 py-1">
-        {isFuturesOnly ? (
+        {isNewCohort ? (
           <span className="inline-block px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-bold uppercase">
-            🆕 New Cohort
+            {COHORT_BADGE_LABEL[s.symbol_source] ?? "🆕 New Cohort"}
           </span>
         ) : (
           <span className="text-text-tertiary text-[10px]">established</span>
         )}
       </td>
       <td className="px-2 py-1 text-[10px] text-text-tertiary">
-        {isFuturesOnly && s.qvol_24h != null
+        {isNewCohort && s.qvol_24h != null
           ? `vol $${s.qvol_24h.toLocaleString()} • ${s.spread_bps?.toFixed(1)}bps • depth $${s.depth_0_5pct_usdt?.toLocaleString()}`
           : "—"}
       </td>
@@ -2944,7 +3021,7 @@ import { useTelegramSignals } from "./hooks/useTelegramSignals";
 import { SignalRow } from "./SignalRow";
 
 type DirectionFilter = "all" | "LONG" | "SHORT";
-type CohortFilter = "all" | "spot_ws" | "futures_poll";
+type CohortFilter = "all" | "established_top20" | "liquidity_added_spot" | "futures_poll";
 
 const DEFAULT_REFRESH_MIN = 2;
 
@@ -2977,8 +3054,9 @@ export function Tab4Signals() {
           className="text-xs bg-bg-surface border border-border rounded px-2 py-1"
         >
           <option value="all">All cohorts</option>
-          <option value="spot_ws">Established only</option>
-          <option value="futures_poll">New cohort only</option>
+          <option value="established_top20">Established only</option>
+          <option value="liquidity_added_spot">New — spot only</option>
+          <option value="futures_poll">New — futures only</option>
         </select>
         <button
           onClick={() => void refetch()}
@@ -3040,6 +3118,8 @@ git commit -m "feat(frontend): add Tab4Signals component (Phase 4 app view)"
 ---
 
 ## Task 16: Register the new tab in `App.tsx`
+
+> **Reviewed 2026-08-18 against the three-way cohort scheme — no change needed.** Pure tab-registration wiring; carries no `symbol_source` literal.
 
 **Files:**
 - Modify: `frontend/src/App.tsx`
