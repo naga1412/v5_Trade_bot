@@ -332,6 +332,20 @@ async def refresh_live_fleet_universe(
         if not keep:
             continue
 
+        # mypy narrowing note: last_check is provably non-None on every path
+        # that reaches here at runtime (the cold-start branch's `except`
+        # continues before assignment could be skipped; the warm branch has
+        # its own explicit `if last_check is None: continue`). mypy cannot
+        # prove this across the if/else merge, though, because the warm
+        # branch's assignment happens inside a nested `for i in range(
+        # N_SAMPLES)` loop -- once a variable is reassigned inside a loop,
+        # mypy's binder widens its type for the rest of the function and a
+        # per-branch `is None` guard does not survive the merge with the
+        # cold-start branch's own (loop-free) assignment. A bare guard in
+        # the cold-start branch alone does not fix this (verified directly
+        # against this repo's mypy invocation); the assert below does.
+        assert last_check is not None
+
         cohort: Cohort
         if currently_in:
             cohort = prior[sym].cohort  # sticky -- inherited, never recomputed
