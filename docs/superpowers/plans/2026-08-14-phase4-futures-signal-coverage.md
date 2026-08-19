@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy async / Alembic / pytest + pytest-asyncio / React + TypeScript + Tailwind (frontend).
 
-> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched.
+> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched. **Tasks 5c and 5d are new** (2026-08-19, same standing as 5b) — `refresh_live_fleet_universe` (Task 5) was discovered to have never had a scheduled caller anywhere in the application (staging confirmed `ws_keepalive_task` running healthy with 0 children, `live_fleet_universe` permanently empty); Task 5c schedules it (6h in-process worker, registered so the healer can see it stop) and Task 5d fixes a related open-position-coverage gap found while designing the scheduler. **See `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md` for the full incident record** — this is recorded there as the staging-soak gate's first concrete save: promoted to main as originally sequenced, this gap would have silently killed all live predictions and signals on a green deploy.
 
 **Spec:** `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`
 
@@ -1104,7 +1104,7 @@ __all__ = [
 
 **Note on `EXIT_MAX_PASSES = 0`**: "unanimous 5-of-5 fail to exit" is equivalent to "keep unless pass_count is exactly 0" — written as `pass_count > EXIT_MAX_PASSES` so the threshold is a named constant, not a magic `0` buried in the conditional.
 
-**Note on dwell time**: no separate dwell-timer state is needed. `refresh_live_fleet_universe` only runs once per day (same cadence as `asset_universe`'s existing refresh), so a symbol structurally cannot be re-evaluated for removal more than once every 24h — the ≥24h minimum dwell from addendum (a) is satisfied by the daily cadence itself, not by additional tracked state. If this refresh cadence ever changes to run more than once a day, this note stops being true and dwell needs its own explicit tracking — flag that explicitly if it comes up.
+**Note on dwell time — UPDATED 2026-08-19, this is the "flag it if it comes up" case this note itself anticipated.** The cadence changed from daily to 6-hourly (Task 5c, ratified 2026-08-19 after discovering `refresh_live_fleet_universe` had never actually been scheduled at all — see `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md`). The original claim above ("≥24h minimum dwell... satisfied by the daily cadence itself") **no longer holds as stated**: at 6-hourly cadence, a symbol's membership can be reconsidered up to 4 times per day, not once, so the structural minimum dwell drops to ~6h (a symbol could in principle enter on one refresh and exit on the very next, 6 hours later, if it unanimously fails all 5 within-refresh microsamples on that call). **No dwell-timer state was added to restore the old ~24h floor.** The operator's own Task 18 staging-verification checklist item 10 ("no symbol entering and leaving the universe more than once in the window — report any flapping") is the empirical check standing in for a structural guarantee here: the 24h soak is what determines whether this matters in practice, not an assumption baked into the code. If real flapping is observed during that soak, that is the trigger to add explicit dwell-timer state — not before.
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
@@ -1249,6 +1249,181 @@ Expected: PASS, including the new open-position-retention test. **If any OTHER e
 ```bash
 git add backend/app/ws/keepalive.py backend/tests/ops/test_ws_keepalive.py
 git commit -m "feat(keepalive): switch to liquidity-floor selector + open-position override (Phase 4)"
+```
+
+---
+
+## Task 5c: Schedule `refresh_live_fleet_universe` (new, ratified 2026-08-19)
+
+> **New task, same standing as Task 5b's own addition to the original 18.** `refresh_live_fleet_universe` (Task 5) has never had a scheduled caller anywhere in the application — confirmed via staging inspection 2026-08-18: `ws_keepalive_task` heartbeats healthy with `{"children": 0}` because `live_fleet_universe` is empty and nothing has ever populated it. See the incident/decision record at `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md` for the full severity writeup and the four operator rulings this task implements. Read that doc before touching this task — it explains *why* each design choice below is what it is, including a clarifying question that was asked and answered (hysteresis stays fully within-refresh, no cross-cycle redesign) and the honest dwell-time consequence of the cadence change.
+
+**Files:**
+- New: `backend/app/shadow/universe_refresh_scheduler.py` (the loop/heartbeat wrapper — mirrors `backend/app/workers/symbol_allowlist_refresh.py`'s `run_symbol_allowlist_refresh_loop` shape exactly: fires one cycle immediately on start, ok/error heartbeat per cycle, sleeps `poll_interval_s` between cycles, not before the first one)
+- Modify: `backend/app/shadow/live_fleet_universe.py` (`refresh_live_fleet_universe`'s cold-start entry-bar relaxation — ruling 3)
+- Modify: `backend/app/main.py` (wire the new worker into lifespan startup + shutdown, mirroring Task 17's `futures_poll_task` wiring exactly)
+- Modify: `backend/app/ops/worker_registry.py` (new `WorkerSpec` entry)
+- Test: `backend/tests/unit/test_universe_refresh_scheduler.py` (new), plus new cold-start-relaxation cases in `backend/tests/unit/test_live_fleet_universe.py`
+
+**Interfaces:**
+- Consumes: `refresh_live_fleet_universe` (Task 5, unchanged signature).
+- Produces: `run_universe_refresh_loop(session_factory, http, rate_client, *, poll_interval_s=...) -> None` (forever-loop) and `start_universe_refresh_task(session_factory) -> asyncio.Task[None]` (spawns it, constructing `http`/`rate_client` internally — see Step 2).
+
+- [ ] **Step 1: Cold-start entry-bar relaxation in `refresh_live_fleet_universe`** (ruling 3)
+
+In `backend/app/shadow/live_fleet_universe.py`, add a new module constant next to `ENTRY_MIN_PASSES`:
+
+```python
+COLD_START_ENTRY_MIN_PASSES: int = 1  # admit-on-any-pass when the table has never been refreshed
+```
+
+Change the entry-threshold computation (currently `keep = pass_count >= ENTRY_MIN_PASSES` in the `else` branch of the `currently_in` check) to:
+
+```python
+        if currently_in:
+            keep = pass_count > EXIT_MAX_PASSES
+        else:
+            entry_bar = COLD_START_ENTRY_MIN_PASSES if not prior else ENTRY_MIN_PASSES
+            keep = pass_count >= entry_bar
+```
+
+This only changes behavior on the very first-ever refresh (`prior` empty) — every subsequent refresh uses the unchanged 3-of-5/unanimous-fail rule. Update the module docstring's "Cold-start seeding" section to document this alongside the existing legacy-cohort-tagging note (both are gated on the same `if not prior:` condition, for the same reason: this branch structurally cannot re-fire once any refresh has ever succeeded).
+
+Add a test: with an empty `live_fleet_universe` table, a candidate passing `check_liquidity` on only 1 of 5 samples (mock the other 4 as failing) is still admitted. Add a second test: with a non-empty table (any single prior row), the same 1-of-5 candidate is correctly rejected (unchanged existing behavior) — this is the regression guard proving the relaxation is scoped to cold start only.
+
+- [ ] **Step 2: Write `backend/app/shadow/universe_refresh_scheduler.py`**
+
+Mirror `backend/app/workers/symbol_allowlist_refresh.py` exactly: one `run_one_cycle(...)` function (calls `refresh_live_fleet_universe`, heartbeats `status="ok"` with `details={"entries": len(result), "cohort_counts": {...}}` on success, `status="error"` with `details={"error": str(e)[:200]}` on any exception — caught and logged, never propagated past the cycle), and one `run_universe_refresh_loop(...)` forever-loop that calls it immediately, then sleeps, then repeats, matching `run_symbol_allowlist_refresh_loop`'s documented reasoning verbatim ("previous shape slept BEFORE the first cycle... every backend restart delayed the first heartbeat... this shape fires immediately").
+
+```python
+WORKER_NAME: str = "universe_refresh_task"
+POLL_INTERVAL_SECONDS: float = 6 * 60 * 60  # 6h, ratified 2026-08-19 (was daily in the original addendum)
+```
+
+For `refresh_live_fleet_universe`'s `http`/`rate_client` arguments: reuse the shared intermarket adapter, matching Task 10's own pattern (`from app.data.adapters import get_intermarket_adapter`, then `adapter = get_intermarket_adapter(); http = adapter.http; rate_client = adapter.rate_client`) — **verify the exact attribute names against the real `BinanceFuturesIntermarketAdapter` dataclass in `backend/app/data/adapters/binance_futures_intermarket.py` before using them**, don't assume. This avoids spinning up a second, independent HTTP client pool alongside the one Task 10's dispatch-time recheck and the intermarket snapshot worker already share.
+
+`start_universe_refresh_task(session_factory) -> asyncio.Task[None]` follows the exact `start_futures_poll_task`/`start_keepalive_task` shape — a thin `asyncio.create_task(run_universe_refresh_loop(...), name="universe_refresh_task")` wrapper.
+
+- [ ] **Step 3: Register in `worker_registry.py`**
+
+```python
+WorkerSpec(
+    name="universe_refresh_task",
+    description="Liquidity-floor universe refresh (6h cadence) -- populates live_fleet_universe, the table ws_keepalive_task and futures_poll_task both read to decide which symbols to poll. Ratified 2026-08-19 after staging caught the table sitting permanently empty with no scheduler.",
+    liveness_query=HEARTBEAT,
+    max_staleness_seconds=6 * 60 * 60 + 36 * 60,  # 6h cadence + ~10% grace (~10% rule, matching symbol_allowlist_refresh/p_win_refit's daily-cadence treatment)
+    stateful=False,  # safe to auto-restart -- no children, no in-flight state beyond one refresh cycle
+),
+```
+
+- [ ] **Step 4: Wire into `main.py`**
+
+Mirror Task 17's exact pattern: import, pre-declare `universe_refresh_task_handle = None`, spawn via `start_universe_refresh_task(get_session_factory())` **before** `start_keepalive_task`/`start_futures_poll_task` in the startup block (the fleet supervisors' very first `_load_keepalive_symbols`/`_load_desired_futures_symbols` call benefits from the universe refresh having already fired at least once, though neither depends on strict ordering — this just avoids the fleet supervisors' cold "0 children" log line firing needlessly on every single fresh boot when it's avoidable), cancel symmetrically in the shutdown block.
+
+- [ ] **Step 5: Tests**
+
+- `test_universe_refresh_scheduler.py`: one cycle calls `refresh_live_fleet_universe` and heartbeats `ok`; a `refresh_live_fleet_universe` exception heartbeats `error` with the exception string, doesn't propagate, doesn't crash the loop; the loop fires cycle 1 immediately (no sleep before it) — mirror `symbol_allowlist_refresh`'s own test file's shape/assertions for the equivalent cases.
+- Run the full regression suite: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_fleet_universe.py tests/unit/test_universe_refresh_scheduler.py tests/unit/test_worker_registry_consistency.py -v`
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/shadow/universe_refresh_scheduler.py backend/app/shadow/live_fleet_universe.py backend/app/main.py backend/app/ops/worker_registry.py backend/tests/unit/test_universe_refresh_scheduler.py backend/tests/unit/test_live_fleet_universe.py
+git commit -m "feat(phase4): schedule refresh_live_fleet_universe -- 6h in-process worker + cold-start entry relaxation"
+```
+
+---
+
+## Task 5d: Fix open-position retention at the source (new, ratified 2026-08-19)
+
+> **New task, ruling 4 of the 2026-08-19 decision record.** The operator flagged (during Task 17's review) that a fleet-supervisor restart recomputes desired symbols from the liquidity floor alone, dropping candle coverage for a symbol with an open position that's since fallen off the floor. Tracing the actual code found the gap is more fundamental than the fleet supervisors themselves: `refresh_live_fleet_universe`'s own open-position override (the mechanism meant to prevent exactly this) only iterates `prior.items()` — on the table's very first-ever refresh, `prior` is empty, so the override protects nothing regardless of what positions are actually open at that moment. **Fixing it at this one source (query live open positions directly, not just prior membership) closes the gap for cold start, mid-window supervisor restarts, AND steady-state operation all at once — `ws_keepalive_task` and `futures_poll_task` inherit the fix automatically through their existing `live_fleet_universe` reads, with no changes needed to `keepalive.py` or `futures_poll.py` at all.** This is a deliberate change from a literal reading of the ruling (which described fixing the fleet supervisors' own startup path) to a more centralized fix at the shared source table — same outcome (open positions never lose coverage, including at startup), less duplicated logic, one fix instead of three. Flagged here for visibility, not silently substituted.
+
+**Files:**
+- Modify: `backend/app/shadow/live_fleet_universe.py` (`refresh_live_fleet_universe`'s open-position override step, plus a new helper)
+- Test: new cases in `backend/tests/unit/test_live_fleet_universe.py`
+
+**Interfaces:**
+- Produces: `get_open_position_symbols(session: AsyncSession) -> set[str]` — all currently-open-position symbols, normalized to the no-slash form `live_fleet_universe` itself uses (reuse `has_open_position`'s dual-table-format awareness: `live_trades.symbol` is slash-form, `shadow_open_positions.symbol` is no-slash — union both, normalized to no-slash for this table's own convention).
+
+- [ ] **Step 1: Add `get_open_position_symbols`**
+
+```python
+async def get_open_position_symbols(session: AsyncSession) -> set[str]:
+    """Every symbol with a currently-open live_trades or shadow_open_positions
+    row, normalized to no-slash form (this table's own symbol convention).
+    Companion to has_open_position (which checks one symbol) -- this is the
+    bulk form the open-position override needs, since it must protect every
+    open position each refresh, not test one candidate at a time."""
+    rows = await session.execute(sa.text(
+        "SELECT symbol FROM live_trades WHERE status = 'open' "
+        "UNION "
+        "SELECT symbol FROM shadow_open_positions"
+    ))
+    out: set[str] = set()
+    for r in rows:
+        out.add(r.symbol.replace("/", ""))
+    return out
+```
+
+(Verify `live_trades.status`'s exact open-state value against the real schema/existing queries before assuming `'open'` literally — Task 5's own `has_open_position` uses this exact literal, cross-check it still matches.)
+
+- [ ] **Step 2: Replace the `prior`-only override loop with a live-position-aware one**
+
+Replace the existing block (currently: `for sym, entry in prior.items(): if sym in results: continue; if await has_open_position(session, to_pair(sym)): ... results[sym] = entry`) with:
+
+```python
+    async with session_factory() as session:
+        open_syms = await get_open_position_symbols(session)
+        for sym in open_syms:
+            if sym in results:
+                continue
+            if sym in prior:
+                log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
+                results[sym] = prior[sym]  # last-known-good numbers, not re-sampled
+            else:
+                # Never seen by this table before (brand-new position, or the
+                # very first refresh ever) -- sample once for real numbers
+                # rather than fabricating placeholders. Rare, self-correcting
+                # from the next refresh onward once this symbol has a prior
+                # entry; established_top20 is the safe default when there is
+                # genuinely no cohort information to inherit.
+                try:
+                    check = await check_liquidity(sym, rate_client)
+                    results[sym] = LiveFleetEntry(
+                        symbol=sym, cohort="established_top20",
+                        qvol_24h=qvol_by_symbol.get(sym, 0.0),
+                        spread_bps=check.spread_bps, depth_0_5pct_usdt=check.depth_0_5pct_usdt,
+                    )
+                    log.warning(
+                        "live_fleet_universe: %s has an open position but no prior "
+                        "snapshot entry -- rescued with a fresh sample, tagged "
+                        "established_top20 as the safe default", sym,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.error(
+                        "live_fleet_universe: %s has an open position, no prior "
+                        "entry, AND a fresh check_liquidity sample failed (%s) -- "
+                        "coverage genuinely cannot be guaranteed this refresh", sym, e,
+                    )
+```
+
+This subsumes the old `to_pair`/`has_open_position`-per-prior-symbol loop entirely — `open_syms` is now the source of truth, not `prior.items()`. Keep the rest of Step 5's persistence logic (the `INSERT INTO live_fleet_universe` loop over `results.values()`) unchanged.
+
+- [ ] **Step 3: Tests**
+
+The operator's explicit required test: **a fleet-supervisor restart with an off-floor open position must retain coverage.** Concretely, at the `refresh_live_fleet_universe` level (this is where the fix actually lives, not in keepalive.py/futures_poll.py):
+1. Seed `live_trades`/`shadow_open_positions` with an open position on a symbol that fails `check_liquidity` this cycle and has NO entry in `prior` at all (simulating: table was just wiped, or this is the very first refresh, or the position opened after the last refresh and before this one).
+2. Run `refresh_live_fleet_universe`.
+3. Assert the symbol IS in the returned/persisted result, tagged `established_top20`, with real (not fabricated-zero) liquidity numbers from the rescue sample.
+4. A second test: same setup but with a `prior` entry present (simulating steady-state, not first-ever-refresh) — assert the symbol is retained using `prior`'s last-known numbers, NOT re-sampled (proves the `if sym in prior` branch still takes precedence over the fresh-sample fallback).
+5. A third test, directly answering the operator's framing: simulate a "fleet-supervisor restart" end-to-end — call `_load_keepalive_symbols`/`_load_desired_futures_symbols` (Task 5b/8, unchanged) against a `live_fleet_universe` state produced by a `refresh_live_fleet_universe` call that included an off-floor open-position symbol per case 1 above, and assert the restart's desired-set includes that symbol. This is the test that actually proves the end-to-end guarantee the operator asked for, not just the persistence-layer unit test.
+
+Run the full regression suite: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_fleet_universe.py tests/ops/test_ws_keepalive.py tests/unit/test_futures_poll*.py -v`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add backend/app/shadow/live_fleet_universe.py backend/tests/unit/test_live_fleet_universe.py
+git commit -m "fix(phase4): live_fleet_universe open-position override now queries live positions directly, not just prior snapshot membership"
 ```
 
 ---
