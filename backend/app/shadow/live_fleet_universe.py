@@ -43,6 +43,20 @@ making every subsequent `prior` non-empty), and a symbol already a
 member on a later refresh always takes its cohort from
 `prior[sym].cohort` (sticky, never recomputed) rather than from this
 branch.
+
+Cold-start entry-bar relaxation (Task 5c, ratified 2026-08-19 --
+docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
+scheduled-incident.md, ruling 3): on that SAME very-first-ever refresh
+(no prior snapshot at all), the entry bar itself also relaxes from the
+normal >=3-of-5 threshold to admit-on-any-pass (>=1-of-5), via
+`COLD_START_ENTRY_MIN_PASSES`. A fresh environment must not sit dark
+waiting for enough refresh cycles to build up hysteresis history that,
+by definition, cannot exist yet. Gated on the identical `if not prior:`
+condition as the legacy-cohort-tagging branch above, for the identical
+structural reason: this table is never empty again after its first
+successful refresh (step 5 always persists at least one row), so this
+branch cannot re-fire on any later call. Every subsequent refresh uses
+the unchanged 3-of-5 entry / unanimous-fail exit rule.
 """
 from __future__ import annotations
 
@@ -68,6 +82,9 @@ N_SAMPLES: int = 5
 SAMPLE_GAP_SECONDS: float = 10.0
 ENTRY_MIN_PASSES: int = 3   # of N_SAMPLES
 EXIT_MAX_PASSES: int = 0    # exit requires unanimous failure -- 0 passes of 5
+# Task 5c (ratified 2026-08-19): admit-on-any-pass when the table has never
+# been refreshed -- see module docstring's "Cold-start entry-bar relaxation".
+COLD_START_ENTRY_MIN_PASSES: int = 1
 
 Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
 
@@ -229,7 +246,12 @@ async def refresh_live_fleet_universe(
         if currently_in:
             keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
         else:
-            keep = pass_count >= ENTRY_MIN_PASSES
+            # Task 5c: on the very first-ever refresh (prior empty), relax
+            # the entry bar to admit-on-any-pass -- there is no hysteresis
+            # history to require 3-of-5 against yet. Every later refresh
+            # (prior non-empty) uses the unchanged ENTRY_MIN_PASSES=3 bar.
+            entry_bar = COLD_START_ENTRY_MIN_PASSES if not prior else ENTRY_MIN_PASSES
+            keep = pass_count >= entry_bar
 
         if not keep:
             continue
@@ -285,6 +307,7 @@ async def refresh_live_fleet_universe(
 
 __all__ = [
     "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
+    "COLD_START_ENTRY_MIN_PASSES",
     "LiveFleetEntry", "has_open_position", "load_live_fleet_universe",
     "refresh_live_fleet_universe",
 ]
