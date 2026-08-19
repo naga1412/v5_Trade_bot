@@ -532,6 +532,174 @@ async def test_run_keepalive_initial_load_and_clean_shutdown(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 Task 5f — root-cause regression: last_refresh must be a genuine
+# captured loop.time() reading, not a hardcoded 0.0.
+#
+# See docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
+# scheduled-incident.md's second "Implementation note" for the full
+# incident. Summary: `now - last_refresh >= refresh_seconds` used
+# `now = loop.time()`, backed by CLOCK_MONOTONIC -- a clock Docker
+# containers share with their host kernel (no per-container reset), so its
+# absolute value reflects host-wide elapsed time, not process/container
+# start time. On a long-lived host, `loop.time()` was already far larger
+# than any refresh_seconds, so `last_refresh = 0.0` made the reconciliation
+# gate trivially true on the very first in-loop check -- it "worked" only
+# by accident. A host reboot near a container restart would reset the
+# clock and make the identical code genuinely wait the full nominal
+# interval -- an environment-dependent divergence between a long-running
+# host and a freshly-rebooted one.
+
+
+class _FakeClock:
+    """Deterministic stand-in for ``loop.time()``, decoupled from real
+    wall-clock time.
+
+    Starts at ``start`` (a value far larger than any ``refresh_seconds``
+    under test -- simulating a long-lived host's CLOCK_MONOTONIC reading)
+    and advances by ``step`` SIMULATED seconds on every call. This lets
+    the test prove reconciliation only fires once ``step``-accumulated
+    SIMULATED elapsed time genuinely reaches ``refresh_seconds`` since the
+    last capture -- not merely because the absolute reading is large,
+    which is exactly what the old ``last_refresh = 0.0`` bug got wrong.
+    """
+
+    def __init__(self, start: float, step: float) -> None:
+        self._value = start
+        self._step = step
+        self.call_count = 0
+
+    def __call__(self) -> float:
+        self.call_count += 1
+        current = self._value
+        self._value += self._step
+        return current
+
+
+class _LoopTimeProxy:
+    """Wraps the REAL running loop, forwarding every attribute unchanged
+    EXCEPT ``.time()``.
+
+    ``BaseEventLoop._run_once`` calls ``self.time()`` directly on its own
+    instance (not via ``asyncio.get_event_loop()``) to compute callback
+    deadlines and ``select()`` timeouts on every iteration -- confirmed
+    directly against this repo's CPython/Windows ProactorEventLoop before
+    settling on this design: monkeypatching the REAL loop instance's
+    ``.time`` attribute in place corrupts that internal scheduling (the
+    loop's own deadline math sees the same wildly-jumping fake values our
+    test feeds it), producing garbled, non-deterministic sleep behavior --
+    exactly the kind of flaky test this rollout's own lesson
+    ([[test_suite_scanner_universe_flakiness]]) warns about. Swapping what
+    ``asyncio.get_event_loop()`` *returns* to callers, instead, leaves the
+    real loop's own internal `self` reference (and thus its scheduling)
+    completely untouched -- only code that explicitly calls
+    ``asyncio.get_event_loop().time()``, which is exactly what
+    ``run_keepalive`` does, observes the fake clock.
+    """
+
+    def __init__(self, real_loop: asyncio.AbstractEventLoop, fake_clock: _FakeClock) -> None:
+        self._real_loop = real_loop
+        self._fake_clock = fake_clock
+
+    def time(self) -> float:
+        return self._fake_clock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real_loop, name)
+
+
+@pytest.mark.asyncio
+async def test_run_keepalive_reconciliation_requires_genuine_elapsed_loop_time(
+    monkeypatch: Any, fleet_factory: Any,
+) -> None:
+    """Phase 4 Task 5f: reconciliation must NOT fire just because
+    ``loop.time()``'s absolute value happens to exceed ``refresh_seconds``
+    (a long-uptime host) -- only after a genuine ``refresh_seconds`` has
+    elapsed, in SIMULATED loop-time terms, since the initial population.
+
+    This is the test that would have caught the actual staging bug: under
+    the old ``last_refresh = 0.0`` code, a single call to the fake clock
+    returning ~100_025 (far bigger than ``refresh_seconds=60``) would
+    already satisfy ``now - 0.0 >= refresh_seconds`` and reconcile on the
+    very first in-loop tick. Under the fix (``last_refresh = loop.time()``,
+    captured after the initial population), the diff computed on that same
+    first tick is only ``25`` (one ``step``), so it correctly does NOT
+    fire — reconciliation only fires on the third tick, once 75 SIMULATED
+    seconds have genuinely accrued since the capture.
+    """
+    await _seed_fleet(fleet_factory, entries=[("BTCUSDT", "established_top20")])
+
+    # start >> refresh_seconds below, exactly the long-uptime-host scenario
+    # that let the old bug hide undetected on staging.
+    real_loop = asyncio.get_event_loop()
+    fake_clock = _FakeClock(start=100_000.0, step=25.0)
+    proxy_loop = _LoopTimeProxy(real_loop, fake_clock)
+    monkeypatch.setattr(keepalive.asyncio, "get_event_loop", lambda: proxy_loop)
+
+    refresh_calls = 0
+    real_load = keepalive._load_keepalive_symbols
+
+    async def _counting_load(*args: Any, **kwargs: Any) -> list[tuple[str, str, str]]:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        return await real_load(*args, **kwargs)
+
+    monkeypatch.setattr(keepalive, "_load_keepalive_symbols", _counting_load)
+
+    async def _noop_runner(_symbol_pair: str, _timeframe: str, _cohort: str) -> None:
+        await asyncio.Event().wait()
+
+    # heartbeat_seconds is real wall-clock time (kept tiny so the test is
+    # fast); refresh_seconds is compared against the fully-decoupled
+    # SIMULATED clock above.
+    task = asyncio.create_task(keepalive.run_keepalive(
+        fleet_factory,
+        timeframe="1h",
+        exclude=frozenset(),
+        refresh_seconds=60,
+        heartbeat_seconds=0.01,
+        runner=_noop_runner,
+    ))
+
+    async def _wait_until(predicate: Any, *, budget_s: float = 5.0) -> None:
+        elapsed = 0.0
+        step_s = 0.005
+        while not predicate():
+            await asyncio.sleep(step_s)
+            elapsed += step_s
+            if elapsed >= budget_s:
+                raise AssertionError("timed out waiting for condition")
+
+    try:
+        # Initial population's own _load_keepalive_symbols call (runs
+        # before last_refresh is even captured) -- not part of the
+        # reconciliation logic under test.
+        await _wait_until(lambda: refresh_calls >= 1)
+        assert refresh_calls == 1
+
+        # Two in-loop ticks have now happened (fake_clock.call_count counts
+        # the last_refresh capture itself plus one call per tick, so
+        # call_count >= 3 means 2 ticks completed): cumulative SIMULATED
+        # elapsed time is 50s (2 * step), still short of refresh_seconds=60.
+        # Reconciliation must NOT have fired yet.
+        await _wait_until(lambda: fake_clock.call_count >= 3)
+        assert refresh_calls == 1, (
+            "reconciliation fired before refresh_seconds of genuine "
+            "SIMULATED elapsed time had accrued since the initial "
+            "population -- this is the last_refresh=0.0 root-cause bug "
+            "(see docs/superpowers/decisions/2026-08-19-live-fleet-"
+            "universe-never-scheduled-incident.md)"
+        )
+
+        # Tick 3 pushes cumulative SIMULATED elapsed time to 75s (>= 60) --
+        # reconciliation must fire now.
+        await _wait_until(lambda: refresh_calls >= 2)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 Task 9 — cohort tag reaches the predictions row (end-to-end,
 # minus real network I/O).
 #

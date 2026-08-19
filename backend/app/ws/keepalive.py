@@ -24,7 +24,9 @@ Design notes:
   conflict on the predictions hash chain.
 - Per-symbol child tasks are wrapped in a restart-with-backoff loop so
   a transient Binance hiccup on one symbol doesn't kill the others.
-- The fleet is re-read every 24h; symbols newly passing the liquidity
+- The fleet is re-read every 1h (Phase 4 Task 5f -- corrected from a
+  stale 24h default that predated Task 5c's move to a 6h
+  universe-refresh cadence); symbols newly passing the liquidity
   floor get a new child task, symbols failing it get their task
   cancelled — UNLESS they have an open live_trades/shadow_open_positions
   row, in which case cancellation is skipped (Phase 4 Task 5b hard
@@ -58,8 +60,8 @@ keyword-only ``symbol_source`` param over the plain 3-positional-arg
 looking its own cohort up from ``load_live_fleet_universe`` at spawn/
 restart time) because the cohort is already in hand at zero extra cost
 when the desired set is built — a second lookup would be a redundant DB
-round-trip on every child restart and race against a concurrent 24h
-refresh. The child-identity dict (``children``) stays keyed by
+round-trip on every child restart and race against a concurrent 1h
+refresh (Phase 4 Task 5f). The child-identity dict (``children``) stays keyed by
 ``(symbol_pair, timeframe)`` only — a symbol belongs to exactly one
 cohort at a time by construction (the two ``load_live_fleet_universe``
 queries are disjoint), so cohort is spawn-time metadata, not part of a
@@ -99,7 +101,7 @@ log = logging.getLogger(__name__)
 # without checking those call sites first.
 KEEPALIVE_TOP_N: int = 20
 KEEPALIVE_TIMEFRAME: str = "1h"
-KEEPALIVE_REFRESH_SECONDS: int = 24 * 60 * 60  # 24h
+KEEPALIVE_REFRESH_SECONDS: int = 60 * 60  # 1h (was 24h -- stale since Task 5c moved the universe refresh to 6h; see Phase 4 Task 5f)
 KEEPALIVE_HEARTBEAT_SECONDS: int = 5 * 60  # 5min
 KEEPALIVE_CHILD_BACKOFF_BASE_S: float = 5.0
 KEEPALIVE_CHILD_BACKOFF_MAX_S: float = 120.0
@@ -161,7 +163,7 @@ async def _run_child_with_restart(
     `symbol_source` is the cohort this child was spawned for (fixed for
     the child's lifetime — a cohort change only takes effect on the next
     full respawn, same staleness window the liquidity floor itself
-    already has via the 24h refresh).
+    already has via the 1h refresh, Phase 4 Task 5f).
     """
     backoff = KEEPALIVE_CHILD_BACKOFF_BASE_S
     while True:
@@ -262,8 +264,9 @@ async def _refresh_children(
       moves it from established_top20 to liquidity_added_spot) while it
       stays in the desired set throughout, the already-running child is
       NOT restarted to pick up the new tag — same staleness window the
-      liquidity floor membership itself already has (24h refresh cadence
-      applies to spawns/cancellations, not to relabeling a live child).
+      liquidity floor membership itself already has (1h refresh cadence,
+      Phase 4 Task 5f, applies to spawns/cancellations, not to relabeling
+      a live child).
     """
     children_cohort_by_key = {(p, tf): c for p, tf, c in desired}
     desired_set = set(children_cohort_by_key)
@@ -340,8 +343,29 @@ async def run_keepalive(
             details={"children": len(children), "timeframe": timeframe},
         )
 
-        last_refresh = 0.0
+        # Phase 4 Task 5f root cause: last_refresh MUST be a real captured
+        # loop.time() reading, never a hardcoded 0.0. loop.time() is backed
+        # by time.monotonic() -> the kernel's CLOCK_MONOTONIC, and Docker
+        # containers share their host's kernel (no per-container clock
+        # namespace) -- so its absolute value reflects host-wide elapsed
+        # time (typically since host boot), not this process/container's
+        # start time. On a long-lived host, `now = loop.time()` is already
+        # far larger than any refresh_seconds, so a hardcoded 0.0 baseline
+        # made `now - 0.0 >= refresh_seconds` trivially true on the very
+        # first in-loop check -- reconciliation appeared to work by
+        # ACCIDENT, not by design. A host reboot near a container restart
+        # resets this clock and would make the identical code genuinely
+        # wait the full refresh_seconds before ever reconciling again --
+        # an environment-dependent divergence between a long-running host
+        # and a freshly-rebooted one. Capturing loop.time() here (after the
+        # initial population above, not before it) measures real elapsed
+        # time since the last reconciliation, independent of host uptime.
+        # DO NOT "simplify" this back to 0.0 -- see
+        # docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
+        # scheduled-incident.md and the regression test
+        # test_run_keepalive_reconciliation_requires_genuine_elapsed_loop_time.
         loop = asyncio.get_event_loop()
+        last_refresh = loop.time()
         while True:
             await asyncio.sleep(heartbeat_seconds)
             now = loop.time()

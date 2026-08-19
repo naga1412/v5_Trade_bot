@@ -254,7 +254,7 @@ async def futures_rest_poll_candles(
 WORKER_NAME: str = "futures_poll_task"
 FUTURES_POLL_SAFETY_MAX_N: int = 30  # safety valve, not the selector -- see plan doc
 FUTURES_POLL_TIMEFRAME: str = "1h"
-FUTURES_POLL_REFRESH_SECONDS: int = 24 * 60 * 60  # 24h
+FUTURES_POLL_REFRESH_SECONDS: int = 60 * 60  # 1h (was 24h -- see keepalive.py's identical fix, Phase 4 Task 5f)
 FUTURES_POLL_HEARTBEAT_SECONDS: int = 5 * 60  # 5min
 _CHILD_BACKOFF_BASE_S: float = 5.0
 _CHILD_BACKOFF_MAX_S: float = 120.0
@@ -439,8 +439,29 @@ async def run_futures_poll(
                 "gap_counts": dict(_GAP_COUNT), "rate_limit_waits": dict(_RATE_LIMIT_WAIT_COUNT),
             },
         )
-        last_refresh = 0.0
+        # Phase 4 Task 5f root cause: last_refresh MUST be a real captured
+        # loop.time() reading, never a hardcoded 0.0. loop.time() is backed
+        # by time.monotonic() -> the kernel's CLOCK_MONOTONIC, and Docker
+        # containers share their host's kernel (no per-container clock
+        # namespace) -- so its absolute value reflects host-wide elapsed
+        # time (typically since host boot), not this process/container's
+        # start time. On a long-lived host, `now = loop.time()` is already
+        # far larger than any refresh_seconds, so a hardcoded 0.0 baseline
+        # made `now - 0.0 >= refresh_seconds` trivially true on the very
+        # first in-loop check -- reconciliation appeared to work by
+        # ACCIDENT, not by design. A host reboot near a container restart
+        # resets this clock and would make the identical code genuinely
+        # wait the full refresh_seconds before ever reconciling again --
+        # an environment-dependent divergence between a long-running host
+        # and a freshly-rebooted one. Capturing loop.time() here (after the
+        # initial population above, not before it) measures real elapsed
+        # time since the last reconciliation, independent of host uptime.
+        # DO NOT "simplify" this back to 0.0 -- see
+        # docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
+        # scheduled-incident.md and keepalive.py's identical fix +
+        # regression test.
         loop = asyncio.get_event_loop()
+        last_refresh = loop.time()
         while True:
             await asyncio.sleep(heartbeat_seconds)
             now = loop.time()
