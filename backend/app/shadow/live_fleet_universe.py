@@ -48,19 +48,30 @@ member on a later refresh always takes its cohort from
 `prior[sym].cohort` (sticky, never recomputed) rather than from this
 branch.
 
-Cold-start entry-bar relaxation (Task 5c, ratified 2026-08-19 --
-docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
-scheduled-incident.md, ruling 3): on that SAME very-first-ever refresh
-(no prior snapshot at all), the entry bar itself also relaxes from the
-normal >=3-of-5 threshold to admit-on-any-pass (>=1-of-5), via
-`COLD_START_ENTRY_MIN_PASSES`. A fresh environment must not sit dark
-waiting for enough refresh cycles to build up hysteresis history that,
-by definition, cannot exist yet. Gated on the identical `if not prior:`
-condition as the legacy-cohort-tagging branch above, for the identical
-structural reason: this table is never empty again after its first
-successful refresh (step 5 always persists at least one row), so this
-branch cannot re-fire on any later call. Every subsequent refresh uses
-the unchanged 3-of-5 entry / unanimous-fail exit rule.
+Cold-start single-sample fast path (Task 5e, ratified 2026-08-19,
+correcting Task 5c the same day, before the first live sweep even
+completed -- docs/superpowers/decisions/2026-08-19-live-fleet-universe-
+never-scheduled-incident.md, ruling 3 + its "Implementation note"):
+on that SAME very-first-ever refresh (no prior snapshot at all), each
+candidate takes exactly ONE `check_liquidity` sample -- not the normal
+5-sample, ~10s-apart microsampling loop -- and admission is that single
+sample's pass/fail, full stop. Task 5c's original fix (`
+COLD_START_ENTRY_MIN_PASSES`, now removed) only lowered the PASS-COUNT
+THRESHOLD from 3-of-5 to 1-of-5 while leaving the 5-sample sleep loop
+itself unconditional, so a cold-start sweep still took the full
+~50-60 minutes across the ~70+ qvol-qualifying candidates -- directly
+contradicting the operator's explicit ruling ("admit everything passing
+the floor on that SINGLE sample... a fresh environment must not sit
+dark"). Confirmed on staging: the first sweep was still running 15+
+minutes in with zero worker heartbeats and both fleet supervisors still
+at `children: 0`. This single-sample path is the actual fix. Gated on
+the identical `if not prior:` condition as the legacy-cohort-tagging
+branch above, for the identical structural reason: this table is never
+empty again after its first successful refresh (step 5 always persists
+at least one row), so this branch cannot re-fire on any later call.
+Every subsequent refresh (`prior` non-empty) is completely unchanged:
+full 5-sample loop, unchanged 3-of-5 entry / unanimous-fail exit
+thresholds.
 
 Open-position retention at the source (Task 5d, ratified 2026-08-19 --
 same decision record, ruling 4): the open-position override above used
@@ -100,9 +111,11 @@ N_SAMPLES: int = 5
 SAMPLE_GAP_SECONDS: float = 10.0
 ENTRY_MIN_PASSES: int = 3   # of N_SAMPLES
 EXIT_MAX_PASSES: int = 0    # exit requires unanimous failure -- 0 passes of 5
-# Task 5c (ratified 2026-08-19): admit-on-any-pass when the table has never
-# been refreshed -- see module docstring's "Cold-start entry-bar relaxation".
-COLD_START_ENTRY_MIN_PASSES: int = 1
+# COLD_START_ENTRY_MIN_PASSES removed (Task 5e, ratified 2026-08-19): it was
+# a redundant relaxed-threshold constant from Task 5c's incomplete fix -- see
+# module docstring's "Cold-start single-sample fast path". A single sample's
+# "at least 1 of 1 passes" is just "did it pass", so no threshold constant
+# is needed for the cold-start branch at all.
 
 Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
 
@@ -213,8 +226,11 @@ async def refresh_live_fleet_universe(
          "is this symbol currently a member" determines which
          hysteresis threshold (3-of-5 entry vs unanimous-fail exit)
          applies to THIS tick's samples.
-      3. Sample check_liquidity N_SAMPLES times per candidate and apply
-         the direction-dependent threshold from step 2's prior state.
+      3. Sample check_liquidity per candidate and apply the
+         direction-dependent threshold from step 2's prior state -- N_SAMPLES
+         times (~10s apart) on every refresh EXCEPT the very first-ever one,
+         where it's a single sample (Task 5e cold-start fast path, see
+         module docstring).
       4. Re-add anything with a currently-open live position that isn't
          already in results (hard override, Task 5d): prior liquidity
          numbers carried forward unchanged if a prior entry exists,
@@ -273,33 +289,62 @@ async def refresh_live_fleet_universe(
 
     results: dict[str, LiveFleetEntry] = {}
     for sym in candidates:
-        pass_count = 0
-        last_check = None
-        for i in range(N_SAMPLES):
+        currently_in = sym in prior
+        if not prior:
+            # Task 5e (ratified 2026-08-19, correcting Task 5c the same
+            # day): cold-start fast path -- one sample, not five. The
+            # normal 5-sample microsampling exists to smooth SECONDS-scale
+            # order-book noise for a threshold decision; at cold start
+            # there is no hysteresis history to protect, and the
+            # operator's ruling was explicit that a single sample decides
+            # admission here, not a relaxed-threshold version of the full
+            # loop (which was Task 5c's mistake -- it changed the
+            # threshold but not the sample count, so cold start still
+            # took ~50-60 minutes for the full market). `currently_in` is
+            # always False here (an empty `prior` cannot contain `sym`),
+            # so this branch only ever evaluates entry, never exit. Every
+            # later refresh (prior non-empty) is unchanged.
             try:
                 last_check = await check_liquidity(sym, rate_client)
-                if last_check.passed:
-                    pass_count += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
-            if i < N_SAMPLES - 1:
-                await asyncio.sleep(SAMPLE_GAP_SECONDS)
-        if last_check is None:
-            continue
-
-        currently_in = sym in prior
-        if currently_in:
-            keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
+                continue
+            keep = last_check.passed
         else:
-            # Task 5c: on the very first-ever refresh (prior empty), relax
-            # the entry bar to admit-on-any-pass -- there is no hysteresis
-            # history to require 3-of-5 against yet. Every later refresh
-            # (prior non-empty) uses the unchanged ENTRY_MIN_PASSES=3 bar.
-            entry_bar = COLD_START_ENTRY_MIN_PASSES if not prior else ENTRY_MIN_PASSES
-            keep = pass_count >= entry_bar
+            pass_count = 0
+            last_check = None
+            for i in range(N_SAMPLES):
+                try:
+                    last_check = await check_liquidity(sym, rate_client)
+                    if last_check.passed:
+                        pass_count += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
+                if i < N_SAMPLES - 1:
+                    await asyncio.sleep(SAMPLE_GAP_SECONDS)
+            if last_check is None:
+                continue
+            if currently_in:
+                keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
+            else:
+                keep = pass_count >= ENTRY_MIN_PASSES
 
         if not keep:
             continue
+
+        # mypy narrowing note: last_check is provably non-None on every path
+        # that reaches here at runtime (the cold-start branch's `except`
+        # continues before assignment could be skipped; the warm branch has
+        # its own explicit `if last_check is None: continue`). mypy cannot
+        # prove this across the if/else merge, though, because the warm
+        # branch's assignment happens inside a nested `for i in range(
+        # N_SAMPLES)` loop -- once a variable is reassigned inside a loop,
+        # mypy's binder widens its type for the rest of the function and a
+        # per-branch `is None` guard does not survive the merge with the
+        # cold-start branch's own (loop-free) assignment. A bare guard in
+        # the cold-start branch alone does not fix this (verified directly
+        # against this repo's mypy invocation); the assert below does.
+        assert last_check is not None
 
         cohort: Cohort
         if currently_in:
@@ -386,7 +431,6 @@ async def refresh_live_fleet_universe(
 
 __all__ = [
     "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
-    "COLD_START_ENTRY_MIN_PASSES",
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
     "load_live_fleet_universe", "refresh_live_fleet_universe",
 ]

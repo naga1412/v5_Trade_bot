@@ -8,7 +8,9 @@ trigger (or not trigger) the behavior under test.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -255,20 +257,31 @@ async def test_cold_start_does_not_refire_on_second_refresh(session_factory) -> 
 
 
 # ---------------------------------------------------------------------
-# 1b. Cold-start entry-bar relaxation (Task 5c, ratified 2026-08-19)
+# 1b. Cold-start single-sample fast path (Task 5e, ratified 2026-08-19,
+# correcting Task 5c the same day -- see
+# docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
+# scheduled-incident.md's Implementation note). Task 5c's original fix
+# only lowered the pass-count threshold (3-of-5 -> 1-of-5) while leaving
+# the 5-sample, ~10s-apart sleep loop itself unconditional, so a
+# cold-start sweep still took the full ~50-60 minutes across the
+# qualifying market. These tests now prove the SPEED property directly
+# (exactly 1 check_liquidity call per candidate, zero sleeps), not just
+# the pass/fail outcome -- a test that only checked "the symbol got
+# admitted" would not have caught Task 5c's regression.
 # ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_cold_start_admits_on_any_pass(session_factory) -> None:
-    """No prior live_fleet_universe snapshot at all -- a candidate passing
-    check_liquidity on only 1 of 5 samples is still admitted. The normal
-    entry bar (>=3 of 5, see test_entry_requires_three_of_five_passes
-    below) does not apply on the very first-ever refresh: there is no
-    hysteresis history to require 3-of-5 against yet."""
+async def test_cold_start_admits_on_single_pass(session_factory) -> None:
+    """No prior live_fleet_universe snapshot at all -- a candidate that
+    passes its ONE cold-start sample is admitted, taking exactly 1
+    check_liquidity call (not 5). The normal entry bar (>=3 of 5, see
+    test_entry_requires_three_of_five_passes below) does not apply on
+    the very first-ever refresh: there is no hysteresis history to
+    require 3-of-5 against yet, and no 5-sample loop to run at all."""
     tickers = [{"symbol": "COLDUSDT", "quoteVolume": "25000000"}]
     provider = _pattern_depth_provider({
-        "COLDUSDT": [True, False, False, False, False],  # 1 of 5 -> admitted (cold start)
+        "COLDUSDT": [True],  # single sample, passes -> admitted (cold start)
     })
     transport = _mock_transport(
         futures_symbols=["COLDUSDT"], spot_symbols=[],
@@ -280,15 +293,43 @@ async def test_cold_start_admits_on_any_pass(session_factory) -> None:
     by_symbol = {e.symbol: e for e in entries}
 
     assert "COLDUSDT" in by_symbol
-    assert provider.call_counts["COLDUSDT"] == 5  # type: ignore[attr-defined]
+    # The speed property: exactly 1 sample, not 5. This is the assertion
+    # that actually catches a regression back to Task 5c's mistake.
+    assert provider.call_counts["COLDUSDT"] == 1  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
-async def test_cold_start_relaxation_does_not_apply_once_prior_exists(session_factory) -> None:
-    """Regression guard proving the relaxation is scoped to cold start
-    only: with a non-empty table (any single prior row makes `prior`
-    truthy), the SAME 1-of-5 candidate that was admitted above is
-    correctly rejected under the unchanged >=3-of-5 entry bar."""
+async def test_cold_start_rejects_on_single_fail(session_factory) -> None:
+    """Companion to the admit case above: a candidate that fails its ONE
+    cold-start sample is rejected outright -- admission is that single
+    sample's pass/fail, full stop, with no threshold to weigh it against.
+    Still exactly 1 check_liquidity call, proving the speed property
+    holds on the rejection path too, not just the admission path."""
+    tickers = [{"symbol": "COLDUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "COLDUSDT": [False],  # single sample, fails -> rejected (cold start)
+    })
+    transport = _mock_transport(
+        futures_symbols=["COLDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "COLDUSDT" not in by_symbol
+    assert provider.call_counts["COLDUSDT"] == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cold_start_single_sample_does_not_apply_once_prior_exists(session_factory) -> None:
+    """Regression guard proving the single-sample fast path is scoped to
+    cold start only: with a non-empty table (any single prior row makes
+    `prior` truthy), a candidate goes back through the full 5-sample
+    loop and the unchanged >=3-of-5 entry bar -- a lone pass (1 of 5) is
+    correctly rejected, and it takes all 5 samples to determine that
+    (contrast with the cold-start case above, which takes exactly 1)."""
     async with session_factory() as session:
         await session.execute(sa.text(
             "INSERT INTO live_fleet_universe "
@@ -312,7 +353,62 @@ async def test_cold_start_relaxation_does_not_apply_once_prior_exists(session_fa
     by_symbol = {e.symbol: e for e in entries}
 
     assert "COLDUSDT" not in by_symbol
+    # Warm refresh: the full 5-sample loop runs (unaffected by Task 5e --
+    # only the cold-start branch changed), unlike the 1-call cold-start
+    # case above.
     assert provider.call_counts["COLDUSDT"] == 5  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cold_start_takes_exactly_one_sample_per_candidate_no_sleep(session_factory) -> None:
+    """Proves the SPEED property directly and exhaustively across an
+    entire cold-start sweep (multiple candidates, not just one symbol):
+    every candidate gets exactly 1 check_liquidity call, and
+    asyncio.sleep(SAMPLE_GAP_SECONDS) is never invoked at all during the
+    cold-start branch -- a single sample never needs the inter-sample
+    gap. This is the direct regression test for Task 5c's actual defect:
+    it lowered the pass-count threshold but left the 5-sample,
+    ~10s-apart sleep loop unconditional, so a cold-start sweep still
+    took ~50-60 minutes across the ~70+ qualifying candidates instead of
+    the "minutes" the operator's ruling required. Monkeypatching
+    asyncio.sleep to fail loudly if called is a stronger guarantee than
+    counting calls: it holds even if some future change reintroduces a
+    sleep this test's call-count assertions didn't anticipate."""
+    tickers = [
+        {"symbol": "COLDAUSDT", "quoteVolume": "25000000"},
+        {"symbol": "COLDBUSDT", "quoteVolume": "30000000"},
+        {"symbol": "COLDCUSDT", "quoteVolume": "40000000"},
+    ]
+    provider = _pattern_depth_provider({
+        "COLDAUSDT": [True],
+        "COLDBUSDT": [False],
+        "COLDCUSDT": [True],
+    })
+    transport = _mock_transport(
+        futures_symbols=["COLDAUSDT", "COLDBUSDT", "COLDCUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    async def _fail_if_called(_seconds: float) -> None:
+        raise AssertionError(
+            "asyncio.sleep must never be called during the cold-start "
+            "single-sample branch -- a single sample never needs the "
+            "inter-sample gap (Task 5e regression guard for Task 5c's "
+            "actual defect: threshold was relaxed but the 5-sample "
+            "sleep loop was left unconditional)."
+        )
+
+    with patch.object(asyncio, "sleep", _fail_if_called):
+        entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "COLDAUSDT" in by_symbol
+    assert "COLDBUSDT" not in by_symbol
+    assert "COLDCUSDT" in by_symbol
+    assert provider.call_counts["COLDAUSDT"] == 1  # type: ignore[attr-defined]
+    assert provider.call_counts["COLDBUSDT"] == 1  # type: ignore[attr-defined]
+    assert provider.call_counts["COLDCUSDT"] == 1  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------
