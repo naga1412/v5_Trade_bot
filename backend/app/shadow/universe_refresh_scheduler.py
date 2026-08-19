@@ -1,4 +1,5 @@
 """Phase 4 Task 5c -- schedules `refresh_live_fleet_universe` (Task 5).
+Task 5e (2026-08-19, same day) adds the start-of-cycle heartbeat below.
 
 `refresh_live_fleet_universe` (app.shadow.live_fleet_universe) populates
 `live_fleet_universe` -- the single table `ws_keepalive_task` (Task 5b)
@@ -12,7 +13,18 @@ scheduled-incident.md for the full severity writeup and the four
 operator rulings this module implements (in-process asyncio worker
 registered so the healer/watchdog can see it stop; 6h cadence; fire
 once on start; cold-start entry-bar relaxation -- see
-app.shadow.live_fleet_universe's own module docstring for that piece).
+app.shadow.live_fleet_universe's own module docstring for that piece,
+now a single-sample fast path per Task 5e).
+
+Task 5e also fixes a second gap in this module specifically: this
+scheduler used to heartbeat only on cycle COMPLETION, leaving
+`live_fleet_universe_refresh_task` heartbeat-invisible for the entire
+sweep duration (up to ~50-60 minutes) -- the watchdog could not tell a
+mid-sweep worker from a dead one. `run_one_universe_refresh_cycle` now
+heartbeats `status="ok"`, `details={"sweep": "in_progress"}` at the
+START of each cycle too, in addition to the unchanged completion
+heartbeat. See that function's own docstring and the incident record's
+"Implementation note" section.
 
 Loop shape mirrors app.workers.symbol_allowlist_refresh's
 run_symbol_allowlist_refresh_loop exactly: fires one cycle immediately
@@ -63,14 +75,32 @@ async def run_one_universe_refresh_cycle(
     http: httpx.AsyncClient,
     rate_client: RateLimitedClient,
 ) -> int:
-    """One cycle: refresh_live_fleet_universe -> heartbeat ok/error.
+    """One cycle: heartbeat start -> refresh_live_fleet_universe ->
+    heartbeat ok/error.
 
     Returns the count of entries persisted this cycle (0 on error).
     Never raises past this function -- any refresh_live_fleet_universe
     exception is caught, logged, and heartbeated as status='error' so
     the outer loop survives a transient Binance/DB outage instead of
     dying silently.
+
+    Task 5e (ratified 2026-08-19): heartbeats status='ok' at the START
+    of the cycle too, not just on completion. Without this, a cold-start
+    sweep (or any warm 6-hourly refresh, up to ~50-60 minutes) leaves
+    live_fleet_universe_refresh_task with zero heartbeat rows for the
+    entire sweep duration -- indistinguishable from dead to the watchdog.
+    Same shape as the symbol_allowlist_refresh sleep-first bug fixed in
+    July (2026-07-22 incident): a worker that goes quiet exactly when
+    it's working hardest. See docs/superpowers/decisions/2026-08-19-
+    live-fleet-universe-never-scheduled-incident.md's Implementation
+    note. max_staleness_seconds does not change -- it was already sized
+    against cadence, not sweep duration; the gap was the missing
+    start-of-cycle heartbeat.
     """
+    await record_heartbeat(
+        session_factory, WORKER_NAME,
+        status="ok", details={"sweep": "in_progress"},
+    )
     try:
         entries = await refresh_live_fleet_universe(session_factory, http, rate_client)
         cohort_counts: dict[str, int] = {}
