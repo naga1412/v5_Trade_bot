@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy async / Alembic / pytest + pytest-asyncio / React + TypeScript + Tailwind (frontend).
 
-> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched. **Tasks 5c and 5d are new** (2026-08-19, same standing as 5b) — `refresh_live_fleet_universe` (Task 5) was discovered to have never had a scheduled caller anywhere in the application (staging confirmed `ws_keepalive_task` running healthy with 0 children, `live_fleet_universe` permanently empty); Task 5c schedules it (6h in-process worker, registered so the healer can see it stop) and Task 5d fixes a related open-position-coverage gap found while designing the scheduler. **See `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md` for the full incident record** — this is recorded there as the staging-soak gate's first concrete save: promoted to main as originally sequenced, this gap would have silently killed all live predictions and signals on a green deploy.
+> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched. **Tasks 5c and 5d are new** (2026-08-19, same standing as 5b) — `refresh_live_fleet_universe` (Task 5) was discovered to have never had a scheduled caller anywhere in the application (staging confirmed `ws_keepalive_task` running healthy with 0 children, `live_fleet_universe` permanently empty); Task 5c schedules it (6h in-process worker, registered so the healer can see it stop) and Task 5d fixes a related open-position-coverage gap found while designing the scheduler. **See `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md` for the full incident record** — this is recorded there as the staging-soak gate's first concrete save: promoted to main as originally sequenced, this gap would have silently killed all live predictions and signals on a green deploy. **Task 5e is new** (2026-08-19, same day) — Task 5c's cold-start relaxation was found to relax the wrong thing immediately after merge, before the first live sweep even completed: it lowered the entry *threshold* but not the *sample count*, so a cold-start sweep still took the full 5-samples-per-candidate ~50-60 minutes across the full market, directly contradicting the operator's own ruling ("admit on a single sample... a fresh environment must not sit dark"). Task 5e fixes this (one sample at cold start, not five) and adds a start-of-cycle heartbeat so the worker isn't heartbeat-invisible for the duration of any sweep.
 
 **Spec:** `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`
 
@@ -1424,6 +1424,115 @@ Run the full regression suite: `cd backend && python -m pytest --no-cov -p no:ca
 ```bash
 git add backend/app/shadow/live_fleet_universe.py backend/tests/unit/test_live_fleet_universe.py
 git commit -m "fix(phase4): live_fleet_universe open-position override now queries live positions directly, not just prior snapshot membership"
+```
+
+---
+
+## Task 5e: Cold-start speed + heartbeat visibility (new, ratified 2026-08-19)
+
+> **New task, correcting a real defect found in Task 5c immediately after it merged — before the first live sweep completed.** Two separate gaps, both against the same 2026-08-19 decision record's ruling 3 (cold-start bootstrap) and a new observation about ruling 1 (heartbeat visibility):
+>
+> **Gap 1 — the cold-start relaxation didn't actually relax the SWEEP, only the ENTRY THRESHOLD.** Task 5c's `COLD_START_ENTRY_MIN_PASSES` (this was my own drafting error in Task 5c's original spec, not an implementation mistake — the subagent built exactly what was specified) lowers how many of the 5 within-refresh microsamples must pass to admit a candidate, but the `for i in range(N_SAMPLES): ... await asyncio.sleep(SAMPLE_GAP_SECONDS)` loop still runs all 5 samples (~10s apart) **regardless** of cold-start state. Confirmed on staging: the very first sweep after deploy was still in progress ~15+ minutes in, with zero `live_fleet_universe_refresh_task` heartbeats and both fleet supervisors still at `children: 0`. Against ~70+ qvol-qualifying candidates (2026-08-15 measurement), a full 5-sample-per-candidate sweep takes on the order of ~50-60 minutes — directly contradicting the operator's explicit ruling: *"admit everything passing the floor on that SINGLE sample... A fresh environment must not sit dark waiting for enough refresh cycles to build up hysteresis history."* The fix: on cold start (`not prior`), take exactly **one** `check_liquidity` sample per candidate, not five — admission is that single sample's pass/fail, full stop. Every later refresh (`prior` non-empty) is completely unchanged: full 5-sample loop, unchanged 3-of-5 entry / unanimous-fail exit thresholds. `COLD_START_ENTRY_MIN_PASSES` becomes redundant under this design (a single sample's "at least 1 of 1 passes" is just "did it pass") and is removed rather than kept as dead weight.
+>
+> **Gap 2 — the scheduler only heartbeats on cycle COMPLETION, never on start.** For the full duration of any sweep (up to ~50-60 minutes even after Gap 1's fix is applied to warm/steady-state refreshes, which are unaffected by the cold-start-only change above), `live_fleet_universe_refresh_task` has zero heartbeat rows — indistinguishable from dead to the watchdog. This is the same shape as the `symbol_allowlist_refresh` sleep-first bug fixed in July (2026-07-22 incident, see that module's own docstring) — a worker that goes quiet exactly when it's working hardest. Fix: heartbeat `status="ok"` with `details={"sweep": "in_progress"}` at the **start** of `run_one_universe_refresh_cycle`, in addition to the existing completion heartbeat (which is unchanged — still reports `entries`/`cohort_counts` on success, `status="error"` on failure). `max_staleness_seconds` (6h cadence + ~10% grace, set in Task 5c) does **not** need to change — it was already sized against cadence, not sweep duration, per the operator's own instruction; the gap was the missing start-of-cycle heartbeat, not the staleness budget. With both heartbeats in place, the worst-case gap between any two heartbeats is `max(sweep_duration, poll_interval_s)` ≈ 6h, safely under the 6h36m budget.
+>
+> **Investigated, not fixed here: parallelizing the sampling loop for warm/steady-state refreshes.** The operator asked to check whether `RateLimitedClient` supports safe concurrent calls before ruling out parallelism as "a design choice, not a constraint." Confirmed: `TokenBucket.acquire()` (`backend/app/data/ratelimit.py`) is `asyncio.Lock`-protected — concurrent callers correctly serialize through real token availability, no risk of over-consuming the rate budget. Parallelizing the candidate loop (e.g. `asyncio.gather` with bounded concurrency) is architecturally safe if wanted. **Not done in this task**: Gap 1's fix alone fully resolves the urgent problem (cold start now takes low seconds-to-minutes, dominated by sequential API latency rather than artificial sleeps, not the ~50-60 minutes that blocked Task 18 from starting) with a narrow, low-risk change scoped to the `not prior` branch only. Touching the shared warm-refresh loop (used by every 6-hourly refresh from now on, and already validated once by the addendum's own cost-check section at its current sequential access pattern) is a bigger, separate change with more surface area to get wrong under time pressure — flagged here as a confirmed-viable follow-up, not bundled into this fix.
+
+**Files:**
+- Modify: `backend/app/shadow/live_fleet_universe.py` (cold-start single-sample path; remove `COLD_START_ENTRY_MIN_PASSES`)
+- Modify: `backend/app/shadow/universe_refresh_scheduler.py` (start-of-cycle heartbeat)
+- Modify: `backend/tests/unit/test_live_fleet_universe.py` (Task 5c's two cold-start tests need real behavioral rewrites — see Step 3, this is an authorized, explicit correction of a just-identified defect, not an unexplained test edit)
+- Modify: `backend/tests/unit/test_universe_refresh_scheduler.py` (new start-heartbeat assertions)
+
+**Interfaces:** unchanged — `refresh_live_fleet_universe`'s and `run_one_universe_refresh_cycle`'s signatures don't change, only their internal behavior.
+
+- [ ] **Step 1: Cold-start single-sample path in `refresh_live_fleet_universe`**
+
+Read the real current sampling loop in `backend/app/shadow/live_fleet_universe.py` first (it changed twice already, Tasks 5c and 5d) — don't assume the shape below matches without checking. Replace the per-candidate sampling block:
+
+```python
+    results: dict[str, LiveFleetEntry] = {}
+    for sym in candidates:
+        currently_in = sym in prior
+        if not prior:
+            # Task 5e: cold-start fast path -- one sample, not five. The
+            # normal 5-sample microsampling exists to smooth SECONDS-scale
+            # order-book noise for a threshold decision; at cold start there
+            # is no hysteresis history to protect, and the operator's ruling
+            # was explicit that a single sample decides admission here, not
+            # a relaxed-threshold version of the full loop (which was Task
+            # 5c's mistake -- it changed the threshold but not the sample
+            # count, so cold start still took ~50-60 minutes for the full
+            # market). Every later refresh (prior non-empty) is unchanged.
+            try:
+                last_check = await check_liquidity(sym, rate_client)
+            except Exception as e:  # noqa: BLE001
+                log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
+                continue
+            keep = last_check.passed
+        else:
+            pass_count = 0
+            last_check = None
+            for i in range(N_SAMPLES):
+                try:
+                    last_check = await check_liquidity(sym, rate_client)
+                    if last_check.passed:
+                        pass_count += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
+                if i < N_SAMPLES - 1:
+                    await asyncio.sleep(SAMPLE_GAP_SECONDS)
+            if last_check is None:
+                continue
+            if currently_in:
+                keep = pass_count > EXIT_MAX_PASSES
+            else:
+                keep = pass_count >= ENTRY_MIN_PASSES
+
+        if not keep:
+            continue
+        ...  # cohort assignment + results[sym] = ... unchanged below this point
+```
+
+Remove `COLD_START_ENTRY_MIN_PASSES` from the module (the constant, its `__all__` entry, and its module-docstring section) — it's redundant under the single-sample design. Update the module docstring's "Cold-start entry-bar relaxation" section to describe the single-sample design instead of the relaxed-threshold one it currently describes.
+
+- [ ] **Step 2: Start-of-cycle heartbeat in `run_one_universe_refresh_cycle`**
+
+In `backend/app/shadow/universe_refresh_scheduler.py`, add before the `try:` block that calls `refresh_live_fleet_universe`:
+
+```python
+    await record_heartbeat(
+        session_factory, WORKER_NAME,
+        status="ok", details={"sweep": "in_progress"},
+    )
+```
+
+The existing completion heartbeat (success: `entries`/`cohort_counts`; failure: `error`) is unchanged.
+
+- [ ] **Step 3: Rewrite the two Task 5c cold-start tests for the new single-sample behavior**
+
+`test_cold_start_admits_on_any_pass` and `test_cold_start_relaxation_does_not_apply_once_prior_exists` in `backend/tests/unit/test_live_fleet_universe.py` currently mock a 5-sample sequence (`[True, False, False, False, False]`) and assert on `provider.call_counts["COLDUSDT"] == 5`. Under the new design, cold start takes exactly 1 sample. Rewrite both to:
+- Mock a single passing/failing sample (not a 5-element sequence).
+- Assert `call_counts["<SYM>"] == 1` for the cold-start case (proving the speed fix, not just the pass/fail outcome — this is the assertion that actually catches a regression back to Task 5c's mistake).
+- Keep the second test's *purpose* unchanged (relaxation doesn't apply once `prior` exists) but its own sampling is now 5 calls as before (only cold start is 1 sample; a warm refresh's entry-bar check is untouched by this task).
+
+Add a new test: `test_cold_start_takes_exactly_one_sample_per_candidate` (or fold into the rewrite above) proving the SPEED property directly — e.g. assert an entire cold-start refresh over N candidates completes without any `asyncio.sleep(SAMPLE_GAP_SECONDS)` call at all (mock/monkeypatch `asyncio.sleep` and assert zero calls during the cold-start branch, since a single sample never needs the inter-sample gap).
+
+- [ ] **Step 4: New scheduler test for the start-of-cycle heartbeat**
+
+In `backend/tests/unit/test_universe_refresh_scheduler.py`, add a test asserting `record_heartbeat` is called **twice** during one cycle (start + completion), with the first call's `details` containing `{"sweep": "in_progress"}` and `status="ok"`, and the second call's `details` containing the real `entries`/`cohort_counts` — order matters, assert the start call happens strictly before `refresh_live_fleet_universe` is awaited (e.g. via a mock side effect that records call order).
+
+- [ ] **Step 5: Run the full regression suite**
+
+```
+cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_live_fleet_universe.py tests/unit/test_universe_refresh_scheduler.py tests/unit/test_worker_registry_consistency.py -v
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/app/shadow/live_fleet_universe.py backend/app/shadow/universe_refresh_scheduler.py backend/tests/unit/test_live_fleet_universe.py backend/tests/unit/test_universe_refresh_scheduler.py
+git commit -m "fix(phase4): cold-start sweep takes 1 sample not 5; heartbeat at cycle start not just completion"
 ```
 
 ---
