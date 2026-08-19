@@ -28,7 +28,11 @@ Hysteresis (addendum section (a)):
     guards against REMOVAL of an existing member (addendum (a) point 4:
     "never removed... until the position closes") -- it is not an
     entry guarantee for a brand-new candidate that fails the 3-of-5
-    entry bar.
+    entry bar. Task 5d (ratified 2026-08-19, see "Open-position
+    retention at the source" below) made this a real guarantee for
+    open positions specifically, independent of prior snapshot
+    membership -- the override queries live open positions directly
+    now, not just `prior`.
 
 Cold-start seeding (addendum section (c) / plan doc Task 5 note 2): the
 very first time this table is ever refreshed (no prior snapshot exists
@@ -57,6 +61,20 @@ structural reason: this table is never empty again after its first
 successful refresh (step 5 always persists at least one row), so this
 branch cannot re-fire on any later call. Every subsequent refresh uses
 the unchanged 3-of-5 entry / unanimous-fail exit rule.
+
+Open-position retention at the source (Task 5d, ratified 2026-08-19 --
+same decision record, ruling 4): the open-position override above used
+to iterate `prior.items()` only -- on the table's very first-ever
+refresh (`prior` empty: fresh deployment, table wiped, or a
+fleet-supervisor cold-start restart before any refresh has ever run),
+that loop protects nothing, regardless of what positions are genuinely
+open at that moment. `get_open_position_symbols` fixes this by querying
+`live_trades`/`shadow_open_positions` directly every refresh instead of
+only consulting the prior snapshot's membership -- closing the gap for
+cold start, mid-window supervisor restarts, AND steady-state operation
+all at once. `ws_keepalive_task` and `futures_poll_task` inherit the
+fix automatically through their existing `live_fleet_universe` reads;
+no changes needed in `keepalive.py` or `futures_poll.py`.
 """
 from __future__ import annotations
 
@@ -132,6 +150,29 @@ async def has_open_position(session: AsyncSession, symbol_pair: str) -> bool:
     return row is not None
 
 
+async def get_open_position_symbols(session: AsyncSession) -> set[str]:
+    """Every symbol with a currently-open live_trades or shadow_open_positions
+    row, normalized to no-slash form (this table's own symbol convention).
+    Companion to has_open_position (which checks one symbol) -- this is the
+    bulk form the open-position override needs, since it must protect every
+    open position each refresh, not test one candidate at a time.
+
+    Task 5d (ratified 2026-08-19): this is the query the open-position
+    override now runs directly, instead of only iterating the prior
+    snapshot's own membership -- see refresh_live_fleet_universe's override
+    step below for why that mattered (prior is empty on the very first
+    refresh, so a prior-only loop protects nothing at cold start)."""
+    rows = await session.execute(sa.text(
+        "SELECT symbol FROM live_trades WHERE status = 'open' "
+        "UNION "
+        "SELECT symbol FROM shadow_open_positions"
+    ))
+    out: set[str] = set()
+    for r in rows:
+        out.add(r.symbol.replace("/", ""))
+    return out
+
+
 async def load_live_fleet_universe(
     session: AsyncSession, *, cohort: str | None = None,
 ) -> list[LiveFleetEntry]:
@@ -174,9 +215,13 @@ async def refresh_live_fleet_universe(
          applies to THIS tick's samples.
       3. Sample check_liquidity N_SAMPLES times per candidate and apply
          the direction-dependent threshold from step 2's prior state.
-      4. Re-add anything that failed exit but has an open position
-         (hard override), carrying its prior liquidity numbers forward
-         unchanged rather than re-sampling.
+      4. Re-add anything with a currently-open live position that isn't
+         already in results (hard override, Task 5d): prior liquidity
+         numbers carried forward unchanged if a prior entry exists,
+         otherwise one fresh check_liquidity sample tagged
+         established_top20 as the safe default (see
+         get_open_position_symbols / module docstring for why this
+         queries live positions directly rather than only `prior`).
       5. Persist the new snapshot and return it.
     """
     futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
@@ -274,20 +319,54 @@ async def refresh_live_fleet_universe(
     # Open-position override -- re-add anything that failed exit (or was
     # never sampled this tick, e.g. dropped below the qvol pre-filter
     # entirely) but has an open position, even though the loop above
-    # already excluded it. Scoped to PRIOR members only: this guards
-    # against REMOVING an existing member, per addendum (a) point 4
-    # ("never removed... until the position closes") -- it is not an
-    # entry guarantee for a brand-new candidate that simply fails the
-    # 3-of-5 entry bar (such a symbol was never "in the fleet" to be
-    # removed from).
+    # already excluded it. Per addendum (a) point 4 ("never removed...
+    # until the position closes").
+    #
+    # Task 5d (ratified 2026-08-19): queries live open positions directly
+    # via get_open_position_symbols, instead of only iterating prior's own
+    # membership. A prior-only loop protects nothing on the table's very
+    # first-ever refresh (prior is empty by definition) -- exactly the
+    # cold-start / fleet-supervisor-restart case this override exists to
+    # guard. Two sub-cases:
+    #   - Symbol has a prior entry (steady-state: failed exit or dropped
+    #     below the qvol pre-filter) -- retain prior's last-known-good
+    #     numbers unchanged, not re-sampled.
+    #   - Symbol has NO prior entry at all (brand-new open position, or
+    #     this is the very first refresh ever) -- rather than fabricate
+    #     placeholder numbers, take one fresh check_liquidity sample and
+    #     tag established_top20 as the safe cohort default when there is
+    #     genuinely no lineage to inherit. Self-correcting from the next
+    #     refresh onward once this symbol has a prior entry. If even the
+    #     rescue sample fails (e.g. a spot-only symbol with no futures
+    #     order book), log loudly -- coverage genuinely cannot be
+    #     guaranteed this refresh -- rather than silently drop the symbol.
     async with session_factory() as session:
-        from app.ws.keepalive import to_pair
-        for sym, entry in prior.items():
+        open_syms = await get_open_position_symbols(session)
+        for sym in open_syms:
             if sym in results:
                 continue
-            if await has_open_position(session, to_pair(sym)):
+            if sym in prior:
                 log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
-                results[sym] = entry  # last-known-good liquidity numbers, not re-sampled
+                results[sym] = prior[sym]  # last-known-good numbers, not re-sampled
+            else:
+                try:
+                    check = await check_liquidity(sym, rate_client)
+                    results[sym] = LiveFleetEntry(
+                        symbol=sym, cohort="established_top20",
+                        qvol_24h=qvol_by_symbol.get(sym, 0.0),
+                        spread_bps=check.spread_bps, depth_0_5pct_usdt=check.depth_0_5pct_usdt,
+                    )
+                    log.warning(
+                        "live_fleet_universe: %s has an open position but no prior "
+                        "snapshot entry -- rescued with a fresh sample, tagged "
+                        "established_top20 as the safe default", sym,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.error(
+                        "live_fleet_universe: %s has an open position, no prior "
+                        "entry, AND a fresh check_liquidity sample failed (%s) -- "
+                        "coverage genuinely cannot be guaranteed this refresh", sym, e,
+                    )
 
         now = datetime.now(timezone.utc)
         for entry in results.values():
@@ -308,6 +387,6 @@ async def refresh_live_fleet_universe(
 __all__ = [
     "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
     "COLD_START_ENTRY_MIN_PASSES",
-    "LiveFleetEntry", "has_open_position", "load_live_fleet_universe",
-    "refresh_live_fleet_universe",
+    "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
+    "load_live_fleet_universe", "refresh_live_fleet_universe",
 ]
