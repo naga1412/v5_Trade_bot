@@ -18,10 +18,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.data.ratelimit import RateLimitedClient, TokenBucket
 from app.shadow import live_fleet_universe as lfu_mod
 from app.shadow.live_fleet_universe import (
+    get_open_position_symbols,
     has_open_position,
     load_live_fleet_universe,
     refresh_live_fleet_universe,
 )
+from app.ws import keepalive
 
 _BookSide = list[tuple[str, str]]
 _DepthProvider = Callable[[str], tuple[_BookSide, _BookSide]]
@@ -497,6 +499,186 @@ async def test_has_open_position_checks_correct_symbol_format_per_table(session_
         ))
         await session.commit()
         assert await has_open_position(session, "ADA/USDT") is False
+
+
+@pytest.mark.asyncio
+async def test_get_open_position_symbols_unions_both_tables_normalized(session_factory) -> None:
+    """Direct, isolated unit coverage of get_open_position_symbols itself
+    (companion to test_has_open_position_checks_correct_symbol_format_per_table
+    above, mirroring it for the new bulk helper) -- proves the union spans
+    BOTH tables and every symbol comes back normalized to no-slash form
+    (live_fleet_universe's own convention), regardless of which table's
+    native format it started in."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('ETH/USDT', 'open')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('ADA/USDT', 'closed')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO shadow_open_positions (symbol) VALUES ('SOLUSDT')"
+        ))
+        await session.commit()
+
+        assert await get_open_position_symbols(session) == {"ETHUSDT", "SOLUSDT"}
+
+
+# ---------------------------------------------------------------------
+# 4b. Task 5d -- open-position override queries live positions directly,
+# not just prior snapshot membership (fixes the cold-start / restart gap
+# from docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-
+# scheduled-incident.md, ruling 4).
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_open_position_no_prior_entry_rescued_with_fresh_sample(session_factory) -> None:
+    """The core Task 5d gap, reproduced directly: an open live_trades
+    position on a symbol that has NO entry in `prior` at all (the table
+    is completely empty here -- simulating the very first-ever refresh,
+    e.g. right after Task 5c's scheduler runs for the first time, or
+    after the table gets wiped) and that fails every check_liquidity
+    sample this cycle (thin book -- genuinely off the liquidity floor).
+
+    Before Task 5d, the override loop only iterated `prior.items()` --
+    with `prior` empty, it would iterate zero times and this symbol
+    would be silently dropped, losing candle coverage on an open
+    position. After the fix, `get_open_position_symbols` finds it
+    directly, and since it has no prior entry to inherit numbers from,
+    the rescue branch takes one fresh check_liquidity sample and tags
+    it established_top20 (the safe default with no lineage to inherit).
+    """
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('RESCUE/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "RESCUEUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["RESCUEUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_thin_book,  # fails every sample, main loop AND rescue
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "RESCUEUSDT" in by_symbol
+    assert by_symbol["RESCUEUSDT"].cohort == "established_top20"
+    # Real numbers from the rescue's fresh check_liquidity sample -- NOT a
+    # fabricated/placeholder zero. _thin_book's fixed geometry (bid
+    # 99.99x0.01, ask 100.01x0.01) yields deterministic non-zero values.
+    assert by_symbol["RESCUEUSDT"].qvol_24h == pytest.approx(30_000_000)
+    assert by_symbol["RESCUEUSDT"].spread_bps == pytest.approx(2.0)
+    assert by_symbol["RESCUEUSDT"].depth_0_5pct_usdt == pytest.approx(2.0, abs=0.01)
+    assert by_symbol["RESCUEUSDT"].depth_0_5pct_usdt != 0.0
+
+    # Confirm it was actually persisted (not just returned in-memory) --
+    # this is what a subsequent _load_keepalive_symbols read (test below)
+    # depends on.
+    async with session_factory() as session2:
+        persisted = (await session2.execute(sa.text(
+            "SELECT symbol, cohort FROM live_fleet_universe "
+            "WHERE snapshot_at = (SELECT MAX(snapshot_at) FROM live_fleet_universe)"
+        ))).all()
+    assert {r.symbol for r in persisted} == {"RESCUEUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_open_position_with_prior_entry_uses_prior_not_resampled(session_factory) -> None:
+    """Same shape as the rescue test above (open position, off-floor,
+    fails every sample this cycle) but this time a `prior` entry DOES
+    exist for the symbol -- steady-state operation, not first-ever
+    refresh. Proves the `if sym in prior` branch still takes precedence
+    over the fresh-sample rescue fallback: the persisted numbers must be
+    the PRIOR snapshot's distinctive values (qvol=77,000,000 / spread=9.0
+    / depth=123,456 / cohort=liquidity_added_spot) unchanged, NOT the
+    fresh thin-book sample's numbers (qvol=30,000,000 / spread=2.0 /
+    depth=~2.0) and NOT the rescue path's established_top20 default."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('PRIORHELDUSDT', 'liquidity_added_spot', 77000000, 9.0, 123456, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('PRIORHELD/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "PRIORHELDUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["PRIORHELDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_thin_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "PRIORHELDUSDT" in by_symbol
+    assert by_symbol["PRIORHELDUSDT"].cohort == "liquidity_added_spot"
+    assert by_symbol["PRIORHELDUSDT"].qvol_24h == pytest.approx(77_000_000)
+    assert by_symbol["PRIORHELDUSDT"].spread_bps == pytest.approx(9.0)
+    assert by_symbol["PRIORHELDUSDT"].depth_0_5pct_usdt == pytest.approx(123456)
+
+
+@pytest.mark.asyncio
+async def test_open_position_survives_simulated_fleet_supervisor_restart(session_factory) -> None:
+    """The operator's actual framing (flagged during Task 17's review),
+    proven end-to-end rather than just at the persistence layer: an
+    off-floor open-position symbol with no prior snapshot entry --
+    identical setup to test_open_position_no_prior_entry_rescued_with_fresh_sample
+    above -- must still be in the desired-symbol set a FRESH
+    fleet-supervisor boot computes on restart.
+
+    ``ws_keepalive_task``'s own ``run_keepalive`` calls
+    ``_load_keepalive_symbols`` on startup ("Initial population" in
+    keepalive.py) to decide which children to spawn -- it does NOT call
+    ``refresh_live_fleet_universe`` itself or share any in-memory state
+    with it. So the real guarantee the operator asked for ("a restart
+    doesn't lose candle coverage for an open position") lives entirely in
+    what ``_load_keepalive_symbols`` reads back from the persisted
+    ``live_fleet_universe`` table -- if the rescued row didn't make it
+    into that read, the persistence-layer fix alone would NOT have
+    closed the incident's gap. This test calls
+    ``_load_keepalive_symbols`` completely independently of the refresh
+    call above it, reusing only the row it left behind in the DB, to
+    prove that chain end-to-end."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('RESTARTHELD/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "RESTARTHELDUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["RESTARTHELDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_thin_book,  # off-floor -- fails every sample
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    # Step 1: a refresh runs (e.g. Task 5c's scheduler's very first tick,
+    # or any tick after the table was wiped) and rescues the open-position
+    # symbol per Task 5d -- see the dedicated test above for the detailed
+    # assertions on this step; here it's just the setup for step 2.
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+    assert "RESTARTHELDUSDT" in by_symbol
+    assert by_symbol["RESTARTHELDUSDT"].cohort == "established_top20"
+
+    # Step 2: simulate a fleet-supervisor restart -- a completely fresh,
+    # independent call to _load_keepalive_symbols, exactly what
+    # ws_keepalive_task's own run_keepalive does on boot. No in-memory
+    # state from step 1 is reused -- only the row it persisted.
+    desired = await keepalive._load_keepalive_symbols(
+        session_factory, exclude=frozenset(), timeframe="1h",
+    )
+
+    assert ("RESTARTHELD/USDT", "1h", "established_top20") in desired
 
 
 # ---------------------------------------------------------------------
