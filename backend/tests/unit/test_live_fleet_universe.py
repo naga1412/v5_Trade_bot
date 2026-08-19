@@ -253,6 +253,67 @@ async def test_cold_start_does_not_refire_on_second_refresh(session_factory) -> 
 
 
 # ---------------------------------------------------------------------
+# 1b. Cold-start entry-bar relaxation (Task 5c, ratified 2026-08-19)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cold_start_admits_on_any_pass(session_factory) -> None:
+    """No prior live_fleet_universe snapshot at all -- a candidate passing
+    check_liquidity on only 1 of 5 samples is still admitted. The normal
+    entry bar (>=3 of 5, see test_entry_requires_three_of_five_passes
+    below) does not apply on the very first-ever refresh: there is no
+    hysteresis history to require 3-of-5 against yet."""
+    tickers = [{"symbol": "COLDUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "COLDUSDT": [True, False, False, False, False],  # 1 of 5 -> admitted (cold start)
+    })
+    transport = _mock_transport(
+        futures_symbols=["COLDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "COLDUSDT" in by_symbol
+    assert provider.call_counts["COLDUSDT"] == 5  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cold_start_relaxation_does_not_apply_once_prior_exists(session_factory) -> None:
+    """Regression guard proving the relaxation is scoped to cold start
+    only: with a non-empty table (any single prior row makes `prior`
+    truthy), the SAME 1-of-5 candidate that was admitted above is
+    correctly rejected under the unchanged >=3-of-5 entry bar."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('ANCHORUSDT', 'established_top20', 500000000, 1.0, 100000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "COLDUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "COLDUSDT": [True, False, False, False, False],  # 1 of 5 -> rejected (warm)
+    })
+    transport = _mock_transport(
+        futures_symbols=["COLDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "COLDUSDT" not in by_symbol
+    assert provider.call_counts["COLDUSDT"] == 5  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------
 # 2. Entry hysteresis: >=3 of 5
 # ---------------------------------------------------------------------
 

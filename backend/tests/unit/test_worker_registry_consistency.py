@@ -58,6 +58,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "ui_freshness_monitor": "app/workers/ui_freshness_monitor.py",
     "healer_detector_task": "app/healer/runner.py",
     "p_win_refit": "app/workers/p_win_refit.py",
+    "live_fleet_universe_refresh_task": "app/shadow/universe_refresh_scheduler.py",
 }
 
 
@@ -208,6 +209,8 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "auto_promote_task": 24 * 60 * 60,
     "symbol_allowlist_refresh": 24 * 60 * 60,
     "p_win_refit": 24 * 60 * 60,
+    # 6h nightly (Phase 4 Task 5c, ratified 2026-08-19)
+    "live_fleet_universe_refresh_task": 6 * 60 * 60,
 }
 
 

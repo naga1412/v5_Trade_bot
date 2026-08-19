@@ -403,6 +403,40 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,  # safe to auto-restart
     ),
+    # 23. Phase 4 Task 5c — 6h liquidity-floor live_fleet_universe refresh.
+    #     Populates live_fleet_universe, the table ws_keepalive_task and
+    #     futures_poll_task both read to decide which symbols to poll.
+    #     Ratified 2026-08-19 after staging caught the table sitting
+    #     permanently empty -- refresh_live_fleet_universe (Task 5) had
+    #     never had a scheduled caller anywhere in the application. See
+    #     docs/superpowers/decisions/2026-08-19-live-fleet-universe-
+    #     never-scheduled-incident.md.
+    #
+    #     NAME NOTE: NOT "universe_refresh_task" -- that name is already
+    #     taken by the pre-existing, unrelated daily asset_universe
+    #     refresh (entry 3 above, app/shadow/universe_refresh.py). Reusing
+    #     it here would make two different workers share one
+    #     worker_heartbeats row (worker_name is the primary key) and one
+    #     WORKER_REGISTRY entry name. See app/shadow/
+    #     universe_refresh_scheduler.py's module docstring for the full
+    #     note on this naming collision in the plan doc's own snippet.
+    WorkerSpec(
+        name="live_fleet_universe_refresh_task",
+        description=(
+            "Liquidity-floor universe refresh (6h cadence) -- populates "
+            "live_fleet_universe, the table ws_keepalive_task and "
+            "futures_poll_task both read to decide which symbols to poll. "
+            "Ratified 2026-08-19 after staging caught the table sitting "
+            "permanently empty with no scheduler."
+        ),
+        liveness_query=HEARTBEAT,
+        # 6h cadence + ~10% grace (~36min), matching symbol_allowlist_
+        # refresh/p_win_refit's daily-cadence treatment (Healer B2).
+        max_staleness_seconds=6 * 60 * 60 + 36 * 60,
+        stateful=False,  # safe to auto-restart -- no children, no in-flight
+        # state beyond one refresh cycle (any partial INSERT loop is inside
+        # an uncommitted session; a mid-cycle cancel rolls back cleanly).
+    ),
 )
 
 
