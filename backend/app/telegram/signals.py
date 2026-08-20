@@ -362,7 +362,7 @@ def render_message(
         f"Funding rate: "
         f"{_format_funding_text(candidate.funding_rate_daily, candidate.direction)}\n"
         f"─────────────────────────────────────\n"
-        f"🔗 View on chart with ghost candle:\n"
+        f"🔗 View chart on Binance:\n"
         f"{candidate.chart_url}\n"
         f"─────────────────────────────────────\n"
         f"Auto-skip in {auto_skip_seconds}s if no response"

@@ -1,6 +1,7 @@
 """SP-8 Phase J — execution dispatcher tests."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import patch
@@ -241,6 +242,62 @@ async def test_allowed_when_only_closed_row_on_symbol() -> None:
         )
         await s.commit()
     assert r.outcome == "sent_telegram"
+
+
+# ---- chart_url (FU-45 interim fix, 2026-08-20) ---------------------------
+#
+# The old `/tab1/{symbol}/{timeframe}?signal={id}` shape pointed at an
+# in-app deep link that was never built. Points at Binance's own futures
+# chart for the symbol instead.
+
+
+@pytest.mark.asyncio
+async def test_chart_url_uses_binance_native_symbol_with_explicit_base() -> None:
+    """proposal.chart_base_url (when set) still wins over the Settings
+    default -- explicit caller value takes precedence."""
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.commit()
+        await dispatch(
+            s,
+            proposal=_proposal(chart_base_url="https://aji12.nagayuaj.com"),
+            user=_user(mode="telegram-approve"),
+            now=_NOW,
+        )
+        await s.commit()
+        row = (await s.execute(sa.text(
+            "SELECT payload FROM telegram_signals LIMIT 1"
+        ))).first()
+    payload = json.loads(row.payload)
+    assert payload["chart_url"] == "https://aji12.nagayuaj.com/BTCUSDT"
+
+
+@pytest.mark.asyncio
+async def test_chart_url_falls_back_to_real_binance_settings_default() -> None:
+    """An empty chart_base_url (the real production case -- glue.py
+    never sets one) must fall back to the real Settings.CHART_BASE_URL,
+    not stay blank."""
+    engine = await _mk_session()
+    async with AsyncSession(engine) as s:
+        await s.execute(sa.text(
+            "UPDATE users SET trading_mode='telegram-approve' WHERE id=1"
+        ))
+        await s.commit()
+        await dispatch(
+            s,
+            proposal=_proposal(chart_base_url=""),
+            user=_user(mode="telegram-approve"),
+            now=_NOW,
+        )
+        await s.commit()
+        row = (await s.execute(sa.text(
+            "SELECT payload FROM telegram_signals LIMIT 1"
+        ))).first()
+    payload = json.loads(row.payload)
+    assert payload["chart_url"] == "https://www.binance.com/en/futures/BTCUSDT"
 
 
 @pytest.mark.asyncio
