@@ -33,6 +33,76 @@ def test_extract_affected_assets_handles_empty_string() -> None:
     assert extract_affected_assets("") == ()
 
 
+# -- 2026-08-20: dynamic_tickers (L9 coverage revival, part b) --------------
+
+
+def test_dynamic_tickers_matches_a_real_altcoin_not_in_curated_table() -> None:
+    """ONDO/KAITO were the operator's own named examples of tickers the
+    curated ~24-entry table can never cover -- confirm the dynamic path does."""
+    assert extract_affected_assets(
+        "ONDO Finance integrates new yield vault",
+        dynamic_tickers=frozenset({"ONDO", "KAITO"}),
+    ) == ("ONDO",)
+    assert extract_affected_assets(
+        "KAITO airdrop season two announced",
+        dynamic_tickers=frozenset({"ONDO", "KAITO"}),
+    ) == ("KAITO",)
+
+
+def test_dynamic_tickers_merges_with_curated_matches() -> None:
+    assert extract_affected_assets(
+        "Bitcoin and ONDO both rally",
+        dynamic_tickers=frozenset({"ONDO"}),
+    ) == ("BTC", "ONDO")
+
+
+def test_dynamic_tickers_denylist_blocks_common_word_collisions() -> None:
+    """CAP/HOME/BANK/etc. are real tickers in the live universe but would
+    false-positive on ordinary crypto-news prose if bare-word matched."""
+    denylisted = frozenset({"CAP", "HOME", "BANK", "DASH", "RE", "U"})
+    assert extract_affected_assets(
+        "Total market cap heads back home as banks dash for the exit re: rates",
+        dynamic_tickers=denylisted,
+    ) == ()
+
+
+def test_dynamic_tickers_min_length_excludes_short_symbols() -> None:
+    """Single/double-letter tickers are excluded even if not explicitly
+    denylisted -- too short to trust for bare-word matching."""
+    assert extract_affected_assets(
+        "U.S. regulators say re the new bill",
+        dynamic_tickers=frozenset({"U", "RE"}),
+    ) == ()
+
+
+def test_dynamic_tickers_does_not_override_curated_table() -> None:
+    """A ticker already covered by the curated alias table (e.g. BTC) is
+    matched via the curated path regardless of whether it's also passed
+    in dynamic_tickers -- no double-processing, same result either way."""
+    assert extract_affected_assets(
+        "Bitcoin surges", dynamic_tickers=frozenset({"BTC"}),
+    ) == ("BTC",)
+
+
+def test_dynamic_tickers_respects_word_boundary() -> None:
+    """Same discipline as the curated table's NEAR-vs-Nearby guard: "arb"
+    as a prefix inside "arbitrary" must not match the standalone ARB ticker."""
+    assert extract_affected_assets(
+        "Regulators call the ruling arbitrary and capricious",
+        dynamic_tickers=frozenset({"ARB"}),
+    ) == ()
+    # But a genuine standalone mention still matches.
+    assert extract_affected_assets(
+        "ARB rallies on Arbitrum news", dynamic_tickers=frozenset({"ARB"}),
+    ) == ("ARB",)
+
+
+def test_dynamic_tickers_empty_default_changes_nothing() -> None:
+    """Omitting dynamic_tickers entirely is bit-identical to pre-2026-08-20
+    behavior -- every existing call site keeps working unmodified."""
+    assert extract_affected_assets("Bitcoin surges past $100k") == ("BTC",)
+
+
 @pytest.mark.parametrize("title,expected", [
     ("SEC files lawsuit against Binance", "regulatory"),
     ("Coinbase delists XYZ pair", "exchange"),

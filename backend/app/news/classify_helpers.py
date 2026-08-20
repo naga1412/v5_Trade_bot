@@ -7,6 +7,7 @@ falls into).
 """
 from __future__ import annotations
 
+import functools
 import re
 
 # Curated alias table — top ~50 cryptos + common alternates.
@@ -46,11 +47,67 @@ _ALIAS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def extract_affected_assets(title: str) -> tuple[str, ...]:
-    """Return sorted unique base tickers mentioned in `title`."""
+# 2026-08-20 (L9 coverage revival, part b): the curated table above only
+# ever covered ~24 of the universe's 70+ symbols -- a static list always
+# lags a daily-rotating universe by construction. `dynamic_tickers`
+# (the current live trading universe's own ticker set, fetched by the
+# caller once per ingest batch -- see app/news/persistence.py) is
+# matched directly on its own symbol string, so any headline naming a
+# ticker the bot actually trades gets picked up without a code change
+# every time the universe rotates. `_ALIAS_TABLE` remains the answer for
+# the OTHER direction: cases where the headline uses a project/company
+# name that differs from the ticker (Bitcoin->BTC, Ripple->XRP,
+# Hyperliquid->HYPE if ever added there) -- a dynamic ticker set can
+# never derive that mapping on its own.
+#
+# Bare-word ticker matching has a real collision risk with common
+# English words that a curated alias table (hand-picked, reviewed each
+# addition) doesn't: this universe alone contains CAP, DASH, HOME, BANK,
+# MET, LIT, MON, TAO, DOS, ACE, RE, U, GPS, ALL -- auto-matching these on
+# `\bTICKER\b` would flag most crypto headlines as "about" them (e.g.
+# "market cap" -> CAP on every article). `_DYNAMIC_MATCH_DENYLIST` is
+# the deliberately small, curated exclusion for tickers identified this
+# way; `_MIN_DYNAMIC_TICKER_LEN` additionally drops single/double-letter
+# tickers (nothing in the alias table's manual entries is that short,
+# by design). Extend the denylist as the coverage measurement (part c)
+# surfaces more collisions -- it is a starting set, not exhaustive.
+_MIN_DYNAMIC_TICKER_LEN: int = 3
+
+_DYNAMIC_MATCH_DENYLIST: frozenset[str] = frozenset({
+    "CAP", "DASH", "HOME", "BANK", "MET", "LIT", "MON", "TAO", "DOS",
+    "ACE", "GPS", "ALL", "RE", "U", "MOVE", "LIVE", "TOP", "NEW", "APP",
+    "REAL", "FUN", "LAYER", "OPEN", "CORE", "TRUE", "TRUST", "SAFE",
+})
+
+
+@functools.lru_cache(maxsize=512)
+def _dynamic_pattern(ticker: str) -> re.Pattern[str]:
+    return re.compile(rf"\b{re.escape(ticker)}\b", re.IGNORECASE)
+
+
+def extract_affected_assets(
+    title: str, *, dynamic_tickers: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Return sorted unique base tickers mentioned in `title`.
+
+    ``dynamic_tickers``, when supplied, is additionally matched via
+    bare-word regex against each ticker not already covered by the
+    curated alias table and not in ``_DYNAMIC_MATCH_DENYLIST`` -- see
+    the comment above for why both guards exist. Defaults to empty so
+    every existing caller (and the persist-time merge in
+    ``app/news/persistence.py``) is unaffected until it opts in.
+    """
     found: set[str] = set()
     for pat, ticker in _ALIAS_PATTERNS:
         if pat.search(title):
+            found.add(ticker)
+    _curated_tickers = set(_ALIAS_TABLE.values())
+    for ticker in dynamic_tickers:
+        if ticker in _curated_tickers or ticker in _DYNAMIC_MATCH_DENYLIST:
+            continue
+        if len(ticker) < _MIN_DYNAMIC_TICKER_LEN:
+            continue
+        if _dynamic_pattern(ticker).search(title):
             found.add(ticker)
     return tuple(sorted(found))
 
