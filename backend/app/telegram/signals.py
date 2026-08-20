@@ -352,10 +352,23 @@ def render_message(
         f"Layer scores:\n{_format_layers(candidate.layer_summary)}\n"
         f"─────────────────────────────────────\n"
         f"Margin:       ${candidate.margin_usdt:.2f} USDT\n"
-        f"Leverage:     {leverage}× (SL allows up to {max_safe}×, "
-        f"your risk cap is {hard_cap}×)\n"
+        # Card review #2, round 2 (2026-08-20): copy-only fix, math
+        # unchanged. `max_safe`/`leverage` are a LIQUIDATION-avoidance
+        # ceiling (keeps SL inside 80% of the liquidation buffer) --
+        # they say nothing about whether the resulting loss-at-SL is a
+        # sane fraction of margin to risk on one trade. At a 5% SL
+        # distance, the ceiling is 10x, which puts 50% of margin on the
+        # line per stop-out (two losses in a row -- not rare at a
+        # ~30%-ish win rate -- costs 75%). The old wording ("SL allows
+        # up to Xx") read as permission, not a warning. Now explicit
+        # that it's a ceiling only, and loss-at-SL moves up next to
+        # leverage with its own warning marker instead of sitting
+        # several lines below where it was easy to skim past.
+        f"Leverage:     {leverage}×\n"
+        f"  ⚠ liquidation-safe ceiling ONLY — not a recommended position size\n"
+        f"  (stays inside liquidation up to {max_safe}×; your risk cap is {hard_cap}×)\n"
+        f"⚠ LOSS AT SL: ${loss_at_sl:.2f}  =  {pct_of_margin:.0f}% OF MARGIN\n"
         f"Position:     ${position_value:,.2f}\n"
-        f"Loss at SL:   ${loss_at_sl:.2f} ({pct_of_margin:.0f}% of margin)\n"
         f"Liquidation:  ${_fmt_price(liq_price)}  "
         f"({-liq_distance*100:+.0f}% adverse)\n"
         f"Buffer:       {safety_buffer_x:.1f}× safety vs SL\n"

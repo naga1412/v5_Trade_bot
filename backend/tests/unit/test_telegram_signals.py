@@ -68,7 +68,7 @@ def test_render_message_includes_spec_section_7_2_fields() -> None:
     assert "Leverage:     5×" in body
     assert "Position:     $150.00" in body
     # Loss + liquidation
-    assert "Loss at SL:" in body
+    assert "LOSS AT SL:" in body
     assert "Liquidation:" in body
     assert "Buffer:" in body
     # Funding (longs receive when negative)
@@ -117,7 +117,7 @@ def test_render_message_uses_custom_auto_skip_seconds() -> None:
 def test_loss_at_sl_matches_leverage_position_size_math() -> None:
     """Loss at SL = margin × leverage × sl_pct = $30 × 5 × 2% = $3.00."""
     msg = render_message(_candidate(), leverage=5, now=_NOW)
-    assert "Loss at SL:   $3.00" in msg.body
+    assert "LOSS AT SL: $3.00  =  10% OF MARGIN" in msg.body
 
 
 # ---- Inline keyboard ----------------------------------------------------
@@ -176,7 +176,7 @@ def test_leverage_line_max_safe_uses_real_hard_cap() -> None:
     # sl_distance_pct=0.02 -> uncapped math max = int(0.80/0.02) = 40.
     # With hard_cap=3, the SL-implied ceiling must clamp to 3, not 10.
     msg = render_message(_candidate(), leverage=3, hard_cap=3, now=_NOW)
-    assert "SL allows up to 3×" in msg.body
+    assert "stays inside liquidation up to 3×" in msg.body
     assert "your risk cap is 3×" in msg.body
 
 
@@ -195,6 +195,36 @@ def test_build_signal_payload_persists_hard_cap() -> None:
         _candidate(), rendered_at=_NOW, initial_leverage=5, hard_cap=20,
     )
     assert payload["hard_cap"] == 20
+
+
+# ---- Leverage-ceiling clarity (card review #2 round 2, 2026-08-20) -------
+#
+# "SL allows up to Xx" read as permission, not a warning -- the ceiling
+# is purely a liquidation-avoidance limit, not a statement that the
+# resulting position size is sane to risk. Copy-only fix: the math
+# (leverage/max_safe/hard_cap/loss_at_sl/pct_of_margin) is untouched,
+# confirmed by test_leverage_line_max_safe_uses_real_hard_cap and
+# test_loss_at_sl_matches_leverage_position_size_math still passing
+# with the same underlying values, just different surrounding text.
+
+
+def test_leverage_ceiling_explicitly_says_not_a_recommendation() -> None:
+    msg = render_message(_candidate(), leverage=5, now=_NOW)
+    assert "liquidation-safe ceiling" in msg.body
+    assert "not a recommended position size" in msg.body.lower()
+
+
+def test_loss_at_sl_warning_sits_immediately_after_leverage_block() -> None:
+    """The whole point is that loss-at-SL must not be several lines
+    below leverage where it's easy to skim past -- assert the actual
+    line adjacency, not just presence."""
+    msg = render_message(_candidate(), leverage=5, now=_NOW)
+    lines = msg.body.splitlines()
+    leverage_block_end = next(
+        i for i, line in enumerate(lines)
+        if "your risk cap is" in line
+    )
+    assert "LOSS AT SL" in lines[leverage_block_end + 1]
 
 
 # ---- Callback parsing ---------------------------------------------------
