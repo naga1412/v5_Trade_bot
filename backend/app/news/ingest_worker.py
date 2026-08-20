@@ -124,13 +124,25 @@ async def _run_one_iteration(
     # Imported here so the heavy ``transformers`` / ``torch`` stack only
     # loads when the worker actually has something to classify.
     from app.news.sentiment import classify_batch
-    from app.news.persistence import persist_news_items
+    from app.news.persistence import load_universe_tickers, persist_news_items
 
     titles = [a.title for a in all_articles]
     sentiments = classify_batch(titles)
 
+    # 2026-08-20 (L9 coverage revival, part b): deliberately its OWN
+    # session, separate from the persist session below. If the universe
+    # query fails (e.g. live_fleet_universe missing on prod pre-cherry-
+    # pick), load_universe_tickers already catches + rolls back
+    # internally, but keeping it on a wholly separate session/connection
+    # is extra insurance that a universe-query failure can never touch
+    # the persist transaction that follows.
+    async with session_factory() as ticker_session:
+        dynamic_tickers = await load_universe_tickers(ticker_session)
+
     async with session_factory() as session:
-        await persist_news_items(session, all_articles, sentiments)
+        await persist_news_items(
+            session, all_articles, sentiments, dynamic_tickers=dynamic_tickers,
+        )
         await session.commit()
 
     if crypto_articles and crypto_adapter is not None:

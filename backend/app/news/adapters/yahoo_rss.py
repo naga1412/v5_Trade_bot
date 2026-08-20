@@ -5,8 +5,29 @@ stays async. No rate limit headers, no API key — Yahoo's RSS endpoints
 are public. We self-throttle to 1 req/sec via a TokenBucket to be polite.
 
 Default feed set covers BTC, ETH, DXY (USD index), S&P 500 — the macro
-tickers that influence crypto. Override via `feeds=` for tests / future
+tickers that influence crypto — plus 5 crypto-focused outlets (2026-08-20,
+L9 coverage revival: Yahoo's macro feed rarely names specific altcoins,
+a coverage gap not an access gap). Despite the class/module name, nothing
+in `fetch_recent` is Yahoo-specific except `_extract_feed_assets`'s
+`?s=` query-param parsing (a no-op for non-Yahoo URLs, which is fine —
+symbol matching for every source runs through
+`classify_helpers.extract_affected_assets` at persist time regardless,
+see `app/news/persistence.py`). Override via `feeds=` for tests / future
 expansion.
+
+Each crypto-focused feed URL below was verified live (2026-08-20): all
+return real, current items, no signup or API key required.
+  - CoinDesk: the bare `/arc/outboundfeeds/rss/` 308-redirects to the
+    trailing-slash-free canonical URL used here; feedparser follows
+    redirects regardless, canonical form used to skip the round trip.
+  - Bitcoin Magazine: `.rss/full/` 301-redirects to `bitcoinmagazine.com
+    /feed`, which serves over PLAIN HTTP, not HTTPS (site-side issue, not
+    ours). Accepted as-is: this is a public news feed (no credentials,
+    no user data), and HTTPS on the other 4 feeds does not itself
+    authenticate content — none of these outlets cryptographically sign
+    headlines, so the marginal risk is one additional MITM-injectable
+    hop for one of five low-stakes sources. Revisit if this feed is ever
+    used for anything beyond FinBERT sentiment/classification input.
 """
 from __future__ import annotations
 
@@ -32,6 +53,12 @@ _DEFAULT_FEEDS: tuple[str, ...] = (
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=ETH-USD&region=US&lang=en-US",
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^DXY&region=US&lang=en-US",
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+    # Crypto-focused outlets (2026-08-20) -- see module docstring.
+    "https://www.coindesk.com/arc/outboundfeeds/rss",
+    "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+    "https://www.theblock.co/rss.xml",
+    "http://bitcoinmagazine.com/feed",
 )
 
 

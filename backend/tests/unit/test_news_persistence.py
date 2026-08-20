@@ -10,7 +10,11 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.news.adapters._base import NewsArticle
-from app.news.persistence import cleanup_old_news, persist_news_items
+from app.news.persistence import (
+    cleanup_old_news,
+    load_universe_tickers,
+    persist_news_items,
+)
 from app.news.sentiment import SentimentResult
 
 
@@ -222,4 +226,155 @@ async def test_cleanup_old_news_returns_zero_when_nothing_to_delete(
     with freeze_time("2026-05-06T12:00:00Z"):
         n = await cleanup_old_news(session, older_than_days=20)
     assert n == 0
+
+
+# -- 2026-08-20: load_universe_tickers + persist_news_items's dynamic_tickers ----
+
+
+@pytest_asyncio.fixture
+async def universe_session() -> AsyncIterator[AsyncSession]:
+    """SQLite mirror of the two real universe tables load_universe_tickers
+    unions. Some tests deliberately omit live_fleet_universe to simulate
+    prod pre-Phase-4-cherry-pick."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "CREATE TABLE live_fleet_universe ("
+            "symbol TEXT NOT NULL, cohort TEXT NOT NULL, "
+            "snapshot_at TEXT NOT NULL)"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE asset_universe ("
+            "symbol TEXT NOT NULL, rank INTEGER, "
+            "snapshot_at TEXT NOT NULL)"
+        ))
+    async with AsyncSession(engine) as s:
+        yield s
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_load_universe_tickers_unions_both_tables(
+    universe_session: AsyncSession,
+) -> None:
+    await universe_session.execute(sa.text(
+        "INSERT INTO live_fleet_universe VALUES "
+        "('ONDOUSDT', 'liquidity_added_spot', '2026-08-20T00:00:00Z'), "
+        "('KAITOUSDT', 'liquidity_added_spot', '2026-08-20T00:00:00Z')"
+    ))
+    await universe_session.execute(sa.text(
+        "INSERT INTO asset_universe VALUES "
+        "('BTCUSDT', 1, '2026-08-20T00:00:00Z'), "
+        "('ETHUSDT', 2, '2026-08-20T00:00:00Z')"
+    ))
+    await universe_session.commit()
+    tickers = await load_universe_tickers(universe_session)
+    assert tickers == frozenset({"ONDO", "KAITO", "BTC", "ETH"})
+
+
+@pytest.mark.asyncio
+async def test_load_universe_tickers_strips_usdt_and_1000_prefix(
+    universe_session: AsyncSession,
+) -> None:
+    await universe_session.execute(sa.text(
+        "INSERT INTO asset_universe VALUES "
+        "('1000SHIBUSDT', 1, '2026-08-20T00:00:00Z')"
+    ))
+    await universe_session.commit()
+    tickers = await load_universe_tickers(universe_session)
+    assert tickers == frozenset({"SHIB"})
+
+
+@pytest.mark.asyncio
+async def test_load_universe_tickers_only_reads_latest_snapshot(
+    universe_session: AsyncSession,
+) -> None:
+    await universe_session.execute(sa.text(
+        "INSERT INTO asset_universe VALUES "
+        "('DOGEUSDT', 1, '2026-08-19T00:00:00Z'), "
+        "('ADAUSDT', 1, '2026-08-20T00:00:00Z')"
+    ))
+    await universe_session.commit()
+    tickers = await load_universe_tickers(universe_session)
+    # Only the max(snapshot_at) row survives -- the stale DOGE row does not.
+    assert tickers == frozenset({"ADA"})
+
+
+@pytest.mark.asyncio
+async def test_load_universe_tickers_missing_table_degrades_gracefully(
+    universe_session: AsyncSession,
+) -> None:
+    """Simulates prod before Phase 4's cherry-pick: live_fleet_universe
+    doesn't exist. Must not raise, must still return asset_universe's
+    tickers, and must leave the session usable for a later query (the
+    real motivation for the internal rollback -- see docstring)."""
+    await universe_session.execute(sa.text("DROP TABLE live_fleet_universe"))
+    await universe_session.execute(sa.text(
+        "INSERT INTO asset_universe VALUES "
+        "('SOLUSDT', 1, '2026-08-20T00:00:00Z')"
+    ))
+    await universe_session.commit()
+    tickers = await load_universe_tickers(universe_session)
+    assert tickers == frozenset({"SOL"})
+    # Session survived the failed query and is still usable afterward.
+    row = (await universe_session.execute(
+        sa.text("SELECT COUNT(*) FROM asset_universe"),
+    )).scalar()
+    assert row == 1
+
+
+@pytest.mark.asyncio
+async def test_load_universe_tickers_both_tables_missing_returns_empty(
+    universe_session: AsyncSession,
+) -> None:
+    await universe_session.execute(sa.text("DROP TABLE live_fleet_universe"))
+    await universe_session.execute(sa.text("DROP TABLE asset_universe"))
+    await universe_session.commit()
+    tickers = await load_universe_tickers(universe_session)
+    assert tickers == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_persist_news_items_matches_dynamic_ticker(
+    session: AsyncSession,
+) -> None:
+    """End-to-end: a ticker not in the curated table matches when passed
+    via dynamic_tickers, and gets merged into affected_assets same as any
+    curated match."""
+    article = NewsArticle(
+        source="cointelegraph", url="https://example.com/ondo",
+        title="ONDO Finance launches new product", body=None,
+        published_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        category=None, affected_assets=(),
+    )
+    sent = SentimentResult(score=0.5, label="positive", confidence=0.8)
+    n = await persist_news_items(
+        session, [article], [sent], dynamic_tickers=frozenset({"ONDO"}),
+    )
+    assert n == 1
+    row = (await session.execute(
+        sa.text("SELECT affected_assets FROM news_items"),
+    )).first()
+    assert row is not None
+    assert "ONDO" in row.affected_assets
+
+
+@pytest.mark.asyncio
+async def test_persist_news_items_dynamic_tickers_defaults_to_no_extra_matches(
+    session: AsyncSession,
+) -> None:
+    """Omitting dynamic_tickers is bit-identical to pre-2026-08-20 behavior."""
+    article = NewsArticle(
+        source="cointelegraph", url="https://example.com/ondo2",
+        title="ONDO Finance launches new product", body=None,
+        published_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        category=None, affected_assets=(),
+    )
+    sent = SentimentResult(score=0.5, label="positive", confidence=0.8)
+    await persist_news_items(session, [article], [sent])
+    row = (await session.execute(
+        sa.text("SELECT affected_assets FROM news_items"),
+    )).first()
+    assert row is not None
+    assert "ONDO" not in row.affected_assets
 

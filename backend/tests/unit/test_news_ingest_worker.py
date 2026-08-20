@@ -97,6 +97,24 @@ def _reset_cursors() -> None:
     iw._last_fetch_ts.clear()
 
 
+@pytest.fixture(autouse=True)
+def _stub_universe_tickers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-08-20: _run_one_iteration now always fetches the current
+    universe's ticker set (on its own session, before persist) to pass
+    into persist_news_items as dynamic_tickers. Default every test in
+    this file to the pre-2026-08-20 behavior (empty set) so none of them
+    need updating for a concern they aren't testing -- _FakeSession
+    below only implements .commit(), not .execute()/.rollback(), so an
+    unpatched real load_universe_tickers would blow up against it.
+    Tests that specifically exercise the ticker-fetch wiring override
+    this via monkeypatch.setattr in their own body."""
+    async def _empty(*_a: object, **_k: object) -> frozenset[str]:
+        return frozenset()
+    monkeypatch.setattr(
+        "app.news.persistence.load_universe_tickers", _empty,
+    )
+
+
 # ---------------------------------------------------------------------------
 # _run_one_iteration — the unit we lean on most
 # ---------------------------------------------------------------------------
@@ -128,6 +146,7 @@ async def test_one_iteration_persists_articles_and_updates_cursors(
         session: Any,
         articles: list[NewsArticle],
         sentiments: list[SentimentResult],
+        **_kw: Any,
     ) -> int:
         persisted.append((list(articles), list(sentiments)))
         return len(articles)
@@ -254,6 +273,51 @@ async def test_one_iteration_uses_backfill_window_on_first_call(
     expected_min = before - timedelta(hours=iw.BACKFILL_HOURS)
     expected_max = after - timedelta(hours=iw.BACKFILL_HOURS)
     assert expected_min <= cutoff <= expected_max
+
+
+@pytest.mark.asyncio
+async def test_one_iteration_threads_dynamic_tickers_into_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-08-20: whatever load_universe_tickers returns must reach
+    persist_news_items's dynamic_tickers kwarg unmodified, on its own
+    session opened before the persist session."""
+    crypto = _FakeAdapter("cryptopanic", scripted=[[_make_article()]])
+    yahoo = _FakeAdapter("yahoo_rss", scripted=[[]])
+
+    async def _fake_tickers(*_a: Any, **_k: Any) -> frozenset[str]:
+        return frozenset({"ONDO", "KAITO"})
+
+    monkeypatch.setattr(
+        "app.news.persistence.load_universe_tickers", _fake_tickers,
+    )
+
+    received_kwargs: list[dict[str, Any]] = []
+
+    async def _fake_persist(
+        _session: Any, _articles: list[NewsArticle],
+        _sentiments: list[SentimentResult], **kw: Any,
+    ) -> int:
+        received_kwargs.append(kw)
+        return 1
+
+    monkeypatch.setattr(
+        "app.news.persistence.persist_news_items", _fake_persist,
+    )
+    monkeypatch.setattr(
+        "app.news.sentiment.classify_batch",
+        lambda titles: [
+            SentimentResult(score=0.0, label="neutral", confidence=0.5)
+            for _ in titles
+        ],
+    )
+
+    factory = _session_factory_factory([])
+    last_macro_run = datetime(2026, 5, 6, 0, 0, tzinfo=timezone.utc)
+    await iw._run_one_iteration(factory, crypto, yahoo, last_macro_run)
+
+    assert len(received_kwargs) == 1
+    assert received_kwargs[0]["dynamic_tickers"] == frozenset({"ONDO", "KAITO"})
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +488,8 @@ async def test_one_iteration_handles_none_crypto_adapter(
     persisted: list[list[NewsArticle]] = []
 
     async def _fake_persist(_session: Any, articles: list[NewsArticle],
-                            _sentiments: list[SentimentResult]) -> int:
+                            _sentiments: list[SentimentResult],
+                            **_kw: Any) -> int:
         persisted.append(list(articles))
         return len(articles)
 

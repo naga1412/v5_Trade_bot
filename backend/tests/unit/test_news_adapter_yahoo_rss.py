@@ -83,10 +83,11 @@ async def test_fetch_recent_swallows_parse_error(caplog) -> None:
     assert any("yahoo_rss" in r.message.lower() for r in caplog.records)
 
 
-# SP-9 follow-up: was skipped after CI hung in selector.poll on the 4-feed
-# iteration. The same suspect (freezegun→transformers lazy load) was fixed
-# globally by SP-3.5; unskipping to verify whether that ALSO covered this
-# hang. If still failing, a separate investigation is needed.
+# SP-9 follow-up: was skipped after CI hung in selector.poll on the original
+# 4-feed iteration (now 9, since 2026-08-20's crypto-feed expansion — see
+# module docstring). The same suspect (freezegun→transformers lazy load) was
+# fixed globally by SP-3.5; unskipping to verify whether that ALSO covered
+# this hang. If still failing, a separate investigation is needed.
 @pytest.mark.asyncio
 async def test_fetch_recent_iterates_all_default_feeds_when_none_passed() -> None:
     """Without an explicit `feeds=` ctor arg, all _DEFAULT_FEEDS are pulled."""
