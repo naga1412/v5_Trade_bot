@@ -244,6 +244,7 @@ def render_message(
     candidate: SignalCandidate,
     *,
     leverage: int,
+    hard_cap: int = _DEFAULT_HARD_CAP,
     auto_skip_seconds: int | None = None,
     now: datetime | None = None,
 ) -> RenderedMessage:
@@ -254,6 +255,17 @@ def render_message(
     rendered "Auto-skip in Ns" footer line reflects the env-configured
     value the auto-skip worker is actually enforcing. Tests pass an
     explicit override to assert UI behavior independent of env.
+
+    `hard_cap` should be the SAME cap that determined `leverage` upstream
+    (`dispatcher.py` computes `leverage = recommended_leverage(...,
+    hard_cap=user.max_leverage_cap)`). Card review #2 (2026-08-20): before
+    this param existed, the "math" shown here was silently recomputed with
+    a hardcoded 125-then-10 sequence completely disconnected from the real
+    per-user cap that actually produced `leverage` — accidentally correct
+    only because `max_leverage_cap` defaults to 10, and silently wrong for
+    any user who customizes it. Defaults to `_DEFAULT_HARD_CAP` so
+    existing callers/tests that don't pass a real cap keep the old
+    (accurate-for-the-default-user) behavior.
     """
     n = now or datetime.now(timezone.utc)
     if auto_skip_seconds is None:
@@ -288,12 +300,20 @@ def render_message(
     max_safe = recommended_leverage(
         margin_usdt=candidate.margin_usdt,
         sl_distance_pct=candidate.sl_distance_pct,
-        hard_cap=125,
+        hard_cap=hard_cap,
     )
 
     cohort_banner = ""
     if candidate.symbol_source == "futures_poll":
-        cohort_banner_headline = "🆕 NEW COHORT — thinner liquidity, unvalidated"
+        # Card review #2 (2026-08-20): "thinner liquidity" was the SAME
+        # error already fixed for liquidity_added_spot in Task 11b, just
+        # not caught for this cohort yet -- futures_poll clears the
+        # identical liquidity floor too (cohort labels describe
+        # PROVENANCE, how a symbol entered the universe, not liquidity
+        # quality; the actual figures are two lines below and speak for
+        # themselves). The real, cohort-specific fact is that these
+        # symbols entered via the futures-only listing path.
+        cohort_banner_headline = "🆕 NEW COHORT — futures-only listing, performance unvalidated"
     elif candidate.symbol_source == "liquidity_added_spot":
         # Task 11b (ratified 2026-08-19): NOT "thinner liquidity" -- these
         # symbols clear the identical liquidity floor established_top20
@@ -332,9 +352,8 @@ def render_message(
         f"Layer scores:\n{_format_layers(candidate.layer_summary)}\n"
         f"─────────────────────────────────────\n"
         f"Margin:       ${candidate.margin_usdt:.2f} USDT\n"
-        f"Leverage:     {leverage}× (math: max safe "
-        f"{min(max_safe, _DEFAULT_HARD_CAP)}×, capped at "
-        f"{_DEFAULT_HARD_CAP}× for risk profile)\n"
+        f"Leverage:     {leverage}× (SL allows up to {max_safe}×, "
+        f"your risk cap is {hard_cap}×)\n"
         f"Position:     ${position_value:,.2f}\n"
         f"Loss at SL:   ${loss_at_sl:.2f} ({pct_of_margin:.0f}% of margin)\n"
         f"Liquidation:  ${_fmt_price(liq_price)}  "
@@ -349,18 +368,29 @@ def render_message(
         f"Auto-skip in {auto_skip_seconds}s if no response"
     )
 
-    keyboard = _build_keyboard(candidate.signal_id, leverage)
+    keyboard = _build_keyboard(candidate.signal_id, leverage, hard_cap=hard_cap)
     return RenderedMessage(body=body, inline_keyboard=keyboard)
 
 
-def _build_keyboard(signal_id: str, leverage: int) -> list[list[dict]]:
+def _build_keyboard(
+    signal_id: str, leverage: int, *, hard_cap: int = _DEFAULT_HARD_CAP,
+) -> list[list[dict]]:
     """Spec §7.2: 5-button inline keyboard layout.
 
     Row 1:  [ Approve N× ]  [ +1× ]  [ -1× ]
     Row 2:  [ Custom leverage ]  [ Skip ]
+
+    `hard_cap` should be the same real per-user cap `render_message`
+    received — found alongside the card review #2 leverage-text fix: the
+    "+1×" button was clamped against the hardcoded `_DEFAULT_HARD_CAP`
+    module constant regardless of the caller's real cap, and nothing
+    server-side re-validates leverage against `user.max_leverage_cap` on
+    the adjust callback path (`trade_signals.py`'s `_re_render_and_edit`
+    takes `parsed.leverage` straight from the callback data) — this
+    button was the only actual enforcement point for a non-default cap.
     """
     minus_lev = max(_MIN_LEVERAGE, leverage - 1)
-    plus_lev = min(_DEFAULT_HARD_CAP, leverage + 1)
+    plus_lev = min(hard_cap, leverage + 1)
 
     return [
         [
@@ -437,6 +467,7 @@ def build_signal_payload(
     candidate: SignalCandidate, *,
     rendered_at: datetime,
     initial_leverage: int,
+    hard_cap: int = _DEFAULT_HARD_CAP,
 ) -> dict:
     """Serialise a SignalCandidate for the telegram_signals.payload column.
 
@@ -445,6 +476,14 @@ def build_signal_payload(
     user later approves the trade (matches the auto path's PR2 §4.4
     persistence contract). Pre-PR2 candidates carry None; the JSONB
     keys are still emitted so payload golden tests are stable.
+
+    `hard_cap` (card review #2, 2026-08-20): persists the real per-user
+    leverage cap that produced `initial_leverage`, so the +1×/-1×
+    adjust-and-re-render path (`trade_signals._re_render_and_edit`,
+    which reconstructs the candidate purely from this payload — it has
+    no live DB user lookup of its own) can pass the SAME cap into its
+    own `render_message` call instead of silently falling back to the
+    module default.
     """
     return {
         "signal_id": candidate.signal_id,
@@ -463,6 +502,7 @@ def build_signal_payload(
         "rr_ratio": candidate.rr_ratio,
         "rendered_at": rendered_at.isoformat(),
         "initial_leverage": initial_leverage,
+        "hard_cap": hard_cap,
         "mtf_agreement": candidate.mtf_agreement,
         "mtf_dominant_tf": candidate.mtf_dominant_tf,
         "mtf_directions": candidate.mtf_directions,

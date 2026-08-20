@@ -44,8 +44,14 @@ def test_futures_poll_signal_shows_cohort_banner_and_liquidity_numbers() -> None
         qvol_24h=25_000_000.0, spread_bps=2.5, depth_0_5pct_usdt=75_000.0,
     )
     rendered = render_message(candidate, leverage=5, auto_skip_seconds=60)
+    # Card review #2 (2026-08-20): "thinner liquidity" was factually wrong
+    # for futures_poll too -- same class of error as Task 11b's
+    # liquidity_added_spot fix, just caught one cohort later. Every
+    # symbol here clears the identical liquidity floor; the banner now
+    # describes provenance (futures-only listing), not liquidity.
     assert "NEW COHORT" in rendered.body
-    assert "thinner liquidity" in rendered.body.lower()
+    assert "futures-only listing" in rendered.body.lower()
+    assert "thinner liquidity" not in rendered.body.lower()
     assert "25,000,000" in rendered.body or "25000000" in rendered.body
     assert "2.5" in rendered.body
     assert "75,000" in rendered.body or "75000" in rendered.body

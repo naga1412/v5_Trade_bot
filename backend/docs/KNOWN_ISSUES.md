@@ -1232,3 +1232,40 @@ gate should check depth/spread directly rather than treating volume as
 a proxy for either.
 
 **Status**: informational, no code change.
+
+### FU-44 — Telegram leverage-cap risk control was silently unenforced by its own display math (FIXED)
+
+**Discovered**: 2026-08-20, Phase 4 Task 18 card review #2.
+
+**Finding**: `render_message`'s "Leverage: Nx (math: max safe Xx, capped
+at 10x for risk profile)" text was computed independently of the real
+leverage decision. `dispatcher.py` picks the actual leverage via
+`recommended_leverage(hard_cap=user.max_leverage_cap)` — the real
+per-user risk cap — but `render_message` recomputed its own display math
+with a hardcoded `125`-then-`_DEFAULT_HARD_CAP(10)` sequence, completely
+disconnected from that real cap. The `+1×` keyboard button's clamp had
+the identical bug (hardcoded `10`, not the real cap). Nothing
+server-side re-validates leverage on the adjust-callback path
+(`trade_signals._re_render_and_edit` takes the callback's leverage
+straight through) — meaning the `+1×` button's clamp was the ONLY
+actual enforcement point for a user's real leverage cap.
+
+**Why this matters**: this is a risk control, not a cosmetic display
+bug. `users.max_leverage_cap` defaults to 10, which is why it was
+harmless in practice — the hardcoded value and the real default
+happened to coincide. If `max_leverage_cap` were ever lowered below 10
+(single-operator today, but the column and the `/me` profile endpoint
+already support per-user customization), the `+1×` button would have
+silently let leverage climb back up to 10 anyway, exceeding the
+configured risk cap with no error, no warning, and a display line that
+would have confidently — and wrongly — claimed the shown number WAS the
+enforced cap.
+
+**Action**: fixed in PR #499 (2026-08-20). Threaded the real `hard_cap`
+through `render_message`, `build_signal_payload` (persisted so the
+adjust/re-render path can read it back instead of falling to the module
+default), and both real `dispatcher.py` call sites. `+1×` button now
+clamps against the real cap. New regression tests cover the threading
+end-to-end, including the persisted-payload re-render path.
+
+**Status**: ✅ **CLOSED** by PR #499.
