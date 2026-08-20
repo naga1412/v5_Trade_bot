@@ -143,6 +143,51 @@ def test_plus_minus_buttons_clamp_to_1x_and_10x() -> None:
     assert minus_btn["callback_data"] == "sig:abc123:adjust:1"
 
 
+# ---- Leverage-cap honesty (card review #2, 2026-08-20) -------------------
+#
+# Before `hard_cap` existed, the "(math: max safe Xx, capped at 10x for
+# risk profile)" text was silently recomputed with a hardcoded 125-then-10
+# sequence, completely disconnected from whatever cap actually produced
+# the `leverage` argument (`dispatcher.py` uses the real per-user
+# `user.max_leverage_cap`). Accidentally correct only because the DB
+# column defaults to 10 -- wrong for any user who customizes it.
+
+
+def test_leverage_line_reflects_real_hard_cap_not_module_default() -> None:
+    """A non-default hard_cap must appear verbatim in the leverage line,
+    not the module's _DEFAULT_HARD_CAP=10."""
+    msg = render_message(_candidate(), leverage=5, hard_cap=20, now=_NOW)
+    assert "your risk cap is 20×" in msg.body
+    assert "capped at 10" not in msg.body.lower()
+
+
+def test_leverage_line_max_safe_uses_real_hard_cap() -> None:
+    """`max_safe` (the SL-implied ceiling) must itself be computed with
+    the real hard_cap, not an independent hardcoded 125."""
+    # sl_distance_pct=0.02 -> uncapped math max = int(0.80/0.02) = 40.
+    # With hard_cap=3, the SL-implied ceiling must clamp to 3, not 10.
+    msg = render_message(_candidate(), leverage=3, hard_cap=3, now=_NOW)
+    assert "SL allows up to 3×" in msg.body
+    assert "your risk cap is 3×" in msg.body
+
+
+def test_plus_button_clamps_to_real_hard_cap_not_module_default() -> None:
+    """The +1x button must never offer a leverage above the real cap --
+    it's the only server-side enforcement point on the adjust path
+    (trade_signals._re_render_and_edit takes the callback's leverage
+    straight through, no separate cap re-check)."""
+    msg = render_message(_candidate(), leverage=5, hard_cap=5, now=_NOW)
+    plus_btn = msg.inline_keyboard[0][1]
+    assert plus_btn["callback_data"] == "sig:abc123:adjust:5"  # not :6
+
+
+def test_build_signal_payload_persists_hard_cap() -> None:
+    payload = build_signal_payload(
+        _candidate(), rendered_at=_NOW, initial_leverage=5, hard_cap=20,
+    )
+    assert payload["hard_cap"] == 20
+
+
 # ---- Callback parsing ---------------------------------------------------
 
 

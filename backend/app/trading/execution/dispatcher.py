@@ -508,8 +508,11 @@ async def _send_telegram_signal(
     )
     payload = build_signal_payload(
         candidate, rendered_at=now, initial_leverage=leverage,
+        hard_cap=user.max_leverage_cap,
     )
-    rendered = render_message(candidate, leverage=leverage, now=now)
+    rendered = render_message(
+        candidate, leverage=leverage, hard_cap=user.max_leverage_cap, now=now,
+    )
     payload["rendered_body"] = rendered.body
     payload["inline_keyboard"] = rendered.inline_keyboard
 
