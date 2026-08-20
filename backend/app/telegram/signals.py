@@ -292,9 +292,23 @@ def render_message(
     )
 
     cohort_banner = ""
-    if candidate.symbol_source != "established_top20":
+    if candidate.symbol_source == "futures_poll":
+        cohort_banner_headline = "🆕 NEW COHORT — thinner liquidity, unvalidated"
+    elif candidate.symbol_source == "liquidity_added_spot":
+        # Task 11b (ratified 2026-08-19): NOT "thinner liquidity" -- these
+        # symbols clear the identical liquidity floor established_top20
+        # does. They were excluded from the OLD top-20-by-VOLUME selector
+        # on rank alone, not on tradeability. Claiming "thin" here is
+        # factually wrong and would train the operator to skip good
+        # signals -- see this task's own note above for the real vs.
+        # apparent difference between the two new cohorts.
+        cohort_banner_headline = "🆕 NEW TO UNIVERSE — liquidity-qualified, performance unvalidated"
+    else:
+        cohort_banner_headline = None
+
+    if cohort_banner_headline is not None:
         cohort_banner = (
-            f"🆕 NEW COHORT — thinner liquidity, unvalidated\n"
+            f"{cohort_banner_headline}\n"
             f"24h vol: ${candidate.qvol_24h:,.0f}  •  "
             f"Spread: {candidate.spread_bps:.1f}bps  •  "
             f"Depth (0.5%): ${candidate.depth_0_5pct_usdt:,.0f}\n"
