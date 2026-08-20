@@ -1310,3 +1310,62 @@ does not block Phase 4 or anything else.
 
 **Status**: interim fix ✅ **CLOSED**; the real in-app deep-link feature
 is open, unscoped, not queued.
+
+### FU-46 — pattern_stats had never written a single row since it shipped (FIXED)
+
+**Discovered**: 2026-08-20, Phase 4 card-review pattern-layer investigation.
+
+**Finding**: `layer-value-isolation`'s measurement found L2 was the one
+layer showing a real, cross-window-consistent signal, but its
+`historical_accuracy` weighting (`app/core/scoring/layer2_patterns.py`)
+had been running on the flat `PRIOR_ACCURACY=0.5` default for every
+pattern, always — real observed win rates for the same patterns spanned
+17.4%-38.5% in the same data. Root cause was THREE compounding bugs in
+`app/ml/patterns.py`, none of them a crash:
+
+1. **Schema mismatch.** `_extract_patterns` looked for
+   `layer_scores["L2"]["patterns"]` as a flat string array — a schema
+   that never shipped. Written against the SP-0/SP-1 stub era's assumed
+   shape for SP-2's not-yet-built L2 layer; SP-2 shipped a different
+   real shape (key `"2"`, patterns nested inside a JSON-encoded `notes`
+   string, each pattern a dict keyed by `"id"`) and this was never
+   updated to match — confirmed against two payloads captured directly
+   from production, not hand-written fixtures (the original test's own
+   hand-written fixture matched the same imagined schema as the buggy
+   code, which is exactly how this shipped wrong without failing CI).
+2. **Never scheduled.** `update_pattern_stats` was never wired to any
+   worker anywhere in the application — full-history repo search found
+   it referenced only by its own definition and its unit test.
+3. **Broken join.** The query joined `predictions p ... ON t.signal_id
+   = p.inputs_hash` — but `shadow_trades.signal_id` is a standalone,
+   self-generated id (`app/shadow/engine.py::_gen_signal_id`) with zero
+   relationship to `predictions.inputs_hash`. Confirmed against real
+   data: 3,736 shadow_trades carry a signal_id, 45,622 predictions carry
+   an inputs_hash, exactly ZERO ever matched.
+
+**Action**: all three fixed. `_extract_patterns` reads the real shape
+(tests use real captured production payloads, including a genuinely
+truncated one — `layer2_patterns.NOTES_MAX_CHARS=500` cuts off `notes`
+mid-object on bars with enough pattern fires). `update_pattern_stats`
+now reads `shadow_trades.layer_scores` directly — no join needed, since
+it's already populated from the same prediction at trade-open time.
+New `pattern_stats_refresh` worker (same shape as `p_win_refit`,
+registered with a heartbeat so the healer can see it stop — the whole
+reason this went unnoticed for months). Backfilled from full trade
+history in one shot rather than waiting months for fresh data to
+accumulate (the job recomputes from scratch on every run by design, so
+the backfill is just its first real run, not special-cased logic).
+
+**Lookahead caveat, documented in code at both the writer and reader**
+(`app/ml/patterns.py`, `app/core/scoring/layer2_patterns.py`):
+`pattern_stats.accuracy` reflects ALL history up to its last refresh,
+recomputed from scratch each time — valid for live/forward scoring, but
+using it to score a trade from BEFORE that refresh in a backtest is
+lookahead bias.
+
+**L2's live scoring does NOT read the real rates yet** — deliberate,
+separate, operator-gated follow-up. Populate + report the delta first;
+wire to live scoring only after that's reviewed.
+
+**Status**: ✅ **CLOSED** (schema + scheduler + join + backfill). Live
+scoring wiring is a separate, not-yet-authorized follow-up.
