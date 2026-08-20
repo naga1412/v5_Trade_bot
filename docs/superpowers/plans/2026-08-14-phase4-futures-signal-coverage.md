@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy async / Alembic / pytest + pytest-asyncio / React + TypeScript + Tailwind (frontend).
 
-> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched. **Tasks 5c and 5d are new** (2026-08-19, same standing as 5b) — `refresh_live_fleet_universe` (Task 5) was discovered to have never had a scheduled caller anywhere in the application (staging confirmed `ws_keepalive_task` running healthy with 0 children, `live_fleet_universe` permanently empty); Task 5c schedules it (6h in-process worker, registered so the healer can see it stop) and Task 5d fixes a related open-position-coverage gap found while designing the scheduler. **See `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md` for the full incident record** — this is recorded there as the staging-soak gate's first concrete save: promoted to main as originally sequenced, this gap would have silently killed all live predictions and signals on a green deploy. **Task 5e is new** (2026-08-19, same day) — Task 5c's cold-start relaxation was found to relax the wrong thing immediately after merge, before the first live sweep even completed: it lowered the entry *threshold* but not the *sample count*, so a cold-start sweep still took the full 5-samples-per-candidate ~50-60 minutes across the full market, directly contradicting the operator's own ruling ("admit on a single sample... a fresh environment must not sit dark"). Task 5e fixes this (one sample at cold start, not five) and adds a start-of-cycle heartbeat so the worker isn't heartbeat-invisible for the duration of any sweep. **Task 5f is new** (2026-08-19, same day) — found while confirming Task 5e on staging: `ws_keepalive_task`/`futures_poll_task`'s own reconciliation cadence was still hardcoded to the pre-Task-5c daily value (24h, four times the new 6h universe-refresh cadence), AND the timing check itself had a root-cause bug (`last_refresh = 0.0` compared against a host-wide, not process-wide, monotonic clock) that made it appear to work correctly on a long-lived host by accident, not by design — a host reboot near a container restart would silently break it. Task 5f fixes both: the cadence value (24h → 1h) and the actual root cause (`last_refresh` initialized to a real captured timestamp, not a hardcoded zero).
+> **SUPERSEDED (2026-08-15), RE-DRAFTED (2026-08-17, extended 2026-08-18).** The universe selector inverts from top-N-by-volume to liquidity-floor pass/fail across the full market (not just the futures-only cohort); the old "Start at N=8, widen to 20-25" Stage A/B sizing is gone. See the addendum at the top of `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md` and the decision record at `docs/superpowers/decisions/2026-08-15-liquidity-floor-selector-supersedes-top20.md` for the full ruling, the hysteresis rule, the cost-check findings, and three-way cohort tagging. **Task 4 (`check_liquidity`) was and remains unaffected.** **Tasks 2, 3, 5, 8, 9, and 18 were re-drafted 2026-08-17; Tasks 10, 11, 12, 13, and 15 were re-drafted 2026-08-18** (Tasks 14 and 16 were reviewed the same day and needed no change — they don't hardcode any cohort literal) (migration revision numbers also fixed — they'd drifted stale against what actually landed on `dev` in the interim, see Task 2's own note). Task 10's re-draft also resolved a live-behavior question beyond simple staleness, confirmed with the operator before drafting: the dispatch-time liquidity recheck and Task 11's Telegram cohort banner both now trigger on `symbol_source != "established_top20"` (covering **both** `liquidity_added_spot` and `futures_poll`), not just `== "futures_poll"` as the pre-addendum base design specified — see Task 10's own note for the full reasoning. **Task 5b is new** (not in the original 18-task list) — wiring `ws_keepalive_task` onto the new selector, a consequence of the addendum superseding the base design's own non-goal of leaving that fleet untouched. **Tasks 5c and 5d are new** (2026-08-19, same standing as 5b) — `refresh_live_fleet_universe` (Task 5) was discovered to have never had a scheduled caller anywhere in the application (staging confirmed `ws_keepalive_task` running healthy with 0 children, `live_fleet_universe` permanently empty); Task 5c schedules it (6h in-process worker, registered so the healer can see it stop) and Task 5d fixes a related open-position-coverage gap found while designing the scheduler. **See `docs/superpowers/decisions/2026-08-19-live-fleet-universe-never-scheduled-incident.md` for the full incident record** — this is recorded there as the staging-soak gate's first concrete save: promoted to main as originally sequenced, this gap would have silently killed all live predictions and signals on a green deploy. **Task 5e is new** (2026-08-19, same day) — Task 5c's cold-start relaxation was found to relax the wrong thing immediately after merge, before the first live sweep even completed: it lowered the entry *threshold* but not the *sample count*, so a cold-start sweep still took the full 5-samples-per-candidate ~50-60 minutes across the full market, directly contradicting the operator's own ruling ("admit on a single sample... a fresh environment must not sit dark"). Task 5e fixes this (one sample at cold start, not five) and adds a start-of-cycle heartbeat so the worker isn't heartbeat-invisible for the duration of any sweep. **Task 5f is new** (2026-08-19, same day) — found while confirming Task 5e on staging: `ws_keepalive_task`/`futures_poll_task`'s own reconciliation cadence was still hardcoded to the pre-Task-5c daily value (24h, four times the new 6h universe-refresh cadence), AND the timing check itself had a root-cause bug (`last_refresh = 0.0` compared against a host-wide, not process-wide, monotonic clock) that made it appear to work correctly on a long-lived host by accident, not by design — a host reboot near a container restart would silently break it. Task 5f fixes both: the cadence value (24h → 1h) and the actual root cause (`last_refresh` initialized to a real captured timestamp, not a hardcoded zero). **Task 11b is new** (2026-08-19, same day) — a real rendered card against real staging data (LINKUSDT, `liquidity_added_spot`) showed Task 11's shared banner claiming "thinner liquidity" over a symbol with $1.87M depth at 1.0bps spread, deeper and tighter than many established_top20 symbols. `liquidity_added_spot` and `futures_poll` share an unvalidated-performance caveat but are NOT both thin — the former cleared the identical liquidity floor established_top20 does, excluded from the old selector on volume rank alone. Task 11b gives each cohort its own banner headline, keeping the shared liquidity-numbers/fast-move-warning lines for both.
 
 **Spec:** `docs/superpowers/specs/2026-08-14-phase4-futures-signal-coverage-design.md`
 
@@ -2924,6 +2924,80 @@ Expected: all existing tests still pass unchanged (find the existing test file w
 ```bash
 git add backend/app/telegram/signals.py backend/tests/unit/test_telegram_signals_cohort.py
 git commit -m "feat(phase4): visually distinct Telegram card for non-established cohorts (redraft: covers liquidity_added_spot + futures_poll)"
+```
+
+---
+
+## Task 11b: Cohort banner text is factually wrong for `liquidity_added_spot` (new, ratified 2026-08-19)
+
+> **New task, found by the operator reviewing a real rendered card against real staging data.** Task 11's banner text ("🆕 NEW COHORT — thinner liquidity, unvalidated") is correct for `futures_poll` but **factually wrong** for `liquidity_added_spot`. A real staging render for LINKUSDT (a `liquidity_added_spot` symbol) showed $1.87M depth at 1.0bps spread — deeper and tighter than many long-established top-20 symbols — under a banner claiming "thinner liquidity." Both new cohorts pass the identical liquidity floor (Task 4); `liquidity_added_spot` symbols were excluded from the OLD selector only because they ranked outside the top-20-by-*volume* cut, not because they're thin. Volume rank and liquidity depth are exactly the axes the whole Phase 4 liquidity-floor selector exists to distinguish (see the 2026-08-15 decision record) — collapsing them back together in the one place the operator actually reads before deciding whether to act on a signal defeats that distinction where it matters most. A banner that cries "thin" over a deep, tight-spread symbol will train the operator to skip signals that are actually fine.
+>
+> **What both cohorts genuinely share, and what's genuinely different:**
+> - Shared, true for both: performance is unvalidated (neither cohort existed in the live-covered universe before Task 5b/8; the 07-28 top-20-by-volume ratification data does not transfer — see reversal criterion #2 in the 2026-08-15 decision record). Keep this caveat on both.
+> - Shared, true for both: resting depth measured now does not predict depth during a fast move. Keep this warning line verbatim on both.
+> - Different: `futures_poll` symbols are genuinely thin by construction (they only exist in this cohort because they're futures-only, no spot pair — the futures-only population skews thinner, per the 2026-08-15 decision record's own measurement: 8 stable-pass out of 169 futures-only vs. 34 of 358 spot-backed). `liquidity_added_spot` symbols cleared the exact same $20M qvol / 5bps spread / $50k depth floor as `established_top20` symbols — they are not thin, they were simply outside a volume-rank cutoff that has nothing to do with tradeability (the whole premise of the 2026-08-15 selector inversion). The banner must not claim otherwise.
+
+**Files:**
+- Modify: `backend/app/telegram/signals.py` (`render_message`'s cohort banner text)
+- Modify: `backend/tests/unit/test_telegram_signals_cohort.py` (cohort-specific banner-text assertions)
+
+**Interfaces:** unchanged — `SignalCandidate`'s fields and `render_message`'s signature don't change, only the banner text `render_message` selects.
+
+- [ ] **Step 1: Update the failing tests first**
+
+In `backend/tests/unit/test_telegram_signals_cohort.py`, read the real current three tests first (`test_established_top20_signal_has_no_cohort_banner`, `test_liquidity_added_spot_signal_shows_cohort_banner_and_liquidity_numbers`, `test_futures_poll_signal_shows_cohort_banner_and_liquidity_numbers`) — don't assume the exact current assertions without checking. Update:
+- `test_futures_poll_signal_shows_cohort_banner_and_liquidity_numbers`: assert `"NEW COHORT" in rendered.body` and `"thinner liquidity" in rendered.body.lower()` (unchanged claim, still true for this cohort) — this test's other assertions (liquidity numbers, fast-move warning) stay as-is.
+- `test_liquidity_added_spot_signal_shows_cohort_banner_and_liquidity_numbers`: assert the NEW banner text is present (`"NEW TO UNIVERSE" in rendered.body` — the operator's suggested wording, or `"liquidity-qualified" in rendered.body.lower()`) AND assert the OLD, now-wrong claim is absent (`"thinner liquidity" not in rendered.body.lower()` — this is the regression guard that actually catches a reversion back to the shared-banner bug). Liquidity numbers and the fast-move-depth-warning line stay asserted as before (both banners still show real numbers and the fast-move caveat).
+- `test_established_top20_signal_has_no_cohort_banner`: unchanged, no banner at all for this cohort.
+
+- [ ] **Step 2: Split the banner into cohort-specific text, sharing the numbers + warning lines**
+
+Read the real current `render_message` cohort-banner block first (it may have shifted since Task 11 originally shipped). Replace the single-text-for-both-cohorts block with one that selects the FIRST line by cohort, keeping everything else identical for both:
+
+```python
+    cohort_banner = ""
+    if candidate.symbol_source == "futures_poll":
+        cohort_banner_headline = "🆕 NEW COHORT — thinner liquidity, unvalidated"
+    elif candidate.symbol_source == "liquidity_added_spot":
+        # Task 11b (ratified 2026-08-19): NOT "thinner liquidity" -- these
+        # symbols clear the identical liquidity floor established_top20
+        # does. They were excluded from the OLD top-20-by-VOLUME selector
+        # on rank alone, not on tradeability. Claiming "thin" here is
+        # factually wrong and would train the operator to skip good
+        # signals -- see this task's own note above for the real vs.
+        # apparent difference between the two new cohorts.
+        cohort_banner_headline = "🆕 NEW TO UNIVERSE — liquidity-qualified, performance unvalidated"
+    else:
+        cohort_banner_headline = None
+
+    if cohort_banner_headline is not None:
+        cohort_banner = (
+            f"{cohort_banner_headline}\n"
+            f"24h vol: ${candidate.qvol_24h:,.0f}  •  "
+            f"Spread: {candidate.spread_bps:.1f}bps  •  "
+            f"Depth (0.5%): ${candidate.depth_0_5pct_usdt:,.0f}\n"
+            f"⚠ Resting depth does not predict depth during a fast move.\n"
+            f"─────────────────────────────────────\n"
+        )
+```
+
+This structurally cannot regress to a shared/wrong banner for a THIRD future cohort — an unrecognized `symbol_source` value falls through to `cohort_banner_headline = None`, rendering no banner at all (fails safe/silent, matching how `established_top20` already behaves), rather than inheriting either existing cohort's claim by accident.
+
+- [ ] **Step 3: Run the tests to verify they pass**
+
+Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/unit/test_telegram_signals_cohort.py -v`
+Expected: PASS, all 3 tests, including the new negative assertion (liquidity_added_spot's render does NOT contain "thinner liquidity").
+
+- [ ] **Step 4: Run the full telegram signals test suite for regression**
+
+Run: `cd backend && python -m pytest --no-cov -p no:cacheprovider tests/ -k "telegram_signals or render_message" -v`
+Expected: all existing tests still pass unchanged.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/telegram/signals.py backend/tests/unit/test_telegram_signals_cohort.py
+git commit -m "fix(phase4): liquidity_added_spot gets its own banner text, not futures_poll's 'thinner liquidity' claim"
 ```
 
 ---
