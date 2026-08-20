@@ -93,18 +93,19 @@ class ShadowPosition:
     # column also lives in NON_HASHED_ALLOW_LIST per app/db/audit.py
     # (PR1 alembic migration 0020).
     #
-    # KNOWN LIMITATION (per spec §3): `shadow_open_positions` does NOT
-    # carry these columns. A restart between open + close → these are
-    # None on the reloaded ShadowPosition → NULL on the closed trade.
-    # Same-session open + close trades are populated correctly. Adding
-    # the columns to `shadow_open_positions` (alembic + thread persist /
-    # load) is the explicit follow-up — out of PR-strategy-1 scope.
+    # RESTART SURVIVAL (verified 2026-08-20): PR-PLUMBING-1 Fix 3
+    # (migration 0025) added these 7 fields to `shadow_open_positions`
+    # and `persist_open_position` / `list_open_positions` thread them
+    # through. A restart between open + close does NOT lose them.
     mtf_agreement: int | None = None
     mtf_dominant_tf: str | None = None
     mtf_directions_json: str | None = None
     # Item 4 (2026-08-13): per-timeframe ADX map, same propagation shape
     # as the 3 fields above. See app/db/payload_builders.py and
-    # app/db/audit.py NON_HASHED_ALLOW_LIST["shadow_trades"].
+    # app/db/audit.py NON_HASHED_ALLOW_LIST["shadow_trades"]. Added to
+    # shadow_trades AFTER migration 0025 shipped, so it missed Fix 3 --
+    # migration 0040 (2026-08-20) closed that gap; restart-survival
+    # confirmed the same as the 7 fields above.
     mtf_adx_by_tf_json: str | None = None
     p_win: float | None = None
     effective_score: float | None = None
@@ -113,11 +114,11 @@ class ShadowPosition:
     # Phase 4 Task 9: cohort tag. Unlike the PR1 analytics fields above
     # (which default None -- their columns are nullable), this defaults
     # to a real string because shadow_trades.symbol_source is
-    # NOT NULL DEFAULT 'established_top20' (migration 0038). Restart-
-    # survivor positions (loaded from shadow_open_positions, which does
-    # not carry this column either) fall back to this same default --
-    # consistent with "no cohort data available" meaning
-    # "established_top20" everywhere else in this task.
+    # NOT NULL DEFAULT 'established_top20' (migration 0038).
+    # Migration 0040 (2026-08-20) added this column to
+    # shadow_open_positions with the same NOT NULL DEFAULT, so a
+    # restart-survivor position now reloads its REAL cohort tag rather
+    # than silently falling back to this dataclass default.
     symbol_source: str = "established_top20"
 
     # Amendment 3 (2026-07-31): in-memory bar buffer used by the
