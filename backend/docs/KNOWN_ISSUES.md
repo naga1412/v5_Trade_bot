@@ -1269,3 +1269,44 @@ clamps against the real cap. New regression tests cover the threading
 end-to-end, including the persisted-payload re-render path.
 
 **Status**: ✅ **CLOSED** by PR #499.
+
+### FU-45 — Telegram chart_url deep-link (with ghost-candle overlay) is a never-built capability, not a broken one
+
+**Discovered**: 2026-08-19/20, Phase 4 Task 18 card review.
+
+**Finding**: every real Telegram signal's "🔗 View on chart with ghost
+candle" link was built as `chart_base_url + "/tab1/{symbol}/{timeframe}
+?signal={id}"`. `chart_base_url` is grep-confirmed to never be set to a
+real value anywhere in the codebase or config — it defaulted to `""` at
+every layer in the call chain — so this link has always been a broken
+relative path on every real signal ever sent. Deeper than a missing
+setting: the frontend doesn't use path-based routing at all
+(`useHashRoute`, hash-fragment routes like `#/live-prediction?...`), so
+`/tab1/{symbol}/{timeframe}` doesn't match any route the frontend could
+ever serve, even with a real base URL configured. This was written
+assuming a router architecture the frontend was never actually built
+with.
+
+**Interim fix**: `chart_url` now points at Binance's own futures chart
+for the symbol instead of the never-built in-app deep link
+(`https://www.binance.com/en/futures/{SYMBOL}`, verified live against
+two different real symbols before wiring in). No ghost-candle overlay,
+no in-app deep link; just a correct, working link to a real chart on
+the exchange the operator already trades on. New `CHART_BASE_URL`
+setting makes the base configurable without a code change. The card's
+own copy was reworded to match ("View chart on Binance" instead of
+"with ghost candle").
+
+**Real fix, deliberately NOT scoped here**: an in-app chart view with a
+ghost-candle overlay is a genuinely new capability — the frontend has no
+such page today — not a bug fix. Building it for real needs: (a) an
+actual hash-route + query-param design, (b) a `CHART_BASE_URL`-shaped
+setting pointing at the app's own frontend instead of Binance, (c) a
+real chart-rendering surface that consumes L8's ConvLSTM ghost
+predictions, which currently only feed the scoring layer and are
+flag-gated off in prod (PR #406) — no UI anywhere consumes them today.
+Logged here as a candidate future feature. May be worth building later;
+does not block Phase 4 or anything else.
+
+**Status**: interim fix ✅ **CLOSED**; the real in-app deep-link feature
+is open, unscoped, not queued.
