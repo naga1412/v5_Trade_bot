@@ -16,6 +16,8 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json
+
 from app.db.audit import insert_with_chain
 from app.db.payload_builders import (
     _normalize_mtf_directions_json,
@@ -52,6 +54,13 @@ async def persist_open_position(
     ``from_signal()`` and this call). ``getattr(..., None)`` keeps
     pre-PR-PLUMBING-1 tests / fixture rows working — when the column
     isn't on the dataclass, we INSERT NULL.
+
+    Migration 0040 (2026-08-20): also writes ``layer_scores``,
+    ``mtf_adx_by_tf_json``, ``symbol_source``, ``hold_scaling_factor``,
+    ``hold_timeout_bars`` — the 5 columns Fix 3 missed (either predating
+    it or added to ``shadow_trades`` afterward with no matching
+    ``shadow_open_positions`` follow-up). Closes the restart-loss gap
+    for these fields the same way Fix 3 did for the original 7.
     """
     await session.execute(
         sa.text(
@@ -62,10 +71,14 @@ async def persist_open_position(
             # PR-PLUMBING-1 Fix 3: 7 PR1 analytics columns. Nullable; the
             # alembic 0025 migration adds them as NULL on existing rows.
             "mtf_agreement, mtf_dominant_tf, mtf_directions_json, p_win, "
-            "effective_score, realized_vol_20d, funding_directional_adj) "
+            "effective_score, realized_vol_20d, funding_directional_adj, "
+            # Migration 0040: the 5 columns Fix 3 missed.
+            "layer_scores, mtf_adx_by_tf_json, symbol_source, "
+            "hold_scaling_factor, hold_timeout_bars) "
             "VALUES (:uid, :s, :tf, :d, :ep, :sl, :tp, :ps, :es, :ec, :ea, "
             ":bh, :oa, :lc, :sig, "
-            ":mtfa, :mtfd, :mtfj, :pw, :effs, :rv, :fda)"
+            ":mtfa, :mtfd, :mtfj, :pw, :effs, :rv, :fda, "
+            ":ls, :mtfadx, :ssrc, :hsf, :htb)"
         ),
         {
             "uid": user_id,
@@ -88,6 +101,16 @@ async def persist_open_position(
             "effs": getattr(pos, "effective_score", None),
             "rv": getattr(pos, "realized_vol_20d", None),
             "fda": getattr(pos, "funding_directional_adj", None),
+            # Migration 0040: serialize layer_scores the same way
+            # build_shadow_trade_payload does (json.dumps) so both
+            # Postgres JSONB and SQLite TEXT get a canonical string.
+            "ls": json.dumps(getattr(pos, "layer_scores", None) or {}),
+            "mtfadx": _normalize_mtf_directions_json(
+                getattr(pos, "mtf_adx_by_tf_json", None),
+            ),
+            "ssrc": getattr(pos, "symbol_source", "established_top20"),
+            "hsf": getattr(pos, "hold_scaling_factor", None),
+            "htb": getattr(pos, "hold_timeout_bars", None),
         },
     )
 
@@ -109,12 +132,19 @@ async def list_open_positions(
         # carry their actual TF. getattr() with '1h' fallback covers
         # both cases without an extra schema check.
         tf = getattr(r, "timeframe", None) or "1h"
+        raw_layer_scores = getattr(r, "layer_scores", None)
+        if isinstance(raw_layer_scores, dict):
+            layer_scores = raw_layer_scores
+        elif isinstance(raw_layer_scores, str) and raw_layer_scores:
+            layer_scores = json.loads(raw_layer_scores)
+        else:
+            layer_scores = {}
         out.append(ShadowPosition(
             symbol=r.symbol, direction=Direction(r.direction),
             entry_price=r.entry_price, stop_loss=r.stop_loss, take_profit=r.take_profit,
             position_size_usdt=r.position_size_usdt,
             entry_score=r.entry_score, entry_confidence=r.entry_confidence,
-            entry_atr=r.entry_atr, layer_scores={},
+            entry_atr=r.entry_atr, layer_scores=layer_scores,
             bars_held=r.bars_held,
             opened_at=_to_dt(r.opened_at),
             last_check_at=_to_dt(r.last_check_at),
@@ -138,6 +168,17 @@ async def list_open_positions(
             effective_score=getattr(r, "effective_score", None),
             realized_vol_20d=getattr(r, "realized_vol_20d", None),
             funding_directional_adj=getattr(r, "funding_directional_adj", None),
+            # Migration 0040 (2026-08-20): the 5 columns Fix 3 missed.
+            # Same dict/str normalization as layer_scores above for
+            # mtf_adx_by_tf_json (also JSONB); symbol_source is a plain
+            # NOT NULL TEXT column so falls back to the dataclass
+            # default only for pre-migration rows in a mid-deploy window.
+            mtf_adx_by_tf_json=_normalize_mtf_directions_json(
+                getattr(r, "mtf_adx_by_tf_json", None),
+            ),
+            symbol_source=getattr(r, "symbol_source", None) or "established_top20",
+            hold_scaling_factor=getattr(r, "hold_scaling_factor", None),
+            hold_timeout_bars=getattr(r, "hold_timeout_bars", None),
         ))
     return out
 
@@ -186,12 +227,14 @@ async def persist_closed_trade(
         closed_at=closed_at,
         bars_held=bars_held,
         inputs_hash=inputs_hash,
-        # PR-strategy-1: thread the 7 PR1 analytics columns from `pos`
-        # into the payload builder. Each field defaults to None on
-        # ShadowPosition; restart-survivor positions (loaded from
-        # `shadow_open_positions` which doesn't carry these cols) stay
-        # None — same as today's behavior. Same-session opens populate
-        # via shadow_worker.
+        # PR-strategy-1 + migration 0040 (2026-08-20): thread all 12
+        # analytics columns from `pos` into the payload builder. Each
+        # field defaults to None (or "established_top20" for
+        # symbol_source) on ShadowPosition. Restart-survivor positions
+        # (loaded via `list_open_positions`) now round-trip all 12 —
+        # `shadow_open_positions` carries every one of them as of
+        # migration 0040. Same-session opens populate via shadow_worker
+        # either way.
         mtf_agreement=getattr(pos, "mtf_agreement", None),
         mtf_dominant_tf=getattr(pos, "mtf_dominant_tf", None),
         mtf_directions_json=getattr(pos, "mtf_directions_json", None),
@@ -200,6 +243,16 @@ async def persist_closed_trade(
         effective_score=getattr(pos, "effective_score", None),
         realized_vol_20d=getattr(pos, "realized_vol_20d", None),
         funding_directional_adj=getattr(pos, "funding_directional_adj", None),
+        # Cohort tag (field only -- see the matching comment on
+        # ShadowPosition.symbol_source in app.shadow.engine for why this
+        # is an inert prod-promotion, not Phase 4 Task 9's application
+        # behavior). getattr() keeps pre-migration-0040 duck-typed
+        # fixtures working; restart-survivor positions now carry their
+        # real cohort tag from shadow_open_positions instead of falling
+        # back here -- though on main today every position's real value
+        # IS that same default, since nothing on main sets it to
+        # anything else yet.
+        symbol_source=getattr(pos, "symbol_source", "established_top20"),
     )
     return await insert_with_chain(session, "shadow_trades", payload)
 

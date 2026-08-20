@@ -69,6 +69,10 @@ async def _mk_engine() -> Any:
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
             "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
             "realized_vol_20d REAL, funding_directional_adj REAL, "
+            # Migration 0040 (2026-08-20): 5 columns Fix 3 missed.
+            "layer_scores TEXT, mtf_adx_by_tf_json TEXT, "
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
+            "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
             "UNIQUE (symbol, timeframe))"
         ))
         # shadow_trades with PR1 + PR3 G1 columns + audit chain
