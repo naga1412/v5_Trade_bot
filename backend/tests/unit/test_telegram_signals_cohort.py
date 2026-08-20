@@ -26,7 +26,12 @@ def test_liquidity_added_spot_signal_shows_cohort_banner_and_liquidity_numbers()
         qvol_24h=22_000_000.0, spread_bps=3.5, depth_0_5pct_usdt=60_000.0,
     )
     rendered = render_message(candidate, leverage=5, auto_skip_seconds=60)
-    assert "NEW COHORT" in rendered.body
+    # Task 11b: liquidity_added_spot gets its own headline -- it clears the
+    # identical liquidity floor established_top20 does, so it must NOT carry
+    # futures_poll's "thinner liquidity" claim.
+    assert "NEW TO UNIVERSE" in rendered.body
+    assert "liquidity-qualified" in rendered.body.lower()
+    assert "thinner liquidity" not in rendered.body.lower()
     assert "22,000,000" in rendered.body or "22000000" in rendered.body
     assert "3.5" in rendered.body
     assert "60,000" in rendered.body or "60000" in rendered.body
@@ -40,6 +45,7 @@ def test_futures_poll_signal_shows_cohort_banner_and_liquidity_numbers() -> None
     )
     rendered = render_message(candidate, leverage=5, auto_skip_seconds=60)
     assert "NEW COHORT" in rendered.body
+    assert "thinner liquidity" in rendered.body.lower()
     assert "25,000,000" in rendered.body or "25000000" in rendered.body
     assert "2.5" in rendered.body
     assert "75,000" in rendered.body or "75000" in rendered.body
