@@ -83,6 +83,15 @@ def test_render_message_includes_spec_section_7_2_fields() -> None:
     assert "Auto-skip in" in body and "s if no response" in body
 
 
+def test_chart_line_does_not_promise_ghost_candle() -> None:
+    """FU-45 interim fix (2026-08-20): chart_url points at Binance's own
+    chart now, not an in-app deep link -- the copy must say so, not
+    promise a ghost-candle overlay that link doesn't provide."""
+    msg = render_message(_candidate(), leverage=5, now=_NOW)
+    assert "View chart on Binance" in msg.body
+    assert "ghost candle" not in msg.body.lower()
+
+
 def test_render_message_short_funding_text_inverts() -> None:
     """For SHORT, positive funding means you RECEIVE."""
     msg = render_message(

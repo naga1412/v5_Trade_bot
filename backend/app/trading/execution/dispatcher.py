@@ -475,6 +475,15 @@ async def _send_telegram_signal(
     healer or manual ops command can flush it without losing context.
     """
     sig_id = "sig_" + secrets.token_hex(8)
+    # FU-45 interim fix (2026-08-20): the old `/tab1/{symbol}/{timeframe}
+    # ?signal={id}` shape pointed at an in-app deep link that was never
+    # built (chart_base_url was never set to a real value anywhere, and
+    # the frontend has no matching route regardless -- it's hash-routed).
+    # Points at Binance's own futures chart for the symbol instead --
+    # correct and working today. proposal.chart_base_url still wins when
+    # a caller explicitly sets one (tests, or a future real base).
+    from app.config import get_settings as _get_chart_settings
+    chart_base_url = proposal.chart_base_url or _get_chart_settings().CHART_BASE_URL
     candidate = SignalCandidate(
         signal_id=sig_id,
         symbol=proposal.symbol,
@@ -487,11 +496,7 @@ async def _send_telegram_signal(
         layer_summary=proposal.layer_summary,
         margin_usdt=margin_usdt,
         funding_rate_daily=proposal.funding_rate_daily,
-        chart_url=(
-            f"{proposal.chart_base_url}/tab1/"
-            f"{proposal.symbol.replace('/', '-')}/"
-            f"{proposal.timeframe}?signal={sig_id}"
-        ),
+        chart_url=f"{chart_base_url}/{_binance_native(proposal.symbol)}",
         sl_distance_pct=_compute_sl_distance_pct(
             proposal.entry_price, proposal.stop_loss_price, proposal.direction,
         ),
