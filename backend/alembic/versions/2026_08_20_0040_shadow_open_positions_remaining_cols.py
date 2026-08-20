@@ -39,7 +39,7 @@ migration and close AFTER it; already-closed trades with layer_scores={}
 keep that value (pattern_stats' own backfill, migration-adjacent PR #507,
 is a separate concern and does not touch shadow_trades rows directly).
 
-Revision ID: 0040_shadow_open_positions_remaining_cols
+Revision ID: 0040_shadow_open_pos_cols
 Revises: 0039_live_fleet_universe
 Create Date: 2026-08-20
 """
@@ -48,7 +48,7 @@ from collections.abc import Sequence
 from alembic import op
 
 
-revision: str = "0040_shadow_open_positions_remaining_cols"
+revision: str = "0040_shadow_open_pos_cols"
 down_revision: str | None = "0039_live_fleet_universe"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
