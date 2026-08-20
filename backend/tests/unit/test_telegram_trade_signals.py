@@ -42,12 +42,14 @@ def _candidate(**overrides) -> SignalCandidate:
     return SignalCandidate(**base)
 
 
-async def _seed_signal(engine, *, signal_id: str = "abc123") -> None:
+async def _seed_signal(
+    engine, *, signal_id: str = "abc123", hard_cap: int = 10,
+) -> None:
     candidate = _candidate(signal_id=signal_id)
     payload = build_signal_payload(
-        candidate, rendered_at=_NOW, initial_leverage=5,
+        candidate, rendered_at=_NOW, initial_leverage=5, hard_cap=hard_cap,
     )
-    rendered = render_message(candidate, leverage=5, now=_NOW)
+    rendered = render_message(candidate, leverage=5, hard_cap=hard_cap, now=_NOW)
     payload["rendered_body"] = rendered.body
     payload["inline_keyboard"] = rendered.inline_keyboard
     async with AsyncSession(engine) as s:
@@ -224,6 +226,46 @@ async def test_callback_adjust_re_renders_via_edit_message() -> None:
             "SELECT response FROM telegram_signals WHERE id='abc123'"
         ))).first()
     assert row.response is None
+
+
+@pytest.mark.asyncio
+async def test_callback_adjust_re_render_uses_persisted_hard_cap() -> None:
+    """Card review #2 (2026-08-20): _re_render_and_edit reconstructs the
+    candidate purely from the persisted payload (no live DB user lookup),
+    so it must read back the SAME real hard_cap the original send used --
+    not silently fall back to the module default."""
+    engine = await _mk_engine()
+    await _seed_signal(engine, hard_cap=20)
+    async with AsyncSession(engine) as s:
+        row = (await s.execute(sa.text(
+            "SELECT payload FROM telegram_signals WHERE id='abc123'"
+        ))).first()
+        p = json.loads(row.payload)
+        assert p["hard_cap"] == 20  # sanity: seeded correctly
+        p["telegram_message_id"] = 7777
+        await s.execute(sa.text(
+            "UPDATE telegram_signals SET payload = :p WHERE id='abc123'"
+        ), {"p": json.dumps(p)})
+        await s.commit()
+
+    edits: list[dict] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "editMessageText" in str(req.url):
+            edits.append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with AsyncSession(engine) as s:
+            await handle_callback(
+                s, callback_data="sig:abc123:adjust:8",
+                config=_config(), http=http, now=_NOW,
+            )
+            await s.commit()
+
+    assert len(edits) == 1
+    assert "your risk cap is 20×" in edits[0]["text"]
 
 
 @pytest.mark.asyncio
