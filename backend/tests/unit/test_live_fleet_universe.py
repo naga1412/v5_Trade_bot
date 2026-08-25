@@ -150,21 +150,44 @@ def _deep_book(_sym: str) -> tuple[_BookSide, _BookSide]:
 
 
 def _thin_book(_sym: str) -> tuple[_BookSide, _BookSide]:
-    """Always fails depth (well under the $50k floor)."""
+    """Always fails depth SEVERELY -- ~$2 notional, far under both the
+    $50k floor and the 2026-08-20 fast-exit severity trigger (50% of
+    floor = $25k). Tests written before that trigger existed use this
+    for "any kind of failure" generically; several of them are
+    currently-a-member (exit-path) tests where that now also means
+    "triggers fast-exit on the first sample" -- verify that's still
+    the INTENDED outcome for a given test (immediate exit is exactly
+    what a severe failure should do) rather than assuming unchanged
+    5-sample-loop behavior. Use _marginal_thin_book below for tests
+    that specifically want a near-miss that should NOT fast-exit."""
     return ([("99.99", "0.01")], [("100.01", "0.01")])
 
 
-def _pattern_depth_provider(patterns: dict[str, list[bool]]) -> _DepthProvider:
+def _marginal_thin_book(_sym: str) -> tuple[_BookSide, _BookSide]:
+    """Fails depth (below the $50k floor) but NOT severely -- ~$39k,
+    78% of the floor, comfortably above the fast-exit severity trigger
+    (50% of floor = $25k). Spread stays well within its own floor (2bps).
+    For tests exercising the plain unanimous-5-of-5 marginal-miss
+    hysteresis in isolation from the 2026-08-20 severity dimension."""
+    return ([("99.99", "195")], [("100.01", "195")])
+
+
+def _pattern_depth_provider(
+    patterns: dict[str, list[bool]], *, fail_book: _DepthProvider = _thin_book,
+) -> _DepthProvider:
     """Returns a depth_provider that replays a per-symbol pass/fail
     sequence across successive calls (one call per sample) -- lets tests
-    hit an exact N-of-5 pass count deterministically."""
+    hit an exact N-of-5 pass count deterministically. ``fail_book``
+    defaults to the severe _thin_book (pre-2026-08-20 behavior); pass
+    _marginal_thin_book for tests that need failures that do NOT trigger
+    the fast-exit severity path."""
     call_counts: dict[str, int] = dict.fromkeys(patterns, 0)
 
     def provider(sym: str) -> tuple[_BookSide, _BookSide]:
         idx = call_counts[sym]
         call_counts[sym] += 1
         should_pass = patterns[sym][idx]
-        return _deep_book(sym) if should_pass else _thin_book(sym)
+        return _deep_book(sym) if should_pass else fail_book(sym)
 
     provider.call_counts = call_counts  # type: ignore[attr-defined]
     return provider
@@ -467,7 +490,10 @@ async def test_exit_requires_unanimous_five_of_five_fails(session_factory) -> No
     that fails 4/5 samples is RETAINED (not unanimous); the same-shaped
     symbol failing 5/5 EXITS. Both start as existing members so this
     isolates the exit-side threshold specifically (contrast with the
-    entry-side test above)."""
+    entry-side test above). Uses _marginal_thin_book (not _thin_book) for
+    the failing samples -- a near-miss, not a collapse -- to isolate the
+    unanimous-hysteresis threshold from the 2026-08-20 fast-exit severity
+    dimension (see the dedicated fast-exit tests below for that path)."""
     async with session_factory() as session:
         await session.execute(sa.text(
             "INSERT INTO live_fleet_universe "
@@ -484,7 +510,7 @@ async def test_exit_requires_unanimous_five_of_five_fails(session_factory) -> No
     provider = _pattern_depth_provider({
         "FOURFAILUSDT": [True, False, False, False, False],  # 1 pass -> retained
         "FIVEFAILUSDT": [False, False, False, False, False],  # 0 pass -> exits
-    })
+    }, fail_book=_marginal_thin_book)
     transport = _mock_transport(
         futures_symbols=["FOURFAILUSDT", "FIVEFAILUSDT"], spot_symbols=[],
         tickers=tickers, depth_provider=provider,
@@ -500,6 +526,215 @@ async def test_exit_requires_unanimous_five_of_five_fails(session_factory) -> No
     assert by_symbol["FOURFAILUSDT"].cohort == "liquidity_added_spot"
     assert provider.call_counts["FOURFAILUSDT"] == 5  # type: ignore[attr-defined]
     assert provider.call_counts["FIVEFAILUSDT"] == 5  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------
+# 3b. Fast-exit severity trigger (2026-08-20, operator ruling following
+# the 73-vs-42 universe-discrepancy investigation): a SEVERE single-sample
+# failure (depth < 50% of floor, or spread > 2x max) exits immediately
+# without waiting for the other N_SAMPLES-1 -- caps worst-case severe-
+# failure exit lag to one refresh cycle instead of ~5 cycles (~30h).
+# ---------------------------------------------------------------------
+
+
+def _severe_depth_book(_sym: str) -> tuple[_BookSide, _BookSide]:
+    """Depth ~$10k -- 20% of the $50k floor, well under the 50% severe
+    trigger. Spread stays tight (2bps) so ONLY depth is severe."""
+    return ([("99.99", "50")], [("100.01", "50")])
+
+
+def _severe_spread_book(_sym: str) -> tuple[_BookSide, _BookSide]:
+    """Spread ~20bps -- 4x the 5bps max, well over the 2x severe trigger.
+    Depth stays deep ($1M-scale) so ONLY spread is severe."""
+    return ([("99.90", "10000")], [("100.10", "10000")])
+
+
+@pytest.mark.asyncio
+async def test_fast_exit_on_severe_depth_failure_single_sample(session_factory) -> None:
+    """A currently-a-member symbol whose FIRST sample shows severe depth
+    collapse exits immediately -- exactly 1 check_liquidity call, not the
+    full 5, and it's excluded from the result regardless of what the
+    remaining (unfetched) samples would have shown."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('COLLAPSEUSDT', 'liquidity_added_spot', 25000000, 2.0, 60000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "COLLAPSEUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "COLLAPSEUSDT": [False, False, False, False, False],
+    }, fail_book=_severe_depth_book)
+    transport = _mock_transport(
+        futures_symbols=["COLLAPSEUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "COLLAPSEUSDT" not in by_symbol
+    # The speed property: fast-exit fires on sample 1, never reaching
+    # samples 2-5 -- this is the assertion that actually distinguishes
+    # fast-exit from "it happened to fail all 5 anyway".
+    assert provider.call_counts["COLLAPSEUSDT"] == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_fast_exit_on_severe_spread_failure_single_sample(session_factory) -> None:
+    """Same as the depth case, but severity comes from spread blowing out
+    past 2x the max instead of depth collapsing."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('BLOWNOUTUSDT', 'liquidity_added_spot', 25000000, 2.0, 60000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "BLOWNOUTUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "BLOWNOUTUSDT": [False, False, False, False, False],
+    }, fail_book=_severe_spread_book)
+    transport = _mock_transport(
+        futures_symbols=["BLOWNOUTUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "BLOWNOUTUSDT" not in by_symbol
+    assert provider.call_counts["BLOWNOUTUSDT"] == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_marginal_failure_does_not_fast_exit(session_factory) -> None:
+    """Regression guard distinguishing the two failure classes: a symbol
+    failing marginally (depth ~78% of floor, same fixture as the
+    unanimous-hysteresis test above) must run the FULL 5-sample loop,
+    not fast-exit on the first miss -- the severity trigger must not
+    fire for near-misses, only genuine collapses."""
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('NEARMISSUSDT', 'liquidity_added_spot', 25000000, 2.0, 60000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "NEARMISSUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        # 1 pass, 4 marginal (not severe) fails -> retained, all 5 sampled.
+        "NEARMISSUSDT": [True, False, False, False, False],
+    }, fail_book=_marginal_thin_book)
+    transport = _mock_transport(
+        futures_symbols=["NEARMISSUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "NEARMISSUSDT" in by_symbol
+    assert provider.call_counts["NEARMISSUSDT"] == 5  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_fast_exit_does_not_apply_to_entry_candidates(session_factory) -> None:
+    """A brand-new candidate (not currently a member) whose first sample
+    is severely bad must NOT be fast-rejected -- fast-exit is an EXIT-
+    only concept (it protects an existing, presumably-open-position-
+    eligible member from a slow removal). A non-member has nothing to
+    protect by exiting fast; it just runs the normal entry evaluation."""
+    async with session_factory() as session:
+        # Unrelated prior row so `prior` is non-empty -- this is a warm
+        # refresh, not the cold-start single-sample path.
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('ANCHORUSDT', 'established_top20', 500000000, 1.0, 100000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "NEWCANDIDATEUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        # Severe on sample 1, then passes 3 of the remaining 4 -- if
+        # fast-exit incorrectly applied to entry candidates, this would
+        # reject after 1 call; the correct behavior runs all 5 and
+        # admits on the real 3-of-5 entry bar.
+        "NEWCANDIDATEUSDT": [False, True, True, True, False],
+    }, fail_book=_severe_depth_book)
+    # ANCHORUSDT deliberately NOT in futures_symbols -- it exists only as
+    # a stale prior row so `prior` is non-empty (warm refresh), mirroring
+    # test_entry_requires_three_of_five_passes's exact convention; it is
+    # not itself a candidate this cycle and is never re-sampled.
+    transport = _mock_transport(
+        futures_symbols=["NEWCANDIDATEUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert "NEWCANDIDATEUSDT" in by_symbol
+    assert provider.call_counts["NEWCANDIDATEUSDT"] == 5  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_open_position_override_wins_over_fast_exit_with_loud_log(
+    session_factory, caplog,
+) -> None:
+    """Operator ruling: the open-position override still wins over
+    fast-exit -- never strand a live position -- but it must be LOGGED
+    LOUDLY (ERROR), not the routine INFO-level retention message every
+    other override case gets, so a severe failure held open is visible
+    rather than silent."""
+    import logging
+
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('STRANDEDUSDT', 'liquidity_added_spot', 25000000, 2.0, 60000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('STRANDED/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "STRANDEDUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "STRANDEDUSDT": [False, False, False, False, False],
+    }, fail_book=_severe_depth_book)
+    transport = _mock_transport(
+        futures_symbols=["STRANDEDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    with caplog.at_level(logging.ERROR, logger="app.shadow.live_fleet_universe"):
+        entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    # Never stranded -- the override wins.
+    assert "STRANDEDUSDT" in by_symbol
+    # But it's visible: an ERROR-level record mentioning the symbol and
+    # the severity, not a silent/routine retention.
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("STRANDEDUSDT" in r.message for r in error_records)
+    assert any("SEVERELY FAILED" in r.message for r in error_records)
 
 
 # ---------------------------------------------------------------------

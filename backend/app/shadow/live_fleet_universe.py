@@ -14,7 +14,10 @@ Hysteresis (addendum section (a)):
     would inherit that noise at the selection layer).
   - Entry: not-currently-a-member needs >=3 of 5 passes.
   - Exit: currently-a-member needs a UNANIMOUS 5 of 5 fails (i.e. must
-    fail strictly more than EXIT_MAX_PASSES=0 passes to be retained).
+    fail strictly more than EXIT_MAX_PASSES=0 passes to be retained) --
+    UNLESS a single sample is a SEVERE failure (see "Fast-exit severity
+    trigger" below), which exits immediately without waiting for the
+    other samples.
   - Order of operations matters: the previous snapshot ("is this symbol
     currently a member?") is loaded BEFORE this tick's samples are
     taken, because which threshold applies (3-of-5 vs unanimous-fail)
@@ -32,7 +35,28 @@ Hysteresis (addendum section (a)):
     retention at the source" below) made this a real guarantee for
     open positions specifically, independent of prior snapshot
     membership -- the override queries live open positions directly
-    now, not just `prior`.
+    now, not just `prior`. This override wins over fast-exit too (below)
+    -- never strand a live position -- but a fast-exited symbol retained
+    only because of an open position is logged at ERROR, not the routine
+    INFO-level retention log every other override case gets (operator
+    ruling, 2026-08-20: visible, not silent).
+
+Fast-exit severity trigger (2026-08-20, operator ruling following the
+73-vs-42 universe-discrepancy investigation): the unanimous-5-of-5 exit
+rule above was sized for MARGINAL misses -- a symbol sitting just under
+one threshold, where waiting out a few refresh cycles of noise is the
+right call. It does not protect against a COLLAPSE: a book that empties
+or a spread that blows out mid-cycle could otherwise take up to ~5
+refresh cycles (POLL_INTERVAL_SECONDS=6h each, see
+app.shadow.universe_refresh_scheduler) to accumulate a genuinely
+unanimous failure, if the symbol keeps landing one lucky passing sample
+per cycle -- up to ~30h of the operator holding a card for a coin they
+cannot cleanly exit, the exact risk the floor exists to prevent.
+SEVERE_DEPTH_RATIO/SEVERE_SPREAD_RATIO (see constants + `_is_severe_
+failure` below) trigger an immediate exit on a SINGLE sample -- no
+waiting for the other N_SAMPLES-1 -- when depth or spread is
+catastrophically outside the floor. Volume is deliberately excluded:
+it's a 24h trailing figure, not a right-now exitability signal.
 
 Cold-start seeding (addendum section (c) / plan doc Task 5 note 2): the
 very first time this table is ever refreshed (no prior snapshot exists
@@ -99,7 +123,13 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.data.futures_liquidity import QVOL_FLOOR_USDT, check_liquidity
+from app.data.futures_liquidity import (
+    DEPTH_FLOOR_USDT,
+    QVOL_FLOOR_USDT,
+    SPREAD_MAX_BPS,
+    LiquidityCheck,
+    check_liquidity,
+)
 from app.data.ratelimit import RateLimitedClient
 
 log = logging.getLogger(__name__)
@@ -116,6 +146,38 @@ EXIT_MAX_PASSES: int = 0    # exit requires unanimous failure -- 0 passes of 5
 # module docstring's "Cold-start single-sample fast path". A single sample's
 # "at least 1 of 1 passes" is just "did it pass", so no threshold constant
 # is needed for the cold-start branch at all.
+
+# Fast-exit severity trigger (2026-08-20, operator ruling on the 2026-08-15
+# hysteresis rule after the 73-vs-42 universe-discrepancy investigation).
+# The unanimous-5-of-5 exit rule was sized for MARGINAL misses (e.g. ZRO's
+# real qvol sitting at 82% of the floor -- no real danger, worth waiting
+# out the noise). It does NOT protect against a COLLAPSE: a book that
+# empties or a spread that blows out mid-refresh-cycle can otherwise take
+# up to ~5 refresh cycles (POLL_INTERVAL_SECONDS=6h each, see
+# app.shadow.universe_refresh_scheduler) to accumulate a genuinely
+# unanimous failure if the symbol keeps landing one lucky passing sample
+# per cycle -- up to ~30h of an operator holding a card for a coin they
+# cannot cleanly exit, the exact risk the floor exists to prevent.
+#
+# SEVERE_DEPTH_RATIO / SEVERE_SPREAD_RATIO trigger an IMMEDIATE exit on a
+# single sample, without waiting for the other N_SAMPLES-1 -- caps
+# worst-case severe-failure exit lag to one refresh cycle (~6h: the time
+# to next notice, not the time to react once noticed) instead of ~30h.
+# Volume is DELIBERATELY excluded from the severity check -- it's a 24h
+# trailing figure and does not reflect whether the book is exitable RIGHT
+# NOW the way depth and spread do (operator's explicit instruction).
+SEVERE_DEPTH_RATIO: float = 0.5   # depth < 50% of DEPTH_FLOOR_USDT = collapse
+SEVERE_SPREAD_RATIO: float = 2.0  # spread > 2x SPREAD_MAX_BPS = blown out
+
+
+def _is_severe_failure(check: LiquidityCheck) -> bool:
+    """True when depth or spread is catastrophically outside the floor --
+    not a marginal miss. See the constants' comment above for the
+    reasoning and the exclusion of volume from this check."""
+    return (
+        check.depth_0_5pct_usdt < DEPTH_FLOOR_USDT * SEVERE_DEPTH_RATIO
+        or check.spread_bps > SPREAD_MAX_BPS * SEVERE_SPREAD_RATIO
+    )
 
 Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
 
@@ -288,6 +350,11 @@ async def refresh_live_fleet_universe(
                 log.warning("live_fleet_universe: legacy top-20 seed failed: %s", e)
 
     results: dict[str, LiveFleetEntry] = {}
+    # Symbols removed this cycle via the fast-exit severity trigger (as
+    # opposed to a normal unanimous-5-of-5 exit) -- the open-position
+    # override loop below logs loudly, not silently, when it re-adds one
+    # of these (operator's explicit "flag it loudly" instruction).
+    fast_exited: set[str] = set()
     for sym in candidates:
         currently_in = sym in prior
         if not prior:
@@ -313,11 +380,22 @@ async def refresh_live_fleet_universe(
         else:
             pass_count = 0
             last_check = None
+            severe = False
             for i in range(N_SAMPLES):
                 try:
                     last_check = await check_liquidity(sym, rate_client)
                     if last_check.passed:
                         pass_count += 1
+                    elif currently_in and _is_severe_failure(last_check):
+                        # Fast-exit: a single severe sample is enough --
+                        # do not wait out the remaining samples the way a
+                        # marginal miss would. Caps worst-case severe-
+                        # failure exit lag to one refresh cycle instead of
+                        # the ~5-cycle (~30h) worst case a symbol landing
+                        # one lucky passing sample per cycle could hit
+                        # under the unanimous-5-of-5 rule alone.
+                        severe = True
+                        break
                 except Exception as e:  # noqa: BLE001
                     log.warning("live_fleet_universe: check_liquidity failed for %s: %s", sym, e)
                 if i < N_SAMPLES - 1:
@@ -325,7 +403,19 @@ async def refresh_live_fleet_universe(
             if last_check is None:
                 continue
             if currently_in:
-                keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
+                if severe:
+                    keep = False
+                    fast_exited.add(sym)
+                    log.warning(
+                        "live_fleet_universe: %s FAST-EXIT -- severe failure "
+                        "(depth=$%.0f spread=%.1fbps vs floor depth=$%.0f "
+                        "spread<=%.1fbps) on a single sample, not waiting "
+                        "for the full %d-sample hysteresis loop",
+                        sym, last_check.depth_0_5pct_usdt, last_check.spread_bps,
+                        DEPTH_FLOOR_USDT, SPREAD_MAX_BPS, N_SAMPLES,
+                    )
+                else:
+                    keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
             else:
                 keep = pass_count >= ENTRY_MIN_PASSES
 
@@ -391,7 +481,20 @@ async def refresh_live_fleet_universe(
             if sym in results:
                 continue
             if sym in prior:
-                log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
+                if sym in fast_exited:
+                    # Operator ruling, 2026-08-20: the open-position override
+                    # still wins -- never strand a live position -- but a
+                    # SEVERE failure held open must be loud, not a routine
+                    # info-level retention log indistinguishable from every
+                    # other marginal-miss retention.
+                    log.error(
+                        "live_fleet_universe: %s SEVERELY FAILED the liquidity "
+                        "floor this cycle but is retained ONLY because it has "
+                        "an open position -- operator cannot cleanly exit this "
+                        "symbol right now. Investigate immediately.", sym,
+                    )
+                else:
+                    log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
                 results[sym] = prior[sym]  # last-known-good numbers, not re-sampled
             else:
                 try:
@@ -431,6 +534,7 @@ async def refresh_live_fleet_universe(
 
 __all__ = [
     "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
+    "SEVERE_DEPTH_RATIO", "SEVERE_SPREAD_RATIO",
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
     "load_live_fleet_universe", "refresh_live_fleet_universe",
 ]
