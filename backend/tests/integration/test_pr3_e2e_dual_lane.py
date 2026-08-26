@@ -77,6 +77,10 @@ async def _mk_engine() -> Any:
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
             "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
             "realized_vol_20d REAL, funding_directional_adj REAL, "
+            # Migration 0040 (2026-08-20): 5 columns Fix 3 missed.
+            "layer_scores TEXT, mtf_adx_by_tf_json TEXT, "
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
+            "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
             "UNIQUE (symbol, timeframe))"
         ))
     return engine
@@ -151,6 +155,10 @@ async def test_dual_lane_same_symbol_produces_two_open_positions(
     fake_pred.effective_score = None
     fake_pred.realized_vol_20d = None
     fake_pred.funding_directional_adj = None
+    # Migration 0040 (2026-08-20): mtf_adx_by_tf_json now also gets
+    # threaded onto ShadowPosition and persisted at open time (Fix 3
+    # never covered it) -- same MagicMock leak risk as the fields above.
+    fake_pred.mtf_adx_by_tf_json = None
 
     fake_cache = MagicMock()
     fake_cache.get_or_load = AsyncMock(return_value=None)
@@ -250,6 +258,10 @@ async def test_dual_lane_in_memory_state_keyed_per_tf(
     fake_pred.effective_score = None
     fake_pred.realized_vol_20d = None
     fake_pred.funding_directional_adj = None
+    # Migration 0040 (2026-08-20): mtf_adx_by_tf_json now also gets
+    # threaded onto ShadowPosition and persisted at open time (Fix 3
+    # never covered it) -- same MagicMock leak risk as the fields above.
+    fake_pred.mtf_adx_by_tf_json = None
 
     fake_cache = MagicMock()
     fake_cache.get_or_load = AsyncMock(return_value=None)

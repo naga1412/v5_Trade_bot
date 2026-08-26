@@ -131,6 +131,10 @@ async def _create_shadow_tables(engine: Any) -> None:
             "mtf_agreement INTEGER, mtf_dominant_tf TEXT, "
             "mtf_directions_json TEXT, p_win REAL, effective_score REAL, "
             "realized_vol_20d REAL, funding_directional_adj REAL, "
+            # Migration 0040 (2026-08-20): 5 columns Fix 3 missed.
+            "layer_scores TEXT, mtf_adx_by_tf_json TEXT, "
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
+            "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
             "UNIQUE (symbol, timeframe))"
         ))
         await conn.execute(sa.text(
@@ -156,6 +160,8 @@ async def _create_shadow_tables(engine: Any) -> None:
             "realized_vol_20d REAL, funding_directional_adj REAL, "
             # Item 4 (alembic 0034): per-TF ADX map, same NULL-when-absent treatment.
             "mtf_adx_by_tf_json TEXT, "
+            # Migration 0038 (2026-08-17): cohort tag, matches real column default.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
             "prev_hash TEXT NOT NULL, row_hash TEXT NOT NULL UNIQUE)"
         ))
         await conn.execute(sa.text(
