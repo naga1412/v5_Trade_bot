@@ -92,6 +92,8 @@ async def _mk_engine() -> Any:
             "funding_directional_adj REAL, "
             # Item 4 (alembic 0034)
             "mtf_adx_by_tf_json TEXT, "
+            # Migration 0038 (2026-08-17): cohort tag
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
             # PR3 G1
             "hold_scaling_factor REAL, hold_timeout_bars INTEGER, "
             # audit chain

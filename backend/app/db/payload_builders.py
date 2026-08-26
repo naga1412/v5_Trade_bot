@@ -137,6 +137,14 @@ def build_shadow_trade_payload(
     effective_score: float | None = None,
     realized_vol_20d: float | None = None,
     funding_directional_adj: float | None = None,
+    # Migration 0040 (2026-08-20) prod-promotion prerequisite: persist.py's
+    # existing persist_closed_trade call already passes symbol_source here
+    # (ShadowPosition carries the field -- see app.shadow.engine). Defaults
+    # to "established_top20", matching the migration's own column default;
+    # nothing on main sets this to any other value yet -- shadow_worker's
+    # cohort-aware universe threading (Phase 4 Task 9) is dev-only and out
+    # of scope for this promotion.
+    symbol_source: str = "established_top20",
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the shadow_trades table.
 
@@ -206,6 +214,7 @@ def build_shadow_trade_payload(
         "effective_score": effective_score,
         "realized_vol_20d": realized_vol_20d,
         "funding_directional_adj": funding_directional_adj,
+        "symbol_source": symbol_source,
     }
 
 
