@@ -79,9 +79,34 @@ async def session_factory():
             "rank INTEGER NOT NULL, "
             "snapshot_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
         ))
+        # Migration 0041 (2026-08-30): the frozen pure-classifier input.
+        # Empty by default -- tests that need a symbol classified
+        # established_top20 seed it explicitly via _seed_baseline below,
+        # matching production's real "not in this table -> not
+        # established_top20" behavior for anything left unseeded.
+        await conn.execute(sa.text(
+            "CREATE TABLE cohort_baseline_symbols ("
+            "symbol TEXT PRIMARY KEY, "
+            "pred_distinct_days INTEGER NOT NULL DEFAULT 0, "
+            "pred_n INTEGER NOT NULL DEFAULT 0, "
+            "frozen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        ))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
+
+
+async def _seed_baseline(session_factory, symbols: list[str]) -> None:
+    """Populate cohort_baseline_symbols with exactly the given symbols --
+    the pure classifier's sole input. Mirrors production's real seeded-
+    migration shape (see migration 0041) without pulling in all 73 real
+    symbols for tests that only care about one or two."""
+    async with session_factory() as session:
+        for sym in symbols:
+            await session.execute(sa.text(
+                "INSERT INTO cohort_baseline_symbols (symbol) VALUES (:s)"
+            ), {"s": sym})
+        await session.commit()
 
 
 def _rate_client(transport: httpx.MockTransport) -> RateLimitedClient:
@@ -194,21 +219,33 @@ def _pattern_depth_provider(
 
 
 # ---------------------------------------------------------------------
-# 1. Cold-start seeding
+# 1. Cohort classification -- pure function of the frozen baseline
+# (2026-08-30 rewrite; see module docstring's "Cohort classification").
+# Replaces the old legacy_top20/asset_universe cold-start seed AND the
+# open-position-rescue path's hardcoded established_top20 default, both
+# of which were found to fabricate lineage on real staging data.
 # ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_cold_start_seeds_established_top20_from_legacy_fleet(session_factory) -> None:
-    """No prior live_fleet_universe snapshot exists. A symbol that (a)
-    passes the new floor AND (b) is in today's legacy top-20-by-volume
-    fleet (asset_universe, read via load_current_universe) gets tagged
-    established_top20, not liquidity_added_spot. A symbol passing the
-    floor but absent from the legacy fleet gets liquidity_added_spot."""
+async def test_established_top20_comes_from_frozen_baseline_not_legacy_fleet(
+    session_factory,
+) -> None:
+    """A symbol in cohort_baseline_symbols gets established_top20 --
+    regardless of whether asset_universe (the OLD, now-irrelevant,
+    signal) says anything about it at all. A symbol passing the floor
+    but absent from the frozen baseline gets liquidity_added_spot, even
+    if asset_universe would have ranked it top-20 by volume today --
+    asset_universe.rank is the selector's INPUT ranking, not evidence of
+    real fleet membership (2026-08-30 investigation: ranks 21-30 were
+    ranked but never actually streamed)."""
+    await _seed_baseline(session_factory, ["BTCUSDT"])
     async with session_factory() as session:
+        # NEWUSDT ranks #1 by volume in today's asset_universe -- this
+        # must NOT matter; it's not in the frozen baseline.
         await session.execute(sa.text(
             "INSERT INTO asset_universe (symbol, quote_volume_usd_24h, rank, snapshot_at) "
-            "VALUES ('BTCUSDT', 1000000000, 1, '2026-08-16T00:00:00')"
+            "VALUES ('NEWUSDT', 2000000000, 1, '2026-08-16T00:00:00')"
         ))
         await session.commit()
 
@@ -232,26 +269,28 @@ async def test_cold_start_seeds_established_top20_from_legacy_fleet(session_fact
 
 
 @pytest.mark.asyncio
-async def test_cold_start_does_not_refire_on_second_refresh(session_factory) -> None:
-    """The cold-start legacy-fleet consultation is gated on `not prior`.
-    After the first refresh persists a snapshot, a second refresh must
-    NOT re-run the legacy-seed branch -- proven here by removing
-    asset_universe's row entirely before the second call: if cold-start
-    logic incorrectly re-fired, BTCUSDT would silently keep its cohort
-    anyway (sticky-cohort would mask the bug), so instead this asserts
-    a DIFFERENT, later-arriving legacy-fleet symbol does NOT retroactively
-    get tagged established_top20 on the second run even though it now
-    (hypothetically) appears in asset_universe -- see the dedicated
-    test_new_entrant_never_tagged_established_top20 below for the
-    focused version of this; this test additionally proves the first
-    run's seed doesn't fire twice by checking BTCUSDT's cohort survives
-    unchanged across both runs even after its asset_universe row is
-    deleted (proving the SECOND run never re-reads asset_universe at
-    all for an existing member -- it uses the sticky prior cohort)."""
+async def test_cohort_recomputed_fresh_every_refresh_not_sticky(session_factory) -> None:
+    """The old code inherited cohort from `prior` for any already-a-member
+    symbol ("sticky"), which is exactly what let real churn corrupt tags
+    (a symbol exiting and re-entering permanently lost its lineage,
+    since the legacy-seed branch was cold-start-only). The new
+    classifier has no such branch: it recomputes from the baseline table
+    on every single call. Proven here by DIRECTLY EDITING a persisted
+    prior row's cohort to something the classifier would never itself
+    produce, then confirming the next refresh overwrites it back to
+    what the frozen baseline actually says -- if any sticky-inheritance
+    path remained, the corrupted value would survive unchanged."""
+    await _seed_baseline(session_factory, ["BTCUSDT"])
     async with session_factory() as session:
+        # A prior row exists, but with an cohort the classifier itself
+        # would never assign to BTCUSDT (it's in the baseline, so the
+        # classifier always says established_top20) -- simulates
+        # corruption from the old buggy code, or simply a stale row.
         await session.execute(sa.text(
-            "INSERT INTO asset_universe (symbol, quote_volume_usd_24h, rank, snapshot_at) "
-            "VALUES ('BTCUSDT', 1000000000, 1, '2026-08-16T00:00:00')"
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('BTCUSDT', 'liquidity_added_spot', 1000000000, 1.0, 100000, "
+            "'2026-08-16T00:00:00')"
         ))
         await session.commit()
 
@@ -261,22 +300,13 @@ async def test_cold_start_does_not_refire_on_second_refresh(session_factory) -> 
         tickers=tickers, depth_provider=_deep_book,
     )
     http = httpx.AsyncClient(transport=transport)
-    first = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
-    assert {e.symbol: e.cohort for e in first} == {"BTCUSDT": "established_top20"}
 
-    # Delete the asset_universe row -- if the cold-start branch incorrectly
-    # re-fired on the second call, load_current_universe would return
-    # nothing and legacy_top20 would be empty, but that wouldn't change
-    # the outcome for an already-sticky symbol either way. The real proof
-    # is structural: `prior` is non-empty after the first run, so
-    # `if not prior:` cannot enter the legacy-seed branch on this second
-    # call regardless of what's in asset_universe.
-    async with session_factory() as session:
-        await session.execute(sa.text("DELETE FROM asset_universe"))
-        await session.commit()
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
 
-    second = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
-    assert {e.symbol: e.cohort for e in second} == {"BTCUSDT": "established_top20"}
+    # NOT sticky -- the classifier overwrites the corrupted prior value
+    # with what the frozen baseline actually says, every single call.
+    assert by_symbol["BTCUSDT"].cohort == "established_top20"
 
 
 # ---------------------------------------------------------------------
@@ -522,8 +552,13 @@ async def test_exit_requires_unanimous_five_of_five_fails(session_factory) -> No
 
     assert "FOURFAILUSDT" in by_symbol
     assert "FIVEFAILUSDT" not in by_symbol
-    # Retained member's cohort stays sticky (unchanged from its prior row).
-    assert by_symbol["FOURFAILUSDT"].cohort == "liquidity_added_spot"
+    # A retained member goes through the main loop, so its cohort is
+    # freshly recomputed (2026-08-30: no longer sticky) -- FOURFAILUSDT
+    # is futures-only here (spot_symbols=[]) and not in the frozen
+    # baseline, so the pure classifier says futures_poll, regardless of
+    # what its seeded prior row said (the prior seed's cohort value is
+    # irrelevant to this test's actual purpose: exit-threshold counting).
+    assert by_symbol["FOURFAILUSDT"].cohort == "futures_poll"
     assert provider.call_counts["FOURFAILUSDT"] == 5  # type: ignore[attr-defined]
     assert provider.call_counts["FIVEFAILUSDT"] == 5  # type: ignore[attr-defined]
 
@@ -877,8 +912,15 @@ async def test_open_position_no_prior_entry_rescued_with_fresh_sample(session_fa
     would be silently dropped, losing candle coverage on an open
     position. After the fix, `get_open_position_symbols` finds it
     directly, and since it has no prior entry to inherit numbers from,
-    the rescue branch takes one fresh check_liquidity sample and tags
-    it established_top20 (the safe default with no lineage to inherit).
+    the rescue branch takes one fresh check_liquidity sample and
+    classifies it via the SAME pure `_classify_cohort` call as every
+    other path (2026-08-30 rewrite -- this used to hardcode
+    established_top20 "the safe default with no lineage to inherit,"
+    which is exactly the fabrication that gave XPLUSDT/TRUMPUSDT/
+    REDUSDT lineage they never had). RESCUEUSDT is futures-only here
+    (no spot listing) and NOT in the frozen baseline, so the pure
+    classifier says futures_poll -- proving the rescue path no longer
+    invents established_top20 out of nothing.
     """
     async with session_factory() as session:
         await session.execute(sa.text(
@@ -897,7 +939,7 @@ async def test_open_position_no_prior_entry_rescued_with_fresh_sample(session_fa
     by_symbol = {e.symbol: e for e in entries}
 
     assert "RESCUEUSDT" in by_symbol
-    assert by_symbol["RESCUEUSDT"].cohort == "established_top20"
+    assert by_symbol["RESCUEUSDT"].cohort == "futures_poll"
     # Real numbers from the rescue's fresh check_liquidity sample -- NOT a
     # fabricated/placeholder zero. _thin_book's fixed geometry (bid
     # 99.99x0.01, ask 100.01x0.01) yields deterministic non-zero values.
@@ -927,7 +969,7 @@ async def test_open_position_with_prior_entry_uses_prior_not_resampled(session_f
     the PRIOR snapshot's distinctive values (qvol=77,000,000 / spread=9.0
     / depth=123,456 / cohort=liquidity_added_spot) unchanged, NOT the
     fresh thin-book sample's numbers (qvol=30,000,000 / spread=2.0 /
-    depth=~2.0) and NOT the rescue path's established_top20 default."""
+    depth=~2.0) and NOT a fresh rescue-path classifier call at all."""
     async with session_factory() as session:
         await session.execute(sa.text(
             "INSERT INTO live_fleet_universe "
@@ -987,7 +1029,15 @@ async def test_open_position_survives_simulated_fleet_supervisor_restart(session
 
     tickers = [{"symbol": "RESTARTHELDUSDT", "quoteVolume": "30000000"}]
     transport = _mock_transport(
-        futures_symbols=["RESTARTHELDUSDT"], spot_symbols=[],
+        # Dual-listed (spot-backed), unlike the sibling RESCUEUSDT test --
+        # this test specifically exercises _load_keepalive_symbols, which
+        # intentionally EXCLUDES the futures_poll cohort (that cohort is
+        # served by the separate futures REST-poll supervisor, not
+        # ws_keepalive_task -- see keepalive.py's own docstring). A
+        # futures-only rescued symbol would correctly never appear in
+        # `desired` below regardless of the persistence fix, so this test
+        # needs a spot-backed symbol to actually prove the round-trip.
+        futures_symbols=["RESTARTHELDUSDT"], spot_symbols=["RESTARTHELDUSDT"],
         tickers=tickers, depth_provider=_thin_book,  # off-floor -- fails every sample
     )
     http = httpx.AsyncClient(transport=transport)
@@ -996,10 +1046,12 @@ async def test_open_position_survives_simulated_fleet_supervisor_restart(session
     # or any tick after the table was wiped) and rescues the open-position
     # symbol per Task 5d -- see the dedicated test above for the detailed
     # assertions on this step; here it's just the setup for step 2.
+    # RESTARTHELDUSDT is spot-backed and not in the frozen baseline, so
+    # the pure classifier says liquidity_added_spot.
     entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
     by_symbol = {e.symbol: e for e in entries}
     assert "RESTARTHELDUSDT" in by_symbol
-    assert by_symbol["RESTARTHELDUSDT"].cohort == "established_top20"
+    assert by_symbol["RESTARTHELDUSDT"].cohort == "liquidity_added_spot"
 
     # Step 2: simulate a fleet-supervisor restart -- a completely fresh,
     # independent call to _load_keepalive_symbols, exactly what
@@ -1009,23 +1061,31 @@ async def test_open_position_survives_simulated_fleet_supervisor_restart(session
         session_factory, exclude=frozenset(), timeframe="1h",
     )
 
-    assert ("RESTARTHELD/USDT", "1h", "established_top20") in desired
+    assert ("RESTARTHELD/USDT", "1h", "liquidity_added_spot") in desired
 
 
 # ---------------------------------------------------------------------
-# 5. established_top20 is cold-start-only, never retroactive
+# 5. established_top20 depends ONLY on frozen-baseline membership, not
+# on prior-snapshot history (2026-08-30 rewrite -- this section used to
+# test the OPPOSITE: that a re-entrant could never regain
+# established_top20. That was the bug. NEARUSDT/ADAUSDT lost real
+# established_top20 lineage on genuine re-entry under the old code;
+# these tests now prove the fix directly.)
 # ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_new_entrant_never_tagged_established_top20(session_factory) -> None:
-    """Even on a WARM refresh (a prior snapshot already exists, so this
-    is NOT the cold-start path), a symbol newly entering the universe --
-    absent from the prior snapshot -- gets liquidity_added_spot or
-    futures_poll, never established_top20, EVEN IF that new entrant also
-    happens to appear in today's legacy asset_universe top-20.
-    established_top20 is a cold-start-only lineage tag, gated on
-    `if not prior:`, and must not be assigned retroactively post-cutover."""
+async def test_new_entrant_in_baseline_gets_established_top20(session_factory) -> None:
+    """A symbol newly entering the universe on a WARM refresh (absent
+    from `prior` -- this is NOT cold start) DOES get established_top20
+    if it's in the frozen baseline -- this is the direct fix for the
+    real NEARUSDT/ADAUSDT bug (both exited the fleet and later
+    re-entered; the old sticky/legacy_top20 code permanently lost their
+    established_top20 tag on that re-entry since the legacy-seed branch
+    only ever fires once, at cold start). asset_universe involvement is
+    irrelevant now (see test_established_top20_comes_from_frozen_
+    baseline_not_legacy_fleet above) -- omitted here for isolation."""
+    await _seed_baseline(session_factory, ["OLDUSDT", "REENTRANTUSDT"])
     async with session_factory() as session:
         # A prior snapshot exists -- this run is NOT cold start.
         await session.execute(sa.text(
@@ -1034,14 +1094,47 @@ async def test_new_entrant_never_tagged_established_top20(session_factory) -> No
             "VALUES ('OLDUSDT', 'established_top20', 900000000, 1.0, 200000, "
             "'2026-08-16T00:00:00')"
         ))
-        # NEWENTRANTUSDT is ALSO in the legacy top-20-by-volume fleet --
-        # this must NOT matter, because the legacy-consultation branch
-        # never runs when `prior` is non-empty.
+        await session.commit()
+
+    tickers = [
+        {"symbol": "OLDUSDT", "quoteVolume": "900000000"},
+        # REENTRANTUSDT is absent from `prior` (simulating a symbol that
+        # exited on some earlier refresh) but IS in the frozen baseline.
+        {"symbol": "REENTRANTUSDT", "quoteVolume": "800000000"},
+    ]
+    transport = _mock_transport(
+        futures_symbols=["OLDUSDT", "REENTRANTUSDT"],
+        spot_symbols=["OLDUSDT", "REENTRANTUSDT"],
+        tickers=tickers, depth_provider=_deep_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+    by_symbol = {e.symbol: e for e in entries}
+
+    assert by_symbol["REENTRANTUSDT"].cohort == "established_top20"
+
+
+@pytest.mark.asyncio
+async def test_new_entrant_not_in_baseline_never_gets_established_top20(
+    session_factory,
+) -> None:
+    """Companion negative case: a symbol newly entering the universe on a
+    WARM refresh that is NOT in the frozen baseline gets
+    liquidity_added_spot or futures_poll, never established_top20 --
+    even if it's a spot-listed top-volume symbol today. Being ranked
+    highly right now is not the same as having been part of the
+    pre-cutover fleet (see the module docstring's rationale for why
+    asset_universe.rank was rejected as the baseline source)."""
+    async with session_factory() as session:
         await session.execute(sa.text(
-            "INSERT INTO asset_universe (symbol, quote_volume_usd_24h, rank, snapshot_at) "
-            "VALUES ('NEWENTRANTUSDT', 800000000, 2, '2026-08-16T00:00:00')"
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('OLDUSDT', 'established_top20', 900000000, 1.0, 200000, "
+            "'2026-08-16T00:00:00')"
         ))
         await session.commit()
+    await _seed_baseline(session_factory, ["OLDUSDT"])  # NEWENTRANTUSDT deliberately excluded
 
     tickers = [
         {"symbol": "OLDUSDT", "quoteVolume": "900000000"},
@@ -1057,9 +1150,124 @@ async def test_new_entrant_never_tagged_established_top20(session_factory) -> No
     entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
     by_symbol = {e.symbol: e for e in entries}
 
-    assert by_symbol["OLDUSDT"].cohort == "established_top20"  # sticky, inherited
+    assert by_symbol["OLDUSDT"].cohort == "established_top20"  # in the frozen baseline
     assert by_symbol["NEWENTRANTUSDT"].cohort != "established_top20"
     assert by_symbol["NEWENTRANTUSDT"].cohort == "liquidity_added_spot"
+
+
+# ---------------------------------------------------------------------
+# 6. Churn-cycle identity (operator's explicit unit-test requirement,
+# 2026-08-30 ruling): admit -> exit -> re-admit must produce an
+# IDENTICAL cohort across all three states, for one symbol from each
+# of the three cohorts. This is the direct proof that the pure
+# classifier fixes the real defect -- the old sticky/legacy_top20 code
+# would have silently reclassified the established_top20 symbol below
+# to liquidity_added_spot on its re-admission (exactly what happened to
+# the real NEARUSDT/ADAUSDT on staging).
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cohort_identical_across_admit_exit_readmit_cycle(session_factory) -> None:
+    """Three symbols, one per cohort, each cycled through three
+    sequential refreshes: admit (3-of-5 pass), exit (unanimous 5-of-5
+    marginal fail -- _marginal_thin_book, not _thin_book, to isolate
+    plain hysteresis from the fast-exit severity dimension), then
+    re-admit (3-of-5 pass again). Asserts the cohort recorded at
+    admission equals the cohort recorded at re-admission, for all
+    three -- proving the classifier is genuinely decidable by identity
+    alone, independent of the fleet-membership history in between."""
+    await _seed_baseline(session_factory, ["CHURNBASEUSDT"])
+    async with session_factory() as session:
+        # Unrelated anchor row so `prior` is non-empty from the start --
+        # isolates this test from the cold-start single-sample fast
+        # path, which is a sampling-count concern orthogonal to what
+        # this test verifies (see module docstring).
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('ANCHORUSDT', 'established_top20', 500000000, 1.0, 100000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    churn_symbols = ["CHURNBASEUSDT", "CHURNFUTUSDT", "CHURNSPOTUSDT"]
+    # ANCHORUSDT is also a real candidate in every phase below, always
+    # passing (_deep_book) -- keeps `results` non-empty even during
+    # phase 2 (all 3 churn symbols exit simultaneously). Without this, a
+    # phase-2 refresh would persist ZERO rows, so `load_live_fleet_
+    # universe`'s "latest snapshot" read would keep returning phase 1's
+    # STALE snapshot into phase 3 -- an artifact of this test's minimal
+    # candidate set, not a real production concern (with 70+ real
+    # candidates, a simultaneous all-exit is not a scenario this module
+    # needs to handle specially).
+    all_symbols = churn_symbols + ["ANCHORUSDT"]
+    tickers = [{"symbol": s, "quoteVolume": "25000000"} for s in all_symbols]
+    # CHURNFUTUSDT has no spot listing (futures_poll); the other two
+    # (plus ANCHORUSDT) are dual-listed. CHURNBASEUSDT is in the frozen
+    # baseline (established_top20); CHURNSPOTUSDT is not
+    # (liquidity_added_spot).
+    futures_symbols = all_symbols
+    spot_symbols = ["CHURNBASEUSDT", "CHURNSPOTUSDT", "ANCHORUSDT"]
+    expected_cohort = {
+        "CHURNBASEUSDT": "established_top20",
+        "CHURNFUTUSDT": "futures_poll",
+        "CHURNSPOTUSDT": "liquidity_added_spot",
+    }
+
+    def _provider_with_anchor(patterns: dict[str, list[bool]], **kw):
+        full = dict(patterns)
+        full["ANCHORUSDT"] = [True, True, True, True, True]  # always passes
+        return _pattern_depth_provider(full, **kw)
+
+    # --- Phase 1: admit (3-of-5 pass, not currently members) ---
+    admit_provider = _provider_with_anchor({
+        s: [True, True, False, True, False] for s in churn_symbols  # 3 of 5 -> enters
+    })
+    transport1 = _mock_transport(
+        futures_symbols=futures_symbols, spot_symbols=spot_symbols,
+        tickers=tickers, depth_provider=admit_provider,
+    )
+    http1 = httpx.AsyncClient(transport=transport1)
+    admitted = await refresh_live_fleet_universe(session_factory, http1, _rate_client(transport1))
+    admitted_by_symbol = {e.symbol: e for e in admitted}
+    for sym in churn_symbols:
+        assert sym in admitted_by_symbol, f"{sym} failed to be admitted in phase 1"
+        assert admitted_by_symbol[sym].cohort == expected_cohort[sym]
+
+    # --- Phase 2: exit (unanimous 5-of-5 marginal fail, now members) ---
+    exit_provider = _provider_with_anchor(
+        {s: [False, False, False, False, False] for s in churn_symbols},  # 0 of 5 -> exits
+        fail_book=_marginal_thin_book,
+    )
+    transport2 = _mock_transport(
+        futures_symbols=futures_symbols, spot_symbols=spot_symbols,
+        tickers=tickers, depth_provider=exit_provider,
+    )
+    http2 = httpx.AsyncClient(transport=transport2)
+    after_exit = await refresh_live_fleet_universe(session_factory, http2, _rate_client(transport2))
+    after_exit_by_symbol = {e.symbol: e for e in after_exit}
+    for sym in churn_symbols:
+        assert sym not in after_exit_by_symbol, f"{sym} did not exit in phase 2"
+    assert "ANCHORUSDT" in after_exit_by_symbol  # keeps the snapshot non-empty
+
+    # --- Phase 3: re-admit (3-of-5 pass again, no longer members) ---
+    readmit_provider = _provider_with_anchor({
+        s: [True, True, False, True, False] for s in churn_symbols
+    })
+    transport3 = _mock_transport(
+        futures_symbols=futures_symbols, spot_symbols=spot_symbols,
+        tickers=tickers, depth_provider=readmit_provider,
+    )
+    http3 = httpx.AsyncClient(transport=transport3)
+    readmitted = await refresh_live_fleet_universe(session_factory, http3, _rate_client(transport3))
+    readmitted_by_symbol = {e.symbol: e for e in readmitted}
+    for sym in churn_symbols:
+        assert sym in readmitted_by_symbol, f"{sym} failed to be re-admitted in phase 3"
+        # THE assertion: cohort at re-admission is IDENTICAL to cohort
+        # at first admission -- churn history left no trace.
+        assert readmitted_by_symbol[sym].cohort == admitted_by_symbol[sym].cohort
+        assert readmitted_by_symbol[sym].cohort == expected_cohort[sym]
 
 
 # ---------------------------------------------------------------------

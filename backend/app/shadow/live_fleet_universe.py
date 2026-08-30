@@ -58,19 +58,53 @@ waiting for the other N_SAMPLES-1 -- when depth or spread is
 catastrophically outside the floor. Volume is deliberately excluded:
 it's a 24h trailing figure, not a right-now exitability signal.
 
-Cold-start seeding (addendum section (c) / plan doc Task 5 note 2): the
-very first time this table is ever refreshed (no prior snapshot exists
-at all), a candidate that also appears in today's legacy top-20-by-
-volume fleet (`asset_universe` via `load_current_universe`, filtered to
-`KEEPALIVE_TOP_N`) is tagged `established_top20` instead of
-`liquidity_added_spot` -- a lineage marker for "was already covered
-before the cutover", not a live-recomputed rank. This branch is gated
-on `if not prior:` so it structurally cannot re-fire on any later
-refresh (the first successful refresh always persists at least one row,
-making every subsequent `prior` non-empty), and a symbol already a
-member on a later refresh always takes its cohort from
-`prior[sym].cohort` (sticky, never recomputed) rather than from this
-branch.
+Cohort classification (2026-08-30 rewrite -- operator ruling on the
+cohort-tag defect): a PURE function of symbol identity, `_classify_
+cohort`, with NO memory of prior live_fleet_universe snapshots and NO
+special-casing of the very first refresh. Replaces two mechanisms that
+were BOTH found to fabricate lineage:
+
+  1. `legacy_top20` -- the original cold-start seed (consulted
+     `asset_universe` via `load_current_universe`, gated on `if not
+     prior:`) only ever populated on the table's very first-ever
+     refresh. Every later refresh saw an empty `legacy_top20`, so any
+     symbol that genuinely exited and re-entered the fleet later lost
+     its established_top20 lineage permanently -- confirmed via real
+     staging data (2026-08-30 investigation): NEARUSDT and ADAUSDT both
+     flipped to `liquidity_added_spot` on real re-entry despite having
+     been part of the pre-cutover fleet for weeks.
+  2. The open-position-rescue path (below) hardcoded
+     `established_top20` as a "safe default" for any symbol with an
+     open position but no prior snapshot entry -- fabricating lineage
+     out of nothing. Confirmed: XPLUSDT, TRUMPUSDT and REDUSDT all
+     picked up established_top20 this way despite having little or no
+     real pre-cutover history (TRUMPUSDT had ZERO).
+
+`_classify_cohort` instead reads a FROZEN identity set persisted in the
+`cohort_baseline_symbols` table (migration 0041, seeded from real
+pre-cutover `predictions` activity -- NOT from `asset_universe.rank`,
+which is the selector's INPUT ranking, not its output: ranks 21-30 were
+ranked but never actually streamed by `ws_keepalive`). The rule that
+produced that frozen set (operator's pre-registered, locked definition,
+2026-08-30): predictions on >=2 distinct calendar days in the 30-day
+window ending at cold-start, minus 6 confirmed stablecoin/synthetic
+symbols (pegged instruments that structurally cannot move, which would
+otherwise bias the established_top20 control arm's measured performance
+upward). 73 symbols. This list does not change after this point --
+amending it requires an explicit new migration and operator sign-off,
+never a code-level recompute.
+
+    in frozen baseline              -> established_top20
+    not in baseline, no spot pair   -> futures_poll
+    not in baseline, has spot pair  -> liquidity_added_spot
+
+Applied identically on every refresh, to every candidate, in both the
+main loop and the open-position-rescue path below -- no branch on
+whether a prior entry exists, no sticky inheritance. Since it is a pure
+function of identity, the result is naturally decidable: the same
+symbol always classifies the same way, regardless of how many times it
+has entered or exited the fleet in between (verified directly by
+`test_cohort_identical_across_admit_exit_readmit_cycle`).
 
 Cold-start single-sample fast path (Task 5e, ratified 2026-08-19,
 correcting Task 5c the same day, before the first live sweep even
@@ -89,13 +123,13 @@ the floor on that SINGLE sample... a fresh environment must not sit
 dark"). Confirmed on staging: the first sweep was still running 15+
 minutes in with zero worker heartbeats and both fleet supervisors still
 at `children: 0`. This single-sample path is the actual fix. Gated on
-the identical `if not prior:` condition as the legacy-cohort-tagging
-branch above, for the identical structural reason: this table is never
-empty again after its first successful refresh (step 5 always persists
-at least one row), so this branch cannot re-fire on any later call.
-Every subsequent refresh (`prior` non-empty) is completely unchanged:
-full 5-sample loop, unchanged 3-of-5 entry / unanimous-fail exit
-thresholds.
+`if not prior:`: this table is never empty again after its first
+successful refresh (step 5 always persists at least one row), so this
+branch cannot re-fire on any later call. Every subsequent refresh
+(`prior` non-empty) is completely unchanged: full 5-sample loop,
+unchanged 3-of-5 entry / unanimous-fail exit thresholds. This is a
+SAMPLING-COUNT concern only -- separate from cohort classification
+(above), which no longer branches on `prior` at all.
 
 Open-position retention at the source (Task 5d, ratified 2026-08-19 --
 same decision record, ruling 4): the open-position override above used
@@ -191,6 +225,33 @@ class LiveFleetEntry:
     depth_0_5pct_usdt: float
 
 
+async def load_baseline_symbols(session: AsyncSession) -> set[str]:
+    """The frozen pre-Phase-4 fleet identity set (migration 0041,
+    `cohort_baseline_symbols`) -- the sole input to cohort classification
+    below. Read fresh every refresh (cheap: 73 rows), never cached across
+    calls, so a future amendment to the table takes effect on the very
+    next refresh without a code change or restart."""
+    rows = await session.execute(sa.text("SELECT symbol FROM cohort_baseline_symbols"))
+    return {r.symbol for r in rows}
+
+
+def _classify_cohort(
+    symbol: str, *, baseline: set[str], futures_only: set[str],
+) -> Cohort:
+    """PURE function of identity -- see module docstring's "Cohort
+    classification" section for the full rationale. No memory of prior
+    live_fleet_universe snapshots, no special-casing of cold start: the
+    same symbol always classifies the same way, on every call, forever.
+    This is the ONLY place a cohort value is decided anywhere in this
+    module -- both the main admission loop and the open-position-rescue
+    path call this, never a hardcoded default."""
+    if symbol in baseline:
+        return "established_top20"
+    if symbol in futures_only:
+        return "futures_poll"
+    return "liquidity_added_spot"
+
+
 async def has_open_position(session: AsyncSession, symbol_pair: str) -> bool:
     """True if symbol_pair has an open live_trades OR shadow_open_positions
     row. Checked before ANY exit -- hard override, not best-effort.
@@ -282,12 +343,13 @@ async def refresh_live_fleet_universe(
     Order of operations (load-bearing for the hysteresis rule):
       1. Fetch the full market (futures + spot symbol sets, bulk 24h
          tickers) and cheap-prefilter candidates on qvol alone.
-      2. Load the PRIOR snapshot (and, only if there is none at all,
-         the cold-start legacy-fleet seed) -- this happens BEFORE any
-         of this tick's check_liquidity samples are taken, because
-         "is this symbol currently a member" determines which
-         hysteresis threshold (3-of-5 entry vs unanimous-fail exit)
-         applies to THIS tick's samples.
+      2. Load the PRIOR snapshot (determines which hysteresis threshold,
+         3-of-5 entry vs unanimous-fail exit, applies to THIS tick's
+         samples) and the frozen baseline symbol set (determines cohort
+         -- see module docstring's "Cohort classification"; unlike the
+         hysteresis threshold, this is NOT prior-dependent, just loaded
+         once per refresh for the classifier calls below). Both happen
+         BEFORE any of this tick's check_liquidity samples are taken.
       3. Sample check_liquidity per candidate and apply the
          direction-dependent threshold from step 2's prior state -- N_SAMPLES
          times (~10s apart) on every refresh EXCEPT the very first-ever one,
@@ -296,8 +358,8 @@ async def refresh_live_fleet_universe(
       4. Re-add anything with a currently-open live position that isn't
          already in results (hard override, Task 5d): prior liquidity
          numbers carried forward unchanged if a prior entry exists,
-         otherwise one fresh check_liquidity sample tagged
-         established_top20 as the safe default (see
+         otherwise one fresh check_liquidity sample, cohort decided by
+         the same pure `_classify_cohort` call as everywhere else (see
          get_open_position_symbols / module docstring for why this
          queries live positions directly rather than only `prior`).
       5. Persist the new snapshot and return it.
@@ -328,26 +390,7 @@ async def refresh_live_fleet_universe(
 
     async with session_factory() as session:
         prior = {e.symbol: e for e in await load_live_fleet_universe(session)}
-
-        # Cold-start seed: no prior snapshot at all -- consult today's
-        # legacy top-20-by-volume fleet so pre-cutover coverage gets
-        # tagged established_top20, not liquidity_added_spot. Gated on
-        # `not prior` so this can only ever fire on the very first
-        # successful refresh (every refresh from here on persists at
-        # least one row, per step 5 below, so `prior` is non-empty on
-        # every subsequent call).
-        legacy_top20: set[str] = set()
-        if not prior:
-            from app.shadow.universe import load_current_universe
-            from app.ws.keepalive import KEEPALIVE_TOP_N, to_pair
-            try:
-                legacy_entries = await load_current_universe(session)
-                legacy_top20 = {
-                    to_pair(e.symbol).replace("/", "")
-                    for e in legacy_entries[:KEEPALIVE_TOP_N]
-                }
-            except Exception as e:  # noqa: BLE001 -- cold-start seed is best-effort
-                log.warning("live_fleet_universe: legacy top-20 seed failed: %s", e)
+        baseline_symbols = await load_baseline_symbols(session)
 
     results: dict[str, LiveFleetEntry] = {}
     # Symbols removed this cycle via the fast-exit severity trigger (as
@@ -436,15 +479,12 @@ async def refresh_live_fleet_universe(
         # against this repo's mypy invocation); the assert below does.
         assert last_check is not None
 
-        cohort: Cohort
-        if currently_in:
-            cohort = prior[sym].cohort  # sticky -- inherited, never recomputed
-        elif sym in legacy_top20:
-            cohort = "established_top20"
-        elif sym in futures_only:
-            cohort = "futures_poll"
-        else:
-            cohort = "liquidity_added_spot"
+        # Pure function of identity -- no branch on currently_in, no
+        # sticky inheritance. See module docstring's "Cohort
+        # classification" for why (a stateful/sticky version is exactly
+        # what let NEARUSDT/ADAUSDT lose their real established_top20
+        # lineage on real re-entry).
+        cohort = _classify_cohort(sym, baseline=baseline_symbols, futures_only=futures_only)
 
         results[sym] = LiveFleetEntry(
             symbol=sym, cohort=cohort, qvol_24h=qvol_by_symbol[sym],
@@ -468,10 +508,13 @@ async def refresh_live_fleet_universe(
     #     numbers unchanged, not re-sampled.
     #   - Symbol has NO prior entry at all (brand-new open position, or
     #     this is the very first refresh ever) -- rather than fabricate
-    #     placeholder numbers, take one fresh check_liquidity sample and
-    #     tag established_top20 as the safe cohort default when there is
-    #     genuinely no lineage to inherit. Self-correcting from the next
-    #     refresh onward once this symbol has a prior entry. If even the
+    #     placeholder numbers, take one fresh check_liquidity sample.
+    #     Cohort is decided by the SAME pure `_classify_cohort` call as
+    #     every other path in this module -- 2026-08-30 fix: this used
+    #     to hardcode established_top20 "as the safe default," which is
+    #     exactly how XPLUSDT/TRUMPUSDT/REDUSDT picked up fabricated
+    #     lineage despite having little or no real pre-cutover history.
+    #     A rescue path must never invent a classification. If even the
     #     rescue sample fails (e.g. a spot-only symbol with no futures
     #     order book), log loudly -- coverage genuinely cannot be
     #     guaranteed this refresh -- rather than silently drop the symbol.
@@ -499,15 +542,20 @@ async def refresh_live_fleet_universe(
             else:
                 try:
                     check = await check_liquidity(sym, rate_client)
+                    rescue_cohort = _classify_cohort(
+                        sym, baseline=baseline_symbols, futures_only=futures_only,
+                    )
                     results[sym] = LiveFleetEntry(
-                        symbol=sym, cohort="established_top20",
+                        symbol=sym, cohort=rescue_cohort,
                         qvol_24h=qvol_by_symbol.get(sym, 0.0),
                         spread_bps=check.spread_bps, depth_0_5pct_usdt=check.depth_0_5pct_usdt,
                     )
                     log.warning(
                         "live_fleet_universe: %s has an open position but no prior "
-                        "snapshot entry -- rescued with a fresh sample, tagged "
-                        "established_top20 as the safe default", sym,
+                        "snapshot entry -- rescued with a fresh sample, cohort=%s "
+                        "from the pure classifier (no hardcoded default -- a "
+                        "rescue path must never invent a classification)",
+                        sym, rescue_cohort,
                     )
                 except Exception as e:  # noqa: BLE001
                     log.error(
@@ -536,5 +584,5 @@ __all__ = [
     "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
     "SEVERE_DEPTH_RATIO", "SEVERE_SPREAD_RATIO",
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
-    "load_live_fleet_universe", "refresh_live_fleet_universe",
+    "load_baseline_symbols", "load_live_fleet_universe", "refresh_live_fleet_universe",
 ]
