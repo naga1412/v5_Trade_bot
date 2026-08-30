@@ -60,6 +60,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "p_win_refit": "app/workers/p_win_refit.py",
     "live_fleet_universe_refresh_task": "app/shadow/universe_refresh_scheduler.py",
     "pattern_stats_refresh": "app/workers/pattern_stats_refresh.py",
+    "futures_only_refresh_task": "app/workers/futures_only_refresh.py",
 }
 
 
@@ -214,6 +215,9 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "live_fleet_universe_refresh_task": 6 * 60 * 60,
     # 24h nightly (pattern_stats fix, 2026-08-20)
     "pattern_stats_refresh": 24 * 60 * 60,
+    # 24h nightly (item 0, 2026-08-30) -- listing data, deliberately NOT
+    # coupled to live_fleet_universe_refresh_task's 6h cadence above.
+    "futures_only_refresh_task": 24 * 60 * 60,
 }
 
 

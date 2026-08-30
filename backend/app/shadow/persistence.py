@@ -170,13 +170,20 @@ async def list_open_positions(
             funding_directional_adj=getattr(r, "funding_directional_adj", None),
             # Migration 0040 (2026-08-20): the 5 columns Fix 3 missed.
             # Same dict/str normalization as layer_scores above for
-            # mtf_adx_by_tf_json (also JSONB); symbol_source is a plain
-            # NOT NULL TEXT column so falls back to the dataclass
-            # default only for pre-migration rows in a mid-deploy window.
+            # mtf_adx_by_tf_json (also JSONB).
             mtf_adx_by_tf_json=_normalize_mtf_directions_json(
                 getattr(r, "mtf_adx_by_tf_json", None),
             ),
-            symbol_source=getattr(r, "symbol_source", None) or "established_top20",
+            # Item 0 (2026-08-30): migration 0042 dropped the NOT NULL
+            # DEFAULT 'established_top20' constraint specifically so a
+            # genuine classification-failure NULL (see worker.py's
+            # position-open path) round-trips as None, not as a
+            # fabricated cohort tag. Do NOT add `or "established_top20"`
+            # back here -- that `or` is exactly the rescue-path defect
+            # (fabricated lineage for TRUMPUSDT, invisible to every
+            # audit) this item exists to stop reintroducing at the read
+            # side instead of the write side.
+            symbol_source=getattr(r, "symbol_source", None),
             hold_scaling_factor=getattr(r, "hold_scaling_factor", None),
             hold_timeout_bars=getattr(r, "hold_timeout_bars", None),
         ))

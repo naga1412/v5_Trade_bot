@@ -52,3 +52,31 @@ def _pause_state_clean(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pause_state, "_get_redis", lambda: fake)
     yield
     pause_state._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _cohort_cache_warm(monkeypatch: pytest.MonkeyPatch):
+    """Item 0 (2026-08-30): app.shadow.cohort_cache is module-level state,
+    None (unwarmed) at process start. Without this fixture, EVERY test
+    that opens a shadow position through the real worker.py path would
+    hit the "classification cache unavailable" branch -- writing
+    symbol_source=NULL and firing a real alert_admin call on every
+    single test, drowning out the handful of tests that actually mean
+    to exercise that path deliberately.
+
+    Seeds both caches EMPTY (not None) by default: `_classify_cohort`
+    then deterministically returns "liquidity_added_spot" for any
+    symbol (not in an empty baseline, not in an empty futures_only set)
+    -- a real, valid classification, not the failure path. Tests that
+    specifically exercise the failure path (empty-cache or raising
+    classifier) reset via `cohort_cache._reset_for_tests()` themselves
+    to get back to the unwarmed None state; tests that care about a
+    SPECIFIC classification seed the caches directly via monkeypatch.
+    """
+    from app.shadow import cohort_cache
+
+    cohort_cache._reset_for_tests()
+    monkeypatch.setattr(cohort_cache, "_baseline_cache", set())
+    monkeypatch.setattr(cohort_cache, "_futures_only_cache", set())
+    yield
+    cohort_cache._reset_for_tests()
