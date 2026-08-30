@@ -52,6 +52,46 @@ def test_combined_stream_url_chunked_at_200_streams() -> None:
     assert url.count("/") - 2 == 200  # 200 streams in URL (subtract scheme //)
 
 
+def test_combined_stream_url_truncation_logs_loudly(caplog) -> None:
+    """2026-08-30 operator ruling: truncation must never be silent -- a
+    prior version dropped symbols past max_streams with zero signal,
+    and since callers pass an alphabetically-sorted list (worker.py's
+    _compute_subscription_set), the drop was not random -- it
+    systematically favored early-alphabet tickers. Now it logs at
+    ERROR with the exact dropped-symbol list."""
+    import logging
+    symbols = [f"SYM{i:03d}USDT" for i in range(5)]
+    with caplog.at_level(logging.ERROR, logger="app.shadow.multi_stream"):
+        build_combined_stream_url(symbols=symbols, timeframe="1h", max_streams=3)
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert "TRUNCATING" in caplog.records[0].message
+    assert "SYM003USDT" in caplog.records[0].message
+    assert "SYM004USDT" in caplog.records[0].message
+
+
+def test_combined_stream_url_no_truncation_no_log(caplog) -> None:
+    """Companion negative case: under the cap, zero log noise."""
+    import logging
+    with caplog.at_level(logging.ERROR, logger="app.shadow.multi_stream"):
+        build_combined_stream_url(symbols=["BTCUSDT", "ETHUSDT"], timeframe="1h", max_streams=200)
+    assert len(caplog.records) == 0
+
+
+def test_multi_stream_reader_exposes_truncated_symbols() -> None:
+    """The async caller (worker.py's _build_default_worker) needs this
+    to route a truncation through alert_admin -- build_combined_stream_url
+    itself stays sync and can only log."""
+    symbols = [f"SYM{i:03d}USDT" for i in range(5)]
+    reader = MultiStreamReader(symbols=symbols, timeframe="1h", max_streams=3)
+    assert reader.truncated_symbols == ["SYM003USDT", "SYM004USDT"]
+
+
+def test_multi_stream_reader_no_truncation_empty_list() -> None:
+    reader = MultiStreamReader(symbols=["BTCUSDT", "ETHUSDT"], timeframe="1h", max_streams=200)
+    assert reader.truncated_symbols == []
+
+
 SAMPLE_CLOSED = {
     "stream": "btcusdt@kline_1h",
     "data": {

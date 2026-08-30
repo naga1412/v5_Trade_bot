@@ -35,6 +35,7 @@ from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
 from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
+from app.ops.alert_routing import alert_admin
 from app.ops.heartbeat import record_heartbeat
 from app.shadow.engine import (
     PositionGate,
@@ -1062,9 +1063,40 @@ async def _load_open_position_symbols(session: AsyncSession) -> set[str]:
 
 def _compute_subscription_set(
     top_n: Iterable[str], open_position_symbols: Iterable[str],
+    *, baseline: Iterable[str] = (),
 ) -> list[str]:
-    """Deduped + sorted union — stable ordering for log readability."""
-    return sorted(set(top_n) | set(open_position_symbols))
+    """Deduped union, ordered [baseline members first] + [rest, sorted].
+
+    2026-08-30 operator ruling: this ordering is a deliberate trade-off,
+    not arbitrary tidiness. MultiStreamReader/build_combined_stream_url
+    truncates to max_streams=200 if this list ever exceeds it (see their
+    own comments) -- putting the frozen cohort_baseline_symbols set
+    first means that IF truncation ever fires, the established_top20
+    stream (mid-measurement for the breakeven-variant read) is
+    protected, and new-cohort symbols (liquidity_added_spot/
+    futures_poll -- several real members already sort late
+    alphabetically, e.g. XRPUSDT/ZECUSDT/TRXUSDT would otherwise be the
+    ones at risk) are the ones dropped instead. That is NOT free: it
+    systematically under-samples criterion #2's TREATMENT arm exactly
+    when capacity is tightest, reducing its power to detect real
+    degradation -- the same "biases against firing a reversal" shape as
+    every other defect in this thread. Accepted ONLY because
+    build_combined_stream_url's 2026-08-30 fix makes truncation loud
+    (ERROR log + alert_admin, see _build_default_worker below) rather
+    than a silent, permanent sampling bias -- if this trade-off is ever
+    actually exercised, it pages, it doesn't quietly happen.
+
+    ``baseline`` defaults to empty so this function stays the same pure
+    sorted-union it always was for any caller that doesn't pass one
+    (today, that's every real call site -- item 0, which would populate
+    ``top_n`` with more than the top-30, is a separate, not-yet-built
+    change; this parameter exists so the ordering is already correct
+    once it lands, without a second migration of caller code)."""
+    baseline_set = set(baseline)
+    full = set(top_n) | set(open_position_symbols)
+    priority = sorted(s for s in full if s in baseline_set)
+    rest = sorted(s for s in full if s not in baseline_set)
+    return priority + rest
 
 
 async def _build_default_worker() -> ShadowWorker:
@@ -1078,11 +1110,13 @@ async def _build_default_worker() -> ShadowWorker:
     only.
 
     PR-CLEANUP-BATCH-1 §I: the subscription set is
-    ``top_30 ∪ open_position_symbols`` (deduped, sorted). Open positions
-    on symbols that have since dropped from the universe still receive
+    ``top_30 ∪ open_position_symbols`` (deduped, ordered baseline-first
+    then sorted — see _compute_subscription_set). Open positions on
+    symbols that have since dropped from the universe still receive
     WS ticks and can be exited cleanly.
     """
     from app.config import get_settings
+    from app.shadow.live_fleet_universe import load_baseline_symbols
     settings = get_settings()
     timeframes: list[str] = list(settings.SHADOW_TIMEFRAMES) or [SHADOW_TIMEFRAME]
     narrow: list[str] = list(settings.SHADOW_NARROW_UNIVERSE)
@@ -1092,8 +1126,9 @@ async def _build_default_worker() -> ShadowWorker:
         top_n = await load_shadow_universe(session, narrow=narrow)
         # PR-CLEANUP-BATCH-1 §I: union with open positions.
         open_position_symbols = await _load_open_position_symbols(session)
+        baseline_symbols = await load_baseline_symbols(session)
 
-    symbols = _compute_subscription_set(top_n, open_position_symbols)
+    symbols = _compute_subscription_set(top_n, open_position_symbols, baseline=baseline_symbols)
     extra = sorted(set(open_position_symbols) - set(top_n))
     if extra:
         log.info(
@@ -1105,6 +1140,19 @@ async def _build_default_worker() -> ShadowWorker:
     readers: dict[str, _StreamReader] = {
         tf: MultiStreamReader(symbols=symbols, timeframe=tf) for tf in timeframes
     }
+    # 2026-08-30 operator ruling: never let a truncation happen quietly.
+    # build_combined_stream_url already logs at ERROR; this is the
+    # louder, paged signal (async context needed for alert_admin, which
+    # this helper has and that sync function does not).
+    for tf, reader in readers.items():
+        if reader.truncated_symbols:
+            await alert_admin(
+                f"shadow_worker: WS subscription truncated for timeframe {tf} -- "
+                f"{len(reader.truncated_symbols)} symbol(s) dropped from live "
+                f"coverage: {reader.truncated_symbols[:20]}"
+                + ("..." if len(reader.truncated_symbols) > 20 else ""),
+                level="critical",
+            )
     log.info(
         "shadow_worker: build_default → %d symbols × %d TF(s) %s",
         len(symbols), len(timeframes), timeframes,
