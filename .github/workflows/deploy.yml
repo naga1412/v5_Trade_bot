@@ -3,6 +3,10 @@ name: deploy
 on:
   push:
     branches: [main, dev]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/workflows/ops-debug.yml"
   workflow_dispatch:
 
 # Two parallel deploy paths:
@@ -12,6 +16,21 @@ on:
 # Same Hetzner box, separate docker-compose stacks, separate volumes,
 # separate Postgres database. Staging hard-OFF for autonomous trading
 # regardless of .env contents (compose env override).
+#
+# paths-ignore (2026-08-30): before this, EVERY push to main/dev
+# deployed -- no path filter existed, so a pure ops-debug.yml or *.md
+# change restarted the live backend (~25-30s real WS outage on prod)
+# with zero behavior change to justify it. Discovered when merging
+# PR #529 (an ops-debug.yml-only probe addition, believed inert)
+# silently triggered a real prod restart that collided with a 15m
+# candle boundary. This list is deliberately conservative and uses
+# an ignore-list, NOT an allow-list: an allow-list that misses a real
+# code path silently stops deploying actual changes, which is a far
+# worse failure mode than one extra harmless deploy. Only add entries
+# here that are provably inert to the running backend/frontend --
+# when in doubt, leave it deploying. Do NOT add `.github/workflows/**`
+# wholesale: deploy.yml and ci.yml themselves, and any future
+# workflow that touches runtime behavior, must keep deploying.
 #
 # Concurrency guard (added 2026-08-07 after a real incident): merging
 # multiple PRs within seconds of each other fired multiple `docker
