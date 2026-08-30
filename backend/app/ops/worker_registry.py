@@ -437,6 +437,29 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # state beyond one refresh cycle (any partial INSERT loop is inside
         # an uncommitted session; a mid-cycle cancel rolls back cleanly).
     ),
+    # Item 0 (2026-08-30) -- daily futures_only listing cache feeding
+    # ShadowWorker's synchronous cohort classification at position-open
+    # time. Deliberately separate from the 6h fleet-membership refresh
+    # above: futures_only is a near-static Binance listing property, not
+    # fleet membership, and the operator explicitly ruled the two must
+    # not share a cadence. See app.workers.futures_only_refresh's
+    # docstring for the full rationale.
+    WorkerSpec(
+        name="futures_only_refresh_task",
+        description=(
+            "Daily refresh of the futures-only-listing cache "
+            "(app.shadow.cohort_cache) -- feeds symbol_source "
+            "classification at shadow position-open time. Kept off the "
+            "hot path: refreshed here, read synchronously with zero I/O."
+        ),
+        liveness_query=HEARTBEAT,
+        # Cadence + ~10% grace, matching symbol_allowlist_refresh's
+        # daily-cadence treatment (Healer B2).
+        max_staleness_seconds=26 * 60 * 60,
+        stateful=False,  # safe to auto-restart -- a failed refresh cycle
+        # leaves the prior in-memory cache untouched (cohort_cache's own
+        # contract); no partial-write state to worry about on cancel.
+    ),
     # pattern_stats fix, 2026-08-20 -- update_pattern_stats existed and had
     # a passing unit test but was never wired to a scheduler anywhere in
     # the application, so pattern_stats went unpopulated for months

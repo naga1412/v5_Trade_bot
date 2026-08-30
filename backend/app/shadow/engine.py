@@ -111,15 +111,19 @@ class ShadowPosition:
     effective_score: float | None = None
     realized_vol_20d: float | None = None
     funding_directional_adj: float | None = None
-    # Phase 4 Task 9: cohort tag. Unlike the PR1 analytics fields above
-    # (which default None -- their columns are nullable), this defaults
-    # to a real string because shadow_trades.symbol_source is
-    # NOT NULL DEFAULT 'established_top20' (migration 0038).
-    # Migration 0040 (2026-08-20) added this column to
-    # shadow_open_positions with the same NOT NULL DEFAULT, so a
-    # restart-survivor position now reloads its REAL cohort tag rather
-    # than silently falling back to this dataclass default.
-    symbol_source: str = "established_top20"
+    # Phase 4 Task 9: cohort tag. Originally defaulted to a real string
+    # because both columns were NOT NULL DEFAULT 'established_top20'
+    # (migrations 0038/0040).
+    #
+    # Item 0 (2026-08-30): migration 0042 dropped both NOT NULL DEFAULT
+    # constraints. `worker.py`'s position-open path now ALWAYS overwrites
+    # this field explicitly -- with a real classification, or with None
+    # when classification cannot complete (operator ruling: NULL + a
+    # healer alert, never a guessed cohort; see worker.py's own comment
+    # at the call site for the full rationale). The "established_top20"
+    # default below only matters for old duck-typed test fixtures that
+    # construct a ShadowPosition without touching this field at all.
+    symbol_source: str | None = "established_top20"
 
     # Amendment 3 (2026-07-31): in-memory bar buffer used by the
     # breakeven-variant lane to replay the position's price path at
