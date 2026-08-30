@@ -73,7 +73,14 @@ BOOTSTRAP_ADMIN_USER_ID: int = 1
 
 
 class _StreamReader(Protocol):
-    """Anything with an async ``stream()`` that yields MultiStreamCandle."""
+    """Anything with an async ``stream()`` that yields MultiStreamCandle.
+
+    ``truncated_symbols`` (2026-08-30): the loud-truncation-safety fix
+    reads this off each real reader in _build_default_worker to decide
+    whether to page via alert_admin -- declared here so the Protocol
+    stays accurate for mypy against that real usage."""
+
+    truncated_symbols: list[str]
 
     def stream(self) -> Any: ...
 
