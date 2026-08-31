@@ -289,6 +289,31 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # WS faster than Binance's per-IP rate window — alert-only is safer.
         stateful=True,
     ),
+    # 16b. Phase 4 Task 17 — REST-polling supervisor for futures-only
+    #      symbols (the liquidity-floor cohort that doesn't qualify for the
+    #      top-N spot-WS fleet above). Structurally mirrors ws_keepalive_task:
+    #      own child-task set, own reconciliation loop, 5-min heartbeat
+    #      cadence (FUTURES_POLL_HEARTBEAT_SECONDS). stateful=True for the
+    #      same open-position-safety reason ws_keepalive_task is stateful —
+    #      a watchdog-triggered restart would cancel every child task
+    #      (run_futures_poll's `finally` block), and on the fresh restart
+    #      the desired-symbol set is recomputed from the liquidity-floor
+    #      cohort only (_load_desired_futures_symbols), NOT from currently
+    #      open positions — so a symbol that has since dropped off the
+    #      liquidity floor but still has an open live position would not be
+    #      restarted, silently losing its candle feed. Auto-restart is only
+    #      safe within _refresh_futures_children's own reconciliation (which
+    #      does carry the open-position override); a supervisor-level
+    #      restart does not. Alert-only, matching ws_keepalive_task.
+    WorkerSpec(
+        name="futures_poll_task",
+        description="REST-polls Binance Futures klines for the liquidity-floor futures-only symbol cohort (1h)",
+        liveness_query=HEARTBEAT,
+        # 5-min heartbeat cadence + 10-min slack — identical budget to
+        # ws_keepalive_task, which shares the same cadence.
+        max_staleness_seconds=15 * 60,
+        stateful=True,
+    ),
     # 17. MTF cache pre-warm — single-shot at startup; loads the top-30
     #     universe and calls prewarm_cache (60s hard deadline, fail-open).
     #     FU-1 H9 + FU-15: emits ONE heartbeat with
@@ -377,6 +402,40 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # daily-cadence treatment (Healer B2).
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,  # safe to auto-restart
+    ),
+    # 23. Phase 4 Task 5c — 6h liquidity-floor live_fleet_universe refresh.
+    #     Populates live_fleet_universe, the table ws_keepalive_task and
+    #     futures_poll_task both read to decide which symbols to poll.
+    #     Ratified 2026-08-19 after staging caught the table sitting
+    #     permanently empty -- refresh_live_fleet_universe (Task 5) had
+    #     never had a scheduled caller anywhere in the application. See
+    #     docs/superpowers/decisions/2026-08-19-live-fleet-universe-
+    #     never-scheduled-incident.md.
+    #
+    #     NAME NOTE: NOT "universe_refresh_task" -- that name is already
+    #     taken by the pre-existing, unrelated daily asset_universe
+    #     refresh (entry 3 above, app/shadow/universe_refresh.py). Reusing
+    #     it here would make two different workers share one
+    #     worker_heartbeats row (worker_name is the primary key) and one
+    #     WORKER_REGISTRY entry name. See app/shadow/
+    #     universe_refresh_scheduler.py's module docstring for the full
+    #     note on this naming collision in the plan doc's own snippet.
+    WorkerSpec(
+        name="live_fleet_universe_refresh_task",
+        description=(
+            "Liquidity-floor universe refresh (6h cadence) -- populates "
+            "live_fleet_universe, the table ws_keepalive_task and "
+            "futures_poll_task both read to decide which symbols to poll. "
+            "Ratified 2026-08-19 after staging caught the table sitting "
+            "permanently empty with no scheduler."
+        ),
+        liveness_query=HEARTBEAT,
+        # 6h cadence + ~10% grace (~36min), matching symbol_allowlist_
+        # refresh/p_win_refit's daily-cadence treatment (Healer B2).
+        max_staleness_seconds=6 * 60 * 60 + 36 * 60,
+        stateful=False,  # safe to auto-restart -- no children, no in-flight
+        # state beyond one refresh cycle (any partial INSERT loop is inside
+        # an uncommitted session; a mid-cycle cancel rolls back cleanly).
     ),
 )
 

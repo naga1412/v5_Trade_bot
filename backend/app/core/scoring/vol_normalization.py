@@ -23,6 +23,23 @@ MIN_VOL: float = 0.01             # floor to prevent divide-by-near-zero
 DAYS_PER_YEAR: int = 365          # used in sqrt(365) annualization
 MIN_DAILY_BARS_FOR_VOL: int = 20  # require ≥20 daily bars or return None
 
+# Single source of truth for "how many 1h bars a caller must seed before
+# compute_realized_vol_20d can return non-None" (2026-08-31 consolidation).
+#
+# This same requirement was independently declared THREE times --
+# app.shadow.worker.HISTORY_BARS, app.ws.live_prediction.HISTORY_SEED_BARS,
+# and a bare `limit=504` literal in app.api.routes.tab1 -- and drifted out
+# of sync at least twice: PR #400 fixed live_prediction's copy from 300 to
+# 504 without touching worker.py's, and a third, independently-discovered
+# copy later turned up in tab1.py. Each drift meant `realized_vol_20d`
+# silently read back None for whichever caller still held the stale value,
+# for as long as nobody noticed. One constant, imported everywhere, is the
+# only version of this that can't recur.
+#
+# (MIN_DAILY_BARS_FOR_VOL + 1) days * 24h -- the +1 day is a safety margin
+# over the 20-day floor above, not part of the floor itself.
+HISTORY_SEED_BARS_1H: int = (MIN_DAILY_BARS_FOR_VOL + 1) * 24  # = 504
+
 
 # ---------------------------------------------------------------------------
 # Bar protocol — any object with .ts (UTC datetime) and .close (float)

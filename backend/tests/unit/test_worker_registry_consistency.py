@@ -51,12 +51,14 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "scanner_batch_task": "app/scanner/batch.py",
     "prediction_validator_task": "app/ml/validator.py",
     "ws_keepalive_task": "app/ws/keepalive.py",
+    "futures_poll_task": "app/ws/futures_poll.py",
     "mtf_cache_prewarm_task": "app/core/scoring/mtf_confluence.py",
     "mtf_cache_ttl_refresh_task": "app/core/scoring/mtf_confluence.py",
     "symbol_allowlist_refresh": "app/workers/symbol_allowlist_refresh.py",
     "ui_freshness_monitor": "app/workers/ui_freshness_monitor.py",
     "healer_detector_task": "app/healer/runner.py",
     "p_win_refit": "app/workers/p_win_refit.py",
+    "live_fleet_universe_refresh_task": "app/shadow/universe_refresh_scheduler.py",
 }
 
 
@@ -195,6 +197,7 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "health_pinger_task": 5 * 60,
     "intermarket_snapshot_task": 5 * 60,
     "ws_keepalive_task": 5 * 60,  # SUPERVISOR heartbeat cadence
+    "futures_poll_task": 5 * 60,  # SUPERVISOR heartbeat cadence (Phase 4 Task 17)
     "ui_freshness_monitor": 5 * 60,
     "healer_detector_task": 5 * 60,
     # 24h nightly
@@ -206,6 +209,8 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "auto_promote_task": 24 * 60 * 60,
     "symbol_allowlist_refresh": 24 * 60 * 60,
     "p_win_refit": 24 * 60 * 60,
+    # 6h nightly (Phase 4 Task 5c, ratified 2026-08-19)
+    "live_fleet_universe_refresh_task": 6 * 60 * 60,
 }
 
 
