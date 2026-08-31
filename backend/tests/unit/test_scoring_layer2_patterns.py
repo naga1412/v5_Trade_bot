@@ -193,7 +193,78 @@ def test_notes_summarises_fire_count(monkeypatch: pytest.MonkeyPatch) -> None:
     score = layer2_patterns.score(_bars(), current_idx=99, stats=stats)
     assert "hammer" in score.notes
     # spec §12 Q4: note kept short
-    assert len(score.notes) <= 500
+    assert len(score.notes) <= layer2_patterns.NOTES_MAX_CHARS
+
+
+def test_notes_always_valid_json_even_when_truncated() -> None:
+    """Notes-truncation fix (2026-08-31): a real prod trade with enough
+    fires used to blow the old 500-char cap and get sliced mid-object,
+    producing unparseable JSON (confirmed: 68.8% of a 2,000-trade sample).
+    A high fire count must now still produce VALID, parseable JSON --
+    shortened, never corrupted."""
+    import json
+
+    from app.core.scoring import layer2_patterns
+    from app.core.patterns.base import PatternFire
+
+    fires = [
+        PatternFire(
+            pattern_id=f"pattern_{i}_with_a_moderately_long_identifier",
+            direction="LONG", strength=0.9, confidence=0.9, evidence={},
+        )
+        for i in range(60)  # comfortably enough to exceed NOTES_MAX_CHARS
+    ]
+    notes = layer2_patterns._build_notes(fires)
+    assert len(notes) <= layer2_patterns.NOTES_MAX_CHARS
+    parsed = json.loads(notes)  # must not raise
+    assert parsed["n"] == 60  # true total fire count, even though shortened
+    assert parsed["truncated"] is True
+    assert len(parsed["patterns"]) < 60
+
+
+def test_notes_drops_weakest_fires_first_when_truncating() -> None:
+    """Fires kept under a tight cap should be the STRONGEST
+    (strength*confidence), not an arbitrary detection-order slice."""
+    import json
+
+    from app.core.scoring import layer2_patterns
+    from app.core.patterns.base import PatternFire
+
+    strong = PatternFire(
+        pattern_id="strong_pattern", direction="LONG",
+        strength=1.0, confidence=1.0, evidence={},
+    )
+    weak_fires = [
+        PatternFire(
+            pattern_id=f"weak_pattern_{i}_padded_identifier_for_length",
+            direction="LONG", strength=0.1, confidence=0.1, evidence={},
+        )
+        for i in range(60)
+    ]
+    notes = layer2_patterns._build_notes(weak_fires + [strong])
+    parsed = json.loads(notes)
+    assert parsed["truncated"] is True
+    ids = [p["id"] for p in parsed["patterns"]]
+    assert "strong_pattern" in ids
+
+
+def test_notes_no_truncation_when_it_fits() -> None:
+    """Negative case: a normal, low fire count round-trips with
+    truncated=False and no fires dropped."""
+    import json
+
+    from app.core.scoring import layer2_patterns
+    from app.core.patterns.base import PatternFire
+
+    fires = [
+        PatternFire(pattern_id="hammer", direction="LONG", strength=0.5, confidence=0.5, evidence={}),
+        PatternFire(pattern_id="engulfing", direction="SHORT", strength=0.6, confidence=0.6, evidence={}),
+    ]
+    notes = layer2_patterns._build_notes(fires)
+    parsed = json.loads(notes)
+    assert parsed["n"] == 2
+    assert parsed["truncated"] is False
+    assert len(parsed["patterns"]) == 2
 
 
 # ---- load_pattern_stats (E2 unit-side) -----------------------------------

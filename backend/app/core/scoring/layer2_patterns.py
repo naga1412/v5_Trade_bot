@@ -41,8 +41,19 @@ TANH_DIVISOR: float = 3.0
 NEUTRAL_BAND: float = 0.05
 """|squashed| < 0.05 → NEUTRAL; spec §3.3."""
 
-NOTES_MAX_CHARS: int = 500
-"""spec §12 Q4 — keep ``LayerScore.notes`` short for JSONB storage."""
+NOTES_MAX_CHARS: int = 2000
+"""spec §12 Q4 — keep ``LayerScore.notes`` short for JSONB storage.
+
+Raised from 500 (2026-08-31, notes-truncation fix): confirmed on real
+prod data that a mid-fire-count trade (~10+ fires) blows past 500
+chars, and ``_build_notes`` used to slice the JSON string blindly at
+the character boundary -- producing invalid, unparseable JSON for
+68.8% of trades in a 2,000-trade sample. 2000 chars comfortably fits
+~25-30 realistic pattern fires; ``_build_notes`` below now ALSO
+truncates at the pattern boundary (weakest fires dropped first, never
+mid-object) so even a pathological fire count degrades to a smaller
+valid payload instead of an unparseable one.
+"""
 
 
 @dataclass(frozen=True)
@@ -195,17 +206,38 @@ def _compute_layer_confidence(fires: list[PatternFire]) -> float:
 
 
 def _build_notes(fires: list[PatternFire]) -> str:
-    """Compact JSON-style summary capped at ``NOTES_MAX_CHARS`` (spec §12 Q4)."""
+    """Compact JSON-style summary capped at ``NOTES_MAX_CHARS`` (spec §12 Q4).
+
+    Truncates at the PATTERN boundary, never mid-character. A blind
+    ``[:NOTES_MAX_CHARS]`` character slice (the pre-2026-08-31 behavior)
+    produces invalid JSON whenever the cut lands inside a fire object --
+    confirmed on real prod data, 68.8% of trades in a 2,000-trade sample
+    had unparseable ``notes`` for exactly this reason, silently losing
+    those trades' pattern attribution entirely in
+    ``app.ml.patterns.update_pattern_stats``. Dropping whole fires from
+    the WEAKEST end (lowest strength*confidence first) instead means a
+    high-fire-count trade degrades to a smaller but always-valid
+    payload, and keeps the most significant fires when something has to
+    give. ``"n"`` always reports the true total fire count even when
+    ``"patterns"`` had to be shortened; ``"truncated"`` flags when that
+    happened so a consumer can tell the two cases apart.
+    """
     if not fires:
         return "0 patterns fired"
-    payload = {
-        "n": len(fires),
-        "patterns": [
-            {
-                "id": f.pattern_id, "dir": f.direction,
-                "s": round(f.strength, 3), "c": round(f.confidence, 3),
-            }
-            for f in fires
-        ],
-    }
-    return json.dumps(payload, separators=(",", ":"))[:NOTES_MAX_CHARS]
+    # Strongest first, so truncation below drops the weakest fires.
+    ordered = sorted(fires, key=lambda f: f.strength * f.confidence, reverse=True)
+    all_patterns = [
+        {"id": f.pattern_id, "dir": f.direction, "s": round(f.strength, 3), "c": round(f.confidence, 3)}
+        for f in ordered
+    ]
+    kept = list(all_patterns)
+    while kept:
+        payload = {"n": len(fires), "patterns": kept, "truncated": len(kept) < len(all_patterns)}
+        s = json.dumps(payload, separators=(",", ":"))
+        if len(s) <= NOTES_MAX_CHARS:
+            return s
+        kept.pop()
+    # Pathological: even zero patterns doesn't fit under the cap. Report
+    # the count only -- still valid JSON, never reached in practice at
+    # NOTES_MAX_CHARS=2000.
+    return json.dumps({"n": len(fires), "patterns": [], "truncated": True}, separators=(",", ":"))
