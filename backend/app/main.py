@@ -42,6 +42,18 @@ from app.data.intermarket_worker import (
 )
 from app.data.universe_sync import start_universe_sync_task
 from app.shadow.universe_refresh import start_universe_refresh_task
+# Phase 4 Task 5c — NOT the same worker as the import directly above.
+# app.shadow.universe_refresh (start_universe_refresh_task) is the
+# pre-existing daily 00:00 UTC asset_universe (top-30-by-volume) refresh.
+# app.shadow.universe_refresh_scheduler (start_live_fleet_universe_
+# refresh_task) is new: it schedules refresh_live_fleet_universe (Task 5),
+# the liquidity-floor selector that populates live_fleet_universe -- the
+# table ws_keepalive_task/futures_poll_task read. Deliberately distinct
+# names throughout (see that module's docstring) to avoid two unrelated
+# workers colliding on one worker_heartbeats row / WORKER_REGISTRY entry.
+from app.shadow.universe_refresh_scheduler import (
+    start_live_fleet_universe_refresh_task,
+)
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
 from app.rl.checkpoints import load_active_checkpoint as load_rl_active_checkpoint
@@ -78,6 +90,7 @@ from app.trading.execution.liquidation_monitor import (
     start_liquidation_monitor,
 )
 from app.trading.preflight import check_audit_chain_intact, run_preflight
+from app.ws.futures_poll import start_futures_poll_task
 from app.ws.keepalive import start_keepalive_task
 from app.ws.live_prediction import start_background_worker
 from app.core.scoring.mtf_confluence import (
@@ -148,6 +161,8 @@ async def lifespan(_app: FastAPI):
     scanner_batch_task = None
     prediction_validator_task = None
     ws_keepalive_task = None
+    futures_poll_worker = None  # Phase 4 Task 17
+    live_fleet_universe_refresh_task = None  # Phase 4 Task 5c
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
@@ -262,11 +277,47 @@ async def lifespan(_app: FastAPI):
             "prediction_validator_task",
             lambda: start_prediction_validator_task(get_session_factory()),
         )
+        # Phase 4 Task 5c: 6h liquidity-floor live_fleet_universe refresh.
+        # Spawned BEFORE ws_keepalive_task/futures_poll_task below so their
+        # very first _load_keepalive_symbols/_load_desired_futures_symbols
+        # call benefits from the universe refresh having already fired at
+        # least once — avoids both fleet supervisors' cold "0 children" log
+        # line firing needlessly on every single fresh boot when it's
+        # avoidable (neither actually depends on strict ordering).
+        #
+        # Routed through worker_supervisor (_wrap), NOT spawned directly
+        # like futures_poll_worker/ws_keepalive_task below. Those two are
+        # stateful=True (own live child-task sets — an auto-restart would
+        # cancel every child abruptly). This worker is stateful=False in
+        # its own WorkerSpec (see worker_registry.py: "no children, no
+        # in-flight state beyond one refresh cycle") — the same category
+        # worker_supervisor's own docstring names as a canonical example
+        # ("stateless polls (universe refresh, health pinger, scanner,
+        # validator)"). Spawning it unsupervised would repeat the exact gap
+        # Healer B1 (2026-07-23, see the symbol_allowlist_task comment
+        # below) already fixed once in this file: a stateful=False
+        # WorkerSpec whose task bypasses worker_supervisor can never
+        # actually be auto-restarted by the watchdog despite being marked
+        # safe to, and instead falls through to "alert (not_supervised)"
+        # every time.
+        live_fleet_universe_refresh_task = _wrap(
+            "live_fleet_universe_refresh_task",
+            lambda: start_live_fleet_universe_refresh_task(get_session_factory()),
+        )
+
         # Server-side WS keepalive — fans live-prediction WS subscriptions
         # across top-N universe so prediction_validations is populated 24/7
         # without anyone leaving a browser tab open. Replaces the
         # "open chart, leave tab open" trick we relied on before.
         ws_keepalive_task = start_keepalive_task(get_session_factory())
+
+        # Phase 4 Task 17: REST-polling supervisor for futures-only symbols
+        # (the liquidity-floor cohort that doesn't qualify for the spot-WS
+        # fleet above). Own child-task set, own reconciliation loop, own
+        # heartbeat — a bug here cannot reach ws_keepalive_task's tasks.
+        # Not gated by any feature flag: matches ws_keepalive_task's own
+        # unconditional start within this settings.worker_enabled block.
+        futures_poll_worker = start_futures_poll_task(get_session_factory())
 
         # PR1 Phase 3: MTF kline cache workers. The pre-warm is single-shot
         # (60s deadline, fail-open); the TTL-refresh loop runs indefinitely,
@@ -679,8 +730,12 @@ async def lifespan(_app: FastAPI):
             scanner_batch_task.cancel()
         if prediction_validator_task is not None:
             prediction_validator_task.cancel()
+        if live_fleet_universe_refresh_task is not None:
+            live_fleet_universe_refresh_task.cancel()
         if ws_keepalive_task is not None:
             ws_keepalive_task.cancel()
+        if futures_poll_worker is not None:
+            futures_poll_worker.cancel()
         if mtf_cache_prewarm_task is not None:
             mtf_cache_prewarm_task.cancel()
         if mtf_cache_ttl_refresh_task is not None:
