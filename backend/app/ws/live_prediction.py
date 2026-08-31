@@ -15,6 +15,7 @@ from app.core.gates.entry_quality import evaluate_all_gates
 from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
+from app.core.scoring.vol_normalization import HISTORY_SEED_BARS_1H
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
 from app.db.dispatch_decisions import record_dispatch_decision
 from app.db.payload_builders import build_predictions_payload
@@ -110,7 +111,15 @@ async def _persist_prediction_and_schedule_validation(
 # 504 bars = 21 days gives a 1-day safety margin over the 20-day floor so
 # the columns populate from the FIRST candle after every restart, with zero
 # dependency on inter-deploy uptime.
-HISTORY_SEED_BARS: int = 504
+#
+# Single source of truth (2026-08-31 consolidation): this value was
+# independently declared here, in app.shadow.worker, and in
+# app.api.routes.tab1 -- and drifted at least twice (this file's own copy
+# was the one fixed first, by PR #400; app.shadow.worker's copy stayed at
+# 300 until a later, separate fix). See
+# app.core.scoring.vol_normalization.HISTORY_SEED_BARS_1H for the shared
+# constant all three now import.
+HISTORY_SEED_BARS: int = HISTORY_SEED_BARS_1H
 
 
 async def run_live_prediction(symbol_pair: str = "BTC/USDT", timeframe: str = "1h") -> None:
