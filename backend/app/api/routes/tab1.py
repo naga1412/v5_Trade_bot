@@ -20,6 +20,7 @@ from app.config import get_settings
 from app.core.dataquality.validator import Candle
 from app.core.predictor import build_prediction
 from app.core.scoring.layer8_convlstm import GhostInput
+from app.core.scoring.vol_normalization import HISTORY_SEED_BARS_1H
 from app.data.adapters.binance import BinanceClient, BinanceFuturesAdapter
 from app.data.universe import is_tradable
 from app.db.session import get_session
@@ -190,14 +191,19 @@ async def predict(
         if markers is None:
             raise HTTPException(404, f"Signal {signal} not found")
 
-    # 504 = 21 days of 1h bars, compute_realized_vol_20d's floor (item 2,
-    # 2026-08-13/14 — same fix as shadow/worker.py's HISTORY_BARS and
-    # live_prediction.py's HISTORY_SEED_BARS). Only fully closes the gap
-    # for timeframe="1h"; compute_realized_vol_20d groups by calendar day
-    # regardless of the caller's native timeframe, so shorter timeframes
-    # (1m/5m/15m) still can't span 20 days at any bar count this endpoint
-    # fetches — a pre-existing, separate limitation, out of scope here.
-    candles = await _fetch_recent_candles(pair, timeframe, limit=504)
+    # Single source of truth (2026-08-31 consolidation): this was a THIRD
+    # independent copy of the same "compute_realized_vol_20d needs 21
+    # days of 1h bars" constant, alongside shadow/worker.py's HISTORY_BARS
+    # and live_prediction.py's HISTORY_SEED_BARS -- discovered only after
+    # the other two had already drifted out of sync with each other once.
+    # See app.core.scoring.vol_normalization.HISTORY_SEED_BARS_1H, now
+    # imported everywhere instead of re-declared. Only fully closes the
+    # gap for timeframe="1h"; compute_realized_vol_20d groups by calendar
+    # day regardless of the caller's native timeframe, so shorter
+    # timeframes (1m/5m/15m) still can't span 20 days at any bar count
+    # this endpoint fetches — a pre-existing, separate limitation, out of
+    # scope here.
+    candles = await _fetch_recent_candles(pair, timeframe, limit=HISTORY_SEED_BARS_1H)
     if len(candles) < 200:
         raise HTTPException(503, "Insufficient candles to compute prediction")
     bars = _candles_to_df(candles)

@@ -33,6 +33,7 @@ from app.core.gates.entry_quality import AllowDecision, open_position_gate
 from app.core.predictor import _atr, build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
+from app.core.scoring.vol_normalization import HISTORY_SEED_BARS_1H
 from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
 from app.ops.heartbeat import record_heartbeat
@@ -61,7 +62,12 @@ log = logging.getLogger(__name__)
 # §5.1 spec constants.
 SHADOW_POSITION_SIZE_USDT: float = 30.0
 COOLDOWN_MINUTES: int = 240  # 4 h — prevents repeat stop-outs on the same choppy signal
-HISTORY_BARS: int = 504  # 21 days of 1h bars — compute_realized_vol_20d's floor (PR #400 parity)
+# Single source of truth: app.core.scoring.vol_normalization.HISTORY_SEED_BARS_1H
+# (2026-08-31 consolidation -- this literal drifted independently of
+# live_prediction.py's copy at least once already; see that constant's
+# own docstring for the full history). Kept as HISTORY_BARS here, not
+# renamed, so existing imports/tests are unaffected.
+HISTORY_BARS: int = HISTORY_SEED_BARS_1H
 MAX_BUFFERED_BARS: int = 1000
 SHADOW_TIMEFRAME: str = "1h"
 
