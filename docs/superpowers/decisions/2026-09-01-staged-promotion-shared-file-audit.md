@@ -17,7 +17,7 @@ Method: cross-referenced Stage 1's exact file list (from the merged commit, `git
 | PR | Touches (of Stage 1's files) | Note |
 |---|---|---|
 | **#474** (Epic B, cohort-threading, Task 9 redraft) | `keepalive.py`, `live_prediction.py`, `test_ws_keepalive.py` | The dependency this document's own Stage 1 fix (#536) and #527's promotion both had to work around via forward-reference test fixes — see [[2026-08-19-live-fleet-universe-never-scheduled-incident]] and this repo's own commit history for the pattern. |
-| **#476** (Task 10, dispatch-time liquidity re-check) | `live_prediction.py` | **Touches the exact function (`run_live_prediction`) that #539's futures-poll-seed fix also modifies.** Expect a real reconciliation point, not just a mechanical conflict, when this promotes — #476's liquidity-recheck logic and #539's seed-source branch both live in the same function body. |
+| **#476** (Task 10, dispatch-time liquidity re-check) | `live_prediction.py` | **Touches the exact function (`run_live_prediction`) that #539's futures-poll-seed fix also modifies.** Whichever of #476/#539 merges second needs a REAL conflict resolution in the seeding logic, not a mechanical one — operator's explicit instruction: when #476 comes up for promotion, diff it against post-#539 main before assuming the cherry-pick is clean. |
 | **#528** ("4a-i" of the cohort-tag-defect ruling — loud truncation + baseline-priority WS ordering) | `worker.py` | Same ruling family as #525/#527/#532, explicitly labeled as such in its own commit message. |
 | **#532** (item 0 — synchronous cohort classification at position-open) | `main.py`, `worker_registry.py`, `live_fleet_universe.py`, `worker.py` | Four of Stage 1's files. Completed on dev per the overnight work order's PART A; not yet promoted. |
 | #525 + #527 (baseline migration + pure classifier) | `live_fleet_universe.py`, its test file | **Being promoted now**, alongside #539, per this session's ruling — see the commit this file ships with. |
@@ -33,7 +33,7 @@ Method: cross-referenced Stage 1's exact file list (from the merged commit, `git
 Not a call to re-sequence the approved staged plan — the plan already correctly ordered the cohort-fix chain after the universe expansion, and nothing in the audited window was ever actually broken. It's a call to expect, by name, which future stage-promotion PRs will need conflict resolution against Stage-1-and-later's already-shipped state, so it's planned work rather than a surprise each time:
 
 - **#474, #476, #528, #532** will each need the same "forward-reference test fix" treatment this session already applied twice (#536's own cherry-pick, #527's promotion) when they promote.
-- **#476 specifically** shares a function body with #539 — worth a direct look at #476's diff before it promotes, not just a generic conflict-resolution pass.
+- **#476 specifically** shares a function body with #539 — not a generic conflict-resolution pass. Diff #476 against post-#539 main before assuming the cherry-pick is clean; expect real reconciliation in the seeding logic itself, since #476's liquidity-recheck and #539's seed-source branch both live inside `run_live_prediction`.
 
 ## Reversal criteria
 
