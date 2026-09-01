@@ -146,14 +146,38 @@ async def run_live_prediction(
     ``symbol_source`` is cohort metadata threaded into the persisted and
     dispatched payloads; defaults to ``"established_top20"`` so every
     existing caller is unaffected.
+
+    History-seed source is likewise keyed off ``symbol_source``:
+    ``"futures_poll"`` seeds from Binance FUTURES REST (futures-only
+    symbols have no spot pair by definition -- the default SPOT seed
+    below is a guaranteed permanent failure for every symbol in that
+    cohort, root-caused 2026-09-01 after it produced zero predictions for
+    its entire existence; see
+    docs/superpowers/decisions/2026-09-01-futures-poll-seed-was-spot-only.md).
+    Every other ``symbol_source`` keeps the original SPOT seed unchanged.
     """
     binance_symbol = symbol_pair.replace("/", "")
 
-    async with httpx.AsyncClient() as http:
-        client = BinanceClient(http=http)
-        history = await client.fetch_klines(
-            binance_symbol, timeframe, limit=HISTORY_SEED_BARS,
+    if symbol_source == "futures_poll":
+        # Local imports: matches this module's own existing convention
+        # (see app.ws.futures_poll._default_futures_runner) of deferring
+        # DB-session-factory / shared-client construction to call time,
+        # and avoids a circular import (futures_poll.py imports
+        # run_live_prediction from this module at its own top level).
+        from app.data.adapters import get_intermarket_adapter
+        from app.ws.futures_poll import fetch_futures_seed_klines
+
+        rate_client = get_intermarket_adapter().rate_client
+        assert rate_client is not None
+        history = await fetch_futures_seed_klines(
+            symbol_pair, timeframe, rate_client=rate_client, limit=HISTORY_SEED_BARS,
         )
+    else:
+        async with httpx.AsyncClient() as http:
+            client = BinanceClient(http=http)
+            history = await client.fetch_klines(
+                binance_symbol, timeframe, limit=HISTORY_SEED_BARS,
+            )
     bars = pd.DataFrame([c.__dict__ for c in history])
     bars["ts"] = pd.to_datetime(bars["ts"], utc=True)
     bars = bars.set_index("ts")[["open", "high", "low", "close", "volume"]]
