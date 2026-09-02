@@ -24,9 +24,7 @@ from datetime import datetime, timezone
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.data.adapters._base import Candle
 from app.data.ratelimit import RateLimitedClient
-from app.ops.alert_routing import alert_admin
 from app.ops.heartbeat import record_heartbeat
 from app.shadow.live_fleet_universe import LiveFleetEntry, has_open_position, load_live_fleet_universe
 from app.shadow.multi_stream import MultiStreamCandle
@@ -90,47 +88,6 @@ _GAP_COUNT: dict[str, int] = {}
 
 _CONSECUTIVE_FAILURE_ALERT_THRESHOLD: int = 20
 _consecutive_failures: dict[str, int] = {}
-
-
-async def fetch_futures_seed_klines(
-    symbol_pair: str,
-    timeframe: str,
-    *,
-    rate_client: RateLimitedClient,
-    limit: int,
-) -> list[Candle]:
-    """One-shot REST fetch of up to `limit` historical futures klines --
-    used only once, at child startup, to seed run_live_prediction's initial
-    history DataFrame before futures_rest_poll_candles (Task 7) takes over
-    the ongoing feed.
-
-    2026-09-01 root cause: run_live_prediction's default seed path fetches
-    from Binance SPOT (app.data.adapters.binance.BinanceClient), which is
-    correct for the spot-WS fleet but a GUARANTEED PERMANENT failure for
-    every symbol in this cohort -- futures-only symbols have no spot pair
-    by definition, that is the entire reason futures_poll exists for them.
-    Confirmed empirically: zero predictions, ever, from symbol_source=
-    'futures_poll' between this module's Stage 1 promotion (2026-08-31)
-    and this fix -- not a handful of edge-case tickers, the entire cohort,
-    100% of its existence. See
-    docs/superpowers/decisions/2026-09-01-futures-poll-seed-was-spot-only.md.
-    """
-    binance_symbol = symbol_pair.replace("/", "")
-    resp = await rate_client.request(
-        "GET", f"{_BASE_URL}/fapi/v1/klines",
-        endpoint_key="klines",
-        params={"symbol": binance_symbol, "interval": timeframe, "limit": str(limit)},
-        timeout=15.0,
-    )
-    resp.raise_for_status()
-    return [
-        Candle(
-            ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc),
-            open=float(row[1]), high=float(row[2]), low=float(row[3]),
-            close=float(row[4]), volume=float(row[5]),
-        )
-        for row in resp.json()
-    ]
 
 
 def _record_poll_result(symbol_pair: str, *, ok: bool) -> None:
@@ -302,29 +259,6 @@ FUTURES_POLL_HEARTBEAT_SECONDS: int = 5 * 60  # 5min
 _CHILD_BACKOFF_BASE_S: float = 5.0
 _CHILD_BACKOFF_MAX_S: float = 120.0
 
-# 2026-09-01: a child that crashes at STARTUP (before it ever produces a
-# candle) is structurally different from one that crashed mid-stream after
-# running fine for a while -- the former is the "will never succeed"
-# pattern (e.g. the spot-seed-on-a-futures-only-symbol bug this same fix
-# closes), the latter is far more likely a transient blip. This threshold
-# only needs to be small enough to catch a *permanent* failure quickly:
-# backoff has already reached its 40-80s range by the 4th-5th consecutive
-# crash, which is ample room for a genuine transient issue (a momentary
-# Binance 5xx, a brief network blip) to have already cleared on retry.
-# Chosen independently from _CONSECUTIVE_FAILURE_ALERT_THRESHOLD (20),
-# which paces individual in-stream poll failures at a ~60s cadence -- a
-# much faster, noisier signal than this file's own restart-with-backoff
-# loop, so the two thresholds are not meant to be the same number.
-_CHILD_DEAD_THRESHOLD: int = 5
-_child_crash_streaks: dict[tuple[str, str], int] = {}
-_confirmed_dead_children: set[tuple[str, str]] = set()
-
-
-def _clear_child_crash_state_for_tests() -> None:
-    _child_crash_streaks.clear()
-    _confirmed_dead_children.clear()
-
-
 # Type alias for the per-symbol runner -- parameterized so tests can inject
 # a deterministic stand-in instead of hitting the real REST poller.
 FuturesRunner = Callable[[str, str], Awaitable[None]]
@@ -366,59 +300,19 @@ async def _run_futures_child_with_restart(
     """Wrap a per-symbol runner in a restart-with-backoff loop -- mirrors
     keepalive.py's _run_child_with_restart exactly. A single symbol
     throwing repeatedly (delisted, Binance error, etc.) must not take down
-    the rest of the futures-poll fleet.
-
-    2026-09-01: also tracks a per-(symbol, timeframe) consecutive-crash
-    streak. A streak that reaches _CHILD_DEAD_THRESHOLD is a structurally
-    permanent failure, not a transient blip -- logged at ERROR (not
-    WARNING, which pages nobody and lets a dead symbol sit silently
-    forever) and pushed through the real alert_admin("critical") channel
-    once, on the crossing, not on every subsequent retry. The symbol is
-    also added to _confirmed_dead_children so run_futures_poll's heartbeat
-    can report a coverage count that means what it says (see
-    docs/superpowers/decisions/2026-09-01-futures-poll-seed-was-spot-only.md,
-    part c) -- the child keeps retrying at its capped backoff regardless
-    (self-heals automatically if the underlying condition ever resolves),
-    it is only EXCLUDED FROM THE COUNT, never killed outright."""
-    key = (symbol_pair, timeframe)
+    the rest of the futures-poll fleet."""
     backoff = backoff_base_s
     while True:
         try:
             await runner(symbol_pair, timeframe)
             backoff = backoff_base_s
-            if _child_crash_streaks.pop(key, None):
-                _confirmed_dead_children.discard(key)
-                log.info(
-                    "futures_poll child %s/%s recovered -- clearing dead-child state",
-                    symbol_pair, timeframe,
-                )
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 -- resilient supervisor
-            streak = _child_crash_streaks.get(key, 0) + 1
-            _child_crash_streaks[key] = streak
-            if streak >= _CHILD_DEAD_THRESHOLD:
-                newly_dead = key not in _confirmed_dead_children
-                _confirmed_dead_children.add(key)
-                log.error(
-                    "futures_poll child %s/%s has crashed %d times in a row -- "
-                    "treating as structurally dead, excluded from the "
-                    "children_producing count until it recovers: %s",
-                    symbol_pair, timeframe, streak, e,
-                )
-                if newly_dead:
-                    await alert_admin(
-                        f"futures_poll: {symbol_pair}/{timeframe} has crashed "
-                        f"{streak} times in a row and is now excluded from "
-                        f"coverage -- structurally permanent failure, not a "
-                        f"transient blip: {e}",
-                        level="critical",
-                    )
-            else:
-                log.warning(
-                    "futures_poll child %s/%s crashed: %s; restart in %.1fs",
-                    symbol_pair, timeframe, e, backoff,
-                )
+            log.warning(
+                "futures_poll child %s/%s crashed: %s; restart in %.1fs",
+                symbol_pair, timeframe, e, backoff,
+            )
             await asyncio.sleep(backoff)
             backoff = min(_CHILD_BACKOFF_MAX_S, backoff * 2)
 
@@ -506,8 +400,6 @@ async def _refresh_futures_children(
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             del children[key]
-            _child_crash_streaks.pop(key, None)
-            _confirmed_dead_children.discard(key)
     for key in desired:
         if key in children:
             continue
@@ -517,28 +409,6 @@ async def _refresh_futures_children(
             _run_futures_child_with_restart(runner, symbol_pair, timeframe),
             name=f"futures_poll:{symbol_pair}:{timeframe}",
         )
-
-
-def _heartbeat_details(children: dict[tuple[str, str], asyncio.Task[None]], timeframe: str) -> dict:
-    """2026-09-01 (part c of the futures-poll-seed fix): `children` alone
-    conflates "we spawned a task for this symbol" with "this symbol is
-    actually producing predictions" -- the exact gap that let a 61-symbol
-    count sit next to 54 real predictions, or worse, 0-of-7 for a
-    structurally dead cohort, without either number ever being reported.
-    `children_producing` is the count that should be read as "coverage";
-    `dead_symbols` names anything currently excluded from it and why (see
-    _run_futures_child_with_restart's _CHILD_DEAD_THRESHOLD escalation).
-    `children` (raw task count) is kept for back-compat with existing
-    dashboards/probes that already read this key."""
-    dead = sorted(f"{s}/{tf}" for s, tf in children if (s, tf) in _confirmed_dead_children)
-    return {
-        "children": len(children),
-        "children_producing": len(children) - len(dead),
-        "dead_symbols": dead,
-        "timeframe": timeframe,
-        "gap_counts": dict(_GAP_COUNT),
-        "rate_limit_waits": dict(_RATE_LIMIT_WAIT_COUNT),
-    }
 
 
 async def run_futures_poll(
@@ -564,7 +434,10 @@ async def run_futures_poll(
         )
         await record_heartbeat(
             session_factory, WORKER_NAME, status="ok",
-            details=_heartbeat_details(children, timeframe),
+            details={
+                "children": len(children), "timeframe": timeframe,
+                "gap_counts": dict(_GAP_COUNT), "rate_limit_waits": dict(_RATE_LIMIT_WAIT_COUNT),
+            },
         )
         # Phase 4 Task 5f root cause: last_refresh MUST be a real captured
         # loop.time() reading, never a hardcoded 0.0. loop.time() is backed
