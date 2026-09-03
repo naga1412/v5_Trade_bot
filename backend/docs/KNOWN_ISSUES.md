@@ -1188,3 +1188,184 @@ no unintended change or explicitly flag one.
 dev and main are due for a full settings reconciliation, or the
 breakeven-variant measurement concludes and shadow-side changes are
 back on the table.
+
+### FU-43 — 24h quote volume does NOT imply order-book depth (standing caution)
+
+**Discovered**: 2026-08-14, Phase 4 (futures signal coverage) liquidity-floor
+research.
+
+**Finding**: fetched real Binance USDT-M futures order-book depth and
+spread for the top 30 futures-only-by-24h-volume symbols. Several
+symbols carrying **$100M–$1.1B in 24h quote volume still had under
+$50k of resting depth within 0.5% of mid**:
+
+| Symbol | 24h qvol | Spread (bps) | Depth within 0.5% |
+|---|---|---|---|
+| AKEUSDT | $1,113,431,376 | 3.95 | $28,286 |
+| APRUSDT | $305,318,997 | 1.89 | $46,724 |
+| CYSUSDT | $244,863,941 | 3.36 | $34,825 |
+| VELVETUSDT | $178,677,903 | 4.26 | $26,240 |
+| BTWUSDT | $109,562,774 | 0.99 | $35,695 |
+
+By contrast, established symbols in the same sample (HYPEUSDT,
+1000PEPEUSDT, XMRUSDT) carried $52M–$294M volume with $172k–$3M depth
+— an order of magnitude more resting liquidity per dollar of volume
+traded. High 24h volume reflects **churn**, not standing order-book
+depth; a large trade or fast move can walk through a thin book
+regardless of how much notional traded that day.
+
+**Why this matters beyond Phase 4**: any current or future logic in
+this codebase that uses 24h volume alone as a liquidity/tradability
+proxy — universe ranking, symbol allowlists, position sizing caps —
+is measuring the wrong thing for "can this be exited without slippage
+right now." Phase 4's liquidity floor (see the Phase 4 design spec)
+checks quote volume AND spread AND resting depth together specifically
+because of this finding; volume-only filtering would have passed
+AKE/APR/CYS/VELVET/BTW despite each having a real risk of slippage on
+exit.
+
+**Action**: none required today — no existing volume-only filter in
+this codebase currently gates trade eligibility (today's universe
+selection and `SHADOW_SPOT_BLACKLIST` are not volume-threshold-based).
+Recorded here so this isn't rediscovered: any future liquidity-adjacent
+gate should check depth/spread directly rather than treating volume as
+a proxy for either.
+
+**Status**: informational, no code change.
+
+### FU-44 — Telegram leverage-cap risk control was silently unenforced by its own display math (FIXED)
+
+**Discovered**: 2026-08-20, Phase 4 Task 18 card review #2.
+
+**Finding**: `render_message`'s "Leverage: Nx (math: max safe Xx, capped
+at 10x for risk profile)" text was computed independently of the real
+leverage decision. `dispatcher.py` picks the actual leverage via
+`recommended_leverage(hard_cap=user.max_leverage_cap)` — the real
+per-user risk cap — but `render_message` recomputed its own display math
+with a hardcoded `125`-then-`_DEFAULT_HARD_CAP(10)` sequence, completely
+disconnected from that real cap. The `+1×` keyboard button's clamp had
+the identical bug (hardcoded `10`, not the real cap). Nothing
+server-side re-validates leverage on the adjust-callback path
+(`trade_signals._re_render_and_edit` takes the callback's leverage
+straight through) — meaning the `+1×` button's clamp was the ONLY
+actual enforcement point for a user's real leverage cap.
+
+**Why this matters**: this is a risk control, not a cosmetic display
+bug. `users.max_leverage_cap` defaults to 10, which is why it was
+harmless in practice — the hardcoded value and the real default
+happened to coincide. If `max_leverage_cap` were ever lowered below 10
+(single-operator today, but the column and the `/me` profile endpoint
+already support per-user customization), the `+1×` button would have
+silently let leverage climb back up to 10 anyway, exceeding the
+configured risk cap with no error, no warning, and a display line that
+would have confidently — and wrongly — claimed the shown number WAS the
+enforced cap.
+
+**Action**: fixed in PR #499 (2026-08-20). Threaded the real `hard_cap`
+through `render_message`, `build_signal_payload` (persisted so the
+adjust/re-render path can read it back instead of falling to the module
+default), and both real `dispatcher.py` call sites. `+1×` button now
+clamps against the real cap. New regression tests cover the threading
+end-to-end, including the persisted-payload re-render path.
+
+**Status**: ✅ **CLOSED** by PR #499.
+
+### FU-45 — Telegram chart_url deep-link (with ghost-candle overlay) is a never-built capability, not a broken one
+
+**Discovered**: 2026-08-19/20, Phase 4 Task 18 card review.
+
+**Finding**: every real Telegram signal's "🔗 View on chart with ghost
+candle" link was built as `chart_base_url + "/tab1/{symbol}/{timeframe}
+?signal={id}"`. `chart_base_url` is grep-confirmed to never be set to a
+real value anywhere in the codebase or config — it defaulted to `""` at
+every layer in the call chain — so this link has always been a broken
+relative path on every real signal ever sent. Deeper than a missing
+setting: the frontend doesn't use path-based routing at all
+(`useHashRoute`, hash-fragment routes like `#/live-prediction?...`), so
+`/tab1/{symbol}/{timeframe}` doesn't match any route the frontend could
+ever serve, even with a real base URL configured. This was written
+assuming a router architecture the frontend was never actually built
+with.
+
+**Interim fix**: `chart_url` now points at Binance's own futures chart
+for the symbol instead of the never-built in-app deep link
+(`https://www.binance.com/en/futures/{SYMBOL}`, verified live against
+two different real symbols before wiring in). No ghost-candle overlay,
+no in-app deep link; just a correct, working link to a real chart on
+the exchange the operator already trades on. New `CHART_BASE_URL`
+setting makes the base configurable without a code change. The card's
+own copy was reworded to match ("View chart on Binance" instead of
+"with ghost candle").
+
+**Real fix, deliberately NOT scoped here**: an in-app chart view with a
+ghost-candle overlay is a genuinely new capability — the frontend has no
+such page today — not a bug fix. Building it for real needs: (a) an
+actual hash-route + query-param design, (b) a `CHART_BASE_URL`-shaped
+setting pointing at the app's own frontend instead of Binance, (c) a
+real chart-rendering surface that consumes L8's ConvLSTM ghost
+predictions, which currently only feed the scoring layer and are
+flag-gated off in prod (PR #406) — no UI anywhere consumes them today.
+Logged here as a candidate future feature. May be worth building later;
+does not block Phase 4 or anything else.
+
+**Status**: interim fix ✅ **CLOSED**; the real in-app deep-link feature
+is open, unscoped, not queued.
+
+### FU-46 — pattern_stats had never written a single row since it shipped (FIXED)
+
+**Discovered**: 2026-08-20, Phase 4 card-review pattern-layer investigation.
+
+**Finding**: `layer-value-isolation`'s measurement found L2 was the one
+layer showing a real, cross-window-consistent signal, but its
+`historical_accuracy` weighting (`app/core/scoring/layer2_patterns.py`)
+had been running on the flat `PRIOR_ACCURACY=0.5` default for every
+pattern, always — real observed win rates for the same patterns spanned
+17.4%-38.5% in the same data. Root cause was THREE compounding bugs in
+`app/ml/patterns.py`, none of them a crash:
+
+1. **Schema mismatch.** `_extract_patterns` looked for
+   `layer_scores["L2"]["patterns"]` as a flat string array — a schema
+   that never shipped. Written against the SP-0/SP-1 stub era's assumed
+   shape for SP-2's not-yet-built L2 layer; SP-2 shipped a different
+   real shape (key `"2"`, patterns nested inside a JSON-encoded `notes`
+   string, each pattern a dict keyed by `"id"`) and this was never
+   updated to match — confirmed against two payloads captured directly
+   from production, not hand-written fixtures (the original test's own
+   hand-written fixture matched the same imagined schema as the buggy
+   code, which is exactly how this shipped wrong without failing CI).
+2. **Never scheduled.** `update_pattern_stats` was never wired to any
+   worker anywhere in the application — full-history repo search found
+   it referenced only by its own definition and its unit test.
+3. **Broken join.** The query joined `predictions p ... ON t.signal_id
+   = p.inputs_hash` — but `shadow_trades.signal_id` is a standalone,
+   self-generated id (`app/shadow/engine.py::_gen_signal_id`) with zero
+   relationship to `predictions.inputs_hash`. Confirmed against real
+   data: 3,736 shadow_trades carry a signal_id, 45,622 predictions carry
+   an inputs_hash, exactly ZERO ever matched.
+
+**Action**: all three fixed. `_extract_patterns` reads the real shape
+(tests use real captured production payloads, including a genuinely
+truncated one — `layer2_patterns.NOTES_MAX_CHARS=500` cuts off `notes`
+mid-object on bars with enough pattern fires). `update_pattern_stats`
+now reads `shadow_trades.layer_scores` directly — no join needed, since
+it's already populated from the same prediction at trade-open time.
+New `pattern_stats_refresh` worker (same shape as `p_win_refit`,
+registered with a heartbeat so the healer can see it stop — the whole
+reason this went unnoticed for months). Backfilled from full trade
+history in one shot rather than waiting months for fresh data to
+accumulate (the job recomputes from scratch on every run by design, so
+the backfill is just its first real run, not special-cased logic).
+
+**Lookahead caveat, documented in code at both the writer and reader**
+(`app/ml/patterns.py`, `app/core/scoring/layer2_patterns.py`):
+`pattern_stats.accuracy` reflects ALL history up to its last refresh,
+recomputed from scratch each time — valid for live/forward scoring, but
+using it to score a trade from BEFORE that refresh in a backtest is
+lookahead bias.
+
+**L2's live scoring does NOT read the real rates yet** — deliberate,
+separate, operator-gated follow-up. Populate + report the delta first;
+wire to live scoring only after that's reviewed.
+
+**Status**: ✅ **CLOSED** (schema + scheduler + join + backfill). Live
+scoring wiring is a separate, not-yet-authorized follow-up.

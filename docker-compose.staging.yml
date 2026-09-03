@@ -82,8 +82,16 @@ services:
       AUTO_PROMOTE_TO_TELEGRAM_ENABLED: "false"
       AUTO_PROMOTE_TO_FULLYAUTO_ENABLED: "false"
       WORKER_ENABLED: ${WORKER_ENABLED:-true}
-      TELEGRAM_BOT_TOKEN: ""
-      TELEGRAM_CHAT_ID: ""
+      # Was hardcoded to "" (2026-06, PR #94's initial staging setup --
+      # no staging bot credentials existed yet). Confirmed 2026-08-20
+      # this was an initial-setup placeholder, not a deliberate
+      # "hard-OFF regardless of env" guardrail like AUTONOMOUS_TRADING_
+      # ENABLED above: neither #94's commit message nor STAGING.md
+      # mentions Telegram at all. Operator-authorized to let real
+      # values flow through from .env.staging, same pattern as every
+      # other credential in this block.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       BACKEND_INTERNAL_URL: http://localhost:8001
     volumes:
       # Separate ml-cache + rl-cache directories so staging can have

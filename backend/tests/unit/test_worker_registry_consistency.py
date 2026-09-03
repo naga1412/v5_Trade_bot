@@ -59,6 +59,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "healer_detector_task": "app/healer/runner.py",
     "p_win_refit": "app/workers/p_win_refit.py",
     "live_fleet_universe_refresh_task": "app/shadow/universe_refresh_scheduler.py",
+    "pattern_stats_refresh": "app/workers/pattern_stats_refresh.py",
 }
 
 
@@ -211,6 +212,8 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     "p_win_refit": 24 * 60 * 60,
     # 6h nightly (Phase 4 Task 5c, ratified 2026-08-19)
     "live_fleet_universe_refresh_task": 6 * 60 * 60,
+    # 24h nightly (pattern_stats fix, 2026-08-20)
+    "pattern_stats_refresh": 24 * 60 * 60,
 }
 
 
