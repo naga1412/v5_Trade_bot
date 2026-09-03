@@ -146,10 +146,20 @@ async def test_gate_db_error_fails_open() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_settings_default_is_none_dedup_disabled() -> None:
+def test_settings_default_is_12_hours() -> None:
+    """Operator decision, 2026-09-04: 12h ships as the default -- matches
+    shadow's median 8.1-bar-to-stop / 12.0-bar-to-TP lifetime on the 1h
+    lane, chosen on mechanism not on the suppression percentage alone."""
     from app.config import Settings
 
     s = Settings()
+    assert s.TELEGRAM_DEDUP_COOLDOWN_HOURS == 12.0
+
+
+def test_settings_can_still_be_disabled_explicitly() -> None:
+    from app.config import Settings
+
+    s = Settings(TELEGRAM_DEDUP_COOLDOWN_HOURS=None)
     assert s.TELEGRAM_DEDUP_COOLDOWN_HOURS is None
 
 
