@@ -96,6 +96,13 @@ class SignalCandidate:
     mtf_agreement: int | None = None
     mtf_dominant_tf: str | None = None
     mtf_directions: dict[str, int] | None = None
+    # Phase 4 Task 11: three-way ingestion cohort tag (Task 3 addendum).
+    # Default matches every other default fixed in Tasks 1/3/9/10 —
+    # 'established_top20' is the pre-Phase-4 status quo cohort.
+    symbol_source: str = "established_top20"
+    qvol_24h: float | None = None
+    spread_bps: float | None = None
+    depth_0_5pct_usdt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -284,7 +291,19 @@ def render_message(
         hard_cap=125,
     )
 
+    cohort_banner = ""
+    if candidate.symbol_source != "established_top20":
+        cohort_banner = (
+            f"🆕 NEW COHORT — thinner liquidity, unvalidated\n"
+            f"24h vol: ${candidate.qvol_24h:,.0f}  •  "
+            f"Spread: {candidate.spread_bps:.1f}bps  •  "
+            f"Depth (0.5%): ${candidate.depth_0_5pct_usdt:,.0f}\n"
+            f"⚠ Resting depth does not predict depth during a fast move.\n"
+            f"─────────────────────────────────────\n"
+        )
+
     body = (
+        cohort_banner +
         f"{direction_emoji} {candidate.direction}  •  {candidate.symbol}  "
         f"•  {n.strftime('%d %b %Y %H:%M UTC')}\n"
         f"─────────────────────────────────────\n"

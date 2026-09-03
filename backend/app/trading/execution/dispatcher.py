@@ -133,6 +133,13 @@ class SignalProposal:
     layer2_direction: str | None = None
     layer2_confidence: float | None = None
     mtf_adx_by_tf: dict[str, float] | None = None
+    # Phase 4 Task 9: cohort tag threaded from LivePredictionOut via
+    # proposal_from_prediction. Defaults to "established_top20" so
+    # pre-Task-9 callers (admin_test_trade, ad-hoc manual proposals)
+    # keep constructing a valid proposal unchanged. Flows into the
+    # telegram_signals INSERT (_send_telegram_signal) and the live_trades
+    # payload (_place_live_order) below.
+    symbol_source: str = "established_top20"
 
 
 @dataclass(frozen=True)
@@ -509,13 +516,16 @@ async def _send_telegram_signal(
     await session.execute(
         sa.text(
             "INSERT INTO telegram_signals "
-            "(id, user_id, symbol, direction, sent_at, payload) "
-            "VALUES (:id, :u, :s, :d, :ts, :p)"
+            "(id, user_id, symbol, direction, sent_at, payload, symbol_source) "
+            "VALUES (:id, :u, :s, :d, :ts, :p, :src)"
         ),
         {
             "id": sig_id, "u": user.user_id, "s": proposal.symbol,
             "d": proposal.direction, "ts": now,
             "p": serialise_payload(payload),
+            # Phase 4 Task 9: real cohort tag, not the column's DB-level
+            # default -- see SignalProposal.symbol_source.
+            "src": proposal.symbol_source,
         },
     )
 
@@ -668,6 +678,8 @@ async def _place_live_order(
         mtf_agreement=proposal.mtf_agreement,
         mtf_dominant_tf=proposal.mtf_dominant_tf,
         mtf_directions=proposal.mtf_directions,
+        # Phase 4 Task 9: real cohort tag from the originating proposal.
+        symbol_source=proposal.symbol_source,
     )
     async with session_factory() as s1:
         await insert_with_chain(s1, "live_trades", payload)

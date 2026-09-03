@@ -318,6 +318,33 @@ class RecentTradeOut(BaseModel):
     signal_id: str
 
 
+class TelegramSignalOut(BaseModel):
+    signal_id: str
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    entry_price: float
+    stop_loss_price: float
+    take_profit_price: float
+    rr_ratio: float
+    confidence_pct: float
+    sent_at: datetime
+    # Full 7-value set per the telegram_signals_response_check constraint
+    # (migration 0027_widen_response_check) -- the original 4-value list
+    # missed 'stale_price'/'auto_skipped'/'approve_lost_race', all three
+    # of which are written by real, actively-running code paths
+    # (telegram_polling.py's auto-skip worker, the price-drift guard,
+    # trade_signals.py's approval-race handler). A row with any of those
+    # would fail Pydantic validation and 500 this endpoint.
+    status: Literal[
+        "approved", "skipped", "timeout", "error",
+        "stale_price", "auto_skipped", "approve_lost_race",
+    ] | None
+    symbol_source: Literal["established_top20", "liquidity_added_spot", "futures_poll"]
+    qvol_24h: float | None = None
+    spread_bps: float | None = None
+    depth_0_5pct_usdt: float | None = None
+
+
 class LongShortBreakdownOut(BaseModel):
     long: WindowStatsOut
     short: WindowStatsOut

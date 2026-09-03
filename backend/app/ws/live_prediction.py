@@ -17,7 +17,9 @@ from app.core.predictor import build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
 from app.core.scoring.vol_normalization import HISTORY_SEED_BARS_1H
+from app.data.adapters import get_intermarket_adapter
 from app.data.adapters.binance import BinanceClient, BinanceKlineStream
+from app.data.futures_liquidity import check_liquidity
 from app.db.dispatch_decisions import record_dispatch_decision
 from app.db.payload_builders import build_predictions_payload
 from app.db.session import get_session_factory
@@ -319,6 +321,7 @@ async def run_live_prediction(
             effective_score=pred.effective_score,
             realized_vol_20d=pred.realized_vol_20d,
             funding_directional_adj=pred.funding_directional_adj,
+            symbol_source=symbol_source,
         )
 
         # 2026-05-17 HOTFIX: two-session pattern. The validator INSERT lives
@@ -388,6 +391,7 @@ async def run_live_prediction(
         # candle loop.
         await _maybe_dispatch(
             session_factory, pred=pred, layer_payload=_layer_payload,
+            symbol_source=symbol_source,
         )
 
         # FU-1: heartbeat after each fully-processed candle. The watchdog
@@ -405,6 +409,7 @@ async def run_live_prediction(
 
 async def _maybe_dispatch(
     session_factory: Any, *, pred: Any, layer_payload: dict[str, Any],
+    symbol_source: str = "established_top20",
 ) -> None:
     """Bridge between the live-prediction loop and the execution glue.
 
@@ -421,6 +426,24 @@ async def _maybe_dispatch(
     ts = pred.trade_setup
     if ts is None or ts.entry is None or ts.stop_loss is None or ts.take_profit is None:
         return
+    if symbol_source != "established_top20":
+        try:
+            rate_client = get_intermarket_adapter().rate_client
+            assert rate_client is not None
+            check = await check_liquidity(pred.symbol.replace("/", ""), rate_client)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "dispatch-time liquidity re-check failed for %s (%s), suppressing: %s",
+                pred.symbol, symbol_source, e,
+            )
+            return
+        if not check.passed:
+            log.warning(
+                "dispatch-time liquidity re-check failed for %s (%s) "
+                "(qvol=%.0f spread=%.1fbps depth=%.0f) -- suppressing card",
+                pred.symbol, symbol_source, check.qvol_24h, check.spread_bps, check.depth_0_5pct_usdt,
+            )
+            return
     # PR-BOT-INTELLIGENCE-UPGRADE: extract Layer-2 pattern data from
     # pred.layer_scores so the dispatcher's entry-quality gate can apply
     # the pattern boost/penalty. Key shape is `str(int)` (see
@@ -471,6 +494,10 @@ async def _maybe_dispatch(
                     "layer2_direction": _l2_direction,
                     "layer2_confidence": _l2_confidence,
                     "mtf_adx_by_tf_json": getattr(pred, "mtf_adx_by_tf_json", None),
+                    # Phase 4 Task 9: cohort tag, threaded all the way to
+                    # proposal_from_prediction -> SignalProposal -> the
+                    # telegram_signals / live_trades write sites.
+                    "symbol_source": symbol_source,
                 },
                 # PR-FIX-GHOST-POSITIONS-ATOMIC-SLTP (2026-05-26): thread
                 # the live worker's session_factory through so

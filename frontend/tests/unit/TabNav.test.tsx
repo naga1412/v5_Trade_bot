@@ -7,35 +7,36 @@ beforeEach(() => {
 });
 
 describe("TabNav", () => {
-  test("renders 5 tabs by default (admin hidden) — SP-8 added Autonomous", () => {
+  test("renders 6 tabs by default (admin hidden) — Phase 4 added Signals", () => {
     const onChange = vi.fn();
     render(<TabNav active="live-prediction" onChange={onChange} />);
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(5);
+    expect(buttons).toHaveLength(6);
     expect(buttons[0]).toHaveTextContent(/live prediction/i);
     expect(buttons[1]).toHaveTextContent(/bot status/i);
     expect(buttons[2]).toHaveTextContent(/scanner/i);
-    expect(buttons[3]).toHaveTextContent(/autonomous/i);
-    expect(buttons[4]).toHaveTextContent(/settings/i);
+    expect(buttons[3]).toHaveTextContent(/signals/i);
+    expect(buttons[4]).toHaveTextContent(/autonomous/i);
+    expect(buttons[5]).toHaveTextContent(/settings/i);
     expect(screen.queryByRole("tab", { name: /admin/i })).toBeNull();
   });
 
-  test("renders 6 tabs when adminVisible=true with Admin last", () => {
+  test("renders 7 tabs when adminVisible=true with Admin last", () => {
     const onChange = vi.fn();
     render(
       <TabNav active="live-prediction" onChange={onChange} adminVisible />,
     );
     const buttons = screen.getAllByRole("tab");
-    expect(buttons).toHaveLength(6);
-    expect(buttons[5]).toHaveTextContent(/admin/i);
+    expect(buttons).toHaveLength(7);
+    expect(buttons[6]).toHaveTextContent(/admin/i);
   });
 
-  test("renders Autonomous between Scanner and Settings", () => {
+  test("renders Signals between Scanner and Autonomous", () => {
     const onChange = vi.fn();
     render(<TabNav active="live-prediction" onChange={onChange} adminVisible={false} />);
     const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
     expect(tabs).toEqual([
-      "Live Prediction", "Bot Status", "Scanner", "Autonomous", "Settings",
+      "Live Prediction", "Bot Status", "Scanner", "Signals", "Autonomous", "Settings",
     ]);
   });
 
