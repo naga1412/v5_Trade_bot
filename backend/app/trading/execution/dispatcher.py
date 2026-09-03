@@ -210,6 +210,12 @@ DispatchOutcome = Literal[
     # the operator can distinguish a verification failure from a real
     # duplicate. Never emitted by `dispatch()` (pre-card fails open).
     "blocked_position_check_failed",
+    # TELEGRAM_DEDUP (2026-09-04): a Telegram card for this
+    # (symbol, direction) sent within TELEGRAM_DEDUP_COOLDOWN_HOURS.
+    # Telegram-approve mode only — see telegram_dedup_gate.py. The
+    # signal itself was still fully evaluated; only the CARD was
+    # suppressed. Disabled (never emitted) when the setting is unset.
+    "suppressed_telegram_dedup",
 ]
 
 
@@ -1063,6 +1069,30 @@ async def dispatch(
                     leverage_chosen=leverage,
                 )
             # ---- end PR-HYBRID-CONFIDENCE-ROUTING -----------------------
+
+            # ---- TELEGRAM_DEDUP (2026-09-04) -----------------------------
+            # Scope: this check and ONLY this check stands between a
+            # fully-evaluated, gate-cleared signal and the Telegram send.
+            # Nothing upstream of this point (signal generation, shadow
+            # trade creation, every gate already run above) is affected —
+            # a suppressed card is still a real signal everywhere else in
+            # the system. See telegram_dedup_gate.py's own docstring for
+            # the full scope argument.
+            from app.config import get_settings as _get_dedup_settings
+            from app.trading.execution.telegram_dedup_gate import (
+                _check_telegram_dedup,
+            )
+            _dedup_cooldown = _get_dedup_settings().TELEGRAM_DEDUP_COOLDOWN_HOURS
+            _dedup_reason = await _check_telegram_dedup(
+                session=session, symbol=proposal.symbol,
+                direction=proposal.direction, cooldown_hours=_dedup_cooldown,
+            )
+            if _dedup_reason is not None:
+                return DispatchResult(
+                    outcome="suppressed_telegram_dedup",
+                    detail=_dedup_reason,
+                )
+            # ---- end TELEGRAM_DEDUP --------------------------------------
 
             sig_id = await _send_telegram_signal(
                 session, user=user, proposal=proposal,

@@ -345,6 +345,52 @@ class Settings(BaseSettings):
             )
         return v
 
+    # --- TELEGRAM_DEDUP (2026-09-04) --------------------------------------
+    # Per-(symbol, direction) cooldown on Telegram card SENDS, keyed at the
+    # dispatch layer only. Motivating measurement (14-day replay against
+    # real telegram_signals history, 566 rows): a persistent single-symbol
+    # setup can re-fire on every qualifying candle with zero deduplication
+    # today — the only existing cooldown (`LIVE_COOLDOWN_ENABLED`) is
+    # outcome-gated (keyed off a live_trades row actually closing) and
+    # `live_cooldowns` has never had a single row in the account's history,
+    # so it has never once suppressed anything. One day alone (2026-09-03)
+    # produced 198 cards with one symbol (LTC/USDT) sending 15 times.
+    #
+    # Scope, non-negotiable: this setting affects ONLY the Telegram-approve
+    # send inside `dispatcher.dispatch()` (`_send_telegram_signal`'s call
+    # site). It does NOT touch signal generation (`app/core/predictor.py`,
+    # `app/shadow/worker.py`'s own evaluator), shadow trade creation, or
+    # anything the breakeven-variant measurement reads. A suppressed
+    # Telegram card is still a real signal for every other purpose —
+    # shadow still evaluates and (if it qualifies) still opens/records the
+    # trade exactly as it would with this setting unset. See
+    # `_check_telegram_dedup` in `app/trading/execution/dispatcher.py` for
+    # the enforcement point and `docs/superpowers/decisions/
+    # 2026-09-04-telegram-dedup-scope.md` for the full read-only measurement
+    # and the scope argument in one place.
+    #
+    # None (default) disables dedup entirely — every dispatch-eligible
+    # signal sends, exactly today's behavior. Shipping is choosing a
+    # positive hour value, not writing code.
+    #
+    # Keyed on (symbol, direction) — NOT symbol alone. A direction reversal
+    # (the setup flips LONG -> SHORT or vice versa) is new information and
+    # must always send regardless of how recently the OPPOSITE direction
+    # last sent for that symbol.
+    TELEGRAM_DEDUP_COOLDOWN_HOURS: float | None = None
+
+    @field_validator("TELEGRAM_DEDUP_COOLDOWN_HOURS")
+    @classmethod
+    def _validate_telegram_dedup_cooldown(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        if v <= 0.0:
+            raise ValueError(
+                f"TELEGRAM_DEDUP_COOLDOWN_HOURS={v} <= 0 is not a cooldown "
+                "— use a positive hour value, or unset to disable dedup."
+            )
+        return v
+
     # --- PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26) ----
     # Two safety knobs on the telegram-approve flow:
     #
