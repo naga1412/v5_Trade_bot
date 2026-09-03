@@ -111,20 +111,15 @@ class ShadowPosition:
     effective_score: float | None = None
     realized_vol_20d: float | None = None
     funding_directional_adj: float | None = None
-    # Cohort tag (field only -- Task 9's application-level cohort
-    # THREADING, which actually sets this to anything but the default,
-    # is dev-only Phase 4 behavior and stays there; this prod-promotion
-    # cherry-pick brings only the inert dataclass field migration 0040's
-    # fix needs to compile/round-trip). Defaults to a real string
-    # because shadow_trades.symbol_source is NOT NULL DEFAULT
-    # 'established_top20' (migration 0038, also cherry-picked here as an
-    # inert schema prerequisite -- see this PR's description). Migration
-    # 0040 (2026-08-20) added this column to shadow_open_positions with
-    # the same NOT NULL DEFAULT, so a restart-survivor position now
-    # reloads its real cohort tag rather than silently falling back to
-    # this dataclass default -- though on main today every position's
-    # real value IS that same default, since nothing on main sets it to
-    # anything else yet.
+    # Cohort tag. Defaults to a real string because shadow_trades.
+    # symbol_source is NOT NULL DEFAULT 'established_top20' (migration
+    # 0038). Migration 0040 (2026-08-20) added this column to
+    # shadow_open_positions with the same NOT NULL DEFAULT, so a
+    # restart-survivor position now reloads its real cohort tag rather
+    # than silently falling back to this dataclass default -- though on
+    # main today every position's real value IS that same default, since
+    # nothing on main sets it to anything else yet until this task's
+    # (Phase 4 Task 9) application-level threading lands.
     symbol_source: str = "established_top20"
 
     # Amendment 3 (2026-07-31): in-memory bar buffer used by the

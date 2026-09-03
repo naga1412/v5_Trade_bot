@@ -10,6 +10,7 @@ import { api } from "@/lib/api";
 import { Tab1LivePrediction } from "@/tabs/Tab1LivePrediction";
 import { BotStatus } from "@/tabs/BotStatus";
 import { Tab3Scanner } from "@/tabs/Tab3Scanner";
+import { Tab4Signals } from "@/tabs/Tab4Signals";
 import { Autonomous } from "@/tabs/Autonomous";
 import { Settings } from "@/tabs/Settings";
 import { Admin } from "@/tabs/Admin";
@@ -118,6 +119,7 @@ export default function App() {
           ) :
            tab === "bot-status" ? <BotStatus /> :
            tab === "scanner" ? <Tab3Scanner /> :
+           tab === "signals" ? <Tab4Signals /> :
            tab === "autonomous" ? <Autonomous /> :
            tab === "settings" ? <Settings /> :
            tab === "admin" && isAdmin ? <Admin /> : null}

@@ -70,7 +70,9 @@ async def _mk_session() -> Any:
         await conn.execute(sa.text(
             "CREATE TABLE telegram_signals ("
             "id TEXT PRIMARY KEY, user_id INTEGER, symbol TEXT, "
-            "direction TEXT, sent_at TEXT, payload TEXT, response TEXT)"
+            "direction TEXT, sent_at TEXT, payload TEXT, response TEXT, "
+            # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20')"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE live_trades ("
@@ -93,6 +95,8 @@ async def _mk_session() -> Any:
             # Lifecycle columns from alembic 0028.
             "status TEXT NOT NULL DEFAULT 'pending', "
             "sl_order_id TEXT, tp_order_id TEXT, failure_reason TEXT, "
+            # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
             "prev_hash TEXT, row_hash TEXT)"
         ))
     return engine

@@ -45,12 +45,30 @@ cohorts this supervisor reads (``established_top20`` and
 futures-only cohort (``futures_poll``) is served by a separate
 supervisor (Phase 4 Task 8), not this one.
 
-Promotion note (Stage 1, 2026-08-31): the upstream commit this was
-cherry-picked from also documents cohort-tag threading through this
-supervisor (Phase 4 Task 9) -- that feature is a later promotion stage
-(Epic B) and is not part of Stage 1. That documentation section was
-dropped from this cherry-pick; the underlying cadence/loop.time() fix
-below is unaffected and unchanged.
+Cohort threading (Phase 4 Task 9): ``run_live_prediction`` accepts a
+``symbol_source`` cohort tag (Task 1) that ends up on every
+predictions/telegram_signals/live_trades/shadow_trades row that symbol
+produces. Because this supervisor serves BOTH spot cohorts from one
+fleet, the desired-symbol set carries cohort as a 3rd tuple element —
+``(symbol_pair, timeframe, cohort)`` — set once in
+``_load_keepalive_symbols`` (where the cohort is already known, since we
+query the two cohorts as separate ``load_live_fleet_universe`` calls)
+and threaded through ``_refresh_children`` into each spawned child via
+``_default_runner``, a small adapter that closes ``run_live_prediction``'s
+keyword-only ``symbol_source`` param over the plain 3-positional-arg
+``SymbolRunner`` shape. This was chosen over the alternative (each child
+looking its own cohort up from ``load_live_fleet_universe`` at spawn/
+restart time) because the cohort is already in hand at zero extra cost
+when the desired set is built — a second lookup would be a redundant DB
+round-trip on every child restart and race against a concurrent 24h
+refresh. The child-identity dict (``children``) stays keyed by
+``(symbol_pair, timeframe)`` only — a symbol belongs to exactly one
+cohort at a time by construction (the two ``load_live_fleet_universe``
+queries are disjoint), so cohort is spawn-time metadata, not part of a
+child's identity. A cohort change on an already-running child (e.g. a
+symbol's volume rank drifts across the established_top20 boundary) is
+NOT picked up until that child is fully cancelled and respawned — see
+``_refresh_children``'s docstring for that documented limitation.
 """
 
 from __future__ import annotations
@@ -109,22 +127,48 @@ def to_pair(symbol_no_slash: str) -> str:
 
 # Type alias for the per-symbol runner — parameterized so tests can inject
 # a deterministic stand-in instead of opening real WS connections.
-SymbolRunner = Callable[[str, str], Awaitable[None]]
+#
+# Phase 4 Task 9 cohort-threading design decision: the desired-symbol set
+# now carries a 3rd element (cohort — see _load_keepalive_symbols below).
+# `run_live_prediction`'s `symbol_source` kwarg is keyword-only, so it
+# cannot satisfy a plain `Callable[[str, str, str], ...]` positionally —
+# `_default_runner` below is the small adapter that closes over that
+# keyword-only param, keeping SymbolRunner's shape uniform for both the
+# production runner and every test stand-in. See the module docstring's
+# "Cohort threading" section for the full rationale (option (a) of the
+# two the 2026-08-17 redraft posed).
+SymbolRunner = Callable[[str, str, str], Awaitable[None]]
+
+
+async def _default_runner(symbol_pair: str, timeframe: str, symbol_source: str) -> None:
+    """Adapts run_live_prediction's keyword-only `symbol_source` param to
+    the 3-positional-arg SymbolRunner shape below, so the desired-set's
+    per-symbol cohort tag (established_top20 / liquidity_added_spot)
+    reaches the predictions/telegram_signals/live_trades rows that symbol
+    produces, instead of every keepalive-fleet symbol silently collapsing
+    to run_live_prediction's own "established_top20" default regardless
+    of which cohort it actually came from."""
+    await run_live_prediction(symbol_pair, timeframe, symbol_source=symbol_source)
 
 
 async def _run_child_with_restart(
-    runner: SymbolRunner, symbol_pair: str, timeframe: str,
+    runner: SymbolRunner, symbol_pair: str, timeframe: str, symbol_source: str,
 ) -> None:
     """Wrap a per-symbol runner in a restart-with-backoff loop.
 
     A single coin throwing repeatedly (delisted, Binance 451, etc.) must
     not take down the rest of the fleet. We exponential-backoff and keep
     retrying; CancelledError propagates so shutdown is clean.
+
+    `symbol_source` is the cohort this child was spawned for (fixed for
+    the child's lifetime — a cohort change only takes effect on the next
+    full respawn, same staleness window the liquidity floor itself
+    already has via the 24h refresh).
     """
     backoff = KEEPALIVE_CHILD_BACKOFF_BASE_S
     while True:
         try:
-            await runner(symbol_pair, timeframe)
+            await runner(symbol_pair, timeframe, symbol_source)
             # Runner returned normally (shouldn't happen for the live WS
             # path, but we tolerate it for testability) — reset backoff
             # before the next attempt.
@@ -133,8 +177,8 @@ async def _run_child_with_restart(
             raise
         except Exception as e:  # noqa: BLE001 — resilient supervisor
             log.warning(
-                "ws_keepalive child %s/%s crashed: %s; restart in %.1fs",
-                symbol_pair, timeframe, e, backoff,
+                "ws_keepalive child %s/%s (%s) crashed: %s; restart in %.1fs",
+                symbol_pair, timeframe, symbol_source, e, backoff,
             )
             await asyncio.sleep(backoff)
             backoff = min(KEEPALIVE_CHILD_BACKOFF_MAX_S, backoff * 2)
@@ -145,7 +189,7 @@ async def _load_keepalive_symbols(
     *,
     exclude: frozenset[tuple[str, str]],
     timeframe: str,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str]]:
     """Read the liquidity-floor-qualified spot-backed cohorts
     (``established_top20`` + ``liquidity_added_spot``) from
     ``live_fleet_universe``, normalize, and apply excludes.
@@ -157,9 +201,16 @@ async def _load_keepalive_symbols(
     symbols are served by the separate futures REST-poll supervisor
     (Phase 4 Task 8), not this spot-WS fleet.
 
-    Returns a list of ``(symbol_pair, timeframe)`` tuples. Empty result on
-    any failure is logged but not raised — the supervisor will retry on
-    its next refresh tick.
+    Returns a list of ``(symbol_pair, timeframe, cohort)`` tuples — the
+    cohort element is Phase 4 Task 9: each symbol's cohort is known here
+    (we already queried the two cohorts separately) and is carried
+    forward through ``_refresh_children`` into the ``run_live_prediction``
+    call each child eventually makes, instead of being discarded and
+    letting every keepalive-fleet symbol collapse to the same default
+    regardless of which cohort it actually qualified through.
+
+    Empty result on any failure is logged but not raised — the supervisor
+    will retry on its next refresh tick.
     """
     try:
         async with session_factory() as session:
@@ -173,26 +224,33 @@ async def _load_keepalive_symbols(
         log.warning("ws_keepalive: load_live_fleet_universe failed: %s", e)
         return []
 
-    pairs: list[tuple[str, str]] = []
-    for entry in established + added:
-        pair = to_pair(entry.symbol)
-        key = (pair, timeframe)
-        if key in exclude:
-            continue
-        pairs.append(key)
-    return pairs
+    triples: list[tuple[str, str, str]] = []
+    for cohort, entries in (
+        ("established_top20", established),
+        ("liquidity_added_spot", added),
+    ):
+        for entry in entries:
+            pair = to_pair(entry.symbol)
+            if (pair, timeframe) in exclude:
+                continue
+            triples.append((pair, timeframe, cohort))
+    return triples
 
 
 async def _refresh_children(
     children: dict[tuple[str, str], asyncio.Task[None]],
-    desired: list[tuple[str, str]],
+    desired: list[tuple[str, str, str]],
     *,
     runner: SymbolRunner,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     """Reconcile the running child tasks with the desired set.
 
-    - New symbols → spawn a child task.
+    - New symbols → spawn a child task, threading its cohort (the 3rd
+      element of its desired-set entry) into the runner so the eventual
+      ``run_live_prediction(symbol_source=...)`` call reflects which of
+      the two spot cohorts (``established_top20`` / ``liquidity_added_spot``)
+      this symbol actually qualified through — Phase 4 Task 9.
     - Removed symbols → cancel and await the old task, UNLESS the symbol
       has an open live_trades/shadow_open_positions row — Phase 4
       liquidity-floor-selector addendum (a) point 4's hard open-position
@@ -201,9 +259,16 @@ async def _refresh_children(
       callers that omit it (most existing tests, and any caller that
       doesn't care about the override) get the prior unconditional-cancel
       behavior unchanged.
-    - Symbols still present → leave untouched (no churn).
+    - Symbols still present → leave untouched (no churn). Note: if a
+      symbol's cohort changes between refreshes (e.g. volume rank drift
+      moves it from established_top20 to liquidity_added_spot) while it
+      stays in the desired set throughout, the already-running child is
+      NOT restarted to pick up the new tag — same staleness window the
+      liquidity floor membership itself already has (24h refresh cadence
+      applies to spawns/cancellations, not to relabeling a live child).
     """
-    desired_set = set(desired)
+    children_cohort_by_key = {(p, tf): c for p, tf, c in desired}
+    desired_set = set(children_cohort_by_key)
     # Cancel symbols that dropped below the liquidity floor (or were
     # excluded/delisted), unless an open position retains them.
     for key in list(children):
@@ -225,13 +290,15 @@ async def _refresh_children(
                 pass
             del children[key]
     # Spawn symbols that joined the fleet.
-    for key in desired:
+    for symbol_pair, timeframe, cohort in desired:
+        key = (symbol_pair, timeframe)
         if key in children:
             continue
-        symbol_pair, timeframe = key
-        log.info("ws_keepalive: starting %s/%s", symbol_pair, timeframe)
+        log.info(
+            "ws_keepalive: starting %s/%s (%s)", symbol_pair, timeframe, cohort,
+        )
         children[key] = asyncio.create_task(
-            _run_child_with_restart(runner, symbol_pair, timeframe),
+            _run_child_with_restart(runner, symbol_pair, timeframe, cohort),
             name=f"keepalive:{symbol_pair}:{timeframe}",
         )
 
@@ -243,7 +310,7 @@ async def run_keepalive(
     exclude: frozenset[tuple[str, str]] = DEFAULT_EXCLUDE,
     refresh_seconds: int = KEEPALIVE_REFRESH_SECONDS,
     heartbeat_seconds: int = KEEPALIVE_HEARTBEAT_SECONDS,
-    runner: SymbolRunner = run_live_prediction,
+    runner: SymbolRunner = _default_runner,
 ) -> None:
     """Main supervisor loop. Owns the per-symbol fleet for the lifetime
     of the process.

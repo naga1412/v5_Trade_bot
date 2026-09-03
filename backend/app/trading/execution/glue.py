@@ -227,6 +227,12 @@ def proposal_from_prediction(
     layer2_direction: str | None = None,
     layer2_confidence: float | None = None,
     mtf_adx_by_tf_json: str | None = None,
+    # Phase 4 Task 9: cohort tag, threaded from live_prediction.py's
+    # _maybe_dispatch (proposal_kwargs["symbol_source"]) all the way to
+    # the SignalProposal the dispatcher acts on. Defaults to
+    # "established_top20" so admin_test_trade / telegram-callback call
+    # sites that don't pass it keep constructing a valid proposal.
+    symbol_source: str = "established_top20",
 ) -> SignalProposal | None:
     """Build a SignalProposal from a Prediction. Returns None for
     NEUTRAL signals (nothing to dispatch)."""
@@ -263,6 +269,7 @@ def proposal_from_prediction(
         layer2_direction=layer2_direction,
         layer2_confidence=layer2_confidence,
         mtf_adx_by_tf=_parse_mtf_adx_by_tf_json(mtf_adx_by_tf_json),
+        symbol_source=symbol_source,
     )
 
 

@@ -205,7 +205,7 @@ async def _read_signal_payload(
     async with session_factory() as session:
         row = (await session.execute(
             sa.text(
-                "SELECT user_id, symbol, direction, payload "
+                "SELECT user_id, symbol, direction, payload, symbol_source "
                 "FROM telegram_signals WHERE id = :id"
             ),
             {"id": signal_id},
@@ -218,6 +218,14 @@ async def _read_signal_payload(
     )
     # Attach the owning user_id so downstream phases don't re-query.
     parsed_payload["__row_user_id__"] = row.user_id
+    # Phase 4 Task 9: recover the cohort tag from the telegram_signals
+    # row's own `symbol_source` column (written at send-time by
+    # dispatcher._send_telegram_signal) rather than duplicating it into
+    # the JSON payload -- the column is the source of truth. getattr()
+    # with a default keeps pre-Task-9 rows (column NOT NULL DEFAULT
+    # 'established_top20' per migration 0038, so this is only a defensive
+    # fallback for duck-typed test rows lacking the attribute entirely).
+    parsed_payload["symbol_source"] = getattr(row, "symbol_source", None) or "established_top20"
     return parsed_payload
 
 
@@ -293,6 +301,9 @@ async def _phase1_insert_pending_trade(
         mtf_agreement=payload.get("mtf_agreement"),
         mtf_dominant_tf=payload.get("mtf_dominant_tf"),
         mtf_directions=_coerce_mtf_directions(payload.get("mtf_directions")),
+        # Phase 4 Task 9: cohort tag recovered by _read_signal_payload
+        # from telegram_signals.symbol_source.
+        symbol_source=payload.get("symbol_source", "established_top20"),
     )
     try:
         async with session_factory() as session:

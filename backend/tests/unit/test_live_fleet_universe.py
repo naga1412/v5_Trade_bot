@@ -1062,19 +1062,16 @@ async def test_open_position_survives_simulated_fleet_supervisor_restart(session
     )
 
     # Promotion note (Stage 1, 2026-08-31; also applies to #527's
-    # promotion, 2026-09-01): the incoming assertion also checked a 3rd
-    # tuple element (cohort tag) -- that's cohort-threading (Phase 4 Task
-    # 9, Epic B), which #527 never touches (its own diff is scoped to
-    # live_fleet_universe.py's cohort computation/storage only, not
-    # keepalive.py's _load_keepalive_symbols). This assertion was authored
-    # on a dev snapshot where Epic B had already landed, so it picked up
-    # the by-then-current 3-tuple return shape as ambient context, not
-    # because #527's classifier fix requires it. _load_keepalive_symbols
-    # returns a plain (symbol_pair, timeframe) 2-tuple here; the real
-    # thing this test proves -- the rescued position survives into a
-    # completely independent fresh keepalive load -- is unaffected by
-    # dropping the cohort assertion.
-    assert ("RESTARTHELD/USDT", "1h") in desired
+    # promotion, 2026-09-01): this assertion was TEMPORARILY downgraded to
+    # a 2-tuple check while cohort-threading (Phase 4 Task 9, Epic B) was
+    # still a later promotion stage -- #527 alone never touches
+    # keepalive.py's _load_keepalive_symbols return shape. Epic B (#474)
+    # is now applied on this branch (Stage 2), which threads cohort
+    # through _load_keepalive_symbols as a 3rd tuple element -- restored
+    # to the original 3-tuple assertion below, proving both the rescued
+    # position survives a fresh keepalive load AND its cohort tag
+    # (liquidity_added_spot, from the pure classifier) survives with it.
+    assert ("RESTARTHELD/USDT", "1h", "liquidity_added_spot") in desired
 
 
 # ---------------------------------------------------------------------

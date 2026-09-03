@@ -130,6 +130,8 @@ class TestBuildPredictionsPayload:
             "effective_score": None,
             "realized_vol_20d": None,
             "funding_directional_adj": None,
+            # Phase 4 Task 9 — defaults to established_top20 when not passed.
+            "symbol_source": "established_top20",
         }
         assert result == expected
 
@@ -166,6 +168,7 @@ class TestBuildPredictionsPayload:
             "effective_score": None,
             "realized_vol_20d": None,
             "funding_directional_adj": None,
+            "symbol_source": "established_top20",
         }
         assert result == expected
 
@@ -212,6 +215,7 @@ class TestBuildPredictionsPayload:
             "effective_score": None,
             "realized_vol_20d": None,
             "funding_directional_adj": None,
+            "symbol_source": "established_top20",
             # ghost keys merged in
             "ghost_open": 80_100.0,
             "ghost_high": 80_300.0,
@@ -234,7 +238,8 @@ class TestBuildPredictionsPayload:
         result_empty = build_predictions_payload(
             pred, user_id=1, layer_payload=layer_payload, ghost_payload={},
         )
-        # Both should be identical (18 keys: 11 base + 7 PR1 None fields; no ghost keys)
+        # Both should be identical (19 keys: 11 base + 7 PR1 None fields
+        # + 1 Phase 4 Task 9 symbol_source; no ghost keys)
         assert result_none == result_empty
         assert "ghost_open" not in result_empty
 
@@ -362,8 +367,7 @@ class TestBuildShadowTradePayload:
             "effective_score": None,
             "realized_vol_20d": None,
             "funding_directional_adj": None,
-            # Migration 0040 prod-promotion prerequisite: cohort tag,
-            # defaults to "established_top20" when caller doesn't pass it.
+            # Phase 4 Task 9 — defaults to established_top20 when not passed.
             "symbol_source": "established_top20",
         }
         assert result == expected
@@ -440,8 +444,6 @@ class TestBuildShadowTradePayload:
             "effective_score": None,
             "realized_vol_20d": None,
             "funding_directional_adj": None,
-            # Migration 0040 prod-promotion prerequisite: cohort tag,
-            # defaults to "established_top20" when caller doesn't pass it.
             "symbol_source": "established_top20",
         }
         assert result == expected
@@ -467,9 +469,8 @@ class TestBuildShadowTradePayload:
 
     def test_22_keys_present(self) -> None:
         """Output must have exactly 33 keys (22 PR1 + 2 PR3 G1 + 7 PR-strategy-1
-        analytics fields + 1 item-4 mtf_adx_by_tf_json + 1 migration-0040
-        prerequisite symbol_source, populated to its default when not
-        supplied)."""
+        analytics fields + 1 item-4 mtf_adx_by_tf_json, populated to None
+        when not supplied, + 1 Phase 4 Task 9 symbol_source)."""
         pos = _make_pos(direction=Direction.LONG)
         result = build_shadow_trade_payload(
             pos,
@@ -648,6 +649,8 @@ class TestBuildLiveTradePayload:
             # server_default='closed'. Default 'pending' matches the
             # new lifecycle.
             "status": "pending",
+            # Phase 4 Task 9 — defaults to established_top20 when not passed.
+            "symbol_source": "established_top20",
         }
         assert result == expected
 
@@ -658,8 +661,9 @@ class TestBuildLiveTradePayload:
         assert result["position_value_usdt"] == 150.0
         assert result["approved_via"] == "auto"
         assert result["mode_at_open"] == "fully-auto"
-        # PR-FIX-PR275-PAYLOAD-STATUS: 18 + 1 status = 19
-        assert len(result) == 19
+        # PR-FIX-PR275-PAYLOAD-STATUS: 18 + 1 status = 19;
+        # Phase 4 Task 9: +1 symbol_source = 20
+        assert len(result) == 20
         assert result["status"] == "pending"
 
     def test_telegram_long(self) -> None:
@@ -691,6 +695,7 @@ class TestBuildLiveTradePayload:
             "mtf_directions_json": None,
             # PR-FIX-PR275-PAYLOAD-STATUS (2026-05-27): see test_auto_long.
             "status": "pending",
+            "symbol_source": "established_top20",
         }
         assert result == expected
 
@@ -700,8 +705,9 @@ class TestBuildLiveTradePayload:
         assert result["direction"] == "SHORT"
         assert result["approved_via"] == "telegram"
         assert result["mode_at_open"] == "telegram-approve"
-        # PR-FIX-PR275-PAYLOAD-STATUS: 18 + 1 status = 19
-        assert len(result) == 19
+        # PR-FIX-PR275-PAYLOAD-STATUS: 18 + 1 status = 19;
+        # Phase 4 Task 9: +1 symbol_source = 20
+        assert len(result) == 20
         assert result["status"] == "pending"
 
     def test_auto_vs_telegram_divergent_fields(self) -> None:
@@ -709,10 +715,10 @@ class TestBuildLiveTradePayload:
         auto_result = build_live_trade_payload(**self._auto_kwargs())
         tg_result = build_live_trade_payload(**self._telegram_kwargs())
 
-        # Identical structure — same 19 keys (PR1: 15; PR2: +3 MTF;
-        # PR-FIX-PR275-PAYLOAD-STATUS: +1 status)
+        # Identical structure — same 20 keys (PR1: 15; PR2: +3 MTF;
+        # PR-FIX-PR275-PAYLOAD-STATUS: +1 status; Phase 4 Task 9: +1 symbol_source)
         assert set(auto_result.keys()) == set(tg_result.keys())
-        assert len(auto_result) == 19
+        assert len(auto_result) == 20
 
         # Divergent: mode_at_open
         assert auto_result["mode_at_open"] == "fully-auto"
@@ -750,10 +756,10 @@ class TestBuildLiveTradePayload:
         assert result["position_value_usdt"] == 500.0  # 50 * 10
 
     def test_15_keys_present(self) -> None:
-        """Output must have exactly 19 keys post-PR-FIX-PR275-PAYLOAD-STATUS
-        (15 PR1 + 3 MTF + 1 status)."""
+        """Output must have exactly 20 keys post-Phase-4-Task-9
+        (15 PR1 + 3 MTF + 1 status + 1 symbol_source)."""
         result = build_live_trade_payload(**self._auto_kwargs())
-        assert len(result) == 19
+        assert len(result) == 20
 
     def test_reasoning_column_not_reasoning_json(self) -> None:
         """Column name is 'reasoning', NOT 'reasoning_json'."""
