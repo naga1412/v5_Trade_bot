@@ -243,15 +243,12 @@ async def persist_closed_trade(
         effective_score=getattr(pos, "effective_score", None),
         realized_vol_20d=getattr(pos, "realized_vol_20d", None),
         funding_directional_adj=getattr(pos, "funding_directional_adj", None),
-        # Cohort tag (field only -- see the matching comment on
-        # ShadowPosition.symbol_source in app.shadow.engine for why this
-        # is an inert prod-promotion, not Phase 4 Task 9's application
-        # behavior). getattr() keeps pre-migration-0040 duck-typed
-        # fixtures working; restart-survivor positions now carry their
-        # real cohort tag from shadow_open_positions instead of falling
-        # back here -- though on main today every position's real value
-        # IS that same default, since nothing on main sets it to
-        # anything else yet.
+        # Phase 4 Task 9: cohort tag set on `pos` at open time (defaults
+        # to "established_top20" on ShadowPosition itself -- see
+        # app.shadow.engine). getattr() keeps pre-migration-0040
+        # duck-typed fixtures working; restart-survivor positions carry
+        # their real cohort tag from shadow_open_positions (migration
+        # 0040) instead of falling back here.
         symbol_source=getattr(pos, "symbol_source", "established_top20"),
     )
     return await insert_with_chain(session, "shadow_trades", payload)

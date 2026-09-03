@@ -274,6 +274,8 @@ async def test_place_live_order_quantizes_sl_tp_to_tick_size() -> None:
             "mtf_directions_json TEXT, "
             "status TEXT NOT NULL DEFAULT 'pending', "
             "sl_order_id TEXT, tp_order_id TEXT, failure_reason TEXT, "
+            # Phase 4 Task 9 (alembic 0038): cohort tag, NOT NULL DEFAULT.
+            "symbol_source TEXT NOT NULL DEFAULT 'established_top20', "
             "prev_hash TEXT, row_hash TEXT)"
         ))
 

@@ -214,6 +214,36 @@ export interface LongShortBreakdown {
   short: WindowStats;
 }
 
+export interface TelegramSignal {
+  signal_id: string;
+  symbol: string;
+  direction: "LONG" | "SHORT";
+  entry_price: number;
+  stop_loss_price: number;
+  take_profit_price: number;
+  rr_ratio: number;
+  confidence_pct: number;
+  sent_at: string;
+  // Full 7-value set matching TelegramSignalOut.status (Task 12,
+  // corrected 2026-08-18) -- 'stale_price'/'auto_skipped'/
+  // 'approve_lost_race' are real values real code writes, not
+  // hypothetical.
+  status:
+    | "approved" | "skipped" | "timeout" | "error"
+    | "stale_price" | "auto_skipped" | "approve_lost_race"
+    | null;
+  symbol_source: "established_top20" | "liquidity_added_spot" | "futures_poll";
+  qvol_24h: number | null;
+  spread_bps: number | null;
+  depth_0_5pct_usdt: number | null;
+}
+
+export interface TelegramSignalsFilters {
+  limit?: number;
+  direction?: "LONG" | "SHORT";
+  symbol_source?: "established_top20" | "liquidity_added_spot" | "futures_poll";
+}
+
 // Feature 4 — multi-asset fast-scanner types.
 export interface FastScanModule {
   name: string;
@@ -619,6 +649,16 @@ export const api = {
     const tail = qs.toString();
     return fetchJson<RecentTrade[]>(
       `/bot-status/recent-trades${tail ? "?" + tail : ""}`,
+    );
+  },
+  telegramSignals: (f: TelegramSignalsFilters = {}) => {
+    const qs = new URLSearchParams();
+    if (f.limit != null) qs.set("limit", String(f.limit));
+    if (f.direction) qs.set("direction", f.direction);
+    if (f.symbol_source) qs.set("symbol_source", f.symbol_source);
+    const tail = qs.toString();
+    return fetchJson<TelegramSignal[]>(
+      `/bot-status/telegram-signals${tail ? "?" + tail : ""}`,
     );
   },
   longShort: (days = 30) =>
