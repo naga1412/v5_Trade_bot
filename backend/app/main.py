@@ -54,6 +54,10 @@ from app.shadow.universe_refresh import start_universe_refresh_task
 from app.shadow.universe_refresh_scheduler import (
     start_live_fleet_universe_refresh_task,
 )
+# Item 0 (2026-08-30): daily futures_only listing cache, decoupled from
+# the 6h live_fleet_universe cadence above -- see that module's
+# docstring for why the two must not share a refresh interval.
+from app.workers.futures_only_refresh import start_futures_only_refresh_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
 from app.rl.checkpoints import load_active_checkpoint as load_rl_active_checkpoint
@@ -163,6 +167,7 @@ async def lifespan(_app: FastAPI):
     ws_keepalive_task = None
     futures_poll_worker = None  # Phase 4 Task 17
     live_fleet_universe_refresh_task = None  # Phase 4 Task 5c
+    futures_only_refresh_task = None  # Item 0, 2026-08-30
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
@@ -304,6 +309,17 @@ async def lifespan(_app: FastAPI):
         live_fleet_universe_refresh_task = _wrap(
             "live_fleet_universe_refresh_task",
             lambda: start_live_fleet_universe_refresh_task(get_session_factory()),
+        )
+
+        # Item 0 (2026-08-30): daily futures_only listing cache feeding
+        # ShadowWorker's synchronous cohort classification at position-
+        # open time. Deliberately its own task, its own 24h cadence, its
+        # own WorkerSpec -- decoupled from the 6h fleet-membership
+        # refresh above (see app.workers.futures_only_refresh's
+        # docstring for why coupling them was rejected).
+        futures_only_refresh_task = _wrap(
+            "futures_only_refresh_task",
+            lambda: start_futures_only_refresh_task(get_session_factory()),
         )
 
         # Server-side WS keepalive — fans live-prediction WS subscriptions
@@ -745,6 +761,8 @@ async def lifespan(_app: FastAPI):
             prediction_validator_task.cancel()
         if live_fleet_universe_refresh_task is not None:
             live_fleet_universe_refresh_task.cancel()
+        if futures_only_refresh_task is not None:
+            futures_only_refresh_task.cancel()
         if ws_keepalive_task is not None:
             ws_keepalive_task.cancel()
         if futures_poll_worker is not None:

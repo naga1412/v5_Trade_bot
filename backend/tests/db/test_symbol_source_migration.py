@@ -13,11 +13,23 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table", ["predictions", "shadow_trades", "telegram_signals", "live_trades"])
+@pytest.mark.parametrize("table", ["predictions", "telegram_signals", "live_trades"])
 async def test_symbol_source_column_defaults_established_top20(table: str) -> None:
     """Existing rows backfill to 'established_top20' -- they were all
     covered under the pre-2026-08-15 top-N-by-volume selector, which is
-    what that tag denotes (a lineage marker, not a live-recomputed rank)."""
+    what that tag denotes (a lineage marker, not a live-recomputed rank).
+
+    shadow_trades deliberately dropped from this parametrize list:
+    migration 0042 (item 0, 2026-08-30) removed both NOT NULL and the
+    DEFAULT on shadow_trades.symbol_source (and shadow_open_positions',
+    which was never covered by this test) so a genuine classification
+    failure at position-open time can write a real, honest NULL instead
+    of a guessed cohort. See tests/db/test_symbol_source_nullable_
+    migration.py for the up-to-date assertions on both of those tables.
+    predictions/telegram_signals/live_trades are untouched -- their
+    symbol_source is a different write path (live_prediction.py /
+    dispatcher), out of item 0's scope, and still carries the original
+    NOT NULL DEFAULT 'established_top20' unchanged."""
     engine = create_async_engine(os.environ["DATABASE_URL"])
     async with engine.begin() as conn:
         col = (await conn.execute(sa.text(

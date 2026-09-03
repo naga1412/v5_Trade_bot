@@ -333,6 +333,31 @@ async def load_live_fleet_universe(
     ]
 
 
+async def fetch_futures_and_futures_only_symbols(
+    http: httpx.AsyncClient,
+) -> tuple[set[str], set[str]]:
+    """Two raw exchangeInfo calls -- (all USDT-perp futures symbols,
+    futures-listed-but-not-spot-listed symbols). Extracted (2026-08-30,
+    item 0) so `app.shadow.cohort_cache`'s daily futures_only refresh
+    can reuse this without duplicating the Binance-call logic. Pure
+    listing data -- no liquidity sampling, no cohort decision, no DB."""
+    futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
+    futures_resp.raise_for_status()
+    fut_symbols = {
+        s["symbol"] for s in futures_resp.json()["symbols"]
+        if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL"
+        and s.get("status") == "TRADING"
+    }
+
+    spot_resp = await http.get(f"{_SPOT_BASE}/api/v3/exchangeInfo")
+    spot_resp.raise_for_status()
+    spot_symbols = {
+        s["symbol"] for s in spot_resp.json()["symbols"]
+        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+    }
+    return fut_symbols, fut_symbols - spot_symbols
+
+
 async def refresh_live_fleet_universe(
     session_factory: async_sessionmaker[AsyncSession],
     http: httpx.AsyncClient,
@@ -364,21 +389,7 @@ async def refresh_live_fleet_universe(
          queries live positions directly rather than only `prior`).
       5. Persist the new snapshot and return it.
     """
-    futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
-    futures_resp.raise_for_status()
-    fut_symbols = {
-        s["symbol"] for s in futures_resp.json()["symbols"]
-        if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL"
-        and s.get("status") == "TRADING"
-    }
-
-    spot_resp = await http.get(f"{_SPOT_BASE}/api/v3/exchangeInfo")
-    spot_resp.raise_for_status()
-    spot_symbols = {
-        s["symbol"] for s in spot_resp.json()["symbols"]
-        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
-    }
-    futures_only = fut_symbols - spot_symbols
+    fut_symbols, futures_only = await fetch_futures_and_futures_only_symbols(http)
 
     ticker_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/ticker/24hr")
     ticker_resp.raise_for_status()
@@ -585,4 +596,5 @@ __all__ = [
     "SEVERE_DEPTH_RATIO", "SEVERE_SPREAD_RATIO",
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
     "load_baseline_symbols", "load_live_fleet_universe", "refresh_live_fleet_universe",
+    "fetch_futures_and_futures_only_symbols",
 ]
