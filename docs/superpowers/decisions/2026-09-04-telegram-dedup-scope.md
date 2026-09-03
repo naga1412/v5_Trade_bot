@@ -117,7 +117,21 @@ duplicate.
 
 ## Status
 
-Built, CI-green, held per the operator's explicit "build parameterized,
-do not ship" instruction. `TELEGRAM_DEDUP_COOLDOWN_HOURS` stays unset
-(dedup disabled, no behavior change) until the operator picks a
-duration from §A1's table.
+**Shipped.** Operator chose 12h (2026-09-04), on mechanism rather than
+the suppression percentage alone: shadow trades run a median 8.1 bars
+to a stop and 12.0 bars to a take-profit on the 1h lane, so a typical
+position lives roughly 8-12 hours. A cooldown shorter than that would
+send a second card for the same (symbol, direction) while a trade
+opened off the first card would still plausibly be open — redundant by
+construction for someone acting on it. 12h matches "one signal per
+symbol+direction per typical trade lifetime." At this value: 63.6% of
+the 14-day replay sample suppressed, LTC/USDT's worst day drops 15 → 2.
+
+`TELEGRAM_DEDUP_COOLDOWN_HOURS: float | None = 12.0` is now the config
+default (still overridable/disable-able via the same field — shipping
+was choosing a number, adjusting later is the same). **Expect roughly a
+60% drop in daily Telegram counts once this deploys — that is the fix
+working, not a regression in anything that merges alongside or after
+it.** Every subsequent stage checkpoint should state this expectation
+up front so a lower Telegram count is never misread as reduced
+coverage.

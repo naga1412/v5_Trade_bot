@@ -369,15 +369,30 @@ class Settings(BaseSettings):
     # 2026-09-04-telegram-dedup-scope.md` for the full read-only measurement
     # and the scope argument in one place.
     #
-    # None (default) disables dedup entirely — every dispatch-eligible
-    # signal sends, exactly today's behavior. Shipping is choosing a
-    # positive hour value, not writing code.
+    # Operator decision (2026-09-04): 12.0, chosen on mechanism, not on
+    # the suppression percentage in isolation. Shadow trades run a
+    # median 8.1 bars to a stop and 12.0 bars to a take-profit on the 1h
+    # lane, so a typical position lives roughly 8-12 hours. A cooldown
+    # shorter than that would send a second card for the same (symbol,
+    # direction) while a trade opened off the FIRST card would still
+    # plausibly be open — redundant by construction for someone acting
+    # on it. 12h matches "one signal per symbol+direction per typical
+    # trade lifetime." At this value: 63.6% of the 14-day replay sample
+    # suppressed, LTC/USDT's worst day drops 15 -> 2. Trivially
+    # adjustable via this same field once the operator has lived with
+    # it in practice — the number is a config value, not a redeploy.
+    #
+    # Expect roughly a 60% drop in daily Telegram counts once this
+    # ships — that is the fix working, not a regression in whatever
+    # merges alongside or after it. Note this explicitly in any
+    # post-merge count comparison so it is never misread as a Stage
+    # 3/4/5 (or any other) coverage regression.
     #
     # Keyed on (symbol, direction) — NOT symbol alone. A direction reversal
     # (the setup flips LONG -> SHORT or vice versa) is new information and
     # must always send regardless of how recently the OPPOSITE direction
     # last sent for that symbol.
-    TELEGRAM_DEDUP_COOLDOWN_HOURS: float | None = None
+    TELEGRAM_DEDUP_COOLDOWN_HOURS: float | None = 12.0
 
     @field_validator("TELEGRAM_DEDUP_COOLDOWN_HOURS")
     @classmethod
