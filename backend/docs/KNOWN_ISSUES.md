@@ -1494,6 +1494,11 @@ wiring decision is taken on its merits. Reverting to 50 re-activates
 the behaviour and MUST be treated as a deliberate scoring change with
 its own measurement, not a cleanup.
 
-**Also stale as a result**: the `pattern-stats-backfill-delta` ops-debug
-probe still documents `COLD_START_THRESHOLD=50` and "pattern_stats is
-not yet backfilled on prod". Both were overtaken by this event.
+**Corrected alongside this entry**: the `pattern-stats-backfill-delta`
+ops-debug probe carried three claims this event falsified -- it quoted
+`COLD_START_THRESHOLD=50`, said "pattern_stats is not yet backfilled on
+prod", and asserted the lookup was "not wired into live scoring". That
+last one was the same false belief described above, sitting in the
+description of the probe most likely to be run when investigating this
+exact subject. All three are fixed in the same change as this entry
+rather than merely noted here.
