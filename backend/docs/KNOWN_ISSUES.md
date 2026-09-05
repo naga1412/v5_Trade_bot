@@ -1434,3 +1434,66 @@ capture backend logs live through a 02:00 UTC run (rather than
 reconstructing after the fact), and/or instrument `sync_universe`'s
 exception log line with more context (which adapter, which step) so a
 future failure is diagnosable without guessing.
+
+### FU-48 — SCORING REGIME BOUNDARY at 2026-09-05T09:18:32Z (pattern_stats briefly fed live L2)
+
+**Split any analysis spanning this timestamp.** For a 48-minute window
+on 2026-09-05, live L2 scoring on the **15m** lane used real
+`pattern_stats` accuracies instead of the flat `PRIOR_ACCURACY` 0.5 it
+had used for the table's entire prior existence. 15m is ~77% of shadow
+trades, so a query spanning 09:18:32Z will silently mix two scoring
+regimes.
+
+| | |
+|---|---|
+| Regime change ON | 2026-09-05 **09:18:32Z** (`pattern_stats_refresh` first run) |
+| Regime change OFF | 2026-09-05 **10:06:41Z** (deploy of #551) |
+| Affected lane | 15m only. 1h was never affected (`max_n_samples`=20, below even the old threshold of 50) |
+| Affected patterns | 11 `(symbol, pattern)` rows crossing `n_samples >= 50` |
+| Magnitude | multiplier 0.5 -> 0.14-0.33, i.e. 28-66% of prior, uniformly downward |
+
+**How it happened** -- this is the generalisable part. `pattern_stats`
+had never held a row since it shipped (FU-46), so
+`PatternStatsLookup.get` returned `PRIOR_ACCURACY` for every pattern
+and the multiplier at `layer2_patterns._weighted` cancelled uniformly.
+The lookup itself had been wired into live scoring all along
+(`predictor` -> `live_prediction` / `shadow.worker` via
+`_pattern_stats_cache`). "Not wired" was only ever true in the sense
+that the table was empty. Stage 3 (#542) registered the
+`pattern_stats_refresh` worker (#507), which ran 9 seconds after boot
+and wrote 3,578 rows -- activating a live read path by populating its
+source, with no code change to the scorer at all.
+
+**PROCESS RULE (operator, 2026-09-05):** "not wired" must mean THE CALL
+DOES NOT EXIST -- never "the call returns a default". A lookup that
+returns a neutral prior from an empty table is a live dependency
+waiting for data, and populating its source IS the activation. Apply
+this test before classifying anything as dormant.
+
+**Measurement impact: NONE, verified.** The 30 September breakeven
+paired read is unaffected. Zero trades were *opened* during the window
+-- the only positions opened in it (TAOUSDT, ENSOUSDT, WLDUSDT, all at
+10:00:00Z) are 1h, which never had a warm row. Six variant rows were
+*recorded* inside the window, but they belong to base trades opened 18
+minutes to 21 hours before it, and the variant replay is a pure
+function of the base trade's own bar path under an alternate exit
+rule -- it never touches L2. Recording time is the wrong test; entry
+time is the right one. No observations need excluding.
+
+The one residual that cannot be measured away: a 15m signal
+*suppressed* by the down-weighting during those 48 minutes would be
+invisible by construction -- a missing trade, not a droppable row.
+Three 15m closes fell in the window; at the observed 15m rate
+(~2.2/hr) that is ~1.75 expected opens against 0 observed, which is
+unremarkable noise (p~0.17) and negligible against a 150-trade target.
+
+**Current state**: `COLD_START_THRESHOLD` is held at `100_000` (#551),
+so no row can feed scoring. The 3,578 rows remain written and
+`pattern_stats_refresh` keeps running, so data accrues for whenever the
+wiring decision is taken on its merits. Reverting to 50 re-activates
+the behaviour and MUST be treated as a deliberate scoring change with
+its own measurement, not a cleanup.
+
+**Also stale as a result**: the `pattern-stats-backfill-delta` ops-debug
+probe still documents `COLD_START_THRESHOLD=50` and "pattern_stats is
+not yet backfilled on prod". Both were overtaken by this event.
