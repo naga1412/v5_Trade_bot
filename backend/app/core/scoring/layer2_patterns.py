@@ -32,8 +32,38 @@ _CHART_PATTERN_IDS: frozenset[str] = frozenset(
 PRIOR_ACCURACY: float = 0.5
 """Default accuracy when pattern_stats has no warm row for a pattern."""
 
-COLD_START_THRESHOLD: int = 50
-"""spec §2 decision 6 — fewer samples than this are too noisy to trust."""
+COLD_START_THRESHOLD: int = 100_000
+"""spec §2 decision 6 — fewer samples than this are too noisy to trust.
+
+TEMPORARILY RAISED 50 -> 100_000 on 2026-09-05 to neutralise an
+unintended live-scoring activation. Operator-authorised in advance;
+revert to 50 only on an explicit decision.
+
+What happened: ``pattern_stats`` had never held a row since it shipped
+(FU-46), so ``PatternStatsLookup.get`` returned a flat
+``PRIOR_ACCURACY`` 0.5 for every pattern and the multiplier at
+``_weighted`` cancelled uniformly. The lookup itself has been wired
+into live scoring all along (predictor -> live_prediction /
+shadow.worker via _pattern_stats_cache) -- "not wired" was only ever
+true in the sense that the table was empty. Stage 3 (#542) registered
+the ``pattern_stats_refresh`` worker (#507), which ran 9s after boot at
+2026-09-05T09:18:32Z and wrote 3,578 rows; 11 crossed the old
+threshold of 50 and began returning real accuracies of 0.14-0.33 --
+i.e. multipliers 28-66% of the previous flat 0.5, uniformly downward.
+
+Why this specifically matters: all 11 warm rows are 15m, and the
+breakeven-variant population is 77% 15m (3,396 of 4,412 pairs), so the
+30 September paired read -- the only instrument in this project that
+can still conclude anything, absolute edge having been established as
+unmeasurable -- was being contaminated mid-flight. Two contaminated
+pairs had already been written by 09:45Z when this was caught.
+
+Why 100_000 and not, say, 100: the value must not be crossed while the
+measurement is in flight, or it creates a second, unpredictable regime
+boundary -- exactly the failure being prevented. Max n_samples today is
+72 against 4,849 all-time closed trades, so 100_000 is uncrossable by
+construction and the neutralisation is a one-line revert.
+"""
 
 TANH_DIVISOR: float = 3.0
 """spec §3.3 — squashing scale; tunable risk fallback in §10."""

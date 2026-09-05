@@ -299,7 +299,16 @@ class _Row:
 
 @pytest.mark.asyncio
 async def test_load_pattern_stats_warm_rows_become_accuracies() -> None:
-    """n_samples >= 50 → ratio; below threshold → omitted (prior applies)."""
+    """At/above threshold → ratio; below → omitted (prior applies).
+
+    Sample counts are expressed RELATIVE to ``COLD_START_THRESHOLD``
+    rather than hardcoded. They were literals (100/200) until
+    2026-09-05, which silently coupled this test to the threshold
+    happening to be 50 -- it broke the moment the constant was raised
+    to neutralise the pattern_stats activation. The behaviour under
+    test is "warm row yields its real ratio, cold row falls back to the
+    prior", which is independent of where the cutoff sits.
+    """
     from app.core.scoring.layer2_patterns import (
         COLD_START_THRESHOLD,
         PRIOR_ACCURACY,
@@ -307,9 +316,17 @@ async def test_load_pattern_stats_warm_rows_become_accuracies() -> None:
     )
 
     rows = [
-        _Row(pattern_id="hammer", n_samples=100, n_correct=60),
+        _Row(
+            pattern_id="hammer",
+            n_samples=COLD_START_THRESHOLD,
+            n_correct=COLD_START_THRESHOLD * 60 // 100,
+        ),
         _Row(pattern_id="doji", n_samples=COLD_START_THRESHOLD - 1, n_correct=30),
-        _Row(pattern_id="engulfing", n_samples=200, n_correct=110),
+        _Row(
+            pattern_id="engulfing",
+            n_samples=COLD_START_THRESHOLD * 2,
+            n_correct=COLD_START_THRESHOLD * 2 * 55 // 100,
+        ),
     ]
     session = _StubSession(rows)
     lookup = await load_pattern_stats(session, symbol="BTC/USDT", timeframe="1h")  # type: ignore[arg-type]
