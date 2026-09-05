@@ -38,6 +38,11 @@ from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
 from app.ops.alert_routing import alert_admin
 from app.ops.heartbeat import record_heartbeat
+from app.shadow.cohort_cache import (
+    get_baseline_cache,
+    get_futures_only_cache,
+    load_baseline_cache_once,
+)
 from app.shadow.engine import (
     PositionGate,
     ShadowPosition,
@@ -49,6 +54,7 @@ from app.shadow.exit_monitor import (
     ExitReason,
     check_exit,
 )
+from app.shadow.live_fleet_universe import _classify_cohort
 from app.shadow.multi_stream import MultiStreamCandle, MultiStreamReader
 from app.shadow.observation import build_obs_components, persist_observation
 from app.shadow.persistence import (
@@ -203,6 +209,24 @@ class ShadowWorker:
             self.cooldowns = await load_cooldowns_per_tf(
                 session, user_id=self.user_id,
             )
+            # Item 0 (2026-08-30): load the frozen 73-symbol cohort
+            # baseline ONCE per process start -- see cohort_cache's
+            # module docstring for why this must never be re-read per
+            # position open. A failure here does NOT crash worker
+            # startup: it leaves get_baseline_cache() returning None,
+            # which the position-open path treats as "cannot classify"
+            # and writes NULL for (constraint 3, operator ruling
+            # 2026-08-30) -- never a guessed cohort. The worker keeps
+            # running and will pick up the baseline on its next setup()
+            # (i.e. next restart) or the moment this call is retried.
+            try:
+                await load_baseline_cache_once(session)
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    "shadow_worker: cohort baseline load failed at setup -- "
+                    "position opens will write symbol_source=NULL until it "
+                    "succeeds: %s", e,
+                )
         log.info(
             "shadow_worker: loaded %d open positions, %d cooldowns from db",
             len(self.open_positions), len(self.cooldowns),
@@ -983,6 +1007,61 @@ class ShadowWorker:
         position.funding_directional_adj = getattr(
             pred, "funding_directional_adj", None,
         )
+
+        # Item 0 (2026-08-30): symbol_source classified SYNCHRONOUSLY,
+        # in real time, at open -- not by joining whichever
+        # live_fleet_universe batch happens to be nearest (proven to be
+        # up to ~8h stale, unacceptable per operator ruling). Both
+        # inputs are pre-warmed, zero-I/O reads (app.shadow.cohort_cache):
+        # the frozen baseline (loaded once at worker startup) and the
+        # daily-refreshed futures_only listing set. Neither call here
+        # ever reaches the network.
+        #
+        # NO DEFAULT ON FAILURE (operator ruling, 2026-08-30): if either
+        # cache is unwarmed, or _classify_cohort itself raises, write
+        # NULL and alert -- never fall back to a guessed cohort. A
+        # hardcoded fallback tag is exactly the defect this whole item
+        # exists to stop repeating (the rescue path's established_top20
+        # default fabricated lineage for TRUMPUSDT across 321
+        # predictions, invisible to every audit until this investigation
+        # found it by accident). A NULL is honest and greppable.
+        _baseline = get_baseline_cache()
+        _futures_only = get_futures_only_cache()
+        if _baseline is None or _futures_only is None:
+            position.symbol_source = None
+            log.error(
+                "shadow_worker: symbol_source classification unavailable for "
+                "%s -- baseline_cached=%s futures_only_cached=%s -- writing "
+                "NULL, never a default cohort tag",
+                candle.symbol, _baseline is not None, _futures_only is not None,
+            )
+            await alert_admin(
+                f"shadow_worker: symbol_source classification cache "
+                f"unavailable for {candle.symbol} (baseline_cached="
+                f"{_baseline is not None}, futures_only_cached="
+                f"{_futures_only is not None}) -- position opened with "
+                f"symbol_source=NULL",
+                level="critical",
+            )
+        else:
+            try:
+                position.symbol_source = _classify_cohort(
+                    candle.symbol, baseline=_baseline, futures_only=_futures_only,
+                )
+            except Exception as e:  # noqa: BLE001
+                position.symbol_source = None
+                log.error(
+                    "shadow_worker: _classify_cohort raised for %s -- "
+                    "writing NULL, never a default cohort tag: %s",
+                    candle.symbol, e,
+                )
+                await alert_admin(
+                    f"shadow_worker: _classify_cohort raised for "
+                    f"{candle.symbol}: {e} -- position opened with "
+                    f"symbol_source=NULL",
+                    level="critical",
+                )
+
         # PR3: stamp the TF on the position so persistence + the in-memory
         # cache key reflect the actual lane the trade was opened on.
         position.timeframe = tf

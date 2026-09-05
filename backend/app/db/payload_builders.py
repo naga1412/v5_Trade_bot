@@ -144,15 +144,17 @@ def build_shadow_trade_payload(
     effective_score: float | None = None,
     realized_vol_20d: float | None = None,
     funding_directional_adj: float | None = None,
-    # Phase 4 Task 9: cohort tag, threaded from the ShadowPosition's own
-    # `symbol_source` (set at open time; see app.shadow.engine). Defaults
-    # to "established_top20" -- today's shadow_worker selects its
-    # universe via `load_shadow_universe` (asset_universe top-30, no
-    # cohort concept at all), so every row this builder produces in
-    # production currently reads "established_top20" until shadow's own
-    # universe selection is cohort-aware -- out of this task's scope,
-    # see the PR description.
-    symbol_source: str = "established_top20",
+    # Phase 4 Task 9 / Item 0 (2026-08-30): cohort tag, threaded from the
+    # ShadowPosition's own `symbol_source`, classified synchronously at
+    # open time (app.shadow.worker's position-open path, via
+    # app.shadow.live_fleet_universe._classify_cohort). None is a real,
+    # legitimate value here -- it means classification could not
+    # complete at open time (operator ruling: NULL + alert, never a
+    # guessed cohort). The "established_top20" default only fires for a
+    # caller that omits this kwarg entirely (duck-typed test fixtures
+    # predating Task 9); every real shadow_worker call site passes it
+    # explicitly.
+    symbol_source: str | None = "established_top20",
 ) -> dict[str, Any]:
     """Build the dict passed to ``insert_with_chain`` for the shadow_trades table.
 
