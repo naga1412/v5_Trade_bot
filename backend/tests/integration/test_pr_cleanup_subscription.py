@@ -149,3 +149,38 @@ async def test_no_open_positions_subscription_equals_top30() -> None:
         op_syms = await _load_open_position_symbols(s)
     subscription = _compute_subscription_set(top_30, op_syms)
     assert subscription == sorted(top_30)
+
+
+def test_subscription_no_baseline_is_plain_sorted_union() -> None:
+    """Default (no baseline passed) stays exactly the historical
+    behavior -- every real call site today (before item 0 lands)."""
+    from app.shadow.worker import _compute_subscription_set
+    result = _compute_subscription_set(["ZUSDT", "AUSDT", "MUSDT"], [])
+    assert result == ["AUSDT", "MUSDT", "ZUSDT"]
+
+
+def test_subscription_baseline_members_sort_first() -> None:
+    """2026-08-30 operator ruling: [baseline members first] + [rest,
+    sorted] -- protects the established_top20 stream from truncation at
+    the cost of new-cohort symbols being the ones dropped if the cap is
+    ever hit (see _compute_subscription_set's own docstring for the
+    full trade-off). ZUSDT sorts last alphabetically but must appear
+    FIRST here because it's a baseline member -- exactly the
+    XRPUSDT/ZECUSDT/TRXUSDT-class case named in the ruling."""
+    from app.shadow.worker import _compute_subscription_set
+    result = _compute_subscription_set(
+        ["ZUSDT", "AUSDT", "MUSDT"], [],
+        baseline={"ZUSDT"},
+    )
+    assert result == ["ZUSDT", "AUSDT", "MUSDT"]
+
+
+def test_subscription_baseline_ordering_is_stable_within_each_group() -> None:
+    """Multiple baseline members and multiple non-members are each
+    independently sorted, not just partitioned arbitrarily."""
+    from app.shadow.worker import _compute_subscription_set
+    result = _compute_subscription_set(
+        ["ZUSDT", "YUSDT", "BUSDT", "AUSDT"], [],
+        baseline={"ZUSDT", "YUSDT"},
+    )
+    assert result == ["YUSDT", "ZUSDT", "AUSDT", "BUSDT"]

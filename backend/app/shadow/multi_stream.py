@@ -41,6 +41,26 @@ def build_combined_stream_url(
     if not symbols:
         raise ValueError("symbols must be non-empty")
     truncated = symbols[:max_streams]
+    if len(symbols) > max_streams:
+        # 2026-08-30 operator ruling on the cohort-tag-defect thread:
+        # NEVER truncate silently. Before this, symbols past index
+        # max_streams (200) were dropped from the WS subscription with
+        # zero signal anywhere -- and since callers pass an
+        # ALPHABETICALLY SORTED list (see worker.py's
+        # _compute_subscription_set), the drop is not random: it
+        # systematically favors tickers early in the alphabet over
+        # ones late in it (e.g. XRPUSDT/ZECUSDT/TRXUSDT), regardless of
+        # liquidity, cohort, or trading merit. A loud log line here is
+        # the minimum bar; callers with async context (worker.py's
+        # _build_default_worker) additionally route this through
+        # app.ops.alert_routing.alert_admin at "critical" so it pages
+        # instead of waiting to be noticed in a log grep.
+        log.error(
+            "multi_stream: %d symbols requested but max_streams=%d -- "
+            "TRUNCATING %d symbol(s), WS coverage lost for: %s",
+            len(symbols), max_streams, len(symbols) - max_streams,
+            symbols[max_streams:],
+        )
     streams = "/".join(f"{s.lower()}@kline_{timeframe}" for s in truncated)
     return f"{base}/stream?streams={streams}"
 
@@ -69,13 +89,18 @@ class MultiStreamReader:
         *,
         timeframe: str = "1h",
         base_url: str = "wss://stream.binance.com:9443",
+        max_streams: int = 200,
         _connect: Callable[[str], AsyncIterator[str]] | None = None,
     ) -> None:
         self.symbols = symbols
         self.timeframe = timeframe
         self.url = build_combined_stream_url(
-            symbols=symbols, timeframe=timeframe, base=base_url
+            symbols=symbols, timeframe=timeframe, base=base_url, max_streams=max_streams,
         )
+        # Exposed so an async caller (worker.py's _build_default_worker)
+        # can route this through alert_admin -- build_combined_stream_url
+        # itself stays sync and only logs (see its own comment for why).
+        self.truncated_symbols: list[str] = symbols[max_streams:] if len(symbols) > max_streams else []
         self._connect = _connect
 
     async def _real_connect(self, url: str) -> AsyncIterator[str]:
