@@ -32,8 +32,38 @@ _CHART_PATTERN_IDS: frozenset[str] = frozenset(
 PRIOR_ACCURACY: float = 0.5
 """Default accuracy when pattern_stats has no warm row for a pattern."""
 
-COLD_START_THRESHOLD: int = 50
-"""spec §2 decision 6 — fewer samples than this are too noisy to trust."""
+COLD_START_THRESHOLD: int = 100_000
+"""spec §2 decision 6 — fewer samples than this are too noisy to trust.
+
+TEMPORARILY RAISED 50 -> 100_000 on 2026-09-05 to neutralise an
+unintended live-scoring activation. Operator-authorised in advance;
+revert to 50 only on an explicit decision.
+
+What happened: ``pattern_stats`` had never held a row since it shipped
+(FU-46), so ``PatternStatsLookup.get`` returned a flat
+``PRIOR_ACCURACY`` 0.5 for every pattern and the multiplier at
+``_weighted`` cancelled uniformly. The lookup itself has been wired
+into live scoring all along (predictor -> live_prediction /
+shadow.worker via _pattern_stats_cache) -- "not wired" was only ever
+true in the sense that the table was empty. Stage 3 (#542) registered
+the ``pattern_stats_refresh`` worker (#507), which ran 9s after boot at
+2026-09-05T09:18:32Z and wrote 3,578 rows; 11 crossed the old
+threshold of 50 and began returning real accuracies of 0.14-0.33 --
+i.e. multipliers 28-66% of the previous flat 0.5, uniformly downward.
+
+Why this specifically matters: all 11 warm rows are 15m, and the
+breakeven-variant population is 77% 15m (3,396 of 4,412 pairs), so the
+30 September paired read -- the only instrument in this project that
+can still conclude anything, absolute edge having been established as
+unmeasurable -- was being contaminated mid-flight. Two contaminated
+pairs had already been written by 09:45Z when this was caught.
+
+Why 100_000 and not, say, 100: the value must not be crossed while the
+measurement is in flight, or it creates a second, unpredictable regime
+boundary -- exactly the failure being prevented. Max n_samples today is
+72 against 4,849 all-time closed trades, so 100_000 is uncrossable by
+construction and the neutralisation is a one-line revert.
+"""
 
 TANH_DIVISOR: float = 3.0
 """spec §3.3 — squashing scale; tunable risk fallback in §10."""
@@ -41,8 +71,19 @@ TANH_DIVISOR: float = 3.0
 NEUTRAL_BAND: float = 0.05
 """|squashed| < 0.05 → NEUTRAL; spec §3.3."""
 
-NOTES_MAX_CHARS: int = 500
-"""spec §12 Q4 — keep ``LayerScore.notes`` short for JSONB storage."""
+NOTES_MAX_CHARS: int = 2000
+"""spec §12 Q4 — keep ``LayerScore.notes`` short for JSONB storage.
+
+Raised from 500 (2026-08-31, notes-truncation fix): confirmed on real
+prod data that a mid-fire-count trade (~10+ fires) blows past 500
+chars, and ``_build_notes`` used to slice the JSON string blindly at
+the character boundary -- producing invalid, unparseable JSON for
+68.8% of trades in a 2,000-trade sample. 2000 chars comfortably fits
+~25-30 realistic pattern fires; ``_build_notes`` below now ALSO
+truncates at the pattern boundary (weakest fires dropped first, never
+mid-object) so even a pathological fire count degrades to a smaller
+valid payload instead of an unparseable one.
+"""
 
 
 @dataclass(frozen=True)
@@ -198,17 +239,38 @@ def _compute_layer_confidence(fires: list[PatternFire]) -> float:
 
 
 def _build_notes(fires: list[PatternFire]) -> str:
-    """Compact JSON-style summary capped at ``NOTES_MAX_CHARS`` (spec §12 Q4)."""
+    """Compact JSON-style summary capped at ``NOTES_MAX_CHARS`` (spec §12 Q4).
+
+    Truncates at the PATTERN boundary, never mid-character. A blind
+    ``[:NOTES_MAX_CHARS]`` character slice (the pre-2026-08-31 behavior)
+    produces invalid JSON whenever the cut lands inside a fire object --
+    confirmed on real prod data, 68.8% of trades in a 2,000-trade sample
+    had unparseable ``notes`` for exactly this reason, silently losing
+    those trades' pattern attribution entirely in
+    ``app.ml.patterns.update_pattern_stats``. Dropping whole fires from
+    the WEAKEST end (lowest strength*confidence first) instead means a
+    high-fire-count trade degrades to a smaller but always-valid
+    payload, and keeps the most significant fires when something has to
+    give. ``"n"`` always reports the true total fire count even when
+    ``"patterns"`` had to be shortened; ``"truncated"`` flags when that
+    happened so a consumer can tell the two cases apart.
+    """
     if not fires:
         return "0 patterns fired"
-    payload = {
-        "n": len(fires),
-        "patterns": [
-            {
-                "id": f.pattern_id, "dir": f.direction,
-                "s": round(f.strength, 3), "c": round(f.confidence, 3),
-            }
-            for f in fires
-        ],
-    }
-    return json.dumps(payload, separators=(",", ":"))[:NOTES_MAX_CHARS]
+    # Strongest first, so truncation below drops the weakest fires.
+    ordered = sorted(fires, key=lambda f: f.strength * f.confidence, reverse=True)
+    all_patterns = [
+        {"id": f.pattern_id, "dir": f.direction, "s": round(f.strength, 3), "c": round(f.confidence, 3)}
+        for f in ordered
+    ]
+    kept = list(all_patterns)
+    while kept:
+        payload = {"n": len(fires), "patterns": kept, "truncated": len(kept) < len(all_patterns)}
+        s = json.dumps(payload, separators=(",", ":"))
+        if len(s) <= NOTES_MAX_CHARS:
+            return s
+        kept.pop()
+    # Pathological: even zero patterns doesn't fit under the cap. Report
+    # the count only -- still valid JSON, never reached in practice at
+    # NOTES_MAX_CHARS=2000.
+    return json.dumps({"n": len(fires), "patterns": [], "truncated": True}, separators=(",", ":"))

@@ -345,6 +345,67 @@ class Settings(BaseSettings):
             )
         return v
 
+    # --- TELEGRAM_DEDUP (2026-09-04) --------------------------------------
+    # Per-(symbol, direction) cooldown on Telegram card SENDS, keyed at the
+    # dispatch layer only. Motivating measurement (14-day replay against
+    # real telegram_signals history, 566 rows): a persistent single-symbol
+    # setup can re-fire on every qualifying candle with zero deduplication
+    # today — the only existing cooldown (`LIVE_COOLDOWN_ENABLED`) is
+    # outcome-gated (keyed off a live_trades row actually closing) and
+    # `live_cooldowns` has never had a single row in the account's history,
+    # so it has never once suppressed anything. One day alone (2026-09-03)
+    # produced 198 cards with one symbol (LTC/USDT) sending 15 times.
+    #
+    # Scope, non-negotiable: this setting affects ONLY the Telegram-approve
+    # send inside `dispatcher.dispatch()` (`_send_telegram_signal`'s call
+    # site). It does NOT touch signal generation (`app/core/predictor.py`,
+    # `app/shadow/worker.py`'s own evaluator), shadow trade creation, or
+    # anything the breakeven-variant measurement reads. A suppressed
+    # Telegram card is still a real signal for every other purpose —
+    # shadow still evaluates and (if it qualifies) still opens/records the
+    # trade exactly as it would with this setting unset. See
+    # `_check_telegram_dedup` in `app/trading/execution/dispatcher.py` for
+    # the enforcement point and `docs/superpowers/decisions/
+    # 2026-09-04-telegram-dedup-scope.md` for the full read-only measurement
+    # and the scope argument in one place.
+    #
+    # Operator decision (2026-09-04): 12.0, chosen on mechanism, not on
+    # the suppression percentage in isolation. Shadow trades run a
+    # median 8.1 bars to a stop and 12.0 bars to a take-profit on the 1h
+    # lane, so a typical position lives roughly 8-12 hours. A cooldown
+    # shorter than that would send a second card for the same (symbol,
+    # direction) while a trade opened off the FIRST card would still
+    # plausibly be open — redundant by construction for someone acting
+    # on it. 12h matches "one signal per symbol+direction per typical
+    # trade lifetime." At this value: 63.6% of the 14-day replay sample
+    # suppressed, LTC/USDT's worst day drops 15 -> 2. Trivially
+    # adjustable via this same field once the operator has lived with
+    # it in practice — the number is a config value, not a redeploy.
+    #
+    # Expect roughly a 60% drop in daily Telegram counts once this
+    # ships — that is the fix working, not a regression in whatever
+    # merges alongside or after it. Note this explicitly in any
+    # post-merge count comparison so it is never misread as a Stage
+    # 3/4/5 (or any other) coverage regression.
+    #
+    # Keyed on (symbol, direction) — NOT symbol alone. A direction reversal
+    # (the setup flips LONG -> SHORT or vice versa) is new information and
+    # must always send regardless of how recently the OPPOSITE direction
+    # last sent for that symbol.
+    TELEGRAM_DEDUP_COOLDOWN_HOURS: float | None = 12.0
+
+    @field_validator("TELEGRAM_DEDUP_COOLDOWN_HOURS")
+    @classmethod
+    def _validate_telegram_dedup_cooldown(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        if v <= 0.0:
+            raise ValueError(
+                f"TELEGRAM_DEDUP_COOLDOWN_HOURS={v} <= 0 is not a cooldown "
+                "— use a positive hour value, or unset to disable dedup."
+            )
+        return v
+
     # --- PR-MAKE-APPROVAL-TIMEOUT-AND-DRIFT-CONFIGURABLE (2026-05-26) ----
     # Two safety knobs on the telegram-approve flow:
     #
