@@ -43,7 +43,12 @@ from app.shadow.engine import (
     ShadowPosition,
     SignalEvaluator,
 )
-from app.shadow.exit_monitor import ExitDecision, ExitReason, check_exit
+from app.shadow.exit_monitor import (
+    TIMEOUT_BARS_PER_TF,
+    ExitDecision,
+    ExitReason,
+    check_exit,
+)
 from app.shadow.multi_stream import MultiStreamCandle, MultiStreamReader
 from app.shadow.observation import build_obs_components, persist_observation
 from app.shadow.persistence import (
@@ -76,6 +81,21 @@ SHADOW_TIMEFRAME: str = "1h"
 # admin (id=1, see migration 0005). SP-8 will spawn one worker per user
 # and parameterise this on the worker dataclass instance.
 BOOTSTRAP_ADMIN_USER_ID: int = 1
+
+# ---------------------------------------------------------------------------
+# Entry-timing recon (2026-09-04) — LOG-ONLY, flag-gated, off by default.
+#
+# Measures the eligibility fraction the entry-timing shadow-variant-lane
+# design (docs/superpowers/plans/2026-09-03-entry-timing-variant-lane-
+# design.md) needs before deciding whether to build the full paired lane.
+# Does NOT persist anything, does NOT change any entry/exit decision, does
+# NOT touch shadow's trade population or the breakeven-variant lanes in
+# any way. See _entry_timing_recon_tick's own docstring for the full
+# safety argument and _entry_timing_recon_state's docstring for why the
+# state it tracks cannot affect anything else in this class.
+ENTRY_TIMING_RECON_ENABLED: bool = False
+ENTRY_TIMING_RECON_SCORE_THRESHOLD: float = 0.22
+
 
 
 class _StreamReader(Protocol):
@@ -142,6 +162,17 @@ class ShadowWorker:
     evaluator: SignalEvaluator = field(default_factory=SignalEvaluator)
     # SP-0.7 single-worker default; SP-8 will populate per spawned user.
     user_id: int = BOOTSTRAP_ADMIN_USER_ID
+    # Entry-timing recon (2026-09-04): (symbol, tf) -> (arm_ts, arm_score)
+    # for the first bar since the last real entry/reset where
+    # ENTRY_TIMING_RECON_SCORE_THRESHOLD cleared. Read and written ONLY by
+    # _entry_timing_recon_tick, below. No other method in this class reads
+    # or writes this dict — it cannot affect open_positions, bars,
+    # cooldowns, or any real decision by construction, not just by
+    # intent. Not persisted; lost on restart like the breakeven lane's own
+    # ephemeral in-memory buffer (Amendment 3) — same design precedent.
+    _entry_timing_recon_state: dict[tuple[str, str], tuple[datetime, float]] = field(
+        default_factory=dict,
+    )
 
     def __post_init__(self) -> None:
         # Default-init: when only one TF and no explicit readers, register
@@ -648,6 +679,95 @@ class ShadowWorker:
             closed_at=candle.ts,
         )
 
+    def _entry_timing_recon_tick(
+        self,
+        *,
+        symbol: str,
+        tf: str,
+        ts: datetime,
+        score: float,
+        real_signal_fired: bool,
+    ) -> None:
+        """Entry-timing recon (2026-09-04) — LOG ONLY, flag-gated, off by
+        default (ENTRY_TIMING_RECON_ENABLED). Measures how often a lower,
+        "faster" score threshold clears BEFORE the real (slower) trigger
+        does, and by how many bars — the eligibility fraction the
+        entry-timing variant-lane design needs before it's built for
+        real. See docs/superpowers/plans/2026-09-03-entry-timing-variant-
+        lane-design.md.
+
+        Safety, by construction not just by intent:
+        - Reads/writes ONLY `self._entry_timing_recon_state`, a dict no
+          other method in this class touches. Cannot affect
+          open_positions, bars, cooldowns, or any real gate/evaluator
+          decision — those are computed independently, before this is
+          ever called, and this function has no return value that
+          feeds back into them.
+        - Called from `_maybe_open_position` strictly AFTER the real
+          `self.evaluator.evaluate(...)` call already ran and its result
+          is already decided — this function observes that outcome, it
+          does not participate in producing it.
+        - Every call site is wrapped in its own try/except in the
+          caller (belt-and-suspenders on top of this function's own
+          internal simplicity) so a bug here cannot interrupt a real
+          candle's entry/exit handling.
+        - No DB write, no new table, no persistence at all — an
+          in-process dict, lost on restart, exactly like the breakeven
+          lane's own ephemeral bar buffer (Amendment 3).
+
+        Behavior: if the real trigger fired this tick, log the pairing
+        (bars-early, if a faster candidate was armed) and clear the
+        state for (symbol, tf) — a fresh "episode" starts after any real
+        entry. If the real trigger did NOT fire and the faster threshold
+        clears and nothing is armed yet for (symbol, tf), arm it. If
+        something is already armed and stays armed too long without the
+        real trigger ever firing (bounded by TIMEOUT_BARS_PER_TF's own
+        hour-count, converted via the candle timeframe), log a false
+        start and clear — matching the same "how long is a signal still
+        plausibly the same setup" horizon the base strategy itself uses.
+        """
+        key = (symbol, tf)
+        armed = self._entry_timing_recon_state.get(key)
+
+        if real_signal_fired:
+            if armed is not None:
+                arm_ts, arm_score = armed
+                bars_early = self._entry_timing_recon_bars_between(arm_ts, ts, tf)
+                log.info(
+                    "entry_timing_recon: PAIRED %s/%s faster_score=%.3f "
+                    "armed_at=%s real_at=%s bars_early=%d",
+                    symbol, tf, arm_score, arm_ts.isoformat(), ts.isoformat(),
+                    bars_early,
+                )
+            self._entry_timing_recon_state.pop(key, None)
+            return
+
+        if armed is None:
+            if abs(score) >= ENTRY_TIMING_RECON_SCORE_THRESHOLD:
+                self._entry_timing_recon_state[key] = (ts, score)
+            return
+
+        # Already armed and the real trigger still hasn't fired — check
+        # the false-start bound.
+        arm_ts, _arm_score = armed
+        bars_since_arm = self._entry_timing_recon_bars_between(arm_ts, ts, tf)
+        limit = TIMEOUT_BARS_PER_TF.get(tf)
+        if limit is not None and bars_since_arm >= limit:
+            log.info(
+                "entry_timing_recon: FALSE_START %s/%s armed_at=%s "
+                "bars_since_arm=%d (limit=%d)",
+                symbol, tf, arm_ts.isoformat(), bars_since_arm, limit,
+            )
+            self._entry_timing_recon_state.pop(key, None)
+
+    @staticmethod
+    def _entry_timing_recon_bars_between(start: datetime, end: datetime, tf: str) -> int:
+        """Bar count between two candle timestamps for a given timeframe.
+        Pure arithmetic, no I/O — used only for recon log lines."""
+        seconds_per_bar = {"1h": 3600, "15m": 900, "4h": 14400, "1d": 86400}.get(tf, 3600)
+        delta = (end - start).total_seconds()
+        return max(0, int(delta // seconds_per_bar))
+
     async def _maybe_open_position(
         self, candle: MultiStreamCandle, buf: pd.DataFrame, tf: str,
     ) -> None:
@@ -768,6 +888,27 @@ class ShadowWorker:
             layer_scores=layer_scores,
             ts=candle.ts,
         )
+
+        # Entry-timing recon (2026-09-04): observes the real decision
+        # above, never participates in it. Off by default
+        # (ENTRY_TIMING_RECON_ENABLED=False); own try/except on top of
+        # the method's own internal safety so a bug here can never
+        # interrupt real candle handling. See _entry_timing_recon_tick's
+        # docstring for the full safety argument.
+        if ENTRY_TIMING_RECON_ENABLED:
+            try:
+                self._entry_timing_recon_tick(
+                    symbol=candle.symbol, tf=tf, ts=candle.ts,
+                    score=pred.final.score,
+                    real_signal_fired=signal is not None,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "entry_timing_recon_tick failed for %s/%s (non-fatal, "
+                    "recon-only): %s",
+                    candle.symbol, tf, e,
+                )
+
         if signal is None:
             # Visibility into why the gate rejected this bar — score below
             # ±threshold or confidence below 0.50. Without this, prod runs
