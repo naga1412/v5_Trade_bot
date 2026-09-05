@@ -167,6 +167,7 @@ async def lifespan(_app: FastAPI):
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
     p_win_refit_task = None  # PR5
+    pattern_stats_refresh_task = None  # pattern_stats fix, 2026-08-20
     ui_freshness_monitor_task = None  # PR10.5 / FU-28
     healer_detector_task = None  # Healer Phase 0
     if settings.env not in {"test", "ci"} and settings.worker_enabled:
@@ -359,6 +360,18 @@ async def lifespan(_app: FastAPI):
         p_win_refit_task = _wrap(
             "p_win_refit",
             lambda: start_p_win_refit(get_session_factory()),
+        )
+
+        # pattern_stats fix (2026-08-20): update_pattern_stats existed but
+        # was never wired to a scheduler, so the table went unpopulated
+        # since it shipped -- see app/ml/patterns.py's module docstring
+        # for the full three-bug history. Registered here specifically so
+        # the healer can see it stop, which is the whole reason this went
+        # unnoticed for months in the first place.
+        from app.workers.pattern_stats_refresh import start_pattern_stats_refresh
+        pattern_stats_refresh_task = _wrap(
+            "pattern_stats_refresh",
+            lambda: start_pattern_stats_refresh(get_session_factory()),
         )
 
         # PR10.5 / FU-28 — UI data-pipeline freshness monitor. NOT gated
@@ -744,6 +757,8 @@ async def lifespan(_app: FastAPI):
             symbol_allowlist_task.cancel()
         if p_win_refit_task is not None:
             p_win_refit_task.cancel()
+        if pattern_stats_refresh_task is not None:
+            pattern_stats_refresh_task.cancel()
         if ui_freshness_monitor_task is not None:
             ui_freshness_monitor_task.cancel()
         if healer_detector_task is not None:

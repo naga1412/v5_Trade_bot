@@ -437,6 +437,26 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         # state beyond one refresh cycle (any partial INSERT loop is inside
         # an uncommitted session; a mid-cycle cancel rolls back cleanly).
     ),
+    # pattern_stats fix, 2026-08-20 -- update_pattern_stats existed and had
+    # a passing unit test but was never wired to a scheduler anywhere in
+    # the application, so pattern_stats went unpopulated for months
+    # without anyone noticing (compounded by a schema-mismatch bug in the
+    # extractor and a join key that never matched real data -- see
+    # app/ml/patterns.py's module docstring for the full history).
+    # Registered here specifically so the healer can see it stop, which is
+    # the whole reason this went unnoticed in the first place.
+    WorkerSpec(
+        name="pattern_stats_refresh",
+        description=(
+            "Daily recompute of pattern_stats (L2's historical_accuracy "
+            "source) from all closed shadow_trades."
+        ),
+        liveness_query=HEARTBEAT,
+        # Cadence + ~10% grace, matching p_win_refit's own daily-cadence
+        # treatment (Healer B2).
+        max_staleness_seconds=26 * 60 * 60,
+        stateful=False,  # safe to auto-restart
+    ),
 )
 
 

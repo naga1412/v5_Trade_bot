@@ -302,7 +302,15 @@ async def _re_render_and_edit(
         sl_distance_pct=float(payload["sl_distance_pct"]),
         rr_ratio=float(payload["rr_ratio"]),
     )
-    rendered = render_message(candidate, leverage=new_leverage, now=now)
+    # Card review #2 (2026-08-20): pass the SAME real per-user cap the
+    # original send used, so the +1x/-1x re-render shows the same honest
+    # leverage math instead of silently falling back to the module
+    # default. .get() with a fallback (not direct indexing) because rows
+    # sent before this fix shipped won't have the key.
+    hard_cap = int(payload.get("hard_cap", 10))
+    rendered = render_message(
+        candidate, leverage=new_leverage, hard_cap=hard_cap, now=now,
+    )
 
     edit_payload = {
         "chat_id": config.chat_id,

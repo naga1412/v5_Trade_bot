@@ -454,6 +454,20 @@ class Settings(BaseSettings):
             )
         return v
 
+    # --- FU-45: chart_url interim fix (2026-08-20) -----------------------
+    # Every real Telegram signal's chart link was a broken relative path
+    # (`chart_base_url` never set anywhere, defaults to "" at every layer
+    # in the call chain) pointing at an in-app deep link + ghost-candle
+    # overlay that was never built (the frontend has no such page or even
+    # a matching route -- it's hash-routed, not path-routed). Real fix is
+    # a genuinely new feature, deliberately not scoped here (see
+    # KNOWN_ISSUES FU-45). Interim fix: point at Binance's own futures
+    # chart for the symbol instead -- correct, working, on the exchange
+    # the operator already trades on. Configurable so a future real base
+    # (this app's own frontend, or a different chart provider) is a
+    # one-line env change, not a code change.
+    CHART_BASE_URL: str = "https://www.binance.com/en/futures"
+
     # --- FU-33: slippage circuit-breaker ---------------------------------
     # Default-OFF — operator flips per-env after observing the metric.
     # When True:

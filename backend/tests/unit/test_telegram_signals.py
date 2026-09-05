@@ -68,7 +68,7 @@ def test_render_message_includes_spec_section_7_2_fields() -> None:
     assert "Leverage:     5×" in body
     assert "Position:     $150.00" in body
     # Loss + liquidation
-    assert "Loss at SL:" in body
+    assert "LOSS AT SL:" in body
     assert "Liquidation:" in body
     assert "Buffer:" in body
     # Funding (longs receive when negative)
@@ -81,6 +81,15 @@ def test_render_message_includes_spec_section_7_2_fields() -> None:
     # asserts the explicit-override path; here we just assert the
     # footer line is present.
     assert "Auto-skip in" in body and "s if no response" in body
+
+
+def test_chart_line_does_not_promise_ghost_candle() -> None:
+    """FU-45 interim fix (2026-08-20): chart_url points at Binance's own
+    chart now, not an in-app deep link -- the copy must say so, not
+    promise a ghost-candle overlay that link doesn't provide."""
+    msg = render_message(_candidate(), leverage=5, now=_NOW)
+    assert "View chart on Binance" in msg.body
+    assert "ghost candle" not in msg.body.lower()
 
 
 def test_render_message_short_funding_text_inverts() -> None:
@@ -108,7 +117,7 @@ def test_render_message_uses_custom_auto_skip_seconds() -> None:
 def test_loss_at_sl_matches_leverage_position_size_math() -> None:
     """Loss at SL = margin × leverage × sl_pct = $30 × 5 × 2% = $3.00."""
     msg = render_message(_candidate(), leverage=5, now=_NOW)
-    assert "Loss at SL:   $3.00" in msg.body
+    assert "LOSS AT SL: $3.00  =  10% OF MARGIN" in msg.body
 
 
 # ---- Inline keyboard ----------------------------------------------------
@@ -141,6 +150,81 @@ def test_plus_minus_buttons_clamp_to_1x_and_10x() -> None:
     minus_btn = msg.inline_keyboard[0][2]
     assert plus_btn["callback_data"] == "sig:abc123:adjust:2"
     assert minus_btn["callback_data"] == "sig:abc123:adjust:1"
+
+
+# ---- Leverage-cap honesty (card review #2, 2026-08-20) -------------------
+#
+# Before `hard_cap` existed, the "(math: max safe Xx, capped at 10x for
+# risk profile)" text was silently recomputed with a hardcoded 125-then-10
+# sequence, completely disconnected from whatever cap actually produced
+# the `leverage` argument (`dispatcher.py` uses the real per-user
+# `user.max_leverage_cap`). Accidentally correct only because the DB
+# column defaults to 10 -- wrong for any user who customizes it.
+
+
+def test_leverage_line_reflects_real_hard_cap_not_module_default() -> None:
+    """A non-default hard_cap must appear verbatim in the leverage line,
+    not the module's _DEFAULT_HARD_CAP=10."""
+    msg = render_message(_candidate(), leverage=5, hard_cap=20, now=_NOW)
+    assert "your risk cap is 20×" in msg.body
+    assert "capped at 10" not in msg.body.lower()
+
+
+def test_leverage_line_max_safe_uses_real_hard_cap() -> None:
+    """`max_safe` (the SL-implied ceiling) must itself be computed with
+    the real hard_cap, not an independent hardcoded 125."""
+    # sl_distance_pct=0.02 -> uncapped math max = int(0.80/0.02) = 40.
+    # With hard_cap=3, the SL-implied ceiling must clamp to 3, not 10.
+    msg = render_message(_candidate(), leverage=3, hard_cap=3, now=_NOW)
+    assert "stays inside liquidation up to 3×" in msg.body
+    assert "your risk cap is 3×" in msg.body
+
+
+def test_plus_button_clamps_to_real_hard_cap_not_module_default() -> None:
+    """The +1x button must never offer a leverage above the real cap --
+    it's the only server-side enforcement point on the adjust path
+    (trade_signals._re_render_and_edit takes the callback's leverage
+    straight through, no separate cap re-check)."""
+    msg = render_message(_candidate(), leverage=5, hard_cap=5, now=_NOW)
+    plus_btn = msg.inline_keyboard[0][1]
+    assert plus_btn["callback_data"] == "sig:abc123:adjust:5"  # not :6
+
+
+def test_build_signal_payload_persists_hard_cap() -> None:
+    payload = build_signal_payload(
+        _candidate(), rendered_at=_NOW, initial_leverage=5, hard_cap=20,
+    )
+    assert payload["hard_cap"] == 20
+
+
+# ---- Leverage-ceiling clarity (card review #2 round 2, 2026-08-20) -------
+#
+# "SL allows up to Xx" read as permission, not a warning -- the ceiling
+# is purely a liquidation-avoidance limit, not a statement that the
+# resulting position size is sane to risk. Copy-only fix: the math
+# (leverage/max_safe/hard_cap/loss_at_sl/pct_of_margin) is untouched,
+# confirmed by test_leverage_line_max_safe_uses_real_hard_cap and
+# test_loss_at_sl_matches_leverage_position_size_math still passing
+# with the same underlying values, just different surrounding text.
+
+
+def test_leverage_ceiling_explicitly_says_not_a_recommendation() -> None:
+    msg = render_message(_candidate(), leverage=5, now=_NOW)
+    assert "liquidation-safe ceiling" in msg.body
+    assert "not a recommended position size" in msg.body.lower()
+
+
+def test_loss_at_sl_warning_sits_immediately_after_leverage_block() -> None:
+    """The whole point is that loss-at-SL must not be several lines
+    below leverage where it's easy to skim past -- assert the actual
+    line adjacency, not just presence."""
+    msg = render_message(_candidate(), leverage=5, now=_NOW)
+    lines = msg.body.splitlines()
+    leverage_block_end = next(
+        i for i, line in enumerate(lines)
+        if "your risk cap is" in line
+    )
+    assert "LOSS AT SL" in lines[leverage_block_end + 1]
 
 
 # ---- Callback parsing ---------------------------------------------------

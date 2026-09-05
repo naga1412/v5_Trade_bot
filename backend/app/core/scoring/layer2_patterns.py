@@ -77,6 +77,17 @@ async def load_pattern_stats(
     Cold-start gating (``n_samples < COLD_START_THRESHOLD``) excludes the row
     so ``PatternStatsLookup.get`` returns the prior — noisy early data must
     not bias the L2 score.
+
+    LOOKAHEAD WARNING for anyone building a backtest/replay: ``pattern_
+    stats`` reflects ALL history up to its ``last_updated`` timestamp,
+    recomputed from scratch on every refresh (see ``app.ml.patterns.
+    update_pattern_stats``) -- not an incrementally-updated rolling
+    window. Calling this at live-scoring time (the only intended use
+    today) is correct: using past outcomes to inform a future decision
+    is exactly the point. Joining it against trades from BEFORE its most
+    recent refresh in a backtest is lookahead bias -- the trade's own
+    future outcome, and every later trade's, is baked into the
+    "historical" rate being tested against.
     """
     rows = (await session.execute(
         sa.text(
