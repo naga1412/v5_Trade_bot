@@ -1369,3 +1369,68 @@ wire to live scoring only after that's reviewed.
 
 **Status**: ✅ **CLOSED** (schema + scheduler + join + backfill). Live
 scoring wiring is a separate, not-yet-authorized follow-up.
+### FU-47 — universe_sync_task: real 02:00 UTC failure + unexplained bulk universe_history update
+
+**Discovered**: 2026-09-03, during Stage 2's T+24h checkpoint, chasing
+down a `worker_heartbeats` row showing `universe_sync_task` at
+`last_status='error'`.
+
+**Premise correction first**: `universe_sync_task` (`app/data/universe_sync.py`)
+writes `universe_history` — a daily exchange listing/delisting diff,
+unrelated to which coins are actively served. It is NOT the mechanism
+that decides the live coin list; that's `live_fleet_universe`'s cohort
+classifier (`app/shadow/live_fleet_universe.py`, promoted #540), which
+was separately confirmed healthy (fresh snapshot, 3 populated cohorts)
+in the same checkpoint. An operator hypothesis that this heartbeat was
+"a monitoring blind spot on the component that decides the coin list"
+was reasonable given the name but does not hold once the actual write
+target is traced — logged here so it isn't re-litigated.
+
+**What IS real and still open**:
+
+1. `universe_sync_task`'s own scheduled loop (`run_universe_sync_loop`,
+   `wake_at_utc_hour=2` — i.e. 02:00 UTC daily, sleep-then-sync) ran on
+   schedule today and its attempt genuinely failed
+   (`log.error("sync_universe(%s) failed: %s", ...)` fired — confirmed
+   by the heartbeat's own `last_status='error'` at `2026-09-03 02:00:29
+   UTC`, not inferred from staleness alone). The underlying exception
+   was not recoverable from available probes — backend log retention
+   didn't reach back that far by the time this was investigated (~17h
+   later), and no `healer_findings` row exists for it (no detector
+   currently watches per-worker heartbeat status directly). Needs
+   either same-day log capture next time it fires, or a targeted
+   healer check added.
+
+2. Separately, `universe_history` showed a bulk update (1362/1516
+   `binance` rows, 569/589 `binance-futures` rows — 90-97%) at
+   `2026-09-03 19:08:1x UTC`, tightly correlated with a backend
+   container restart at that exact time. This does NOT match
+   `universe_sync_task`'s own code, which sleeps until the next 02:00
+   UTC before ever calling `sync_universe` — it should not have run at
+   19:08 at all. Exhaustively checked for another caller: `main.py`'s
+   startup sequence (only starts the scheduled task, no direct call),
+   `app/api/routes/admin_adapters.py` (a manual-trigger endpoint,
+   nothing found that calls it automatically), `app/shadow/
+   universe_refresh.py` (a same-era, similarly-named but genuinely
+   different task — writes `asset_universe`, not `universe_history`,
+   also sleep-first), `worker_registry.py`/`worker_supervisor.py`
+   (registration/liveness only, no sync trigger), `preflight.py` (no
+   reference to either function), `deploy.yml` (no reference despite
+   `git grep -c` initially reporting matches — a direct Python
+   string-search of the same file content found zero, confirming the
+   `-c` count was a tool artifact in this environment, not a real
+   match; worth remembering next time `git grep -c` and `git grep -n`
+   disagree). The actual writer remains unidentified.
+
+**Impact**: low. Neither issue affects the live coin list or trading
+behavior — `universe_history` is bookkeeping. Kept open rather than
+closed-as-explained because "a component erroring on schedule, plus an
+unexplained write from an unknown caller" is a real gap in
+understanding this worker's actual runtime behavior, not merely an
+ugly-but-harmless heartbeat.
+
+**Status**: open, low priority, no fix. Next step if picked back up:
+capture backend logs live through a 02:00 UTC run (rather than
+reconstructing after the fact), and/or instrument `sync_universe`'s
+exception log line with more context (which adapter, which step) so a
+future failure is diagnosable without guessing.

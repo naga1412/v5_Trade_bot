@@ -4,6 +4,13 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Manual trigger on an arbitrary ref — lets a red PR check be reproduced
+  # against clean main/dev (no PR diff) to isolate whether a failure is
+  # pre-existing/order-dependent vs caused by the PR's own changes,
+  # without opening a throwaway PR to force a run. Added 2026-08-15 after
+  # PR #456 hit exactly this gap trying to verify an unrelated CI failure
+  # (test_adapter_registry.py, order-dependent full-suite-only flake).
+  workflow_dispatch:
 
 # Auto-cancel an in-progress run when a newer commit lands on the same ref.
 # Without this, a pytest-hung run can sit for the full 6h job timeout while
