@@ -1,7 +1,9 @@
 # Checks that cannot fail for the reason they exist
 
 **Status: standing rule.** Written 2026-09-08 after the fourth instance
-in five days. It keeps being re-derived in conversation, which is
+in five days -- and a FIFTH turned up while writing it (below), which is
+the strongest evidence in the document that this is a default failure
+mode rather than a bad week. It keeps being re-derived in conversation, which is
 precisely the failure it describes.
 
 ## The rule
@@ -89,7 +91,7 @@ Applies equally to a green result: state what the check shows when the
 guarded thing is FINE. If the two statements are the same sentence,
 there is nothing to observe.
 
-## The four instances
+## The five instances
 
 ### 1. A revert trigger keyed on a constant field — killed a working fix
 
@@ -140,6 +142,35 @@ statement of one requirement.
 while the two constants it existed to pin drifted apart — which is the
 exact drift `HISTORY_SEED_BARS_1H` was consolidated to end, after that
 requirement had already been declared three times and diverged twice.
+
+### 5. A behavioural test that bypassed the guard it was testing
+
+Found **while writing this document**, which is itself the point.
+
+Replacing instance 4's retired test, the first attempt called
+`_entry_timing_recon_tick(...)` directly with the flag monkeypatched
+False, then True, and asserted the recorded state differed. But the flag
+is checked at the CALL SITE in `_maybe_open_position` -- invoking the
+tick directly bypasses the guard entirely and records state either way.
+
+**Outcome:** caught only because it referenced a helper that did not
+exist and died with a `NameError`. Had that helper been present it would
+have shipped green and meaningless, asserting the flag controlled
+behaviour while proving nothing of the kind. Instance 3's
+luck-not-process failure, repeating exactly.
+
+The test was removed rather than repaired: the guarantee it claimed is
+carried by the structural gate test, and no assertion about a constant
+can substitute for looking at what the code produced.
+
+**Why this instance matters most.** Four instances in five days could be
+a bad week. A fifth appearing spontaneously in the act of writing the
+rule down -- authored by someone actively holding the pattern in mind --
+is evidence it is the DEFAULT failure mode of writing checks, not a run
+of bad luck. Vigilance demonstrably did not prevent it. That is the
+argument for the mechanical steps above: the mutation step would have
+caught this in one run, because deleting the guard would have left the
+test green.
 
 ## The worked example of the fix
 
