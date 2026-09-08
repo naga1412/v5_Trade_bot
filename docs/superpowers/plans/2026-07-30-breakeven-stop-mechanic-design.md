@@ -161,6 +161,42 @@ per variant (~2 months at current 0.43 trades/day live shadow rate),
 vs. the ~6 months required for two-sample comparison at similar
 power.
 
+### READ BANKED 2026-09-08 -- this measurement is COMPLETE
+
+**Do not read the 14 September check as a gate. It is a refinement.**
+
+The pre-registered bar (`Delta > 1xSE with the right sign`, meaningful
+measurement expected at `n~40`) was met at **more than 3x the sample and
+nearly 3x the threshold**:
+
+| variant | n | armed | mean delta | SE | delta/SE |
+|---|---|---|---|---|---|
+| breakeven_0.40R | 129 | 74 | +0.643% | 0.233 | **2.76** |
+| breakeven_0.50R | 129 | 73 | +0.659% | 0.232 | **2.84** |
+
+**Zero direction reversals.** The effect concentrates in the ARMED
+subset (+1.12% / +1.16% where the stop actually fires, vs +0.64%
+overall), which is what a real effect looks like -- it lives where its
+mechanism operates. The broad population across all 2,398 pairs is flat
+(+0.06 / -0.14 sigma), ruling out general drift. Both variants agree to
+within 0.02%, which is what you expect from one genuine effect measured
+twice.
+
+**Trigger choice: INDISTINGUISHABLE; 0.50R by the design's own
+tie-break** (`n_armed x delta`: 48.1 vs 47.6). A ~1% margin is noise.
+Never restate this as a finding with a rationale attached.
+
+**What remains outstanding is ONE refinement, not a verdict**: the
+31-August universe-expansion split, re-run at n=150 (~2026-09-14). The
+effect currently sits in the PRE-expansion half; the halves are 0.93 SE
+apart, so nothing is separated, and the ~21 remaining pairs come almost
+entirely from the new universe. It decides WHICH POPULATION the +0.65%
+describes -- not whether the effect is real. That question is answered.
+
+Anyone citing this lane should cite n=129 and the figures above. A
+reader arriving later must not conclude "the result was pending until
+the 14th"; it was not.
+
 ### RESULT + decision-bar lineage (added 2026-09-08)
 
 **The rule above is the ONLY pre-registered bar. It has been met.**
@@ -206,9 +242,11 @@ the distinction matters: a bar remembered rather than read is not a
 pre-registration, and raising one after seeing a positive result is a
 post-hoc adjustment even in the conservative direction.
 
-### Named deliverable -- re-run at n=150 (open as of 2026-09-08)
+### Named deliverable -- the 31-August split at n=150 (REFINEMENT, not a gate)
 
-Not a footnote. At n=150, re-run and report:
+The read is BANKED (see above). This is the one open refinement, and it
+is still a named deliverable rather than a footnote. At n=150, re-run
+and report:
 
 1. **The 31-August split** (Stage 1's universe expansion, ~20 symbols
    -> ~100), same cut as 2026-09-08:
