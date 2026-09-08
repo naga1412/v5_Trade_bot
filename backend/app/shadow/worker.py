@@ -33,7 +33,10 @@ from app.core.gates.entry_quality import AllowDecision, open_position_gate
 from app.core.predictor import _atr, build_prediction
 from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
-from app.core.scoring.vol_normalization import HISTORY_SEED_BARS_1H
+from app.core.scoring.vol_normalization import (
+    HISTORY_SEED_BARS_1H,
+    min_bars_for_vol,
+)
 from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
 from app.ops.alert_routing import alert_admin
@@ -259,13 +262,24 @@ class ShadowWorker:
         from app.core.scoring.mtf_confluence import _cache_get, _cache_set
         import time as _time
 
-        # Spec §4.3 D1: cache-hit threshold is SHADOW_PREWARM_BARS, NOT
-        # HISTORY_BARS. PR1's prewarm caches 200 klines (MTF compute's
-        # need); HISTORY_BARS=504 is the REST-fetch target (21 days of 1h
-        # bars, compute_realized_vol_20d's floor — see item 2, 2026-08-13).
-        # Using SHADOW_PREWARM_BARS here ensures any cache entry from PR1
-        # prewarm is reusable. The rolling buffer accumulates to ~504
-        # as live candles flow in (spec §4.3 D2).
+        # CORRECTED 2026-09-08. This block used to accept any cache
+        # entry with >= SHADOW_PREWARM_BARS (200) klines, and justified
+        # it with "the rolling buffer accumulates to ~504 as live
+        # candles flow in". THAT CLAIM WAS FALSE IN PRACTICE and is why
+        # the defect survived: 200 1h bars span 8.3 days, but
+        # compute_realized_vol_20d resamples to days and needs >=20, so
+        # a cache-hit symbol produced realized_vol_20d=None (and hence
+        # effective_score=None) until its buffer filled. The buffer only
+        # refills from live candles, and we redeploy several times a
+        # day -- every restart re-enters this path at 200. Measured on
+        # prod over 7 days: 39/108 1h trades NULL, flat at 25-40% daily
+        # with no downward drift. We restart faster than it fills.
+        #
+        # A cache entry is now only reused when it already satisfies the
+        # consuming computation's own floor for this timeframe; anything
+        # short falls through to the REST fetch below. The cost is a few
+        # hundred extra weight at boot against a 1200/min cap -- under a
+        # minute's budget, a few times a day.
         _prewarm_bars = _get_settings_for_setup().SHADOW_PREWARM_BARS
 
         cache_hits = 0
@@ -275,8 +289,11 @@ class ShadowWorker:
             for tf in self.timeframes:
                 for sym in self.symbols:
                     # 1. Try the MTF cache first (raw kline rows).
+                    # Require the vol floor where the timeframe can
+                    # support it (1h -> 504), else the prewarm minimum.
+                    _min_cached = min_bars_for_vol(tf) or _prewarm_bars
                     cached_klines = _cache_get(sym, tf)
-                    if cached_klines is not None and len(cached_klines) >= _prewarm_bars:
+                    if cached_klines is not None and len(cached_klines) >= _min_cached:
                         df = _klines_to_dataframe(cached_klines)
                         self.bars[(sym, tf)] = df
                         cache_hits += 1
