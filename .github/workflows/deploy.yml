@@ -87,10 +87,32 @@ jobs:
              git reset --hard origin/main && \
              docker compose up -d --build && \
              docker compose exec -T backend alembic upgrade head && \
-             echo 'waiting 15s for backend to bind port 8000…' && \
-             sleep 15 && \
-             curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
-                  http://localhost:8000/api/v1/health && \
+             echo '--- backend health POLL (up to 180s) ---' && \
+             HEALTHY=0 && \
+             for i in \$(seq 1 60); do \
+               if curl -fsS -m 5 --retry-all-errors --retry 2 --retry-delay 1 \
+                    http://localhost:8000/api/v1/health >/dev/null 2>&1; then \
+                 echo \"backend healthy after ~\$(( i * 3 ))s\"; HEALTHY=1; break; \
+               fi; \
+               sleep 3; \
+             done && \
+             if [ \"\$HEALTHY\" -ne 1 ]; then \
+               echo 'DEPLOY FAILED: backend never became healthy within 180s' >&2; \
+               docker compose logs --tail=80 backend >&2 || true; \
+               exit 1; \
+             fi && \
+             echo '--- asserting container restarted for THIS commit ---' && \
+             DEPLOYED_SHA=\$(git rev-parse HEAD) && \
+             COMMIT_TS=\$(git show -s --format=%ct HEAD) && \
+             STARTED_RAW=\$(docker inspect tr-backend --format '{{.State.StartedAt}}') && \
+             STARTED_TS=\$(date -u -d \"\$STARTED_RAW\" +%s) && \
+             RESTARTS=\$(docker inspect tr-backend --format '{{.RestartCount}}') && \
+             echo \"deployed_sha=\$DEPLOYED_SHA started=\$STARTED_RAW restarts=\$RESTARTS\" && \
+             if [ \"\$STARTED_TS\" -lt \"\$COMMIT_TS\" ]; then \
+               echo \"DEPLOY FAILED: tr-backend started \$STARTED_RAW, BEFORE the deployed commit -- the container did not restart for this deploy, so the code on disk may not be what is running.\" >&2; \
+               exit 1; \
+             fi && \
+             echo 'health + restart assertions passed' && \
              echo '--- populating universe_history (idempotent) ---' && \
              ( docker compose exec -T backend \
                  python /app/host-tools/populate_universe_history.py || true ) && \
@@ -138,10 +160,20 @@ jobs:
                  up -d --build && \
              docker compose -f docker-compose.staging.yml --env-file .env.staging \
                  exec -T backend-staging alembic upgrade head && \
-             echo 'waiting 15s for staging backend to bind port 8001…' && \
-             sleep 15 && \
-             curl -fsS --retry 5 --retry-delay 3 --retry-connrefused \
-                  http://localhost:8001/api/v1/health && \
+             echo '--- staging backend health POLL (up to 180s) ---' && \
+             HEALTHY=0 && \
+             for i in \$(seq 1 60); do \
+               if curl -fsS -m 5 --retry-all-errors --retry 2 --retry-delay 1 \
+                    http://localhost:8001/api/v1/health >/dev/null 2>&1; then \
+                 echo \"staging backend healthy after ~\$(( i * 3 ))s\"; HEALTHY=1; break; \
+               fi; \
+               sleep 3; \
+             done && \
+             if [ \"\$HEALTHY\" -ne 1 ]; then \
+               echo 'DEPLOY FAILED: staging backend never became healthy within 180s' >&2; \
+               docker compose logs --tail=80 backend >&2 || true; \
+               exit 1; \
+             fi && \
              echo '--- staging populate ---' && \
              ( docker compose -f docker-compose.staging.yml --env-file .env.staging \
                  exec -T backend-staging \
