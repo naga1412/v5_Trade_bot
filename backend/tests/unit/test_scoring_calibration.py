@@ -193,11 +193,19 @@ def test_min_bars_for_vol_matches_the_daily_resample_requirement() -> None:
     cache-hit path came to accept 8.3 days for a computation needing 21.
     """
     from app.core.scoring.vol_normalization import (
+        HISTORY_SEED_BARS_1H,
         MIN_DAILY_BARS_FOR_VOL,
         min_bars_for_vol,
     )
 
-    assert min_bars_for_vol("1h") == (MIN_DAILY_BARS_FOR_VOL + 1) * 24
+    # 1h asserts IDENTITY with the existing constant, not equality with a
+    # re-derived expression. Writing `(MIN_DAILY_BARS_FOR_VOL + 1) * 24`
+    # here would make the test a THIRD independent statement of the same
+    # requirement -- the very drift this module was consolidated to end,
+    # and it would keep passing while the two constants diverged.
+    assert min_bars_for_vol("1h") is HISTORY_SEED_BARS_1H
+    assert HISTORY_SEED_BARS_1H == (MIN_DAILY_BARS_FOR_VOL + 1) * 24
+
     assert min_bars_for_vol("4h") == (MIN_DAILY_BARS_FOR_VOL + 1) * 6
     assert min_bars_for_vol("1d") == MIN_DAILY_BARS_FOR_VOL + 1
 

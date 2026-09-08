@@ -23,22 +23,42 @@ MIN_VOL: float = 0.01             # floor to prevent divide-by-near-zero
 DAYS_PER_YEAR: int = 365          # used in sqrt(365) annualization
 MIN_DAILY_BARS_FOR_VOL: int = 20  # require ≥20 daily bars or return None
 
-# 2026-09-08: this function resamples to CALENDAR DAYS, so the caller's
-# bar timeframe determines whether it can ever succeed. At 1h a 504-bar
-# buffer spans 21 days and clears the floor. At 15m the same 504 bars
-# span 5.25 days -- reaching 20 daily bars would need 1,920 bars, which
-# no prewarm value supplies. 15m therefore returns None 100% of the
-# time, and did so silently for the column's whole life (341/341 trades
-# over 7 days on prod, taking effective_score down with it).
+# Single source of truth for "how many 1h bars a caller must seed before
+# compute_realized_vol_20d can return non-None" (2026-08-31 consolidation).
 #
-# `is_timeframe_supported` exists so callers state that explicitly
-# rather than calling into a computation that cannot succeed and
-# recording an indistinguishable None. A 100%-NULL column that looks
-# like a failure but is a structural mismatch is its own defect class.
+# This same requirement was independently declared THREE times --
+# app.shadow.worker.HISTORY_BARS, app.ws.live_prediction.HISTORY_SEED_BARS,
+# and a bare `limit=504` literal in app.api.routes.tab1 -- and drifted out
+# of sync at least twice: PR #400 fixed live_prediction's copy from 300 to
+# 504 without touching worker.py's, and a third, independently-discovered
+# copy later turned up in tab1.py. Each drift meant `realized_vol_20d`
+# silently read back None for whichever caller still held the stale value,
+# for as long as nobody noticed. One constant, imported everywhere, is the
+# only version of this that can't recur.
+#
+# (MIN_DAILY_BARS_FOR_VOL + 1) days * 24h -- the +1 day is a safety margin
+# over the 20-day floor above, not part of the floor itself.
+HISTORY_SEED_BARS_1H: int = (MIN_DAILY_BARS_FOR_VOL + 1) * 24  # = 504
+
+
+# Per-timeframe form of the SAME requirement HISTORY_SEED_BARS_1H states
+# for 1h. 1h REFERENCES that constant rather than re-deriving it: two
+# independent expressions of one requirement is precisely the drift this
+# module was consolidated to end (see HISTORY_SEED_BARS_1H's note above
+# -- the requirement was declared three times and drifted twice), and
+# re-deriving it here would have rebuilt that seam one layer up.
+#
+# compute_realized_vol_20d resamples to CALENDAR DAYS, so the caller's
+# bar timeframe decides whether it can ever succeed. At 1h, 504 bars
+# span 21 days and clear the floor. At 15m the same 504 bars span 5.25
+# days; reaching 20 daily bars would need 1,920, which no prewarm value
+# supplies. 15m therefore returned None 100% of the time, silently, for
+# the column's whole life (341/341 trades over 7 days on prod, taking
+# effective_score down with it).
 _MIN_BARS_FOR_VOL_BY_TIMEFRAME: dict[str, int] = {
-    "1h": (MIN_DAILY_BARS_FOR_VOL + 1) * 24,   # 504
-    "4h": (MIN_DAILY_BARS_FOR_VOL + 1) * 6,    # 126
-    "1d": MIN_DAILY_BARS_FOR_VOL + 1,          # 21
+    "1h": HISTORY_SEED_BARS_1H,
+    "4h": (MIN_DAILY_BARS_FOR_VOL + 1) * 6,
+    "1d": MIN_DAILY_BARS_FOR_VOL + 1,
 }
 
 
@@ -61,23 +81,6 @@ def min_bars_for_vol(timeframe: str) -> int | None:
     path accept 200 bars for a computation needing 504.
     """
     return _MIN_BARS_FOR_VOL_BY_TIMEFRAME.get(timeframe)
-
-# Single source of truth for "how many 1h bars a caller must seed before
-# compute_realized_vol_20d can return non-None" (2026-08-31 consolidation).
-#
-# This same requirement was independently declared THREE times --
-# app.shadow.worker.HISTORY_BARS, app.ws.live_prediction.HISTORY_SEED_BARS,
-# and a bare `limit=504` literal in app.api.routes.tab1 -- and drifted out
-# of sync at least twice: PR #400 fixed live_prediction's copy from 300 to
-# 504 without touching worker.py's, and a third, independently-discovered
-# copy later turned up in tab1.py. Each drift meant `realized_vol_20d`
-# silently read back None for whichever caller still held the stale value,
-# for as long as nobody noticed. One constant, imported everywhere, is the
-# only version of this that can't recur.
-#
-# (MIN_DAILY_BARS_FOR_VOL + 1) days * 24h -- the +1 day is a safety margin
-# over the 20-day floor above, not part of the floor itself.
-HISTORY_SEED_BARS_1H: int = (MIN_DAILY_BARS_FOR_VOL + 1) * 24  # = 504
 
 
 # ---------------------------------------------------------------------------
