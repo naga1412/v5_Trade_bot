@@ -426,6 +426,16 @@ async def _maybe_dispatch(
     ts = pred.trade_setup
     if ts is None or ts.entry is None or ts.stop_loss is None or ts.take_profit is None:
         return
+    # 2026-09-08: #476's re-check already computes the exact three
+    # figures the cohort banner needs, for exactly the non-established
+    # symbols that get a banner. They used to be discarded into a log
+    # line on failure. Captured here and threaded to the card instead.
+    # Stays None for established_top20, which skips this block entirely
+    # -- and which also takes render_message's `else` branch, so it
+    # never enters the figure-formatting path at all.
+    _qvol_24h: float | None = None
+    _spread_bps: float | None = None
+    _depth_0_5pct_usdt: float | None = None
     if symbol_source != "established_top20":
         try:
             rate_client = get_intermarket_adapter().rate_client
@@ -444,6 +454,10 @@ async def _maybe_dispatch(
                 pred.symbol, symbol_source, check.qvol_24h, check.spread_bps, check.depth_0_5pct_usdt,
             )
             return
+        # Passed the re-check: these are the live figures the card shows.
+        _qvol_24h = check.qvol_24h
+        _spread_bps = check.spread_bps
+        _depth_0_5pct_usdt = check.depth_0_5pct_usdt
     # PR-BOT-INTELLIGENCE-UPGRADE: extract Layer-2 pattern data from
     # pred.layer_scores so the dispatcher's entry-quality gate can apply
     # the pattern boost/penalty. Key shape is `str(int)` (see
@@ -474,6 +488,12 @@ async def _maybe_dispatch(
                     # the proposal_from_prediction parser fails open on
                     # malformed JSON. PR1 populated these on the
                     # LivePredictionOut record; we forward them here.
+                    # 2026-09-08 cohort-banner plumbing: carried to
+                    # SignalCandidate so the banner can show real
+                    # figures. See _maybe_dispatch's capture above.
+                    "qvol_24h": _qvol_24h,
+                    "spread_bps": _spread_bps,
+                    "depth_0_5pct_usdt": _depth_0_5pct_usdt,
                     "mtf_agreement": pred.mtf_agreement,
                     "mtf_dominant_tf": pred.mtf_dominant_tf,
                     "mtf_directions_json": pred.mtf_directions_json,

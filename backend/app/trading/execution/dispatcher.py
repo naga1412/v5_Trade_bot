@@ -140,6 +140,16 @@ class SignalProposal:
     # telegram_signals INSERT (_send_telegram_signal) and the live_trades
     # payload (_place_live_order) below.
     symbol_source: str = "established_top20"
+    # Cohort-banner liquidity figures (2026-09-08). Sourced from #476's
+    # dispatch-time liquidity re-check, which already computes exactly
+    # these three for non-established symbols and previously discarded
+    # them into a log line. None for established_top20 (that path skips
+    # the re-check) and for any caller that does not supply them --
+    # render_message degrades to a headline-only banner rather than
+    # raising, so a legacy payload can never break a card.
+    qvol_24h: float | None = None
+    spread_bps: float | None = None
+    depth_0_5pct_usdt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -516,6 +526,17 @@ async def _send_telegram_signal(
         mtf_agreement=proposal.mtf_agreement,
         mtf_dominant_tf=proposal.mtf_dominant_tf,
         mtf_directions=proposal.mtf_directions,
+        # 2026-09-08: these four were NEVER passed, so SignalCandidate's
+        # own `symbol_source` default ("established_top20") always won at
+        # render time and the cohort banner could not render on ANY real
+        # card -- for any cohort, ever. telegram_signals.symbol_source
+        # was correct all along (set from proposal.symbol_source in the
+        # INSERT below), which is exactly why it stayed invisible: the
+        # data looked right while the card was silent.
+        symbol_source=proposal.symbol_source,
+        qvol_24h=proposal.qvol_24h,
+        spread_bps=proposal.spread_bps,
+        depth_0_5pct_usdt=proposal.depth_0_5pct_usdt,
     )
     payload = build_signal_payload(
         candidate, rendered_at=now, initial_leverage=leverage,

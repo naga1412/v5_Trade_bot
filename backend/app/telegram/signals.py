@@ -327,14 +327,30 @@ def render_message(
         cohort_banner_headline = None
 
     if cohort_banner_headline is not None:
-        cohort_banner = (
-            f"{cohort_banner_headline}\n"
-            f"24h vol: ${candidate.qvol_24h:,.0f}  •  "
-            f"Spread: {candidate.spread_bps:.1f}bps  •  "
-            f"Depth (0.5%): ${candidate.depth_0_5pct_usdt:,.0f}\n"
-            f"⚠ Resting depth does not predict depth during a fast move.\n"
-            f"─────────────────────────────────────\n"
-        )
+        # Figures are omitted rather than fatal when absent. Every
+        # telegram_signals row written before 2026-09-08 has a payload
+        # with no liquidity keys, and the approve/reject edit path
+        # rebuilds candidates from those payloads -- formatting None
+        # with ":,.0f" would raise TypeError and break the card for
+        # exactly the new-cohort symbols this banner exists to flag.
+        # The headline is the load-bearing part; the numbers are
+        # supporting detail.
+        if None in (
+            candidate.qvol_24h, candidate.spread_bps, candidate.depth_0_5pct_usdt,
+        ):
+            cohort_banner = (
+                f"{cohort_banner_headline}\n"
+                f"─────────────────────────────────────\n"
+            )
+        else:
+            cohort_banner = (
+                f"{cohort_banner_headline}\n"
+                f"24h vol: ${candidate.qvol_24h:,.0f}  •  "
+                f"Spread: {candidate.spread_bps:.1f}bps  •  "
+                f"Depth (0.5%): ${candidate.depth_0_5pct_usdt:,.0f}\n"
+                f"⚠ Resting depth does not predict depth during a fast move.\n"
+                f"─────────────────────────────────────\n"
+            )
 
     body = (
         cohort_banner +
@@ -519,6 +535,16 @@ def build_signal_payload(
         "mtf_agreement": candidate.mtf_agreement,
         "mtf_dominant_tf": candidate.mtf_dominant_tf,
         "mtf_directions": candidate.mtf_directions,
+        # 2026-09-08: persisted for the SAME reason `hard_cap` is --
+        # `trade_signals._re_render_and_edit` rebuilds the candidate
+        # purely from this payload. Without these the cohort banner
+        # would render on the initial send and then VANISH the moment
+        # the operator pressed +1x/-1x or approve, which reads as a
+        # glitch rather than a defect.
+        "symbol_source": candidate.symbol_source,
+        "qvol_24h": candidate.qvol_24h,
+        "spread_bps": candidate.spread_bps,
+        "depth_0_5pct_usdt": candidate.depth_0_5pct_usdt,
     }
 
 
