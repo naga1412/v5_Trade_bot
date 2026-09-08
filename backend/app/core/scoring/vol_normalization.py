@@ -23,6 +23,45 @@ MIN_VOL: float = 0.01             # floor to prevent divide-by-near-zero
 DAYS_PER_YEAR: int = 365          # used in sqrt(365) annualization
 MIN_DAILY_BARS_FOR_VOL: int = 20  # require ≥20 daily bars or return None
 
+# 2026-09-08: this function resamples to CALENDAR DAYS, so the caller's
+# bar timeframe determines whether it can ever succeed. At 1h a 504-bar
+# buffer spans 21 days and clears the floor. At 15m the same 504 bars
+# span 5.25 days -- reaching 20 daily bars would need 1,920 bars, which
+# no prewarm value supplies. 15m therefore returns None 100% of the
+# time, and did so silently for the column's whole life (341/341 trades
+# over 7 days on prod, taking effective_score down with it).
+#
+# `is_timeframe_supported` exists so callers state that explicitly
+# rather than calling into a computation that cannot succeed and
+# recording an indistinguishable None. A 100%-NULL column that looks
+# like a failure but is a structural mismatch is its own defect class.
+_MIN_BARS_FOR_VOL_BY_TIMEFRAME: dict[str, int] = {
+    "1h": (MIN_DAILY_BARS_FOR_VOL + 1) * 24,   # 504
+    "4h": (MIN_DAILY_BARS_FOR_VOL + 1) * 6,    # 126
+    "1d": MIN_DAILY_BARS_FOR_VOL + 1,          # 21
+}
+
+
+def is_timeframe_supported(timeframe: str) -> bool:
+    """Can `timeframe` ever supply >=20 calendar days from a live buffer?
+
+    False for sub-hourly timeframes (15m, 5m): the bar count required
+    exceeds anything the shadow worker holds. Callers should skip the
+    computation rather than record a None that reads as a failure.
+    """
+    return timeframe in _MIN_BARS_FOR_VOL_BY_TIMEFRAME
+
+
+def min_bars_for_vol(timeframe: str) -> int | None:
+    """Bars of `timeframe` needed to reach MIN_DAILY_BARS_FOR_VOL days.
+
+    None when the timeframe cannot reach it from a live buffer at all.
+    Callers sizing a history buffer should use this rather than a
+    hardcoded constant -- that coupling is what let the 1h cache-hit
+    path accept 200 bars for a computation needing 504.
+    """
+    return _MIN_BARS_FOR_VOL_BY_TIMEFRAME.get(timeframe)
+
 # Single source of truth for "how many 1h bars a caller must seed before
 # compute_realized_vol_20d can return non-None" (2026-08-31 consolidation).
 #

@@ -181,3 +181,63 @@ def test_aggregator_calibration_clamped_to_unit_interval() -> None:
     # Pre-existing behavior already clamps; calibration must respect the
     # [-1, 1] invariant.
     assert -1.0 <= fs.score <= 1.0
+
+
+# --- realized_vol_20d timeframe coverage (2026-09-08) -----------------
+
+
+def test_min_bars_for_vol_matches_the_daily_resample_requirement() -> None:
+    """The bar counts must follow from MIN_DAILY_BARS_FOR_VOL, not be literals.
+
+    Hardcoding 504 in one place and 200 in another is exactly how the
+    cache-hit path came to accept 8.3 days for a computation needing 21.
+    """
+    from app.core.scoring.vol_normalization import (
+        MIN_DAILY_BARS_FOR_VOL,
+        min_bars_for_vol,
+    )
+
+    assert min_bars_for_vol("1h") == (MIN_DAILY_BARS_FOR_VOL + 1) * 24
+    assert min_bars_for_vol("4h") == (MIN_DAILY_BARS_FOR_VOL + 1) * 6
+    assert min_bars_for_vol("1d") == MIN_DAILY_BARS_FOR_VOL + 1
+
+
+def test_sub_hourly_timeframes_are_explicitly_unsupported() -> None:
+    """15m cannot reach 20 calendar days from any buffer we hold.
+
+    1,920 bars would be required against the 504 the worker keeps. The
+    old behaviour called the computation anyway and recorded a bare
+    None -- indistinguishable from a genuine failure, on 100% of 15m
+    trades, silently, for the column's whole life.
+    """
+    from app.core.scoring.vol_normalization import (
+        is_timeframe_supported,
+        min_bars_for_vol,
+    )
+
+    for tf in ("15m", "5m", "1m"):
+        assert not is_timeframe_supported(tf)
+        assert min_bars_for_vol(tf) is None
+    assert is_timeframe_supported("1h")
+
+
+def test_vol_returns_none_below_the_daily_floor() -> None:
+    """Behavioural: 8.3 days of 1h bars is not enough, 21 days is.
+
+    This is the exact gap the cache-hit path used to sit in.
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from app.core.scoring.vol_normalization import compute_realized_vol_20d
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def bars(n: int) -> list:
+        return [
+            SimpleNamespace(ts=start + timedelta(hours=i), close=100.0 + (i % 7))
+            for i in range(n)
+        ]
+
+    assert compute_realized_vol_20d(bars(200)) is None   # 8.3 days
+    assert compute_realized_vol_20d(bars(504)) is not None  # 21 days

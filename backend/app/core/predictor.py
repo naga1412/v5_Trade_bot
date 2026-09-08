@@ -357,6 +357,7 @@ async def _compute_aggregator_hook_fields(
     from app.core.scoring.vol_normalization import (
         compute_effective_score,
         compute_realized_vol_20d,
+        is_timeframe_supported,
     )
     from app.core.scoring.funding_directional import compute_funding_directional_adj
 
@@ -398,7 +399,14 @@ async def _compute_aggregator_hook_fields(
     effective = None
     funding_adj = None
     try:
-        realized_vol = compute_realized_vol_20d(_bar_list)
+        # 2026-09-08: only compute where the timeframe can actually
+        # reach 20 calendar days. compute_realized_vol_20d resamples to
+        # days, so 15m cannot clear the floor at any buffer size (1,920
+        # bars needed vs 504 held) and returned None on 100% of 15m
+        # trades -- silently, and taking effective_score with it. Skip
+        # explicitly instead of recording an indistinguishable None.
+        if is_timeframe_supported(timeframe):
+            realized_vol = compute_realized_vol_20d(_bar_list)
         effective = compute_effective_score(final.score, realized_vol)
         funding_adj = compute_funding_directional_adj(funding_rate, final.direction)
     except Exception as exc:  # noqa: BLE001 — fail-open
