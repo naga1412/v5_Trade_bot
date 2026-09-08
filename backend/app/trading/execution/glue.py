@@ -233,6 +233,16 @@ def proposal_from_prediction(
     # "established_top20" so admin_test_trade / telegram-callback call
     # sites that don't pass it keep constructing a valid proposal.
     symbol_source: str = "established_top20",
+    # Cohort-banner liquidity figures (2026-09-08). Sourced from #476's
+    # dispatch-time liquidity re-check, which already computes exactly
+    # these three for non-established symbols and previously discarded
+    # them into a log line. None for established_top20 (that path skips
+    # the re-check) and for any caller that does not supply them --
+    # render_message degrades to a headline-only banner rather than
+    # raising, so a legacy payload can never break a card.
+    qvol_24h: float | None = None,
+    spread_bps: float | None = None,
+    depth_0_5pct_usdt: float | None = None,
 ) -> SignalProposal | None:
     """Build a SignalProposal from a Prediction. Returns None for
     NEUTRAL signals (nothing to dispatch)."""
@@ -270,6 +280,9 @@ def proposal_from_prediction(
         layer2_confidence=layer2_confidence,
         mtf_adx_by_tf=_parse_mtf_adx_by_tf_json(mtf_adx_by_tf_json),
         symbol_source=symbol_source,
+        qvol_24h=qvol_24h,
+        spread_bps=spread_bps,
+        depth_0_5pct_usdt=depth_0_5pct_usdt,
     )
 
 

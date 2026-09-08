@@ -301,6 +301,14 @@ async def _re_render_and_edit(
         chart_url=payload["chart_url"],
         sl_distance_pct=float(payload["sl_distance_pct"]),
         rr_ratio=float(payload["rr_ratio"]),
+        # 2026-09-08: without these the cohort banner would disappear on
+        # the first +1x/-1x or approve re-render. .get() with the
+        # dataclass defaults keeps pre-2026-09-08 payloads (which have
+        # none of these keys) rendering exactly as they do today.
+        symbol_source=payload.get("symbol_source", "established_top20"),
+        qvol_24h=payload.get("qvol_24h"),
+        spread_bps=payload.get("spread_bps"),
+        depth_0_5pct_usdt=payload.get("depth_0_5pct_usdt"),
     )
     # Card review #2 (2026-08-20): pass the SAME real per-user cap the
     # original send used, so the +1x/-1x re-render shows the same honest
