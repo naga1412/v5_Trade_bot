@@ -18,6 +18,77 @@ This is not the same as "write better tests". A check that cannot fail
 is worse than no check, because it converts an absent guarantee into a
 believed one — and the belief is what stops anyone looking again.
 
+## Mechanising it
+
+The three questions at the bottom of this doc are sound but rely on
+someone thinking to ask them, which is exactly what failed in instances
+1 and 3. Two mechanical steps, split by check type. **Neither half
+covers the other** — mutation cannot reach an operational check, and a
+written failure signature would not have caught either test.
+
+### For TESTS: break the thing once and watch it fail
+
+Before committing a guard test, **make the defect it guards against real
+and confirm the test goes red.** Targeted mutation, by hand, in the file
+you already have open — not a suite-wide framework:
+
+- delete the argument the test asserts is passed
+- change the constant it claims to pin
+- return the wrong value from the function under guard
+
+Then revert the mutation. If the test passed while the thing was broken,
+it is not a check. **One run.**
+
+This is deterministic where review is not. It would have caught instance
+3 outright rather than by luck — deleting `symbol_source=` from the
+dispatcher call would have left the string-sliced test green, visibly —
+and instance 4 before review, since changing `HISTORY_SEED_BARS_1H` to
+503 leaves a re-derived-formula assertion passing.
+
+Worked example, instance 4:
+
+```
+1. Edit: HISTORY_SEED_BARS_1H = 503
+2. Run the test.
+   - Still green  -> the assertion restates the formula. Not a check.
+   - Red          -> it pins the real constant.
+3. Revert.
+```
+
+### For OPERATIONAL CHECKS: state the failure signature in writing, first
+
+Revert triggers, pass conditions, soak criteria and post-deploy
+verifications are not tests and mutation cannot reach them. For these,
+**write down what result the check produces UNDER THE FAILURE IT GUARDS
+AGAINST, at the time the check is defined** — before it is ever run.
+
+The discipline is stating the failure signature in advance, not
+interpreting the result afterwards. Interpreting afterwards is how a
+zero gets read as a pass.
+
+Instance 1 would have been exposed by one sentence:
+
+> "If futures_poll is broken, this query returns zero."
+
+...because the next line must then be:
+
+> "...and it also returns zero when futures_poll is fine, because prod
+> never writes that value."
+
+Two lines, and the check is revealed as uninformative before it can
+revert a working change.
+
+Instance 2 fails the same way, with a magnitude instead of a value:
+
+> "If the flip effect is real, the LONG/SHORT ratio moves by ~1
+> trade/day. Binomial noise on n=56 is +/-6.7 trades."
+
+Written down, the mismatch is arithmetic rather than judgement.
+
+Applies equally to a green result: state what the check shows when the
+guarded thing is FINE. If the two statements are the same sentence,
+there is nothing to observe.
+
 ## The four instances
 
 ### 1. A revert trigger keyed on a constant field — killed a working fix
