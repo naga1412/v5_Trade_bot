@@ -1592,3 +1592,78 @@ sufficient. All of these must be true first:
    than shadow-only.
 4. Its own before/after observation window on merge, treated as a
    deliberate scoring change exactly as this one was.
+
+### FU-50 — historical cohort retag: DECIDED, will NOT run. Read the boundary rule instead.
+
+**Status: CLOSED as a decision, not deferred.** Do not re-open this as a
+task. If you are here because `symbol_source` looks wrong on old rows,
+the rule below is the answer.
+
+**THE RULE.** `symbol_source` before each table's boundary is the
+pre-fix uniform default and carries NO INFORMATION. From the boundary
+forward it is computed by the pure classifier and is real. The
+boundaries differ per table, because the threading reached each one at a
+different point -- a single global date would be wrong:
+
+| table | boundary | what landed |
+|---|---|---|
+| `predictions` | `ts >= 2026-09-03 18:00 UTC` | Stage 2 threading |
+| `telegram_signals` | `sent_at >= 2026-09-03 20:00:23 UTC` | same deploy, first card |
+| `shadow_trades` | `opened_at >= 2026-09-05 12:30 UTC` | item 0 / Stage 5 |
+| `live_trades` | never | live is BTC/USDT only; no non-established row exists |
+
+`predictions`' boundary reads ~1h EARLIER than Stage 2's 19:07 UTC merge
+because `predictions.ts` is the candle's OPEN time, not its close. The
+18:00 candle closed at 19:00 and its batch was written after the 19:08
+restart. That offset is the documented ts convention, not a discrepancy.
+
+Verified from the rows rather than inferred from the merge: 55,244
+prediction rows exist before the boundary and `SELECT DISTINCT
+symbol_source` over them returns exactly one value,
+`established_top20`. Zero variation, as expected for a uniform default.
+
+**WHY NO RETAG.** Re-derived against prod (the previously-cited
+61,080/15,504 figures were STAGING and do not describe prod):
+
+| table | total | would change | UNRESOLVABLE |
+|---|---|---|---|
+| predictions | 63,425 | 14,506 | 11,017 |
+| shadow_trades | 5,058 | 1,047 | 778 |
+| telegram_signals | 2,570 | 567 | 392 |
+| **total** | **71,066** | **16,120 (22.7%)** | **12,187 (75.6% of changes)** |
+
+**12,187 rows cannot be classified at all.** The classifier's 2nd and
+3rd branches both turn on "does a spot pair exist", and prod never
+recorded historical spot-pair status. Only symbols inside the
+73-symbol frozen baseline UNION the 78-symbol current
+`live_fleet_universe` snapshot are resolvable; every historical symbol
+outside that union is not.
+
+**Inferring them from current `exchangeInfo` was CONSIDERED and
+REJECTED as fabrication.** Spot-pair status changes over a four-month
+window, so most inferences would be right and some silently wrong, with
+nothing marking which. "Mostly right, unmarked" is strictly WORSE than a
+known-stale value: a stale value announces itself, a plausible guess
+does not.
+
+**UNIFORMLY STALE BEATS PARTIALLY CORRECTED.** "Everything before date X
+is the pre-fix default and carries no information" is a one-line rule
+anyone can apply. "Some corrected, some inferred, some stale" is not
+statable at all. That is the whole argument, and it generalises beyond
+this table.
+
+**NO CONSUMER EXISTS.** The breakeven read is 1h live-eligible and does
+not split by cohort. Criterion #2's data begins when item 0 landed on
+2026-09-05, so it never touches pre-fix rows. Live dispatch and the
+Telegram banner are forward-only. Nothing reads historical cohort tags.
+
+**AND IT COULD NOT ANSWER ANYTHING ANYWAY.** At sigma=2.75% an unpaired
+historical cohort split needs n in the thousands PER ARM to separate.
+There is no precision here for anyone to spend, so perfect tags would
+buy nothing even if they were free.
+
+**If a future consumer genuinely needs historical cohort tags**, the
+honest path is a new column recording classifier output going forward,
+never a backfill of the existing one -- so that "computed" and "unknown"
+stay distinguishable rather than being merged into a single ambiguous
+field.
