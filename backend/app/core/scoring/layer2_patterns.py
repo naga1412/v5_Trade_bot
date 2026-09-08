@@ -32,7 +32,45 @@ _CHART_PATTERN_IDS: frozenset[str] = frozenset(
 PRIOR_ACCURACY: float = 0.5
 """Default accuracy when pattern_stats has no warm row for a pattern."""
 
-COLD_START_THRESHOLD: int = 100_000
+COLD_START_THRESHOLD_DISABLED: int = 100_000
+"""Sentinel: no real row can reach this, so the timeframe is inert."""
+
+COLD_START_THRESHOLD_BY_TIMEFRAME: dict[str, int] = {
+    "15m": 50,
+}
+"""Per-timeframe minimum n_samples before a pattern_stats row feeds L2.
+
+SCOPED BY TIMEFRAME DELIBERATELY (2026-09-08). A single global constant
+is what made FU-48 possible: `pattern_stats` sat empty for its whole
+life, so `PatternStatsLookup.get` returned the flat PRIOR_ACCURACY and
+the wiring looked dormant. When #507's populator finally wrote rows,
+11 of them crossed the then-global threshold of 50 and live L2 scoring
+changed with no code or config change at all.
+
+15m is enabled on measurement (see FU-49): a decision-flip screen over
+n=474 real closed 15m trades, recomputed with this module's own
+`score()` formula on real stored fires, found 9 flips (1.9%) and ZERO
+direction reversals.
+
+1h is deliberately NOT enabled, and the omission is the control, not an
+oversight. The 1h lane is live dispatch AND the breakeven-variant
+population, mid-measurement. Its highest row sits at n=23 and the
+fastest observed accumulation is 11 fires/28 days, so a global 50 would
+have silently activated it around mid-November -- the exact FU-48
+failure, scheduled for a future date. Leaving 1h absent from this map
+means enabling it requires editing this dict, which is a deliberate act
+rather than a threshold quietly being crossed while nobody is looking.
+
+To enable a timeframe, read FU-49's preconditions FIRST -- they are not
+satisfied by the number merely being large enough.
+"""
+
+
+def _cold_start_threshold(timeframe: str) -> int:
+    """Minimum n_samples for `timeframe`; disabled unless explicitly listed."""
+    return COLD_START_THRESHOLD_BY_TIMEFRAME.get(
+        timeframe, COLD_START_THRESHOLD_DISABLED,
+    )
 """spec §2 decision 6 — fewer samples than this are too noisy to trust.
 
 TEMPORARILY RAISED 50 -> 100_000 on 2026-09-05 to neutralise an
@@ -104,9 +142,11 @@ async def load_pattern_stats(
 ) -> PatternStatsLookup:
     """Read all rows for ``(symbol, timeframe)`` from ``pattern_stats``.
 
-    Cold-start gating (``n_samples < COLD_START_THRESHOLD``) excludes the row
-    so ``PatternStatsLookup.get`` returns the prior — noisy early data must
-    not bias the L2 score.
+    Cold-start gating excludes rows below this TIMEFRAME's threshold
+    (``_cold_start_threshold``) so ``PatternStatsLookup.get`` returns the
+    prior — noisy early data must not bias the L2 score. A timeframe not
+    listed in ``COLD_START_THRESHOLD_BY_TIMEFRAME`` is inert by
+    construction; see that constant and FU-49 before adding one.
 
     LOOKAHEAD WARNING for anyone building a backtest/replay: ``pattern_
     stats`` reflects ALL history up to its ``last_updated`` timestamp,
@@ -131,7 +171,7 @@ async def load_pattern_stats(
     for r in rows:
         n_samples = int(r.n_samples)
         n_correct = int(r.n_correct)
-        if n_samples >= COLD_START_THRESHOLD:
+        if n_samples >= _cold_start_threshold(timeframe):
             by_pattern[r.pattern_id] = n_correct / n_samples
         # Below threshold → leave absent so .get() falls back to PRIOR_ACCURACY.
     return PatternStatsLookup(by_pattern=by_pattern)

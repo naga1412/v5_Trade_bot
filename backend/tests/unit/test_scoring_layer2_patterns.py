@@ -310,10 +310,14 @@ async def test_load_pattern_stats_warm_rows_become_accuracies() -> None:
     prior", which is independent of where the cutoff sits.
     """
     from app.core.scoring.layer2_patterns import (
-        COLD_START_THRESHOLD,
         PRIOR_ACCURACY,
+        _cold_start_threshold,
         load_pattern_stats,
     )
+
+    # 2026-09-08: the threshold is per-timeframe now, so derive it from
+    # the timeframe this test actually passes rather than a global.
+    COLD_START_THRESHOLD = _cold_start_threshold("1h")
 
     rows = [
         _Row(
@@ -349,3 +353,55 @@ async def test_load_pattern_stats_no_rows_returns_empty_lookup() -> None:
     lookup = await load_pattern_stats(session, symbol="ETH/USDT", timeframe="4h")  # type: ignore[arg-type]
     assert lookup.by_pattern == {}
     assert lookup.get("anything") == pytest.approx(PRIOR_ACCURACY)
+
+
+# --- Timeframe-scoped cold-start threshold (2026-09-08, FU-49) --------
+
+
+def test_cold_start_threshold_is_scoped_per_timeframe() -> None:
+    """15m is enabled on measurement; every other timeframe is inert.
+
+    The scoping IS the control. A single global constant is what made
+    FU-48 possible -- 11 rows crossed it and live L2 scoring changed
+    with no code or config change. 1h must stay absent from the map so
+    that enabling it requires a deliberate edit, not a row quietly
+    accumulating past a number while nobody is watching.
+    """
+    from app.core.scoring.layer2_patterns import (
+        COLD_START_THRESHOLD_BY_TIMEFRAME,
+        COLD_START_THRESHOLD_DISABLED,
+        _cold_start_threshold,
+    )
+
+    assert _cold_start_threshold("15m") == 50
+    assert "1h" not in COLD_START_THRESHOLD_BY_TIMEFRAME, (
+        "1h must not be enabled without satisfying FU-49's preconditions: "
+        "the breakeven n=150 read banked, criterion #2's needs met, and a "
+        "FRESH flip-screen on 1h data -- the 15m result does not carry over"
+    )
+    for tf in ("1h", "4h", "1d", "5m"):
+        assert _cold_start_threshold(tf) == COLD_START_THRESHOLD_DISABLED
+
+
+@pytest.mark.asyncio
+async def test_same_row_is_warm_on_15m_and_inert_on_1h() -> None:
+    """The behavioural half: identical data, opposite outcome by timeframe.
+
+    n=60 clears 15m's threshold of 50 and must yield its real ratio. The
+    SAME row on 1h must fall back to the prior -- that is what stops a
+    1h row crossing 50 from perturbing live dispatch and the breakeven
+    variant population mid-measurement.
+    """
+    from app.core.scoring.layer2_patterns import PRIOR_ACCURACY, load_pattern_stats
+
+    rows = [_Row(pattern_id="hammer", n_samples=60, n_correct=15)]  # 0.25
+
+    warm = await load_pattern_stats(
+        _StubSession(rows), symbol="WLD/USDT", timeframe="15m",  # type: ignore[arg-type]
+    )
+    assert warm.get("hammer") == pytest.approx(0.25)
+
+    inert = await load_pattern_stats(
+        _StubSession(rows), symbol="WLD/USDT", timeframe="1h",  # type: ignore[arg-type]
+    )
+    assert inert.get("hammer") == pytest.approx(PRIOR_ACCURACY)

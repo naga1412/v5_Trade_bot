@@ -1487,8 +1487,10 @@ Three 15m closes fell in the window; at the observed 15m rate
 (~2.2/hr) that is ~1.75 expected opens against 0 observed, which is
 unremarkable noise (p~0.17) and negligible against a 150-trade target.
 
-**Current state**: `COLD_START_THRESHOLD` is held at `100_000` (#551),
-so no row can feed scoring. The 3,578 rows remain written and
+**Current state (SUPERSEDED 2026-09-08 -- see FU-49)**: the hold was
+resolved on measurement. The threshold is now scoped per timeframe:
+15m enabled at 50, 1h and everything else deliberately inert. What
+follows described the hold while it was global. The 3,578 rows remain written and
 `pattern_stats_refresh` keeps running, so data accrues for whenever the
 wiring decision is taken on its merits. Reverting to 50 re-activates
 the behaviour and MUST be treated as a deliberate scoring change with
@@ -1502,3 +1504,91 @@ last one was the same false belief described above, sitting in the
 description of the probe most likely to be run when investigating this
 exact subject. All three are fixed in the same change as this entry
 rather than merely noted here.
+
+### FU-49 — pattern_stats hold RESOLVED for 15m on measurement; 1h deliberately still inert
+
+**Second scoring regime boundary.** Read alongside FU-48, which records
+the first (2026-09-05T09:18:32Z) and the process rule that came out of
+it.
+
+FU-48 left `COLD_START_THRESHOLD` at `100_000` to neutralise an
+unintended activation. That was a HOLD, not a resting state: #507's
+populator kept writing rows (3,578 and growing) that nothing read. Left
+alone it would have meant the fix we shipped did nothing, forever.
+Resolved 2026-09-08 on measurement.
+
+**The measurement.** Decision-flip screen on prod, recomputed with
+`layer2_patterns.score()`'s own formula (`sum(s*c*acc)` per side,
+`tanh(raw/3.0)`, `NEUTRAL_BAND=0.05`) against real stored pattern fires
+from `shadow_trades.layer_scores`:
+
+| metric | value |
+|---|---|
+| Closed 15m trades measured | 474 |
+| Direction flips | **9 (1.899%)** |
+| Direction REVERSALS (L->S or S->L) | **0** |
+| Mean absolute score shift | 0.0137 |
+| Max absolute shift | 0.0413 |
+| L2 score SD | 0.2875 -> 0.2798 |
+| Trades exceeding B2's 0.0127 bound | 170 of 474 (36%) |
+
+Seven of the nine flips are neutral-boundary tips (L<->N, N<->S) --
+marginal signals crossing `|squashed| < 0.05`. Nothing changes from buy
+to sell.
+
+**THIS IS A CORRECTNESS CHANGE, NOT A MEASURED IMPROVEMENT.** Do not
+read it as the latter. L2 does not separate strong from weak at
+n=3,865 (-0.101 vs -0.165, 0.64 sigma), so we CANNOT verify that better
+inputs to L2 produce better outcomes. What is being fixed is a weight
+that is objectively wrong: the warm rows carry real accuracies of
+0.14-0.33, and weighting a 14%-win-rate pattern at a flat 0.5 is the
+defect. That the correction is right does not make it a demonstrated
+gain.
+
+**B2's "zero flips, max shift 0.0127" described STAGING, not prod.** It
+does not reproduce here -- the mean shift alone exceeds its stated
+maximum and 36% of trades clear it. Do not carry that figure forward.
+
+**1.9% is a FLOOR, not a point estimate.** Trades whose stored L2 notes
+were truncated mid-JSON by the pre-#545 bug are excluded (474 measured
+of 770 affected) and skew older. `NOTES_MAX_CHARS` also caps stored
+fires, dropping the WEAKEST first -- so the recomputation understates
+shift slightly, in the optimistic direction.
+
+**Why the threshold is scoped by TIMEFRAME rather than restored
+globally.** 1h is live dispatch AND the breakeven-variant population,
+mid-measurement, with the n=150 read due ~2026-09-14. Highest 1h row
+sits at n=23; fastest observed accumulation is 11 fires/28 days, which
+projects a crossing of 50 around mid-November -- the exact FU-48
+failure, scheduled for a future date. A global restore would have
+deferred that risk behind an alert someone has to remember to look at.
+Scoping it means enabling 1h requires editing
+`COLD_START_THRESHOLD_BY_TIMEFRAME`, which is a deliberate act. The
+unsafe state cannot be reached by a number quietly growing.
+
+Caveat on the projection: the rate was measured over 28 days on the
+current universe. Stage 1's expansion and item 0's non-established
+opens (first ones 2026-09-05) could raise the 1h fire rate. Even at
+double the fastest observed rate the crossing lands well past
+mid-September, but it is a reason to watch rather than to trust ten
+weeks as a guarantee.
+
+**WATCH (opportunistic, alert band 35):**
+`SELECT MAX(n_samples) FROM pattern_stats WHERE timeframe='1h';`
+At >=35, the 1h DECISION is becoming available. It no longer signals a
+silent activation -- the scoping prevents that -- it signals that a
+choice is due.
+
+**PRECONDITIONS BEFORE ENABLING 1h.** A number crossing 35 or 50 is NOT
+sufficient. All of these must be true first:
+
+1. The breakeven-variant n=150 read is BANKED (see
+   `2026-07-30-breakeven-stop-mechanic-design.md`). Nothing perturbs
+   that lane for a correctness improvement we cannot verify.
+2. Criterion #2 has what it needs from the 1h population.
+3. A FRESH decision-flip screen on 1h data. The 15m result above does
+   NOT carry across -- different symbols, different accuracies,
+   different fire mix, and 1h flips would land on live dispatch rather
+   than shadow-only.
+4. Its own before/after observation window on merge, treated as a
+   deliberate scoring change exactly as this one was.
