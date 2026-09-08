@@ -200,16 +200,19 @@ async def test_real_c1_detects_and_alarms_on_a_real_injected_exception() -> None
     real production code.
 
     record_dispatch_error itself is faked here to seed the row with a raw
-    SQLite-safe INSERT rather than calling the real function: the real
-    app.healer.findings.record_finding uses `CAST(:p AS JSONB)`, which is
-    correct Postgres SQL (prod's real dialect) but silently corrupts the
-    JSON payload to the string '0' on SQLite's CAST-to-NUMERIC semantics —
-    a genuine SQLite-test-compatibility gap in that shared helper, out of
-    this script's scope to fix. tests/healer/test_detectors.py's own C1
-    tests avoid it the same way: hand-seeding the row instead of calling
-    record_finding. What matters here is proving detect_dispatch_error_rate
-    itself — unmodified production code — correctly classifies this
-    script's exact synthetic-exception shape as novel + critical.
+    SQLite-safe INSERT rather than calling the real function, so this
+    test's own INSERT shape stays independent of whatever record_finding
+    happens to do — the point of this test is proving
+    detect_dispatch_error_rate itself, unmodified production code,
+    correctly classifies this script's exact synthetic-exception shape as
+    novel + critical, not exercising the write helper.
+
+    (Historical note: record_finding used to use `CAST(:p AS JSONB)`,
+    which silently corrupted the JSON payload to the string '0' on
+    SQLite's CAST-to-NUMERIC semantics — fixed 2026-08-14, remediation
+    work order B3; see tests/healer/test_findings_record.py for direct
+    coverage of the fix. This test's hand-seeded INSERT predates and is
+    independent of that bug/fix either way.)
     """
     engine = await _mk_healer_findings_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)

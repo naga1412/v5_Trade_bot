@@ -20,7 +20,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.scoring.traps import ALL_TRAPS
-from app.core.scoring.traps.base import TrapContext, TrapFire
+from app.core.scoring.traps.base import TrapContext, TrapFire, check_safe
 from app.core.scoring.types import Direction, LayerScore
 
 
@@ -35,25 +35,24 @@ def check_all_traps(
 ) -> list[TrapFire]:
     """Run every enabled trap at ``current_idx`` and collect their fires.
 
-    A single trap raising an exception is silently swallowed (logged only by
-    upstream observability if wired) — by contract a broken detector must not
-    block the rest. Per ``Trap.check`` docstring, well-behaved traps return
+    A single trap raising an exception returns None for that trap (by
+    contract a broken detector must not block the rest — see
+    ``check_safe``), with per-trap-id consecutive-failure tracking so a
+    structurally broken trap escalates loudly instead of vanishing
+    silently. Per ``Trap.check`` docstring, well-behaved traps return
     ``None`` instead of raising on bad input.
     """
     fires: list[TrapFire] = []
     for trap in ALL_TRAPS:
         if enabled_set is not None and trap.trap_id not in enabled_set:
             continue
-        try:
-            fire = trap.check(
-                bars,
-                current_idx=current_idx,
-                layer_scores=layer_scores,
-                proposed_direction=proposed_direction,
-                context=context,
-            )
-        except Exception:  # noqa: BLE001 — a broken trap must not brick the stack
-            continue
+        fire = check_safe(
+            trap, bars,
+            current_idx=current_idx,
+            layer_scores=layer_scores,
+            proposed_direction=proposed_direction,
+            context=context,
+        )
         if fire is not None:
             fires.append(fire)
     return fires

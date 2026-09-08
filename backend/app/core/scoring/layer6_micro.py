@@ -24,7 +24,7 @@ import math
 import pandas as pd
 
 from app.core.patterns import ALL_PATTERNS
-from app.core.patterns.base import PatternFire
+from app.core.patterns.base import PatternFire, detect_safe
 from app.core.scoring.types import Direction, LayerScore
 
 # Curated set: single-bar + multi-bar reaction patterns valuable on 1m/5m.
@@ -74,10 +74,7 @@ def score(bars: pd.DataFrame) -> LayerScore | None:
     current_idx = len(bars) - 1
     fires: list[PatternFire] = []
     for pat in micro:
-        try:
-            f = pat.detect(bars, current_idx)
-        except Exception:  # noqa: BLE001 — pattern bug must not brick layer
-            continue
+        f = detect_safe(pat, bars, current_idx)
         if f is not None:
             fires.append(f)
 
