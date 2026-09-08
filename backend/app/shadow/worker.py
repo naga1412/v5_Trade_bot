@@ -102,7 +102,19 @@ BOOTSTRAP_ADMIN_USER_ID: int = 1
 # any way. See _entry_timing_recon_tick's own docstring for the full
 # safety argument and _entry_timing_recon_state's docstring for why the
 # state it tracks cannot affect anything else in this class.
-ENTRY_TIMING_RECON_ENABLED: bool = False
+# ENABLED 2026-09-08. Held disabled since it shipped (#549) for one
+# reason only: risk to the breakeven-variant lane before its read was
+# banked. That read is now banked at n=129 (Delta > 1xSE with the right
+# sign was the pre-registered bar; observed 2.76 and 2.84 SE, zero
+# direction reversals), so the reason is gone and holding it further
+# just costs eligibility data.
+#
+# Reversal is a revert PR plus a deploy, ~10 minutes -- quick, but not
+# a config flip. DELIBERATELY NOT env-backed: an env var affecting live
+# behaviour is operator-gated, which would turn a rollback the agent can
+# execute into one that waits on a human. Wrong direction for a rollback
+# path (operator ruling, 2026-09-08).
+ENTRY_TIMING_RECON_ENABLED: bool = True
 ENTRY_TIMING_RECON_SCORE_THRESHOLD: float = 0.22
 
 

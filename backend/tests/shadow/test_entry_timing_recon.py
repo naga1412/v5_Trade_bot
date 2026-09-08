@@ -155,13 +155,34 @@ def test_state_is_keyed_per_symbol_and_timeframe_independently() -> None:
     assert ("BTCUSDT", "15m") in w._entry_timing_recon_state
 
 
-def test_shipped_default_is_disabled() -> None:
-    """The one flag that matters for the hard-stop compliance: recon
-    must ship OFF. This is the actual guarantee the empty-diff-on-the-
-    existing-suite argument depends on."""
-    from app.shadow import worker as worker_module
-
-    assert worker_module.ENTRY_TIMING_RECON_ENABLED is False
+# test_shipped_default_is_disabled was REMOVED 2026-09-08, not inverted.
+#
+# It asserted `ENTRY_TIMING_RECON_ENABLED is False`, which was the right
+# guarantee while recon shipped disabled. That guarantee is now
+# deliberately retired, and the two obvious replacements are both worse
+# than nothing:
+#
+#   - Asserting `is True` would pass on a build where the guard had been
+#     deleted entirely, since it checks a value and not the wiring.
+#   - A "behavioural" version calling _entry_timing_recon_tick directly
+#     cannot work either: the flag is checked at the CALL SITE in
+#     _maybe_open_position, so invoking the tick bypasses the guard and
+#     records state regardless of the flag. Such a test would pass
+#     identically whether the flag worked or not.
+#
+# What still carries the guarantee is the structural test below, which
+# proves the call site remains inside the flag's guard -- i.e. that the
+# rollback path exists. See
+# docs/superpowers/decisions/2026-09-08-checks-that-cannot-fail.md.
+#
+# DO NOT REINTRODUCE A FLAG-VALUE ASSERTION TO FILL THIS GAP. The check
+# that the recon is actually RUNNING is its OUTPUT, not its flag: a
+# constant reading True proves nothing about whether the tick fires,
+# which is the same value-versus-wiring distinction that made the
+# removed test worthless. The standing verification is "eligibility data
+# is accumulating in the logs", and the ABSENCE of that data is the
+# signal. There is no assertion about the constant that can substitute
+# for looking at what the code produced.
 
 
 def test_recon_call_site_is_gated_behind_the_flag_constant() -> None:
