@@ -161,6 +161,83 @@ per variant (~2 months at current 0.43 trades/day live shadow rate),
 vs. the ~6 months required for two-sample comparison at similar
 power.
 
+### RESULT + decision-bar lineage (added 2026-09-08)
+
+**The rule above is the ONLY pre-registered bar. It has been met.**
+
+Read of 2026-09-08 on the pre-registered population (`timeframe='1h'
+AND direction='LONG' AND entry_score >= 0.36` -- live-eligible; the
+same definition that produced n=37/38 at the 2026-08-15 check):
+
+| variant | n | armed | mean delta | SE | delta/SE |
+|---|---|---|---|---|---|
+| breakeven_0.40R | 129 | 74 | +0.643% | 0.233 | **2.76** |
+| breakeven_0.50R | 129 | 73 | +0.659% | 0.232 | **2.84** |
+
+Both exceed their SE with the right sign, at n=129 against an n~40
+expectation. **By its own pre-registered rule this measurement passed,
+and passed some time ago.** It should not be described as "not yet
+conclusive".
+
+**Trigger choice**: the two are INDISTINGUISHABLE. The rule's
+tie-break (higher `n_armed x delta`) gives 0.50R at 48.1 vs 0.40R at
+47.6 -- a ~1% margin, which is noise. State it as "indistinguishable;
+0.50R by tie-break", never as a finding with a rationale attached.
+
+**Corrected lineage -- neither n=100 nor n=150 was ever pre-registered
+here.** Both circulated as the bar during September 2026 and both are
+STRICTER than this document specifies. Recorded so the confusion
+cannot regenerate:
+
+- **n=150** -- an aside in `docs/superpowers/decisions/2026-08-30-
+  criterion2-population-definition.md:15`: "(n=38 at the 2026-08-15
+  check, heading to n=150, due mid-September)". A forward projection
+  in a document about a different criterion, not a decision rule.
+- **n>=100** -- `docs/superpowers/plans/2026-09-03-entry-timing-
+  variant-lane-design.md` cited "the breakeven-variant lane's own
+  DECISION rule uses n>=30 for an early directional read and n>=100
+  for a real PASS/FAIL". **That attribution was invented.** No such
+  rule exists in this document. It was written by Claude on
+  2026-09-03 and is corrected at source in the same change as this
+  entry.
+
+Holding to the stricter number was conservative and cost little, but
+the distinction matters: a bar remembered rather than read is not a
+pre-registration, and raising one after seeing a positive result is a
+post-hoc adjustment even in the conservative direction.
+
+### Named deliverable -- re-run at n=150 (open as of 2026-09-08)
+
+Not a footnote. At n=150, re-run and report:
+
+1. **The 31-August split** (Stage 1's universe expansion, ~20 symbols
+   -> ~100), same cut as 2026-09-08:
+
+   | segment | n | mean | SE | sigma |
+   |---|---|---|---|---|
+   | pre-Aug31 0.40R | 100 | +0.738 | 0.282 | 2.62 |
+   | post-Aug31 0.40R | 29 | +0.314 | 0.361 | 0.87 |
+   | pre-Aug31 0.50R | 100 | +0.759 | 0.280 | 2.71 |
+   | post-Aug31 0.50R | 29 | +0.314 | 0.361 | 0.87 |
+
+   The effect currently sits in the PRE-expansion half -- the opposite
+   of the "estimate only describes the new universe" failure mode. The
+   halves differ by 0.93 SE of the difference, i.e. not separated;
+   n=29 supports nothing either way. The remaining ~21 pairs come
+   almost entirely from the new universe, so this self-resolves.
+
+2. **The 0.40R/0.50R arming identity.** Post-Aug31 the two variants
+   are numerically IDENTICAL (same mean, sd, to 4dp) -- no trade armed
+   at 0.40R without also arming at 0.50R. If that persists on the new
+   universe the two triggers are not distinguishable there and the
+   tie-break rule stops meaning anything.
+
+Paired design note, so this is not misread as a contamination worry:
+each observation compares breakeven against no-breakeven on the SAME
+trade, so changing which symbols are sampled cannot bias the paired
+difference. The question is which population the estimate DESCRIBES,
+not whether it is contaminated.
+
 ### Open questions from original design — RESOLVED
 
 1. **Option A vs Option B same-bar tiebreak**: **Option B** (SL-first

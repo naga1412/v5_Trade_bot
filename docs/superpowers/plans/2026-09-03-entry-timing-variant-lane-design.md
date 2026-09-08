@@ -132,10 +132,28 @@ zero at ~2 standard errors): SE = σ/√n, so n ≥ (2σ/μ)².
 | 0.55% | 100 |
 | 0.30% | 336 |
 
-The project's own existing convention (breakeven-variant's DECISION
-rule) uses n≥30 for an "early directional read" and n≥100 for a real
-PASS/FAIL — reused here rather than inventing a new bar. At n=30 this
-lane can reliably see deltas ≥ ~1.0%/trade; at n=100, deltas ≥ ~0.55%.
+**CORRECTION (2026-09-08): the paragraph that stood here was wrong.**
+It asserted that "the project's own existing convention (breakeven-
+variant's DECISION rule) uses n≥30 for an 'early directional read' and
+n≥100 for a real PASS/FAIL — reused here rather than inventing a new
+bar." No such rule exists in the breakeven-variant design doc. That
+attribution was invented by this document (written by Claude,
+2026-09-03) while claiming the opposite, and it then circulated as
+though it were the breakeven lane's pre-registered bar.
+
+The breakeven lane's ACTUAL pre-registered rule, quoted from
+`2026-07-30-breakeven-stop-mechanic-design.md`, is: "whichever
+trigger's cumulative Δ exceeds its SE with the right sign becomes the
+recommended live-side trigger. If both survive, prefer higher
+n_armed × Δ product", with "meaningful measurement expected at n≈40
+pairs per variant".
+
+**This lane needs its own bar, stated on its own terms rather than
+borrowed.** Using the sigma table above: at n=30 this lane can
+reliably see deltas ≥ ~1.0%/trade; at n=100, deltas ≥ ~0.55%. Those
+are power figures, not a decision rule — a decision rule for this lane
+must be pre-registered explicitly before its first read, and must
+state both the captured-move and false-start criteria together (§3).
 
 ## 5. Timeline at current rates
 
