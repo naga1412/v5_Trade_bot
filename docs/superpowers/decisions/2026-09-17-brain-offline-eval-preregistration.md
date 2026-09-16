@@ -19,7 +19,7 @@ output, compare avg_pnl_pct with n and SE per bucket.
 
 | dims | group | status |
 |---|---|---|
-| 32 | asset embedding | untested, LEARNED (`nn.Embedding(134, 32)`, trained by PPO) |
+| 32 | asset embedding | untested, **FROZEN random code per symbol** -- `nn.Embedding(134, 32)` is NOT in `policy.parameters()` (train_brain.py: "asset embeddings are frozen during PPO training"). No representation learning; the policy net can only memorise fixed codes |
 | 6 | L1-L6 scores | tested null, n=3,865 |
 | 1 | L8 | constant 0.0 (flag off -> None -> 0.0, `replay_buffer.py:200`) |
 | 1 | L9 | tested null; 86.8% abstain -> 0.0 |
@@ -31,8 +31,14 @@ output, compare avg_pnl_pct with n and SE per bucket.
 | 2 | weekend, asia_open | tested null via `hour` (strictly finer) |
 
 **17 of 53 dims are null or dead. The interaction hypothesis rests on
-four stored features -- funding, OI, one regime bit, atr -- plus
-learned symbol identity at 4,288 embedding parameters on 5,602 trades.**
+four stored features -- funding, OI, one regime bit, atr -- plus symbol
+identity encoded as a FROZEN random 32-dim code.** (Corrected 2026-09-17:
+the first draft said "4,288 learned parameters". The embedding is not
+trained -- it is Gaussian-initialised once and frozen. The overfitting
+mechanism is therefore the 128-unit policy net memorising fixed symbol
+codes, not the embedding adapting. Same risk shape, different
+mechanism; the neutral baseline and the reduced-embedding rule still
+apply.)
 The prior is weak and is stated as such. It does not gate the work:
 interactions between individually-null features are precisely what a
 model can find and a univariate split cannot.
