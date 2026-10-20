@@ -259,6 +259,51 @@ truth as easily as a constant can.** Consolidating constants while
 leaving a test restating the old formula rebuilds the seam one layer up
 and hides it behind a green run.
 
+## Sibling pattern: a fix applied to one of two call sites
+
+**Not a check that cannot fail — a fix that only covered half of what it
+changed.** Named here because it was found by the same question ("what
+would this do if the thing it guards were broken?") and it fails the same
+way: silently, for weeks, behind something that looks handled.
+
+`#456/#463` dropped the dead L7 layer from the RL observation vector,
+taking `OBS_DIM` from 54 to 53. The PR correctly anticipated that an
+existing 54-dim checkpoint could no longer be loaded, and handled it:
+it deactivated the stale champion and made
+`app/rl/checkpoints.py::load_active_checkpoint` fail open to
+equal-weight mode with a loud log line.
+
+**That is the INFERENCE consumer of the dimension. There were two.** The
+TRAINING consumer, `tools/ml/train_brain.py::maybe_warm_start`, still
+called `load_state_dict` unguarded. It raised, the nightly run died
+before `save_checkpoint`, the warm-start file therefore never advanced,
+and `ls -t | head -n1` re-selected the same stale file the following
+night. **64 consecutive dead nights from 2026-08-18, with no checkpoint
+active in production**, discovered only when someone asked where the
+brain was.
+
+Two properties made it invisible rather than merely broken:
+
+1. **The failure was self-perpetuating.** Dying before the write step
+   guarantees the next run starts from the identical bad input. Any
+   retry loop whose failure prevents the state advance that would clear
+   it will run forever. This is the second instance of exactly this
+   shape in this subsystem — the August NaN loop warm-started from the
+   same file for 12 nights for the same structural reason.
+2. **A test file named for the thing existed and did not cover it.**
+   `test_train_brain_warmstart.py` tested two ordering helpers and never
+   fed `maybe_warm_start` a checkpoint at all, let alone a mismatched
+   one. A test named after a function it never calls is worse than no
+   test, by this document's opening argument.
+
+**The question to add to a change like this:** *what reads the thing I
+just changed the shape of?* Enumerate the consumers mechanically — grep
+the symbol, not your memory of the architecture — and guard each one or
+state in writing why it needs no guard. A changed dimension, a renamed
+column, a new enum value and a changed return arity all have this
+shape; three of those already have their own entries in this project's
+pitfall list.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration
