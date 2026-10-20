@@ -59,7 +59,27 @@ import torch
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT / "backend"))
+# Make `app` importable under BOTH layouts this file runs in, by checking
+# where `app` actually IS rather than assuming:
+#   repo checkout — <repo>/tools/ml/, so parents[2] is <repo> and the
+#                   package is at <repo>/backend/app
+#   container     — the bind mount puts this at /app/host-tools/ml/, so
+#                   parents[2] is /app and the package is at /app/app
+# The original line assumed the first layout unconditionally and inserted
+# a nonexistent /app/backend inside the container, so the probe died with
+# ModuleNotFoundError: No module named 'app' on its first real run. Same
+# class as PR-BRAIN-BOOTSTRAP-FIX's shim in train_brain.py, which solves
+# it by hardcoding "/app"; this resolves it instead, so neither layout is
+# privileged and a future move of either tree cannot silently break it.
+for _candidate in (_REPO_ROOT / "backend", _REPO_ROOT):
+    if (_candidate / "app").is_dir():
+        sys.path.insert(0, str(_candidate))
+        break
+else:  # pragma: no cover - neither layout present
+    raise SystemExit(
+        f"cannot locate the `app` package from {__file__}: tried "
+        f"{_REPO_ROOT / 'backend'} and {_REPO_ROOT}"
+    )
 
 from app.rl.adapter import AssetEmbeddingTable  # noqa: E402
 from app.rl.backtest_brain import _infer_proposed_direction  # noqa: E402
