@@ -152,3 +152,153 @@ def test_extract_asset_embeddings_returns_empty_for_unregistered_table() -> None
     table = AssetEmbeddingTable()
     out = train_brain._extract_asset_embeddings(table)
     assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# maybe_warm_start dimension guard
+#
+# These are the tests whose absence let the brain die for 64 nights. This
+# file was named "warmstart" but only ever covered the two ordering helpers
+# below it -- it never fed maybe_warm_start a checkpoint at all, let alone a
+# dimension-mismatched one, so it could not fail for the reason it existed.
+# Each test below was mutation-checked by reverting the guard and confirming
+# it goes red.
+# ---------------------------------------------------------------------------
+
+
+def _save_ckpt(path: Path, *, obs_dim: int) -> None:
+    """Write a checkpoint in train_brain's production format at `obs_dim`."""
+    import torch
+
+    from app.rl.policy import PolicyNetwork
+
+    torch.manual_seed(7)
+    policy = PolicyNetwork(obs_dim=obs_dim)
+    table = AssetEmbeddingTable()
+    table.bulk_register(["BTCUSDT", "ETHUSDT"])
+    torch.save(
+        {"policy": policy.state_dict(), "asset_table": table.state_dict()}, path,
+    )
+
+
+def _live_dim() -> int:
+    from app.rl.policy import PolicyNetwork
+
+    return int(PolicyNetwork().shared[0].weight.shape[1])
+
+
+def test_warm_start_rejects_obs_dim_mismatch_and_cold_starts(tmp_path: Path) -> None:
+    """The 2026-08-17 regression: a checkpoint one dim wider than the live
+    policy must COLD START, not raise. Reproduces OBS_DIM 54 -> 53."""
+    from app.rl.policy import PolicyNetwork
+
+    ckpt = tmp_path / "stale.pt"
+    _save_ckpt(ckpt, obs_dim=_live_dim() + 1)
+
+    policy = PolicyNetwork()
+    table = AssetEmbeddingTable()
+    msgs: list[str] = []
+
+    warm = train_brain.maybe_warm_start(policy, table, ckpt, on_incompatible=msgs.append)
+
+    assert warm is False, "a mismatched checkpoint must not report a warm start"
+    assert len(msgs) == 1, "an incompatible checkpoint must be reported to the caller"
+    assert "OBS_DIM" in msgs[0]
+    assert "COLD START" in msgs[0].upper()
+
+
+def test_warm_start_mismatch_leaves_policy_untouched(tmp_path: Path) -> None:
+    """A rejected warm-start must not partially overwrite the random init."""
+    import torch
+
+    from app.rl.policy import PolicyNetwork
+
+    ckpt = tmp_path / "stale.pt"
+    _save_ckpt(ckpt, obs_dim=_live_dim() + 1)
+
+    torch.manual_seed(123)
+    policy = PolicyNetwork()
+    before = {k: v.clone() for k, v in policy.state_dict().items()}
+
+    train_brain.maybe_warm_start(policy, AssetEmbeddingTable(), ckpt)
+
+    after = policy.state_dict()
+    for key, tensor in before.items():
+        assert torch.equal(tensor, after[key]), f"{key} was mutated by a rejected load"
+
+
+def test_warm_start_accepts_matching_obs_dim(tmp_path: Path) -> None:
+    """Positive control: the guard must not block a compatible checkpoint.
+
+    Without this, a guard that rejected EVERYTHING would pass the tests
+    above while leaving the brain just as dead.
+    """
+    import torch
+
+    from app.rl.policy import PolicyNetwork
+
+    ckpt = tmp_path / "good.pt"
+    _save_ckpt(ckpt, obs_dim=_live_dim())
+
+    policy = PolicyNetwork()
+    table = AssetEmbeddingTable()
+    msgs: list[str] = []
+
+    warm = train_brain.maybe_warm_start(policy, table, ckpt, on_incompatible=msgs.append)
+
+    assert warm is True, "a same-dim checkpoint must warm-start"
+    assert msgs == [], "a compatible checkpoint must not be reported incompatible"
+    # And the weights actually came from the file, not the random init.
+    saved = torch.load(ckpt, map_location="cpu", weights_only=False)
+    assert torch.equal(
+        policy.state_dict()["shared.0.weight"], saved["policy"]["shared.0.weight"],
+    )
+
+
+def test_missing_checkpoint_is_not_reported_as_incompatible(tmp_path: Path) -> None:
+    """The two causes of False are different events and must stay distinct:
+    a first-ever run is routine, an incompatible checkpoint is an alert."""
+    from app.rl.policy import PolicyNetwork
+
+    msgs: list[str] = []
+    warm = train_brain.maybe_warm_start(
+        PolicyNetwork(), AssetEmbeddingTable(),
+        tmp_path / "does_not_exist.pt", on_incompatible=msgs.append,
+    )
+
+    assert warm is False
+    assert msgs == [], "a missing checkpoint must not raise a critical alert"
+
+
+def test_warm_start_survives_a_corrupt_checkpoint(tmp_path: Path) -> None:
+    """Non-dim incompatibilities (truncated/garbage payload) also cold-start."""
+    import torch
+
+    from app.rl.policy import PolicyNetwork
+
+    ckpt = tmp_path / "corrupt.pt"
+    torch.save({"policy": {"shared.0.weight": "not a tensor"}, "asset_table": {}}, ckpt)
+
+    msgs: list[str] = []
+    warm = train_brain.maybe_warm_start(
+        PolicyNetwork(), AssetEmbeddingTable(), ckpt, on_incompatible=msgs.append,
+    )
+
+    assert warm is False
+    assert len(msgs) == 1
+
+
+def test_checkpoint_obs_dim_reads_the_width() -> None:
+    """Helper reads the real width and returns None rather than guessing."""
+    import torch
+
+    from app.rl.policy import PolicyNetwork
+
+    state = {"policy": PolicyNetwork(obs_dim=41).state_dict()}
+    assert train_brain.checkpoint_obs_dim(state) == 41
+
+    assert train_brain.checkpoint_obs_dim({"policy": {}}) is None
+    assert train_brain.checkpoint_obs_dim({}) is None
+    assert train_brain.checkpoint_obs_dim(None) is None
+    assert train_brain.checkpoint_obs_dim({"policy": {"shared.0.weight": 5}}) is None
+    _ = torch

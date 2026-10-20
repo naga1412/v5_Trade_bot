@@ -42,6 +42,7 @@ import hashlib
 import json
 import logging
 import os
+from typing import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -140,17 +141,97 @@ async def _build_buffer(
     return transitions
 
 
+def checkpoint_obs_dim(state: object) -> int | None:
+    """Observation width a saved policy was trained under.
+
+    Returns None when the checkpoint does not carry a readable
+    ``shared.0.weight`` — an unknown width is not treated as a mismatch,
+    it just falls through to the load attempt below.
+    """
+    if not isinstance(state, dict):
+        return None
+    policy_state = state.get("policy")
+    if not isinstance(policy_state, dict):
+        return None
+    weight = policy_state.get("shared.0.weight")
+    try:
+        return int(weight.shape[1])  # type: ignore[union-attr]
+    except (AttributeError, IndexError, TypeError):
+        return None
+
+
 def maybe_warm_start(
     policy: PolicyNetwork, asset_table: AssetEmbeddingTable, ckpt_path: Path | None,
+    *, on_incompatible: Callable[[str], None] | None = None,
 ) -> bool:
     """Load weights from a previous checkpoint if one exists. Returns True
-    on warm-start, False on cold-start (legitimate — first-ever run)."""
+    on warm-start, False on cold-start.
+
+    False has two legitimate causes, and they are NOT the same event:
+      1. no checkpoint to warm-start from (first-ever run) — logged at INFO
+      2. the checkpoint exists but is INCOMPATIBLE with the policy we just
+         built — logged at ERROR and reported via ``on_incompatible`` so the
+         caller can raise a critical alert.
+
+    Case 2 is why this function exists in its current form. OBS_DIM went
+    54 -> 53 in #456/#463 (dead L7 dropped from the observation vector) and
+    this function then called ``load_state_dict`` unguarded, so every
+    nightly run died with a shape-mismatch RuntimeError *before* reaching
+    ``save_checkpoint``. Because the warm-start file therefore never
+    advanced, ``ls -t | head -n1`` re-selected the same stale 54-dim file
+    the next night and failed identically — 64 consecutive dead nights
+    from 2026-08-18, with no checkpoint active in production.
+
+    #456 guarded the INFERENCE consumer of that dimension change
+    (``app/rl/checkpoints.py::load_active_checkpoint`` fails open to
+    equal-weight mode) but not the TRAINING consumer. A dimension change
+    has two consumers; only one was guarded. This closes the other.
+    """
     if ckpt_path is None or not ckpt_path.exists():
         log.info("cold-start training (no warm-start checkpoint provided)")
         return False
+
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    policy.load_state_dict(state["policy"])
-    asset_table.load_state_dict(state["asset_table"])
+
+    # Compare against the width THIS policy was actually built with, not
+    # against a re-imported OBS_DIM constant. The live module is the single
+    # source of truth; restating the constant here would only prove the
+    # restatement matches itself.
+    live_dim = int(policy.shared[0].weight.shape[1])
+    ckpt_dim = checkpoint_obs_dim(state)
+    if ckpt_dim is not None and ckpt_dim != live_dim:
+        msg = (
+            f"RL warm-start REJECTED: checkpoint {ckpt_path} was trained with "
+            f"OBS_DIM={ckpt_dim} but this policy expects OBS_DIM={live_dim}. "
+            f"FALLING BACK TO COLD START — training proceeds from a random "
+            f"init and tonight's run will write a {live_dim}-dim checkpoint "
+            f"that future runs can warm-start from."
+        )
+        log.error(msg)
+        if on_incompatible is not None:
+            on_incompatible(msg)
+        return False
+
+    try:
+        policy.load_state_dict(state["policy"])
+        asset_table.load_state_dict(state["asset_table"])
+    except Exception as e:  # noqa: BLE001
+        # Any other incompatibility (hidden_dim, n_actions, asset-table
+        # rows, a truncated file). Same contract as the dim mismatch above:
+        # never die, fall back to cold start, make noise. The caller
+        # rebuilds policy + asset_table because torch copies matching
+        # tensors before raising, so a failed load leaves them partially
+        # populated rather than cleanly random.
+        msg = (
+            f"RL warm-start REJECTED: checkpoint {ckpt_path} failed to load "
+            f"into the current policy ({type(e).__name__}: {e}). "
+            f"FALLING BACK TO COLD START."
+        )
+        log.error(msg)
+        if on_incompatible is not None:
+            on_incompatible(msg)
+        return False
+
     log.info("warm-started from %s", ckpt_path)
     return True
 
@@ -249,7 +330,26 @@ async def _async_main(args: argparse.Namespace) -> int:
     #                          since prior training). Uses the median-seed
     #                          register_asset since these are truly new.
     warm_start_path = args.warm_start  # already Path | None from _build_arg_parser
-    warm_started = maybe_warm_start(policy, asset_table, warm_start_path)
+    incompatible: list[str] = []
+    warm_started = maybe_warm_start(
+        policy, asset_table, warm_start_path,
+        on_incompatible=incompatible.append,
+    )
+    if incompatible:
+        # torch's load_state_dict copies matching tensors before it raises,
+        # so a rejected warm-start can leave these half-populated. Rebuild
+        # both so the cold-start path below starts from a genuine random init.
+        asset_table = AssetEmbeddingTable()
+        policy = PolicyNetwork().to(device)
+        # Imported lazily: the alert chain pulls app settings, which need not
+        # be present on the Colab/laptop training path. Only an actual
+        # incompatibility reaches this branch.
+        try:
+            from app.ops.alert_routing import alert_admin
+
+            await alert_admin(incompatible[0], level="critical")
+        except Exception:  # noqa: BLE001
+            log.exception("warm-start incompatibility alert failed to dispatch")
 
     if not warm_started:
         training_symbols = await _discover_training_symbols(args.db_url)
