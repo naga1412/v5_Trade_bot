@@ -128,6 +128,7 @@ def activate(
 
 def _direct_db_register_and_activate(
     *, payload: dict, activate_flag: bool, force: bool,
+    allow_bootstrap: bool = False,
 ) -> dict:
     """Mirror ``register.py``'s ``--direct`` mode for ``rl_checkpoints``.
 
@@ -140,7 +141,23 @@ def _direct_db_register_and_activate(
     by at least 5% (``challenger > champion * 1.05``).
 
     Outcomes when ``activate_flag=True, force=False``:
-    * No active champion → ``bootstrap``: register + activate.
+    * No active champion → ``bootstrap_blocked``: register-only
+      (``is_active=False``) UNLESS ``allow_bootstrap=True``, in which
+      case ``bootstrap``: register + activate. The default is OFF.
+      **Absence of a champion is not evidence that a new one is good.**
+      Before 2026-10-20 this branch activated unconditionally, so the
+      first successful run after a champion-less period installed
+      whatever it produced. That is how a cold-start random-init
+      policy (id=84, sharpe -17.80) became live champion for ~8
+      minutes on 2026-10-20 — the gate does not gate when there is
+      nothing to compare against, and #456 had deactivated the
+      incumbent, which silently put this branch in charge.
+      No quality bar is applied instead: the only metric available
+      here is Sharpe, which is known broken (it scales with
+      sqrt(holdout_size), so it drifts negative as data grows
+      regardless of model quality — id=62 scored -7.02 on it). A
+      threshold on that number would be a check that cannot fail for
+      the right reason. An explicit opt-in is the honest guard.
     * Champion has no Sharpe → ``gate_undecidable``: register-only, log
       ``gate_undecidable: champion has no sharpe; manual review required``.
     * Challenger beats threshold → ``gate_passed``: deactivate champion,
@@ -203,8 +220,15 @@ def _direct_db_register_and_activate(
                 )).first()
 
                 if champ_row is None:
-                    # Bootstrap: no incumbent — activate unconditionally.
-                    gate_outcome = "bootstrap"
+                    # No incumbent. This is NOT evidence the challenger is
+                    # good, so it does not activate unless explicitly asked.
+                    # The nightly cron never passes allow_bootstrap, so an
+                    # unattended run can no longer install a champion.
+                    if allow_bootstrap:
+                        gate_outcome = "bootstrap"
+                    else:
+                        gate_outcome = "bootstrap_blocked"
+                        should_activate = False
                 else:
                     raw_champ = champ_row.sharpe
                     try:
@@ -320,6 +344,15 @@ def main(argv: list[str] | None = None) -> int:
         "--force", action="store_true",
         help="bypass champion-challenger Sharpe gate (first-checkpoint case)",
     )
+    p.add_argument(
+        "--allow-bootstrap-activation", action="store_true",
+        help=(
+            "permit activation when there is NO active champion. Default off: "
+            "without an incumbent the Sharpe gate has nothing to compare "
+            "against, so it would otherwise activate unconditionally. The "
+            "nightly cron must never pass this."
+        ),
+    )
     p.add_argument("--notes", default=None)
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args(argv)
@@ -357,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _direct_db_register_and_activate(
             payload=payload,
             activate_flag=args.activate, force=args.force,
+            allow_bootstrap=args.allow_bootstrap_activation,
         )
         gate = result.get("gate_outcome")
         rl_id = result["id"]

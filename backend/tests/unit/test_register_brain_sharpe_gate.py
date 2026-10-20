@@ -4,7 +4,10 @@ The gate logic lives in tools/ml/register_brain.py and delegates the
 threshold comparison to app.ml.champion_challenger.sharpe_passes.
 
 Gate branches:
-  bootstrap      — no active champion → register + activate unconditionally
+  bootstrap_blocked — no active champion → register ONLY (the default
+                   since 2026-10-20; absence of a champion is not
+                   evidence the challenger is good)
+  bootstrap      — no active champion AND allow_bootstrap=True → activate
   gate_passed    — sharpe_passes(challenger, champion) → activate
   gate_held      — sharpe_passes returns False → register-only
   gate_undecidable — champion has no Sharpe in eval_results → register-only
@@ -80,7 +83,10 @@ def _make_factory(session):
     return mock.MagicMock(return_value=_sf)
 
 
-def _call_direct(payload=None, *, activate=True, force=False, execute_returns):
+def _call_direct(
+    payload=None, *, activate=True, force=False, allow_bootstrap=False,
+    execute_returns,
+):
     """Invoke _direct_db_register_and_activate with a mocked session.
 
     The real app.ml.champion_challenger.sharpe_passes is imported by _go() at
@@ -96,6 +102,7 @@ def _call_direct(payload=None, *, activate=True, force=False, execute_returns):
             payload=payload,
             activate_flag=activate,
             force=force,
+            allow_bootstrap=allow_bootstrap,
         )
 
 
@@ -104,9 +111,25 @@ def _call_direct(payload=None, *, activate=True, force=False, execute_returns):
 # ---------------------------------------------------------------------------
 
 
-def test_bootstrap_no_champion_activates():
-    """When no active champion exists, register and activate unconditionally."""
-    insert_row = _fake_row(id=42, is_active=True)
+def test_bootstrap_no_champion_does_not_activate_by_default():
+    """No active champion → register ONLY. Changed 2026-10-20.
+
+    This test previously asserted the opposite ("activate
+    unconditionally"), and that pinned behaviour is what broke
+    production: the Sharpe gate only gates when there is an incumbent to
+    compare against, so once #456/#463 deactivated the stale champion,
+    the first successful nightly run installed whatever it had just
+    trained. A cold-start random-init policy (id=84, sharpe -17.80)
+    became live champion that way on 2026-10-20.
+
+    No quality bar replaces it, deliberately: the only metric available
+    at this point is Sharpe, which scales with sqrt(holdout_size) and so
+    drifts negative as data accumulates regardless of model quality
+    (id=62 scored -7.02). A threshold on that number would be a check
+    that cannot fail for the right reason. The explicit opt-in below is
+    the honest guard.
+    """
+    insert_row = _fake_row(id=42, is_active=False)
     result = _call_direct(
         execute_returns=[
             None,        # SELECT champion → no row
@@ -115,10 +138,30 @@ def test_bootstrap_no_champion_activates():
     )
 
     assert result["id"] == 42
-    assert result["is_active"] is True
-    assert result["gate_outcome"] == "bootstrap"
+    assert result["is_active"] is False
+    assert result["gate_outcome"] == "bootstrap_blocked"
     assert result["champion_sharpe"] is None
     assert result["challenger_sharpe"] == pytest.approx(1.5)
+
+
+def test_bootstrap_activates_with_explicit_opt_in():
+    """Positive control: the opt-in must still work.
+
+    Without this, a guard that blocked bootstrap activation permanently
+    would pass the test above while making first-checkpoint promotion
+    impossible — the brain would never get a champion again.
+    """
+    insert_row = _fake_row(id=42, is_active=True)
+    result = _call_direct(
+        allow_bootstrap=True,
+        execute_returns=[
+            None,        # SELECT champion → no row
+            insert_row,  # INSERT RETURNING
+        ]
+    )
+
+    assert result["is_active"] is True
+    assert result["gate_outcome"] == "bootstrap"
 
 
 def test_gate_passed_challenger_wins():
