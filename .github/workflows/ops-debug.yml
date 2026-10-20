@@ -67,7 +67,7 @@ on:
           - send-test-cohort-cards # WRITE (sends real Telegram messages, same acceptance-test pattern as healer-selftest): companion to render-cohort-cards for Phase 4 Task 18 item 3 -- console output does not prove phone rendering (markdown/emoji/line-wrapping/width all differ), so this POSTs the real rendered card for one liquidity_added_spot and one futures_poll symbol to the real configured TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, using real current live_fleet_universe numbers and the real resolved TELEGRAM_APPROVAL_TIMEOUT_SECONDS (not a synthetic override). Prefixed [TEST] with an explicit "not a real signal, no buttons attached" line. Deliberately sends WITHOUT the real inline_keyboard (no Approve/Reject/Adjust buttons) -- this is a visual/legibility check only, must not be tappable into any real approval flow. Uses a realistic (illustrative, non-empty) sample layer_summary so the operator sees the actual populated "Layer scores" section, not the empty-dict "(no layer scores)" state that only a synthetic test with zero layers (like render-cohort-cards) ever produces. Operator confirms receipt + legibility on their own device -- that confirmation, not this probe's own success, is the actual pass/fail signal.
           - sync-staging-telegram-creds # WRITE, one-time infra fix (2026-08-20): send-test-cohort-cards' first staging run found TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID entirely unset inside backend-staging -- never populated when staging was stood up (repo-wide grep confirms no separate staging bot was ever intended; deploy.yml does not template these into .env.staging either). Operator-authorized: copies both values verbatim from prod's .env into staging's .env.staging (backs up .env.staging first; removes any pre-existing line for the same key before appending, so a rerun is idempotent), then force-recreates backend-staging so the new env actually takes effect (a plain restart reuses the already-baked container env) and verifies presence from inside the freshly-recreated container. Never prints the token/chat_id values themselves, only set=True/False booleans. Staging-only -- prod already has these values, there is never a reason to run this against prod.
           - sl-autopsy # READ-ONLY: SL distance / ATR ratio analysis for closed LONG shadow_trades last 30d. Per-symbol + overall avg sl_dist%, avg_atr%, sl_atr_ratio distribution for SL-exit vs TP-exit. Answers: are stops inside the noise band?
-          - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe
+          - recent-perf # READ-ONLY: 30-day shadow trade win rate + avg P&L by direction + 14-day daily cadence — fresh performance snapshot replacing the stale May holdout dates in stats probe NOTE: shadow_trades.pnl_pct is ALREADY a percent (verified by identity against (exit_price-entry_price)/entry_price*100 on real prod rows, 2026-10-20) — never re-scale it by 100. FAILURE SIGNATURE if you do: per-trade averages print in the tens-to-hundreds (e.g. a daily avg of +110) instead of the real sub-1% scale.
           - brain-activate # WRITE: list rl-cache .pt files + cron log + activate latest rl_checkpoint (is_active=true) + restart backend. Use when brain has been training nightly but never activated.
           - soak-verify # Phase 1+2 soak check: cooldown=4h, brain_decisions rows, pattern confidence in notes, 7d shadow win rate + exit reasons
           - top-decile-anomaly # READ-ONLY: compares extreme (entry_score>=0.445) vs high (0.36-0.445) vs below (<0.36) LONG bands — WR, avg_pnl, symbol/hour/layer distributions + score/pnl correlation. Tests momentum-exhaustion hypothesis for top-decile reversal.
@@ -192,12 +192,12 @@ jobs:
                  \"SELECT direction, count(*) AS trades, \
                     round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
                     round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
-                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
+                    round(avg(pnl_pct)::numeric, 2) AS avg_pnl_pct \
                     FROM shadow_trades WHERE closed_at IS NOT NULL GROUP BY direction \
                     UNION ALL SELECT 'TOTAL', count(*), \
                       round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1), \
                       round(sum(pnl_usdt)::numeric, 2), \
-                      round(avg(pnl_pct)::numeric * 100, 2) \
+                      round(avg(pnl_pct)::numeric, 2) \
                     FROM shadow_trades WHERE closed_at IS NOT NULL;\" -c \
                  \"SELECT direction, count(*) AS predictions, \
                     round(avg(final_score)::numeric, 3) AS avg_score, \
@@ -998,7 +998,7 @@ jobs:
                     extract(hour from opened_at) AS hour_utc, \
                     round(entry_score::numeric, 3) AS score, \
                     round(entry_confidence::numeric, 3) AS conf, \
-                    round(pnl_pct::numeric * 100, 2) AS pnl_pct, \
+                    round(pnl_pct::numeric, 2) AS pnl_pct, \
                     round(pnl_usdt::numeric, 4) AS pnl_usdt, \
                     CASE WHEN pnl_usdt > 0 THEN 'WIN' WHEN pnl_usdt < 0 THEN 'LOSS' ELSE 'FLAT' END AS outcome, \
                     exit_reason \
@@ -1009,7 +1009,7 @@ jobs:
                     ORDER BY opened_at;\" -c \
                  \"SELECT direction, COUNT(*) AS n, \
                     round(100.0 * SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS win_rate_pct, \
-                    round(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct, \
+                    round(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct, \
                     round(SUM(pnl_usdt)::numeric, 2) AS total_pnl_usdt \
                     FROM shadow_trades \
                     WHERE closed_at IS NOT NULL AND pnl_usdt IS NOT NULL \
@@ -1062,16 +1062,16 @@ jobs:
                  \"SELECT direction, count(*) AS trades, \
                     round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1) AS win_rate_pct, \
                     round(sum(pnl_usdt)::numeric, 2) AS total_pnl_usdt, \
-                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
+                    round(avg(pnl_pct)::numeric, 2) AS avg_pnl_pct \
                     FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '30 days' \
                     GROUP BY direction \
                     UNION ALL SELECT 'TOTAL', count(*), \
                       round((100.0 * sum(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / nullif(count(*), 0))::numeric, 1), \
                       round(sum(pnl_usdt)::numeric, 2), \
-                      round(avg(pnl_pct)::numeric * 100, 2) \
+                      round(avg(pnl_pct)::numeric, 2) \
                     FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '30 days';\" -c \
                  \"SELECT DATE(closed_at) AS day, count(*) AS closes, \
-                    round(avg(pnl_pct)::numeric * 100, 2) AS avg_pnl_pct \
+                    round(avg(pnl_pct)::numeric, 2) AS avg_pnl_pct \
                     FROM shadow_trades WHERE closed_at IS NOT NULL AND closed_at >= now() - interval '14 days' \
                     GROUP BY DATE(closed_at) ORDER BY day;\""
               ;;
@@ -1133,14 +1133,14 @@ jobs:
                    \"SELECT direction, COUNT(*) AS trades, \
                        SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins, \
                        ROUND(100.0 * SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS wr_pct, \
-                       ROUND(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct \
+                       ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct \
                      FROM shadow_trades \
                      WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
                      GROUP BY direction ORDER BY direction;\" && \
                  echo '=== 5. Exit reason breakdown (7d; TIMEOUT should not dominate SL) ===' && \
                  docker compose exec -T postgres psql -U postgres -d trading_radar -c \
                    \"SELECT exit_reason, COUNT(*) AS n, \
-                       ROUND(AVG(pnl_pct)::numeric * 100, 3) AS avg_pnl_pct \
+                       ROUND(AVG(pnl_pct)::numeric, 3) AS avg_pnl_pct \
                      FROM shadow_trades \
                      WHERE closed_at >= NOW() - INTERVAL '7 days' AND closed_at IS NOT NULL \
                      GROUP BY exit_reason ORDER BY n DESC;\""
