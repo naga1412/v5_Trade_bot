@@ -92,7 +92,7 @@ Applies equally to a green result: state what the check shows when the
 guarded thing is FINE. If the two statements are the same sentence,
 there is nothing to observe.
 
-## The six instances
+## The instances
 
 ### 1. A revert trigger keyed on a constant field — killed a working fix
 
@@ -258,6 +258,51 @@ A related sibling worth naming: **a test can be a duplicate source of
 truth as easily as a constant can.** Consolidating constants while
 leaving a test restating the old formula rebuilds the seam one layer up
 and hides it behind a green run.
+
+### 9. A probe's description trusted instead of its code path
+
+**A distinct variant: documentation treated as evidence of behaviour.**
+Not a check that cannot fail — no check was written at all. A claim
+about behaviour was read and believed.
+
+The `brain-cron-trigger` ops-debug probe's own option description says:
+*"Trains a checkpoint (~5-15 min CPU). Does NOT activate the checkpoint
+(is_active stays False)."* The session memory repeated it. Both were
+wrong. Run on 2026-10-20 to verify the warm-start fix, it registered
+`rl_checkpoints.id=84` with `is_active=True`, set `activated_at`, and
+restarted the backend — installing a cold-start random-init policy
+(`sharpe=-17.80`) as live champion for ~8 minutes, moving production off
+the deliberately-safe `brain_adjust=1.0` fail-open state.
+
+The description was probably accurate when written. The behaviour it
+describes is not even in the probe — it emerges from
+`register_brain.py`'s gate, which activates unconditionally when there
+is no incumbent. In 2026-05 a champion existed, so the gate held and the
+probe genuinely did not activate. **The description documented an
+outcome that depended on state outside the thing being described**, and
+that state changed.
+
+**The rule: before relying on what a tool says it does, read what it
+does.** A description is a restatement by an author who may have been
+wrong, whose code may have changed since, or whose claim was only ever
+true under conditions they did not state. This is the same argument as
+the opening of this document, applied to a runbook rather than a test:
+the restatement proves nothing about the thing.
+
+Specifically, for anything that writes: **do not accept "this does not
+write X" from prose.** Follow the call into the code that would do the
+writing and read the branch. The cost of reading `register_brain.py`'s
+gate first was two minutes.
+
+**Sibling finding, same incident:** the `OBS_DIM` 54→53 change had
+**four** consumers — inference (`load_active_checkpoint`), training
+warm-start (`maybe_warm_start`), the promotion gate
+(`register_brain.py`), and the shared
+`champion_challenger.evaluate_challenger` used by the HTTP route and by
+ConvLSTM promotion. #456/#463 guarded **one**. Two of the others failed
+in production. **Enumerate the consumers of anything whose shape you
+change — mechanically, by grepping the symbol, not by recalling the
+architecture — and guard each or state in writing why it needs none.**
 
 ## Sibling pattern: a fix applied to one of two call sites
 
