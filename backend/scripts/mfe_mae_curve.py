@@ -968,6 +968,22 @@ def _report_stop_conversion(metrics: list[TradeMetrics]) -> None:
 
     _print_stop_block("ALL trades", metrics)
 
+    # THE DECONFOUNDED SLICE. The model over-calls stop-outs (it resolves
+    # ~87% against the DB's ~70.5% STOP_LOSS share), so part of any
+    # "conversion at a wider stop" is just the model undoing its own false
+    # stop rather than a real noise-driven exit. Restricting to trades the
+    # DB itself recorded as STOP_LOSS removes that path entirely: for these,
+    # production really did take the stop, so a conversion is a genuine
+    # noise-stop. This is the slice the decision should rest on.
+    db_stops = [m for m in metrics if m.exit_reason == "STOP_LOSS"]
+    _print_stop_block("DB-CONFIRMED STOP_LOSS exits only [DECONFOUNDED]",
+                      db_stops)
+    for src in sorted({m.symbol_source for m in db_stops if m.symbol_source}):
+        _print_stop_block(
+            f"DB-CONFIRMED x symbol_source={src}",
+            [m for m in db_stops if m.symbol_source == src],
+        )
+
     for src in sorted({m.symbol_source for m in metrics if m.symbol_source}):
         _print_stop_block(f"COHORT symbol_source={src}",
                           [m for m in metrics if m.symbol_source == src])
