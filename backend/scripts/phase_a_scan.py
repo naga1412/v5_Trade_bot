@@ -54,6 +54,20 @@ N_DECILES = 10
 # the value at entry.
 MAX_SNAPSHOT_AGE_H = {"oi": 24.0, "funding": 24.0, "depth": 48.0}
 
+# Bounded concurrency for the kline fetch. Sequential at ~1.8s/trade the
+# scan took ~55 min over ~1,800 trades. Each klines call is weight 1-2
+# against Binance's 1200/min per-IP budget, so 5 in flight at ~1.8s each
+# is ~170 calls/min -- well inside it.
+FETCH_CONCURRENCY = 5
+
+# Progress cadence. The first run of this scan died after ~50 min with
+# `client_loop: send disconnect: Broken pipe` and ssh exit 255 -- NOT a
+# Python error. The fetch loop printed nothing for the whole window, so
+# the ssh channel sat silent and the connection was dropped. Concurrency
+# alone would not have fixed that; silence was the cause. Anything that
+# runs for minutes over `ssh ... docker compose exec` must keep writing.
+PROGRESS_EVERY = 100
+
 
 @dataclass
 class Row:
@@ -265,7 +279,12 @@ def _median_split(rows: list[Row], get, target: str):
 
 
 def _halves(rows: list[Row]) -> tuple[list[Row], list[Row]]:
-    ordered = sorted(rows, key=lambda r: r.closed_at)
+    # (closed_at, trade_id): sorting on closed_at alone leaves the split
+    # input-order dependent whenever two trades share a timestamp,
+    # because Python's sort is stable. Under concurrency the input order
+    # IS completion order, so this tiebreak is what makes the halves
+    # reproducible run to run.
+    ordered = sorted(rows, key=lambda r: (r.closed_at, r.trade_id))
     mid = len(ordered) // 2
     return ordered[:mid], ordered[mid:]
 
@@ -360,33 +379,93 @@ async def main() -> int:
           f"(span {hi_s - lo_s:.4f})")
 
     print(f"\nfetching native-TF bars per trade (~{len(rows)} requests) ...")
+    print(f"  concurrency={FETCH_CONCURRENCY} (bounded)")
+    sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+    failures: list[tuple[int, str, str]] = []
+    no_bars: list[int] = []
+
+    # Defined BEFORE _tick, which closes over both. Python's late
+    # binding would have resolved them either way, since _tick is only
+    # ever called from inside the gather -- but depending on that across
+    # forty lines is what breaks on the next edit.
+    done = {"n": 0}
+    requested = len(rows)
+
+    def _tick() -> None:
+        """Keep the ssh channel alive and make progress visible."""
+        done["n"] += 1
+        if done["n"] % PROGRESS_EVERY == 0 or done["n"] == requested:
+            print(f"    fetched {done['n']}/{requested}", flush=True)
+
+    async def _one(client: httpx.AsyncClient, r: Row) -> Row | None:
+        """Fetch + measure one trade.
+
+        EVERY exception is caught HERE, per item. asyncio.gather without
+        per-item handling is all-or-nothing: one bad symbol would abort
+        the entire scan. And a silently dropped trade would shrink n
+        without anyone knowing -- the same class of error as substituting
+        a model-resolved event for a recorded one.
+        """
+        async with sem:
+            try:
+                _iv, bar_ms = _TF_TO_INTERVAL.get(r.timeframe, ("1h", 3600000))
+                bars = await _fetch_bars_at_tf(
+                    client, r.symbol, r.opened_ms - bar_ms,
+                    r.closed_ms + bar_ms, timeframe=r.timeframe,
+                )
+            except Exception as e:  # noqa: BLE001
+                failures.append(
+                    (r.trade_id, r.symbol, f"{type(e).__name__}: {e}"))
+                _tick()
+                return None
+        bars = [b for b in bars if r.opened_ms <= b.ts_ms <= r.closed_ms]
+        if not bars or r.r_unit <= 0:
+            no_bars.append(r.trade_id)
+            _tick()
+            return None
+        r.bars = bars
+        r.mfe_r = max((b.high - r.entry_price) / r.r_unit for b in bars)
+        r.mae_r = max((r.entry_price - b.low) / r.r_unit for b in bars)
+        sl_i = next((i for i, b in enumerate(bars) if b.low <= r.stop_loss), None)
+        tp_i = next((i for i, b in enumerate(bars) if b.high >= r.take_profit), None)
+        if tp_i is not None and (sl_i is None or tp_i < sl_i):
+            r.model_outcome = "win"
+        elif sl_i is not None:
+            r.model_outcome = "loss"
+        else:
+            r.model_outcome = "timeout"
+        _tick()
+        return r
+
     async with httpx.AsyncClient() as client:
-        kept: list[Row] = []
-        for r in rows:
-            _iv, bar_ms = _TF_TO_INTERVAL.get(r.timeframe, ("1h", 3600000))
-            bars = await _fetch_bars_at_tf(
-                client, r.symbol, r.opened_ms - bar_ms, r.closed_ms + bar_ms,
-                timeframe=r.timeframe,
-            )
-            bars = [b for b in bars if r.opened_ms <= b.ts_ms <= r.closed_ms]
-            if not bars or r.r_unit <= 0:
-                continue
-            r.bars = bars
-            r.mfe_r = max((b.high - r.entry_price) / r.r_unit for b in bars)
-            r.mae_r = max((r.entry_price - b.low) / r.r_unit for b in bars)
-            sl_i = next((i for i, b in enumerate(bars)
-                         if b.low <= r.stop_loss), None)
-            tp_i = next((i for i, b in enumerate(bars)
-                         if b.high >= r.take_profit), None)
-            if tp_i is not None and (sl_i is None or tp_i < sl_i):
-                r.model_outcome = "win"
-            elif sl_i is not None:
-                r.model_outcome = "loss"
-            else:
-                r.model_outcome = "timeout"
-            kept.append(r)
+        settled = await asyncio.gather(
+            *(_one(client, r) for r in rows), return_exceptions=True,
+        )
+    kept: list[Row] = []
+    for item in settled:
+        if isinstance(item, BaseException):
+            # Should be unreachable -- _one catches its own fetch errors --
+            # but counted rather than ignored, because "unreachable" is a
+            # belief and n shrinking silently is the failure being avoided.
+            failures.append(
+                (-1, "?", f"escaped: {type(item).__name__}: {item}"))
+        elif item is not None:
+            kept.append(item)
     rows = kept
-    print(f"  usable after bar fetch: {len(rows)}")
+
+    # EXCLUSIONS REPORTED EXPLICITLY. A run that quietly loses rows reports
+    # a smaller n as though it were the population.
+    print(f"  requested={requested}  usable={len(rows)}  "
+          f"fetch_failures={len(failures)}  no_usable_bars={len(no_bars)}")
+    if failures:
+        print(f"  EXCLUDED on fetch failure: {len(failures)} "
+              f"({100.0 * len(failures) / requested:.1f}% of requested)")
+        for tid, sym, err in failures[:10]:
+            print(f"    trade {tid} {sym}: {err}")
+        if len(failures) > 10:
+            print(f"    ... and {len(failures) - 10} more")
+    if no_bars:
+        print(f"  EXCLUDED for no usable bars / non-positive R: {len(no_bars)}")
     if not rows:
         return 1
 
@@ -432,6 +511,38 @@ async def main() -> int:
                   f"{cell([r.mfe_r for r in bs])['mean']:+8.4f} | "
                   f"{cell([r.mae_r for r in bs])['mean']:+8.4f}")
         top, bot = max(buckets), min(buckets)
+
+        # ---- WHAT A0 CAN DETECT, computed before the estimates -------
+        # The range width was banked by the failed run of 2026-10-21
+        # BEFORE any outcome was measured, so this is a POWER FACT, not a
+        # result. Printed as a number rather than as "low contrast" in
+        # prose, so an in-band null cannot be read as closure.
+        sc_lo = cell([r.entry_score for r in buckets[bot]])["mean"]
+        sc_hi = cell([r.entry_score for r in buckets[top]])["mean"]
+        sc_contrast = sc_hi - sc_lo
+        print("")
+        print(f"  CONTRAST  mean score d{bot}={sc_lo:.4f} -> d{top}="
+              f"{sc_hi:.4f}  =>  {sc_contrast:.4f} score units")
+        print("  DETECTABLE SLOPE (bar / contrast) -- the per-unit-score")
+        print("  effect A0 would need before it could see anything:")
+        for tname in ("pnl_pct", "MFE_R", "MAE_R"):
+            cc = contrast(
+                [_targets(r)[tname] for r in buckets[bot]],
+                [_targets(r)[tname] for r in buckets[top]],
+            )
+            if not cc.get("ok") or sc_contrast <= 0:
+                print(f"    {tname:<8} insufficient cells")
+                continue
+            print(f"    {tname:<8} bar(3s)={cc['bar']:.4f} -> "
+                  f"{cc['bar'] / sc_contrast:.3f} per unit score   |   "
+                  f"bar(3.68s)={cc['bar_corrected']:.4f} -> "
+                  f"{cc['bar_corrected'] / sc_contrast:.3f} per unit score")
+        print("  Read it this way: a slope SMALLER than the figure above is")
+        print("  invisible to A0 regardless of whether it is real. If the")
+        print("  figure is large relative to any plausible effect, THE")
+        print("  IN-BAND NULL CARRIES ALMOST NO INFORMATION and the")
+        print("  full-range escalation (#590) is the real test, not a")
+        print("  fallback.")
         for target in ("pnl_pct", "MFE_R", "MAE_R"):
             halves = []
             for hname, hs in (("FIRST_HALF", h1), ("SECOND_HALF", h2)):
