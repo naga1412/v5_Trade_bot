@@ -115,6 +115,7 @@ class TradeMetrics:
     scope: str
     atr_class: str
     symbol: str
+    timeframe: str
     exit_reason: str
     actual_pnl_pct: float
     entry_price: float
@@ -276,7 +277,7 @@ def _compute_metrics(trade: TradeRow, bars: list[Bar]) -> TradeMetrics:
     r_pct = r_unit / trade.entry_price if trade.entry_price > 0 else 0.0
     m = TradeMetrics(
         trade_id=trade.id, scope=trade.scope, atr_class=trade.atr_class,
-        symbol=trade.symbol,
+        symbol=trade.symbol, timeframe=trade.timeframe,
         exit_reason=trade.exit_reason, actual_pnl_pct=trade.pnl_pct,
         entry_price=trade.entry_price, stop_loss=trade.stop_loss,
         take_profit=trade.take_profit,
@@ -570,6 +571,210 @@ async def _fetch_all_native_tf(
     return metrics
 
 
+
+
+# ---------------------------------------------------------------------------
+# CORRECTED TP_R LADDER — Study 1 reversal criterion #1
+#
+# Study 1 (2026-07-29) ratified "2:1 retained by default" from a ladder whose
+# conclusion the doc itself called "provisional on the current probe's
+# hypothetical-2R model", and set reversal criterion #1: rewrite the resolver
+# to each trade's ACTUAL take_profit/stop_loss and re-open the geometry
+# question if the corrected ladder's range exceeds 0.15R (about 2x the 0.077R
+# noise floor observed at n=166).
+#
+# The resolver correction landed (v3, actual TP/SL) and the native-TF fix
+# landed (v5), but the LADDER itself was dropped from the script in the same
+# evolution -- so the criterion was never actually testable from the shipped
+# probe. This restores it on the corrected resolver.
+#
+# Each rung keeps the trade's ACTUAL stop_loss (which is what defines R) and
+# overrides only the take_profit to entry + k*R. Production semantics: wick
+# touches (bar_low <= SL, bar_high >= TP) with same-bar SL-first tiebreak,
+# matching check_exit.
+# ---------------------------------------------------------------------------
+
+TP_R_LADDER: list[float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
+# Endpoints for the noise floor. FIXED IN ADVANCE, deliberately: the floor
+# must not be computed from whichever pair happens to be extreme in the
+# result, or it becomes a function of the estimate it is meant to judge.
+LADDER_FLOOR_PAIR: tuple[float, float] = (0.5, 2.0)
+
+
+def _resolve_at_tp_r(m: TradeMetrics, tp_r: float) -> float:
+    """Outcome in R units with TP overridden to entry + tp_r*R.
+
+    The trade's actual stop_loss is retained. Returns the gross R multiple.
+    """
+    if m.r_unit <= 0:
+        return 0.0
+    tp_price = m.entry_price + tp_r * m.r_unit
+    sl_bar: int | None = None
+    tp_bar: int | None = None
+    for i, b in enumerate(m.bars):
+        hit_sl = b.low <= m.stop_loss
+        hit_tp = b.high >= tp_price
+        if hit_sl and sl_bar is None:
+            sl_bar = i
+        if hit_tp and tp_bar is None and not (hit_sl and sl_bar == i):
+            tp_bar = i
+        if sl_bar is not None or tp_bar is not None:
+            break
+    if tp_bar is not None and (sl_bar is None or tp_bar < sl_bar):
+        return tp_r
+    if sl_bar is not None:
+        return -1.0
+    # Timeout: fall back to the trade's realised pnl, expressed in R.
+    r_pct_pct = m.r_pct * 100.0
+    if r_pct_pct <= 0:
+        return 0.0
+    return m.actual_pnl_pct / r_pct_pct
+
+
+def _mean_fee_r(subset: list[TradeMetrics]) -> float:
+    """Average round-trip fee expressed in R for this subset."""
+    vals = []
+    for m in subset:
+        if m.r_unit <= 0:
+            continue
+        r_pct_pct = m.r_pct * 100.0
+        vals.append(_fee_pct_round_trip() / r_pct_pct if r_pct_pct > 0 else 0.0)
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _ladder_cell(subset: list[TradeMetrics], tp_r: float) -> dict:
+    rs = [_resolve_at_tp_r(m, tp_r) for m in subset if m.r_unit > 0]
+    n = len(rs)
+    if n == 0:
+        return {"n": 0}
+    exp_r = sum(rs) / n
+    wins = sum(1 for r in rs if r > 0)
+    if n > 1:
+        var = sum((r - exp_r) ** 2 for r in rs) / (n - 1)
+        se = (var / n) ** 0.5
+    else:
+        se = float("nan")
+    return {
+        "n": n,
+        "wr": 100.0 * wins / n,
+        "exp_r": exp_r,
+        "exp_r_fee": exp_r - _mean_fee_r(subset),
+        "se": se,
+    }
+
+
+def _ladder_noise_floor(subset: list[TradeMetrics]) -> tuple[float, int]:
+    """2 x the PAIRED SE of the fixed endpoint difference, plus its n.
+
+    Paired because every rung is evaluated on the same trades, so the
+    between-trade variance cancels; an unpaired per-rung SE would overstate
+    the noise on a rung-vs-rung comparison.
+    """
+    lo, hi = LADDER_FLOOR_PAIR
+    ds = [
+        _resolve_at_tp_r(m, hi) - _resolve_at_tp_r(m, lo)
+        for m in subset
+        if m.r_unit > 0
+    ]
+    n = len(ds)
+    if n < 2:
+        return float("nan"), n
+    mean = sum(ds) / n
+    var = sum((d - mean) ** 2 for d in ds) / (n - 1)
+    return 2.0 * (var / n) ** 0.5, n
+
+
+def _print_ladder(
+    label: str, subset: list[TradeMetrics], *, apply_criterion: bool,
+) -> None:
+    usable = [m for m in subset if m.r_unit > 0]
+    print("")
+    print("--- " + label + " ---")
+    floor, n_pair = _ladder_noise_floor(subset)
+    # ORDER IS DELIBERATE: cells, then the floor, then the point estimates.
+    print(f"  CELLS     n={len(usable)}  (paired n={n_pair})")
+    print(
+        f"  FLOOR     2 x paired SE of the {LADDER_FLOOR_PAIR[0]}R-vs-"
+        f"{LADDER_FLOOR_PAIR[1]}R difference = {floor:.4f}R"
+    )
+    print("            [endpoint pair fixed before the estimates were seen]")
+    if apply_criterion:
+        print(
+            "  CRITERION 0.1500R — Study 1's threshold, applied to THIS "
+            "population only"
+        )
+    else:
+        print(
+            "  CRITERION not applied — relevance population, judged against "
+            "its OWN floor above"
+        )
+    print("")
+    print("  TP_R | n    | implied_WR% |    exp_R |  exp_R_fee | SE(exp_R)")
+    cells: dict[float, dict] = {}
+    for k in TP_R_LADDER:
+        c = _ladder_cell(subset, k)
+        cells[k] = c
+        if c["n"] == 0:
+            print(f"  {k:>4} | 0    |          -- |       -- |         -- |        --")
+            continue
+        print(
+            f"  {k:>4} | {c['n']:<4} | {c['wr']:>11.1f} | {c['exp_r']:>+8.3f} | "
+            f"{c['exp_r_fee']:>+10.3f} | {c['se']:>9.4f}"
+        )
+    valid = {k: c for k, c in cells.items() if c.get("n", 0) > 0}
+    if len(valid) < 2:
+        print("  RANGE     insufficient rungs")
+        return
+    best_k = max(valid, key=lambda k: valid[k]["exp_r"])
+    worst_k = min(valid, key=lambda k: valid[k]["exp_r"])
+    rng = valid[best_k]["exp_r"] - valid[worst_k]["exp_r"]
+    print(
+        f"  RANGE     max-min exp_R = {rng:.4f}R  "
+        f"(best {best_k}R, worst {worst_k}R)"
+    )
+    verdict_floor = "EXCEEDS floor" if rng > floor else "within floor (flat)"
+    print(f"  vs floor  {floor:.4f}R  ->  {verdict_floor}")
+    if apply_criterion:
+        verdict = "RE-OPEN geometry" if rng > 0.15 else "ladder still FLAT"
+        print(f"  vs 0.1500R criterion  ->  {rng:.4f}R  ==>  {verdict}")
+
+
+def _report_corrected_ladder(metrics: list[TradeMetrics]) -> None:
+    print("")
+    print("=" * 78)
+    print("CORRECTED TP_R LADDER — Study 1 reversal criterion #1")
+    print("=" * 78)
+    print("Resolver: each trade's ACTUAL stop_loss retained (it defines R);")
+    print("take_profit overridden to entry + k*R; native-TF bars; production")
+    print("wick touches with same-bar SL-first tiebreak.")
+    print("")
+    print("POPULATION NOTE: 'same population' means Study 1's DEFINITION")
+    print("(top-20 @ 1h) evaluated on the CURRENT trailing window. These are")
+    print("not the identical 166 trades — the criterion was set on the")
+    print("definition, not on a frozen trade list.")
+
+    primary = [m for m in metrics if m.scope == "top20" and m.timeframe == "1h"]
+    _print_ladder(
+        "PRIMARY (criterion-bearing): top20 @ 1h — Study 1's population",
+        primary,
+        apply_criterion=True,
+    )
+    _print_ladder(
+        "SECONDARY (relevance): current full fleet, all scopes + timeframes",
+        metrics,
+        apply_criterion=False,
+    )
+    for tf in ("1h", "15m"):
+        sub = [m for m in metrics if m.timeframe == tf]
+        if sub:
+            _print_ladder(
+                f"CONTEXT (no criterion): all scopes @ {tf}",
+                sub,
+                apply_criterion=False,
+            )
+
+
 async def main() -> None:
     t0 = time.time()
     print("MFE/MAE curve probe v5 — native-TF (each trade on its OWN timeframe's bars)")
@@ -597,6 +802,7 @@ async def main() -> None:
     _report_item1_agreement(metrics)
     _report_study2_style(metrics)
     _report_item2_breakeven(metrics)
+    _report_corrected_ladder(metrics)
 
     print(f"\nTotal runtime: {time.time() - t0:.1f}s")
 
