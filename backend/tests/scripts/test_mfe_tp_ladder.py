@@ -31,13 +31,16 @@ def _tm(bars: list[Bar], *, entry: float = 100.0, sl: float = 90.0,
         timeframe="1h", symbol_source="established_top20",
         exit_reason="TAKE_PROFIT",
         actual_pnl_pct=actual_pnl_pct, entry_price=entry, stop_loss=sl,
-        take_profit=entry + 2 * r_unit, bars=bars, r_unit=r_unit,
+        take_profit=entry + 2 * r_unit, bars=bars, bars_ext=bars, r_unit=r_unit,
         r_pct=r_unit / entry,
     )
 
 
-def _bar(high: float, low: float, ts: int = 0) -> Bar:
-    return Bar(ts_ms=ts, high=high, low=low)
+def _bar(high: float, low: float, ts: int = 0,
+         close: float | None = None) -> Bar:
+    """close defaults to the bar midpoint when unspecified."""
+    return Bar(ts_ms=ts, high=high, low=low,
+               close=close if close is not None else (high + low) / 2)
 
 
 def test_win_at_rung_returns_exactly_that_rung() -> None:
