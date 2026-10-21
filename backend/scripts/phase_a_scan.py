@@ -461,7 +461,7 @@ async def main() -> int:
     if mtf_vals:
         print(f"    mtf_agreement median={st.median(mtf_vals)} "
               f"(reported so '4 may sit far from the median' is checkable)")
-        print(f"    distribution: " + ", ".join(
+        print("    distribution: " + ", ".join(
             f"{v}:{mtf_vals.count(v)}" for v in sorted(set(mtf_vals))))
     for target in ("pnl_pct", "MFE_R"):
         lo = [_targets(r)[target] for r in rows
