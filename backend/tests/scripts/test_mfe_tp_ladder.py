@@ -28,7 +28,8 @@ def _tm(bars: list[Bar], *, entry: float = 100.0, sl: float = 90.0,
     r_unit = entry - sl
     return TradeMetrics(
         trade_id=1, scope="top20", atr_class="atr_bound", symbol="X",
-        timeframe="1h", exit_reason="TAKE_PROFIT",
+        timeframe="1h", symbol_source="established_top20",
+        exit_reason="TAKE_PROFIT",
         actual_pnl_pct=actual_pnl_pct, entry_price=entry, stop_loss=sl,
         take_profit=entry + 2 * r_unit, bars=bars, r_unit=r_unit,
         r_pct=r_unit / entry,
