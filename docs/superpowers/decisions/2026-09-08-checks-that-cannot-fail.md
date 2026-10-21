@@ -349,6 +349,19 @@ column, a new enum value and a changed return arity all have this
 shape; three of those already have their own entries in this project's
 pitfall list.
 
+## Sibling rule: counterfactuals evaluated where the baseline never happened
+
+See `2026-10-21-counterfactual-baseline-subset.md`. **Restrict a
+counterfactual to the subset where the baseline event actually
+happened.** Selecting the baseline event as your MODEL resolves it
+rather than as your RECORDS confirm it turns the model's own error rate
+into an apparent effect, with a sign and a magnitude that look exactly
+like a finding. The instance: a stop-widening test read **+0.32R, a
+real lever**, on all trades and **-0.13R, do not touch it**, on
+DB-confirmed stop-outs -- same data, one filter apart -- and two
+independent artifacts were both inflating that same false positive at
+once.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration
