@@ -511,6 +511,38 @@ async def main() -> int:
                   f"{cell([r.mfe_r for r in bs])['mean']:+8.4f} | "
                   f"{cell([r.mae_r for r in bs])['mean']:+8.4f}")
         top, bot = max(buckets), min(buckets)
+
+        # ---- WHAT A0 CAN DETECT, computed before the estimates -------
+        # The range width was banked by the failed run of 2026-10-21
+        # BEFORE any outcome was measured, so this is a POWER FACT, not a
+        # result. Printed as a number rather than as "low contrast" in
+        # prose, so an in-band null cannot be read as closure.
+        sc_lo = cell([r.entry_score for r in buckets[bot]])["mean"]
+        sc_hi = cell([r.entry_score for r in buckets[top]])["mean"]
+        sc_contrast = sc_hi - sc_lo
+        print("")
+        print(f"  CONTRAST  mean score d{bot}={sc_lo:.4f} -> d{top}="
+              f"{sc_hi:.4f}  =>  {sc_contrast:.4f} score units")
+        print("  DETECTABLE SLOPE (bar / contrast) -- the per-unit-score")
+        print("  effect A0 would need before it could see anything:")
+        for tname in ("pnl_pct", "MFE_R", "MAE_R"):
+            cc = contrast(
+                [_targets(r)[tname] for r in buckets[bot]],
+                [_targets(r)[tname] for r in buckets[top]],
+            )
+            if not cc.get("ok") or sc_contrast <= 0:
+                print(f"    {tname:<8} insufficient cells")
+                continue
+            print(f"    {tname:<8} bar(3s)={cc['bar']:.4f} -> "
+                  f"{cc['bar'] / sc_contrast:.3f} per unit score   |   "
+                  f"bar(3.68s)={cc['bar_corrected']:.4f} -> "
+                  f"{cc['bar_corrected'] / sc_contrast:.3f} per unit score")
+        print("  Read it this way: a slope SMALLER than the figure above is")
+        print("  invisible to A0 regardless of whether it is real. If the")
+        print("  figure is large relative to any plausible effect, THE")
+        print("  IN-BAND NULL CARRIES ALMOST NO INFORMATION and the")
+        print("  full-range escalation (#590) is the real test, not a")
+        print("  fallback.")
         for target in ("pnl_pct", "MFE_R", "MAE_R"):
             halves = []
             for hname, hs in (("FIRST_HALF", h1), ("SECOND_HALF", h2)):
