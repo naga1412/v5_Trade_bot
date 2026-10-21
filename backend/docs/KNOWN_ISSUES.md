@@ -1667,3 +1667,88 @@ honest path is a new column recording classifier output going forward,
 never a backfill of the existing one -- so that "computed" and "unknown"
 stay distinguishable rather than being merged into a single ambiguous
 field.
+
+---
+
+## FU-49 — `evaluate_challenger`'s first-checkpoint auto-pass (open)
+
+**Filed 2026-10-21. Not urgent; operator-initiated only. Filed so it is
+not discovered a third time.**
+
+`app/ml/champion_challenger.py::evaluate_challenger` documents, and
+implements, the same hole that #571 just closed on the training path:
+
+> *"The first-checkpoint case (no active champion) auto-passes for both
+> metrics — the bootstrap path stays the same."*
+
+With zero `is_active=TRUE` rows there is **no quality check at all** —
+whatever is offered becomes champion. #571 fixed this for
+`tools/ml/register_brain.py` (the nightly cron path) by requiring an
+explicit `--allow-bootstrap-activation`, defaulting off. This consumer
+was deliberately left alone at the time because it is reached only via
+the `admin_rl.py` HTTP route, i.e. a human is already asking for the
+promotion, and because it is **shared with `ml_checkpoints`** (SP-1
+ConvLSTM, `metric="mae"`), which would need its own test surface.
+
+**Why it still matters:** prod currently sits at zero active RL
+checkpoints by design, which is exactly the state that makes this
+branch live. Anyone promoting by hand from the admin route gets no gate.
+
+**Shape of the fix when it is taken:** mirror #571 — an explicit opt-in
+parameter defaulting to refuse, surfaced as a distinct outcome
+(`bootstrap_blocked`) rather than a silent pass, with a guard test that
+drives the real path at zero active rows and asserts nothing activates,
+mutation-checked. Do **not** add a quality bar on Sharpe: it scales
+with `sqrt(holdout_size)` and drifts negative as data accumulates
+regardless of model quality (id=62 scored −7.02), so a threshold on it
+would be a check that cannot fail for the right reason.
+
+### The four-consumer enumeration (the reason this is filed at all)
+
+The `OBS_DIM` 54→53 change in #456/#463 had **four** consumers. It
+guarded one:
+
+| consumer | guarded by |
+|---|---|
+| inference — `app/rl/checkpoints.py::load_active_checkpoint` | #456 ✓ |
+| training warm-start — `tools/ml/train_brain.py::maybe_warm_start` | #570 — had failed 64 consecutive nights |
+| promotion gate — `tools/ml/register_brain.py` bootstrap branch | #571 — installed an untested champion |
+| **shared gate — `champion_challenger.evaluate_challenger`** | **this entry, open** |
+
+Two of the three unguarded consumers failed in production. **Enumerate
+the consumers of anything whose shape you change — mechanically, by
+grepping the symbol, not by recalling the architecture — and guard each
+or state in writing why it needs none.**
+
+---
+
+## FU-50 — `hetzner_brain_cron.sh` claims a checkpoint is active when it is not (open)
+
+**Filed 2026-10-21, found by the first post-#571 cron run.**
+
+The 03:30 UTC run of 2026-10-21 correctly registered `id=85` with
+`is_active=False` (gate outcome `bootstrap_blocked`, active count still
+0), and then logged:
+
+```
+[2026-10-21T03:30:19Z] ▶ restarting backend to load id=85
+[2026-10-21T03:30:30Z] ✓ backend restarted — id=85 active on next prediction
+```
+
+**`id=85` is not active.** The restart/announce block runs
+unconditionally on a successful registration rather than branching on
+whether the gate actually activated anything. A future reader grepping
+the cron log would conclude the checkpoint is live; `rl_checkpoints`
+says otherwise, and `rl_checkpoints` is right.
+
+This is the log-line form of the pattern recorded as instance 9 in
+`docs/superpowers/decisions/2026-09-08-checks-that-cannot-fail.md` —
+a statement about behaviour that was true when written and is now
+false. It is cosmetic in the sense that nothing downstream reads it, and
+load-bearing in the sense that humans do.
+
+**Fix:** make the restart and its message conditional on the registration
+result's `is_active` / `gate_outcome`. When nothing was activated, say
+so — and skip the restart, which is pointless work (`docker compose
+restart` keeps the same container, so log retention is unaffected, but
+it is still ~11s of avoidable churn every night).
