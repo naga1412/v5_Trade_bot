@@ -1772,9 +1772,19 @@ the mangled form is still syntactically valid.
 | #578 | #577's own fix did not fix it | the stray `\n` survived mid-line; `ssh` received five args and ran `n` as the remote command (`bash: line 1: n: command not found`) |
 | today | a verification assertion inverted | a heredoc collapsed `"\\n"` into a real newline, so `assert "\n" not in body` tested for **newlines** and fired on every multi-line input -- asserting the opposite of its stated intent |
 
-The third is the worst of the three, because it was a check written
-*specifically* to catch the first two, and the escaping defeated the
-check itself.
+| **4** | **the commit filing this entry** | an edit anchored on `"\\nfetching"` matched **zero** times: the heredoc collapsed it to a real newline, so the anchor no longer existed in the file. Caught only because the script asserts its match count. |
+
+The third is the worst, because it was a check written *specifically* to
+catch the first two and the escaping defeated the check itself. **The
+fourth happened while writing this entry**, which is as direct a
+demonstration as the argument could ask for: the hazard fired inside the
+commit that documents the hazard.
+
+What saved the fourth one was not care -- it was `assert s.count(old) == 1`
+before every edit. **An anchored edit that does not assert its match count
+fails silently and leaves the file unchanged while reporting success.**
+That assertion is the cheap control; `chr(92)` is the per-instance fix;
+file-backed scripts are the structural one.
 
 **`chr(92)` is the correct per-instance fix** and is what the current
 probes use. But three occurrences of one hazard argues for **removing
