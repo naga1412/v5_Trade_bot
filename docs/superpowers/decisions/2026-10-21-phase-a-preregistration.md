@@ -5,7 +5,12 @@ split is run.** The git history of this file is the evidence. Nothing
 below was chosen after seeing a point estimate.
 
 Supersedes nothing; this is the first pre-registration for these
-variables. Coverage was audited first, deliberately — a
+variables.
+
+**AMENDED 2026-10-21, still before the probe existed**, with A0's fourth
+cell (check MAE before discarding) and a pre-committed escalation for
+the low-contrast case. Both were added while no Phase A code existed, so
+neither is a response to a result. Coverage was audited first, deliberately — a
 pre-registration that misstates its own `n` is worse than none.
 
 ## Power note, stated before anything else
@@ -91,6 +96,70 @@ must therefore load at **0.30**, and must not reuse that script's
 population — the ladder, stop-width and agreement figures already
 recorded came from the 0.36 population and must stay comparable. A0 gets
 its own loader and reuses only the bar-fetch and MFE/MAE computation.
+
+### A0's FOURTH CELL — check MAE before discarding anything
+
+Added 2026-10-21, **before the probe existed.**
+
+The "score predicts final P&L but not MFE → suspect" case above must not
+be a dismissal. **Check MAE first.**
+
+If score predicts the **adverse** excursion rather than the favourable
+one, that is a genuine finding about the losing side, and it is
+actionable through **stop sizing**. Today's stop-width test found the
+*unconditional* stop is already at or inside the right distance —
+widening it is monotonically worse on DB-confirmed stop-outs — but that
+result says nothing about a **score-conditional** stop. A
+score-conditional stop is **not** ruled out the way the unconditional one
+now is, for exactly the reason a score-conditional take-profit is not
+ruled out by the flat unconditional ladder.
+
+So the four cells are:
+
+| MFE | MAE | reading |
+|---|---|---|
+| predicted | — | signal is informative about reach; exit is discarding it → score-conditional take-profit |
+| — | predicted | signal is informative about **drawdown** → score-conditional **stop** |
+| both | both | strongest case; conditional geometry on both terms |
+| neither | neither | the iso-expectancy wall confirmed from a second direction; search finished |
+
+"Predicts final P&L but neither excursion" stays suspect, and now has a
+named reason: it would mean the relationship lives entirely in exit
+mechanics rather than in the path.
+
+### A0's contrast problem, and a PRE-COMMITTED ESCALATION
+
+**Added 2026-10-21, before the probe existed. This is a
+pre-registration, not a post-hoc rescue, and the git history of this
+file is the evidence.**
+
+The truncation above has a consequence beyond modest `n`: **A0 has low
+CONTRAST.** The traded band is 0.30–0.51, deciles inside it are ~0.02
+wide, and the extreme-decile separation spans only **~0.19 of score
+range**. A null measured across a 0.19-wide span of a variable whose
+full range is roughly 0–1 is **weak evidence**, and weak evidence from a
+compressed range must not be allowed to read as a closure.
+
+**PRE-COMMITTED: a null in the 0.30–0.51 band TRIGGERS the full-range
+test. It does not close the question.**
+
+**The full-range test:** MFE_R / MAE_R computed for `predictions` rows
+that **never became trades** — timestamp plus symbol plus a hypothetical
+entry at the next bar's open, with R defined from the same ATR-based
+stop geometry the engine would have used. That restores the whole score
+range and the contrast the entry bar destroys.
+
+Deciding this now rather than after seeing a null is the entire
+difference between a pre-registered escalation and a post-hoc rescue.
+
+**Its own caveat, also pre-registered:** hypothetical entries are a
+**different population** from real shadow entries — unfilled, unselected,
+and not subject to whatever the entry bar was implicitly selecting for.
+So the full-range test answers **"does score predict path"**, and
+**not** "does score predict path on the trades we would actually take."
+A positive full-range result with a null in-band would therefore be a
+finding about the score, not a licence to trade below 0.30; acting on it
+would need its own forward pre-registration.
 
 ## A1 — CONCLUSIVE TIER
 
