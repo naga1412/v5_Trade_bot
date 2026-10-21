@@ -384,6 +384,13 @@ async def main() -> int:
     failures: list[tuple[int, str, str]] = []
     no_bars: list[int] = []
 
+    # Defined BEFORE _tick, which closes over both. Python's late
+    # binding would have resolved them either way, since _tick is only
+    # ever called from inside the gather -- but depending on that across
+    # forty lines is what breaks on the next edit.
+    done = {"n": 0}
+    requested = len(rows)
+
     def _tick() -> None:
         """Keep the ssh channel alive and make progress visible."""
         done["n"] += 1
@@ -430,8 +437,6 @@ async def main() -> int:
         _tick()
         return r
 
-    done = {"n": 0}
-    requested = len(rows)
     async with httpx.AsyncClient() as client:
         settled = await asyncio.gather(
             *(_one(client, r) for r in rows), return_exceptions=True,
