@@ -93,6 +93,34 @@ nobody was looking at, which had no business moving that way. The second
 was caught by comparing the model's baseline-event rate against the
 database's.
 
+## A detector in its own right: watch what should be INVARIANT
+
+Neither artifact was caught by review, and neither was caught by the
+rule above. The first was caught because **a column that had no
+business moving moved monotonically with the intervention.**
+
+Widening a stop should not change how many trades time out. Timeouts
+are decided by whether price reaches a level inside the holding window;
+a wider stop removes an exit, it does not create a new terminal state.
+Yet the timeout count went **186 -> 321 -> 440** across 1.25x / 1.5x /
+2.0x -- perfectly ordered with the intervention. That ordering is the
+fingerprint of a fabricated fallback, and it was visible in a column
+nobody was looking at because it was not the answer to the question.
+
+**Before running a counterfactual, name the quantities that should be
+invariant under it, and print them.** Then:
+
+- a quantity that should not move, moving -> the simulation is
+  manufacturing the outcome
+- a quantity that should not move, moving MONOTONICALLY with the
+  intervention -> it is manufacturing it proportionally, which is
+  exactly what an artifact dressed as a dose-response looks like
+
+This is cheaper than the rule it complements: it needs no second
+population and no ground-truth comparison, only a column and a prior
+about whether it should move. **"Something that should not move,
+moved" is a detector, not an observation.**
+
 ## The two questions to add
 
 1. **Did the thing I am replacing actually happen, in the records?**
