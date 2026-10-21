@@ -29,13 +29,16 @@ def _tm(bars: list[Bar], *, entry: float = 100.0, sl: float = 90.0,
         trade_id=1, scope="top20", atr_class="atr_bound", symbol="X",
         timeframe="1h", symbol_source="established_top20",
         exit_reason="STOP_LOSS", actual_pnl_pct=actual_pnl_pct,
-        entry_price=entry, stop_loss=sl, take_profit=tp, bars=bars,
+        entry_price=entry, stop_loss=sl, take_profit=tp, bars=bars, bars_ext=bars,
         r_unit=entry - sl, r_pct=(entry - sl) / entry,
     )
 
 
-def _bar(high: float, low: float, ts: int = 0) -> Bar:
-    return Bar(ts_ms=ts, high=high, low=low)
+def _bar(high: float, low: float, ts: int = 0,
+         close: float | None = None) -> Bar:
+    """close defaults to the bar midpoint when unspecified."""
+    return Bar(ts_ms=ts, high=high, low=low,
+               close=close if close is not None else (high + low) / 2)
 
 
 def test_a_stop_out_converts_when_the_stop_is_widened() -> None:
@@ -112,12 +115,56 @@ def test_same_bar_stop_and_target_resolves_to_the_stop() -> None:
         assert _resolve_at_stop_mult(m, w)[0] == "loss"
 
 
-def test_timeout_falls_back_to_realised_pnl_in_r_units() -> None:
-    """MUTATION: `return "timeout", 0.0` -> red. Verified."""
-    m = _tm([_bar(104.0, 97.0)], actual_pnl_pct=2.5)
+def test_timeout_is_priced_at_the_horizon_close_not_realised_pnl() -> None:
+    """A timeout must be priced at the HORIZON BAR'S CLOSE.
+
+    The first version of this probe fell back to the trade's realised
+    pnl_pct, which came from an exit at the ORIGINAL stop -- so a widened
+    stop inherited the narrow stop's loss instead of being followed
+    forward. That is what made the first run read -0.21R at 2.0x: it
+    replaced -1.0R losses with ~-0.83R by construction, and the timeout
+    count grew 186 -> 440 as width rose. The improvement was the
+    fallback, not the market.
+
+    Here the last bar closes at 100.5 with entry 100 and R=10, so the
+    timeout pays +0.05R -- NOT the +0.25R the realised-pnl fallback would
+    have returned for actual_pnl_pct=2.5.
+
+    MUTATION: restore `return "timeout", m.actual_pnl_pct / r_pct_pct`
+    -> red. Verified.
+    """
+    m = _tm([_bar(104.0, 97.0, close=100.5)], actual_pnl_pct=2.5)
     outcome, r = _resolve_at_stop_mult(m, 2.0)
     assert outcome == "timeout"
-    assert math.isclose(r, 0.25)  # 2.5% realised / 10% per R
+    assert math.isclose(r, 0.05)
+    assert not math.isclose(r, 0.25), "realised-pnl fallback is back"
+
+
+def test_a_widened_stop_is_followed_past_the_original_exit() -> None:
+    """THE PROPERTY THE FIX EXISTS FOR.
+
+    bars (clipped window) ends at the original stop-out. bars_ext carries
+    production's full max-hold horizon, in which price recovers to the
+    actual TP. At 1.0x the trade still stops; at 2.0x it must CONVERT --
+    which is only possible if the resolver walks bars_ext.
+
+    MUTATION: `walk = m.bars` -> the 2.0x conversion is invisible and
+    this goes red. Verified.
+    """
+    clipped = [_bar(101.0, 88.0)]                       # dips through 1.0x stop
+    extended = clipped + [_bar(121.0, 99.0), _bar(122.0, 118.0)]  # later reaches TP
+    m = _tm(clipped, tp=120.0)
+    m.bars_ext = extended
+    assert _resolve_at_stop_mult(m, 1.0)[0] == "loss"
+    assert _resolve_at_stop_mult(m, 2.0)[0] == "win"
+
+
+def test_resolver_falls_back_to_clipped_bars_when_ext_is_empty() -> None:
+    """bars_ext empty (e.g. a fetch that returned nothing past the exit)
+    must degrade to the clipped window rather than resolve on no data."""
+    m = _tm([_bar(101.0, 89.0)])
+    m.bars_ext = []
+    assert _resolve_at_stop_mult(m, 1.0)[0] == "loss"
 
 
 def test_widening_can_only_help_a_trade_that_already_won() -> None:

@@ -75,6 +75,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db.session import get_session_factory
+from app.shadow.exit_monitor import TIMEOUT_BARS_PER_TF
 
 
 BREAKEVEN_TRIGGERS: list[float] = [0.4, 0.5, 0.75, 1.0]
@@ -108,6 +109,7 @@ class Bar:
     ts_ms: int
     high: float
     low: float
+    close: float = 0.0
 
 
 @dataclass
@@ -124,6 +126,7 @@ class TradeMetrics:
     stop_loss: float
     take_profit: float
     bars: list[Bar]
+    bars_ext: list[Bar]
     r_unit: float
     r_pct: float
 
@@ -263,7 +266,10 @@ async def _fetch_bars_at_tf(
         if not payload:
             break
         for row in payload:
-            bars.append(Bar(ts_ms=int(row[0]), high=float(row[2]), low=float(row[3])))
+            bars.append(Bar(
+                ts_ms=int(row[0]), high=float(row[2]),
+                low=float(row[3]), close=float(row[4]),
+            ))
         last_open = int(payload[-1][0])
         if last_open + bar_ms > end_ms or len(payload) < 1000:
             break
@@ -276,7 +282,10 @@ def _pnl_pct_for_exit(entry: float, exit_price: float) -> float:
     return (exit_price - entry) / entry * 100.0
 
 
-def _compute_metrics(trade: TradeRow, bars: list[Bar]) -> TradeMetrics:
+def _compute_metrics(
+    trade: TradeRow, bars: list[Bar], bars_ext: list[Bar] | None = None,
+) -> TradeMetrics:
+    bars_ext = bars_ext if bars_ext is not None else list(bars)
     r_unit = trade.entry_price - trade.stop_loss
     r_pct = r_unit / trade.entry_price if trade.entry_price > 0 else 0.0
     m = TradeMetrics(
@@ -286,7 +295,7 @@ def _compute_metrics(trade: TradeRow, bars: list[Bar]) -> TradeMetrics:
         exit_reason=trade.exit_reason, actual_pnl_pct=trade.pnl_pct,
         entry_price=trade.entry_price, stop_loss=trade.stop_loss,
         take_profit=trade.take_profit,
-        bars=bars, r_unit=r_unit, r_pct=r_pct,
+        bars=bars, bars_ext=bars_ext, r_unit=r_unit, r_pct=r_pct,
         trigger_first_bar={t: None for t in BREAKEVEN_TRIGGERS},
     )
 
@@ -562,14 +571,28 @@ async def _fetch_all_native_tf(
     for i, t in enumerate(trades, 1):
         _interval, bar_ms = _TF_TO_INTERVAL.get(t.timeframe, (INTERVAL_1H, BAR_MS_1H))
         start_ms = t.opened_at_ms - bar_ms
-        end_ms = t.closed_at_ms + bar_ms
-        bars = await _fetch_bars_at_tf(
+        # The stop-width test needs price action PAST the original exit: a
+        # widened stop that no longer fires has to be followed forward or it
+        # falls through to a fabricated timeout. Horizon is production's own
+        # max hold (TIMEOUT_BARS_PER_TF, imported not restated), so the
+        # simulation competes over the window production would have allowed.
+        horizon_bars = TIMEOUT_BARS_PER_TF.get(t.timeframe)
+        horizon_end_ms = (
+            t.opened_at_ms + horizon_bars * bar_ms if horizon_bars else t.closed_at_ms
+        )
+        end_ms = max(t.closed_at_ms, horizon_end_ms) + bar_ms
+        fetched = await _fetch_bars_at_tf(
             client, t.symbol, start_ms, end_ms, timeframe=t.timeframe,
         )
-        bars = [b for b in bars if t.opened_at_ms <= b.ts_ms <= t.closed_at_ms]
+        # bars: unchanged clipped window, so every pre-existing report
+        # (baseline model, agreement, TP ladder, breakeven sim) is untouched.
+        bars = [b for b in fetched if t.opened_at_ms <= b.ts_ms <= t.closed_at_ms]
+        bars_ext = [
+            b for b in fetched if t.opened_at_ms <= b.ts_ms <= horizon_end_ms
+        ]
         if not bars:
             continue
-        metrics.append(_compute_metrics(t, bars))
+        metrics.append(_compute_metrics(t, bars, bars_ext))
         if i % 50 == 0:
             print(f"  {i}/{len(trades)} processed (elapsed {time.time() - start:.0f}s)")
         await asyncio.sleep(FETCH_DELAY_S)
@@ -826,7 +849,8 @@ def _resolve_at_stop_mult(m: TradeMetrics, width: float) -> tuple[str, float]:
     sl_price = m.entry_price - width * m.r_unit
     sl_bar: int | None = None
     tp_bar: int | None = None
-    for i, b in enumerate(m.bars):
+    walk = m.bars_ext or m.bars
+    for i, b in enumerate(walk):
         hit_sl = b.low <= sl_price
         hit_tp = b.high >= m.take_profit
         if hit_sl and sl_bar is None:
@@ -839,10 +863,18 @@ def _resolve_at_stop_mult(m: TradeMetrics, width: float) -> tuple[str, float]:
         return "win", (m.take_profit - m.entry_price) / m.r_unit
     if sl_bar is not None:
         return "loss", -width
-    r_pct_pct = m.r_pct * 100.0
-    if r_pct_pct <= 0:
+    # Neither level touched inside production's max hold. Price the exit at
+    # the horizon bar's CLOSE -- NOT at the trade's realised pnl, which came
+    # from an exit at the ORIGINAL stop and would hand a widened stop the
+    # narrow stop's loss. That fallback is what made the first run of this
+    # test read -0.21R: it replaced -1.0R losses with ~-0.83R by
+    # construction, and the timeout count grew 186 -> 440 as width rose.
+    if not walk:
         return "timeout", 0.0
-    return "timeout", m.actual_pnl_pct / r_pct_pct
+    exit_px = walk[-1].close
+    if exit_px <= 0:
+        return "timeout", 0.0
+    return "timeout", (exit_px - m.entry_price) / m.r_unit
 
 
 def _stop_expectancy(subset: list[TradeMetrics], width: float) -> dict:
