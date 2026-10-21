@@ -210,3 +210,65 @@ def test_replication_flags_a_far_half_even_when_the_sign_agrees() -> None:
 
 def test_replication_is_na_without_both_contrasts() -> None:
     assert replication_flags({"ok": False}, _c(1.0, 0.5)) == "n/a"
+
+
+# --- degenerate median split (added after the first real run) ----------
+
+def _rows_for_split(values):
+    """Minimal stand-ins exposing just what _median_split reads."""
+    from scripts.phase_a_scan import Row
+    out = []
+    for i, v in enumerate(values):
+        out.append(Row(
+            trade_id=i, symbol="X", timeframe="1h", opened_ms=0, closed_ms=0,
+            entry_price=100.0, stop_loss=90.0, take_profit=120.0,
+            entry_score=0.4, mtf_agreement=4, funding_directional_adj=v,
+            oi_24h_delta=None, oi_age_h=None, funding_rate=None,
+            funding_age_h=None, depth_0_5pct_usdt=None, depth_age_h=None,
+            pnl_pct=float(i), exit_reason="STOP_LOSS", closed_at=i,
+        ))
+    return out
+
+
+def test_median_split_falls_back_when_the_median_is_the_mode() -> None:
+    """THE DEFECT THE FIRST REAL RUN EXPOSED.
+
+    funding_directional_adj has two distinct values over 60d -- 3,572
+    zeros against 98 at 0.1 -- so its median is 0 and `>= med` captures
+    the whole population, emptying the low cell. The scan reported
+    "INSUFFICIENT CELLS", which reads as missing data rather than as a
+    split that cannot separate.
+
+    MUTATION: drop the fallback branch -> lo is empty and this goes red.
+    """
+    from scripts.phase_a_scan import _median_split
+    rows = _rows_for_split([0.0] * 8 + [0.1] * 2)
+    lo, hi, cut = _median_split(rows, lambda r: r.funding_directional_adj,
+                                "pnl_pct")
+    assert cut == 0.1, "should split at the first value above the minimum"
+    assert len(lo) == 8 and len(hi) == 2
+
+
+def test_median_split_is_unchanged_on_a_normal_distribution() -> None:
+    """The fallback must not alter the ordinary case.
+
+    MUTATION: always take the fallback branch -> cut becomes the second
+    distinct value instead of the median and this goes red.
+    """
+    from scripts.phase_a_scan import _median_split
+    rows = _rows_for_split([float(i) for i in range(10)])
+    lo, hi, cut = _median_split(rows, lambda r: r.funding_directional_adj,
+                                "pnl_pct")
+    assert cut == 4.5
+    assert len(lo) == 5 and len(hi) == 5
+
+
+def test_median_split_refuses_a_genuinely_constant_variable() -> None:
+    """All-identical values cannot be split at all -- that must report
+    insufficient rather than inventing a cut."""
+    from scripts.phase_a_scan import _median_split
+    rows = _rows_for_split([0.0] * 10)
+    lo, hi, cut = _median_split(rows, lambda r: r.funding_directional_adj,
+                                "pnl_pct")
+    assert lo == [] and hi == []
+    assert cut != cut  # nan

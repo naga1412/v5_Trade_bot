@@ -267,15 +267,36 @@ def _targets(r: Row) -> dict:
 
 
 def _median_split(rows: list[Row], get, target: str):
+    """Split at the median, falling back when the median IS the mode.
+
+    A median split empties one cell whenever the median equals the modal
+    value -- which is exactly what happens on a near-constant variable.
+    funding_directional_adj has TWO distinct values over 60d (0.0 and
+    0.1, with 3,572 zeros against 98 non-zeros), so its median is 0 and
+    `>= med` captures the entire population. The first run of this scan
+    reported "INSUFFICIENT CELLS" for it, which reads as missing data
+    rather than as a split that cannot separate.
+
+    Fallback: split at the smallest value STRICTLY above the minimum, so
+    a near-constant variable is tested as baseline-vs-elevated instead of
+    silently dropping out. The threshold actually used is returned, so
+    the report states which split it ran.
+    """
     vals = [get(r) for r in rows if get(r) is not None]
     if len(vals) < 4:
         return [], [], float("nan")
     med = st.median(vals)
+    cut = med
+    if min(vals) >= med or max(vals) < med:
+        above = sorted({v for v in vals if v > min(vals)})
+        if not above:
+            return [], [], float("nan")   # genuinely constant
+        cut = above[0]
     lo = [_targets(r)[target] for r in rows
-          if get(r) is not None and get(r) < med]
+          if get(r) is not None and get(r) < cut]
     hi = [_targets(r)[target] for r in rows
-          if get(r) is not None and get(r) >= med]
-    return lo, hi, med
+          if get(r) is not None and get(r) >= cut]
+    return lo, hi, cut
 
 
 def _halves(rows: list[Row]) -> tuple[list[Row], list[Row]]:
@@ -595,6 +616,41 @@ async def main() -> int:
                  "(its baseline was retracted) and is not carried forward.",
             halves=halves,
         )
+    # VALIDITY DIAGNOSTIC, NOT A 13TH HYPOTHESIS. A1a passed on MFE_R,
+    # but its high-mtf cell also has the larger sd (1.457 vs 1.060), so
+    # the gain could be nothing more than selecting more volatile trades
+    # -- which would raise the ADVERSE excursion by a similar amount. If
+    # MAE_R moves as much as MFE_R did, mtf>=4 is a volatility proxy and
+    # not an edge. This exists to interpret an existing result, cannot
+    # itself "pass" anything, and is NOT counted in the 12 pre-registered
+    # comparisons.
+    print("")
+    print("  --- A1a VALIDITY DIAGNOSTIC: is the MFE gain just volatility? ---")
+    print("  Not a pre-registered comparison. If MAE_R rises by a similar")
+    print("  amount to MFE_R, mtf>=4 selects volatility rather than edge.")
+    lo_m = [r.mae_r for r in rows
+            if r.mtf_agreement is not None and r.mtf_agreement < 4]
+    hi_m = [r.mae_r for r in rows
+            if r.mtf_agreement is not None and r.mtf_agreement >= 4]
+    report_split(
+        "A1a mtf_agreement>=4 [DIAGNOSTIC]", "MAE_R", lo_m, hi_m,
+        lo_desc="mtf<4", hi_desc="mtf>=4",
+        note="validity check on the MFE_R pass; not one of the 12",
+    )
+    cm = contrast(lo_m, hi_m)
+    cf = contrast(
+        [r.mfe_r for r in rows
+         if r.mtf_agreement is not None and r.mtf_agreement < 4],
+        [r.mfe_r for r in rows
+         if r.mtf_agreement is not None and r.mtf_agreement >= 4],
+    )
+    if cm.get("ok") and cf.get("ok"):
+        print(f"    MFE_R gain={cf['diff']:+.4f}   MAE_R gain={cm['diff']:+.4f}"
+              f"   net(MFE-MAE)={cf['diff'] - cm['diff']:+.4f} R")
+        print("    net ~0 => volatility proxy. net clearly positive => the")
+        print("    favourable excursion grew MORE than the adverse one, which")
+        print("    is what an edge would look like.")
+
     run_median_variable(
         rows, label="A1b funding_directional_adj",
         get=lambda r: r.funding_directional_adj,
