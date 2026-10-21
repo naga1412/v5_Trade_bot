@@ -1,0 +1,212 @@
+"""Pure-function tests for the Phase A scan's statistics.
+
+Covers the cell summary, the contrast and its bar, the decile cuts and
+assignment, the verdict thresholds (including the SUGGESTIVE band that
+must not read as a pass), and the replication consistency flags. No DB
+and no network — these are the parts that decide what the scan reports.
+
+Every mutation named below was RUN and confirmed to turn the test red.
+Nothing is asserted about a mutation that was not actually executed —
+four of the five cannot-fail tests caught in this project's history were
+docstrings claiming mutations nobody had run.
+"""
+from __future__ import annotations
+
+import math
+
+from scripts.phase_a_scan import (
+    BAR_SIGMA,
+    BAR_SIGMA_CORRECTED,
+    cell,
+    contrast,
+    decile_of,
+    deciles,
+    replication_flags,
+    verdict,
+)
+
+
+# --- cell ---------------------------------------------------------------
+
+def test_cell_reports_n_mean_sd_and_se() -> None:
+    """MUTATION: se = sd (drop the /sqrt(n)) -> red."""
+    c = cell([1.0, 2.0, 3.0, 4.0])
+    assert c["n"] == 4
+    assert math.isclose(c["mean"], 2.5)
+    assert math.isclose(c["sd"], st_dev([1.0, 2.0, 3.0, 4.0]))
+    assert math.isclose(c["se"], c["sd"] / 2.0)
+
+
+def st_dev(xs: list[float]) -> float:
+    m = sum(xs) / len(xs)
+    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+
+def test_cell_is_nan_safe_below_n2() -> None:
+    assert cell([])["n"] == 0
+    one = cell([5.0])
+    assert one["n"] == 1 and one["sd"] != one["sd"]  # nan
+
+
+# --- contrast and its bar ----------------------------------------------
+
+def test_contrast_is_hi_minus_lo() -> None:
+    """Sign convention matters for every reported diff.
+
+    MUTATION: diff = lo.mean - hi.mean -> red.
+    """
+    c = contrast([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0])
+    assert c["ok"] is True
+    assert math.isclose(c["diff"], 1.0)
+
+
+def test_bar_comes_from_the_real_per_cell_sds() -> None:
+    """The bar must be 3 x the pooled SE of the two REAL cells, never an
+    assumed sigma.
+
+    MUTATION: bar = BAR_SIGMA * 0.1 (a constant) -> red.
+    """
+    lo = [1.0, 2.0, 3.0, 4.0, 5.0]
+    hi = [2.0, 3.0, 4.0, 5.0, 6.0]
+    c = contrast(lo, hi)
+    expected_se = (cell(lo)["se"] ** 2 + cell(hi)["se"] ** 2) ** 0.5
+    assert math.isclose(c["se_diff"], expected_se)
+    assert math.isclose(c["bar"], BAR_SIGMA * expected_se)
+    assert math.isclose(c["bar_corrected"], BAR_SIGMA_CORRECTED * expected_se)
+
+
+def test_corrected_bar_is_strictly_wider_than_the_uncorrected_one() -> None:
+    """12 comparisons must make the bar HARDER, not easier.
+
+    MUTATION: BAR_SIGMA_CORRECTED = 2.5 -> red.
+    """
+    assert BAR_SIGMA_CORRECTED > BAR_SIGMA
+    c = contrast([1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0])
+    assert c["bar_corrected"] > c["bar"]
+
+
+def test_contrast_refuses_undersized_cells() -> None:
+    c = contrast([1.0], [2.0, 3.0, 4.0])
+    assert c["ok"] is False
+
+
+# --- verdict: the SUGGESTIVE band must not read as a pass --------------
+
+def _c(diff: float, se: float) -> dict:
+    return {"ok": True, "diff": diff, "se_diff": se,
+            "bar": BAR_SIGMA * se, "bar_corrected": BAR_SIGMA_CORRECTED * se,
+            "sigma": diff / se}
+
+
+def test_pass_requires_the_corrected_bar() -> None:
+    """MUTATION: compare against c['bar'] instead of bar_corrected -> red,
+    because the 3.2-sigma case below would then read PASS."""
+    assert verdict(_c(4.0, 1.0)).startswith("PASS")
+
+
+def test_three_to_three_point_six_eight_sigma_is_suggestive_not_pass() -> None:
+    """THE BAND THAT MATTERS. 3.2 sigma clears 3 but not 3.68, so it must
+    be SUGGESTIVE and explicitly not announced.
+
+    MUTATION: drop the SUGGESTIVE branch so it returns PASS -> red.
+    """
+    v = verdict(_c(3.2, 1.0))
+    assert v.startswith("SUGGESTIVE")
+    assert "do not announce" in v
+    assert not v.startswith("PASS")
+
+
+def test_below_three_sigma_fails() -> None:
+    assert verdict(_c(1.5, 1.0)) == "FAIL"
+
+
+def test_verdict_is_sign_agnostic() -> None:
+    """A large NEGATIVE effect is still a pass -- these scans are
+    two-sided, and a wrong-sign finding is a finding.
+
+    MUTATION: use diff instead of abs(diff) -> red.
+    """
+    assert verdict(_c(-4.0, 1.0)).startswith("PASS")
+
+
+def test_insufficient_contrast_reports_insufficient() -> None:
+    assert verdict({"ok": False}) == "INSUFFICIENT"
+
+
+# --- deciles ------------------------------------------------------------
+
+def test_deciles_returns_nine_interior_cuts() -> None:
+    cuts = deciles([float(i) for i in range(100)])
+    assert len(cuts) == 9
+
+
+def test_deciles_refuses_when_there_is_less_data_than_buckets() -> None:
+    """Fewer rows than buckets must return no cuts rather than silently
+    producing degenerate ones.
+
+    MUTATION: drop the len(xs) < k guard -> red.
+    """
+    assert deciles([1.0, 2.0, 3.0]) == []
+
+
+def test_decile_of_assigns_monotonically() -> None:
+    """MUTATION: `value > c` instead of `>=` leaves this green, so the
+    boundary case is asserted separately below."""
+    cuts = [10.0, 20.0, 30.0]
+    assert decile_of(5.0, cuts) == 0
+    assert decile_of(15.0, cuts) == 1
+    assert decile_of(25.0, cuts) == 2
+    assert decile_of(35.0, cuts) == 3
+
+
+def test_decile_of_is_inclusive_at_a_cut() -> None:
+    """A value exactly on a cut belongs to the HIGHER bucket.
+
+    MUTATION: `value > c` instead of `>=` -> red.
+    """
+    assert decile_of(10.0, [10.0, 20.0]) == 1
+
+
+def test_decile_assignment_covers_every_row() -> None:
+    """Invariant worth pinning: deciling must not drop rows."""
+    vals = [float(i) for i in range(50)]
+    cuts = deciles(vals)
+    counts: dict[int, int] = {}
+    for v in vals:
+        counts[decile_of(v, cuts)] = counts.get(decile_of(v, cuts), 0) + 1
+    assert sum(counts.values()) == len(vals)
+
+
+# --- replication --------------------------------------------------------
+
+def test_replication_requires_same_sign_and_within_two_se() -> None:
+    """Consistency, not re-significance.
+
+    MUTATION: use 1.0 * se_diff instead of 2.0 -> the within=True case
+    below becomes False -> red.
+    """
+    primary = _c(1.0, 0.5)
+    same_and_close = replication_flags(primary, _c(1.6, 0.5))
+    assert "same_sign=True" in same_and_close
+    assert "within_2SE=True" in same_and_close
+
+
+def test_replication_flags_an_opposite_sign_half() -> None:
+    primary = _c(1.0, 0.5)
+    flipped = replication_flags(primary, _c(-1.0, 0.5))
+    assert "same_sign=False" in flipped
+
+
+def test_replication_flags_a_far_half_even_when_the_sign_agrees() -> None:
+    """Same sign is not sufficient -- magnitude has to be consistent too.
+
+    MUTATION: return only the same_sign term -> red.
+    """
+    primary = _c(1.0, 0.5)
+    far = replication_flags(primary, _c(5.0, 0.5))
+    assert "same_sign=True" in far
+    assert "within_2SE=False" in far
+
+
+def test_replication_is_na_without_both_contrasts() -> None:
+    assert replication_flags({"ok": False}, _c(1.0, 0.5)) == "n/a"
