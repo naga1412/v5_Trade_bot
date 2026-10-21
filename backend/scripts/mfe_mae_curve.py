@@ -99,6 +99,7 @@ class TradeRow:
     exit_reason: str
     pnl_pct: float
     scope: str          # 'top20' | 'ranks_21_30'
+    symbol_source: str  # Phase 4 cohort tag
     atr_class: str      # 'atr_bound' | 'cap_bound'  (per 1.5*ATR > 5% of entry)
 
 
@@ -116,6 +117,7 @@ class TradeMetrics:
     atr_class: str
     symbol: str
     timeframe: str
+    symbol_source: str
     exit_reason: str
     actual_pnl_pct: float
     entry_price: float
@@ -152,6 +154,7 @@ async def _load_trades() -> list[TradeRow]:
                 s.id,
                 s.symbol,
                 s.timeframe,
+                COALESCE(s.symbol_source, 'unknown') AS symbol_source,
                 s.opened_at,
                 s.closed_at,
                 s.entry_price,
@@ -203,6 +206,7 @@ async def _load_trades() -> list[TradeRow]:
             id=int(r.id),
             symbol=str(r.symbol),
             timeframe=str(r.timeframe),
+            symbol_source=str(r.symbol_source),
             opened_at_ms=int(r.opened_at.timestamp() * 1000),
             closed_at_ms=int(r.closed_at.timestamp() * 1000),
             entry_price=entry_price,
@@ -278,6 +282,7 @@ def _compute_metrics(trade: TradeRow, bars: list[Bar]) -> TradeMetrics:
     m = TradeMetrics(
         trade_id=trade.id, scope=trade.scope, atr_class=trade.atr_class,
         symbol=trade.symbol, timeframe=trade.timeframe,
+        symbol_source=trade.symbol_source,
         exit_reason=trade.exit_reason, actual_pnl_pct=trade.pnl_pct,
         entry_price=trade.entry_price, stop_loss=trade.stop_loss,
         take_profit=trade.take_profit,
@@ -775,6 +780,171 @@ def _report_corrected_ladder(metrics: list[TradeMetrics]) -> None:
             )
 
 
+
+
+# ---------------------------------------------------------------------------
+# STOP-WIDTH CONVERSION TEST
+#
+# The TP_R ladder varied the TARGET and held the STOP fixed, and came back
+# iso-expectancy: exp_R = WR*k - (1 - WR) with the loss rung pinned at -1R,
+# and the implied win rate falling almost exactly in proportion as k rises.
+# So the take-profit is structurally incapable of moving expectancy. The term
+# that actually sets the hit rate -- the STOP -- has never been varied.
+#
+# THE QUESTION, and it is one pass over data we already fetch: of the trades
+# that stopped out, what fraction would have reached their ACTUAL take-profit
+# had the stop been wider? Reported against the cost -- the remaining losses
+# get proportionally bigger -- so the net is conversions vs deeper losses.
+#
+#   large conversion fraction -> the stop is being taken by NOISE, real lever
+#   mostly kept going against -> the stop is doing its job, geometry closes
+#
+# HONEST PRIOR: if the price process carries no information from the entry,
+# this is flat too, for the same reason the TP ladder was. What makes it
+# worth running is that the stop has a microstructure asymmetry the TP does
+# not, and the breakeven reversal (worked pre-expansion, reversed
+# post-expansion, mechanism "a stop-to-entry in high noise gets touched
+# before the move develops") is direct evidence that asymmetry is real and
+# cohort-dependent.
+#
+# Cohort split is on symbol_source, the Phase 4 tag, because that is the key
+# a per-cohort stop policy would actually use.
+# ---------------------------------------------------------------------------
+
+STOP_WIDTHS: list[float] = [1.25, 1.5, 2.0]
+
+
+def _resolve_at_stop_mult(m: TradeMetrics, width: float) -> tuple[str, float]:
+    """Outcome with the stop widened to entry - width*R, actual TP retained.
+
+    Returns (outcome, R_multiple). A win pays the trade's ACTUAL take-profit
+    distance in R units, not `width`. A loss costs exactly -width R by
+    construction. Production semantics: wick touches, same-bar SL-first.
+    """
+    if m.r_unit <= 0:
+        return "unknown", 0.0
+    sl_price = m.entry_price - width * m.r_unit
+    sl_bar: int | None = None
+    tp_bar: int | None = None
+    for i, b in enumerate(m.bars):
+        hit_sl = b.low <= sl_price
+        hit_tp = b.high >= m.take_profit
+        if hit_sl and sl_bar is None:
+            sl_bar = i
+        if hit_tp and tp_bar is None and not (hit_sl and sl_bar == i):
+            tp_bar = i
+        if sl_bar is not None or tp_bar is not None:
+            break
+    if tp_bar is not None and (sl_bar is None or tp_bar < sl_bar):
+        return "win", (m.take_profit - m.entry_price) / m.r_unit
+    if sl_bar is not None:
+        return "loss", -width
+    r_pct_pct = m.r_pct * 100.0
+    if r_pct_pct <= 0:
+        return "timeout", 0.0
+    return "timeout", m.actual_pnl_pct / r_pct_pct
+
+
+def _stop_expectancy(subset: list[TradeMetrics], width: float) -> dict:
+    rs: list[float] = []
+    fees: list[float] = []
+    for m in subset:
+        if m.r_unit <= 0:
+            continue
+        rs.append(_resolve_at_stop_mult(m, width)[1])
+        r_pct_pct = m.r_pct * 100.0
+        fees.append(_fee_pct_round_trip() / r_pct_pct if r_pct_pct > 0 else 0.0)
+    n = len(rs)
+    if n == 0:
+        return {"n": 0}
+    exp_r = sum(rs) / n
+    se = float("nan")
+    if n > 1:
+        var = sum((r - exp_r) ** 2 for r in rs) / (n - 1)
+        se = (var / n) ** 0.5
+    # Mean R in percent terms, so expectancy can be read in pnl_pct units.
+    r_pcts = [m.r_pct * 100.0 for m in subset if m.r_unit > 0]
+    mean_r_pct = sum(r_pcts) / len(r_pcts) if r_pcts else 0.0
+    return {
+        "n": n, "exp_r": exp_r, "se": se,
+        "exp_r_fee": exp_r - (sum(fees) / len(fees) if fees else 0.0),
+        "exp_pct": exp_r * mean_r_pct,
+        "mean_r_pct": mean_r_pct,
+    }
+
+
+def _print_stop_block(label: str, subset: list[TradeMetrics]) -> None:
+    usable = [m for m in subset if m.r_unit > 0]
+    base_losers = [m for m in usable
+                   if _resolve_at_stop_mult(m, 1.0)[0] == "loss"]
+    print("")
+    print("--- " + label + " ---")
+    base = _stop_expectancy(usable, 1.0)
+    if base.get("n", 0) == 0:
+        print("  no usable trades")
+        return
+    # CELLS FIRST, then the baseline, then the widened variants.
+    print(f"  CELLS     n={len(usable)}  baseline stop-outs={len(base_losers)} "
+          f"({100.0 * len(base_losers) / len(usable):.1f}%)")
+    print(f"  BASELINE  exp_R={base['exp_r']:+.4f}  "
+          f"(after fee {base['exp_r_fee']:+.4f})  "
+          f"mean R={base['mean_r_pct']:.3f}% of entry  "
+          f"=> exp {base['exp_pct']:+.4f}% per trade")
+    print("")
+    print("  width | converted | still_stop | timeout |    exp_R |  exp_R_fee "
+          "|   exp_%  | SE(exp_R)")
+    for w in STOP_WIDTHS:
+        conv = sum(1 for m in base_losers
+                   if _resolve_at_stop_mult(m, w)[0] == "win")
+        still = sum(1 for m in base_losers
+                    if _resolve_at_stop_mult(m, w)[0] == "loss")
+        tmo = len(base_losers) - conv - still
+        st = _stop_expectancy(usable, w)
+        print(f"  {w:>5} | {conv:>9} | {still:>10} | {tmo:>7} | "
+              f"{st['exp_r']:>+8.4f} | {st['exp_r_fee']:>+10.4f} | "
+              f"{st['exp_pct']:>+7.4f}% | {st['se']:>9.4f}")
+    if base_losers:
+        print("")
+        print("  conversion fractions of the baseline stop-out set:")
+        for w in STOP_WIDTHS:
+            conv = sum(1 for m in base_losers
+                       if _resolve_at_stop_mult(m, w)[0] == "win")
+            print(f"    at {w}x: {conv}/{len(base_losers)} = "
+                  f"{100.0 * conv / len(base_losers):.1f}% reach their actual TP")
+
+
+def _report_stop_conversion(metrics: list[TradeMetrics]) -> None:
+    print("")
+    print("=" * 78)
+    print("STOP-WIDTH CONVERSION TEST")
+    print("=" * 78)
+    print("The TP ladder varied the target and held the stop fixed, and came")
+    print("back iso-expectancy. The stop is the term that sets the hit rate")
+    print("and it has never been varied. Of the trades that stopped out, how")
+    print("many would have reached their ACTUAL take-profit with a wider stop")
+    print("-- against the cost that every remaining loss gets proportionally")
+    print("deeper?")
+    print("")
+    print("HONEST PRIOR: if the price process carries no information from the")
+    print("entry, this is flat too, for the same reason the TP ladder was.")
+    print("What makes it worth running is that the stop has a microstructure")
+    print("asymmetry the TP does not, and the breakeven reversal is evidence")
+    print("that asymmetry is real and cohort-dependent.")
+    print("")
+    print("A win pays the trade's ACTUAL TP distance in R; a loss at width w")
+    print("costs exactly -w R. Baseline is width 1.0 (today's stop).")
+
+    _print_stop_block("ALL trades", metrics)
+
+    for src in sorted({m.symbol_source for m in metrics if m.symbol_source}):
+        _print_stop_block(f"COHORT symbol_source={src}",
+                          [m for m in metrics if m.symbol_source == src])
+    for sc in ("top20", "ranks_21_30"):
+        sub = [m for m in metrics if m.scope == sc]
+        if sub:
+            _print_stop_block(f"SCOPE {sc}", sub)
+
+
 async def main() -> None:
     t0 = time.time()
     print("MFE/MAE curve probe v5 — native-TF (each trade on its OWN timeframe's bars)")
@@ -803,6 +973,7 @@ async def main() -> None:
     _report_study2_style(metrics)
     _report_item2_breakeven(metrics)
     _report_corrected_ladder(metrics)
+    _report_stop_conversion(metrics)
 
     print(f"\nTotal runtime: {time.time() - t0:.1f}s")
 
