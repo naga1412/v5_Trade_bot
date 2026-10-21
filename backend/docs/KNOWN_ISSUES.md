@@ -1752,3 +1752,70 @@ result's `is_active` / `gate_outcome`. When nothing was activated, say
 so — and skip the restart, which is pointless work (`docker compose
 restart` keeps the same container, so log retention is unaffected, but
 it is still ~11s of avoidable churn every night).
+
+
+---
+
+## FU-51 — the embedded-script escaping stack has cost three incidents (open)
+
+**Filed 2026-10-21. Structural fix, not urgent. Filed so the fourth
+occurrence is a decision rather than a surprise.**
+
+Three separate incidents, one hazard: a script embedded in a shell
+heredoc inside a YAML `run:` block, piped over `ssh`. Every layer in
+that stack re-interprets backslashes, and the failure is silent because
+the mangled form is still syntactically valid.
+
+| # | incident | what the escaping did |
+|---|---|---|
+| #577 | `btc-trend-filter-test` dead on arrival | a line continuation became a literal `\n`, so the next token was passed as an argument |
+| #578 | #577's own fix did not fix it | the stray `\n` survived mid-line; `ssh` received five args and ran `n` as the remote command (`bash: line 1: n: command not found`) |
+| today | a verification assertion inverted | a heredoc collapsed `"\\n"` into a real newline, so `assert "\n" not in body` tested for **newlines** and fired on every multi-line input -- asserting the opposite of its stated intent |
+
+The third is the worst of the three, because it was a check written
+*specifically* to catch the first two, and the escaping defeated the
+check itself.
+
+**`chr(92)` is the correct per-instance fix** and is what the current
+probes use. But three occurrences of one hazard argues for **removing
+the layer rather than disciplining around it** -- requiring everyone to
+remember `chr(92)` at exactly the moment they are tired is not a
+control.
+
+**THE STRUCTURAL FIX: write the script to a file and execute the file.**
+
+Instead of base64-embedding a script in the workflow and piping it
+through `ssh` into `python3 -`, commit the script under
+`backend/scripts/` and have the probe run
+`docker compose exec -T backend python /app/scripts/<name>.py`. That is
+already how `mfe-mae-curve`, `phase-a-scan` and the other file-backed
+probes work, and **none of them has ever had an escaping incident** --
+the three above are all from the embedded-heredoc pattern.
+
+What it deletes: the shell-inside-YAML-inside-ssh escaping stack, in its
+entirety. What it costs: the script must exist in the deployed image, so
+a probe can no longer be run from an arbitrary ref without a deploy --
+which is exactly the property the embedded pattern was chosen for
+(`gate-counterfactual`'s comment says so explicitly: "no new file needed
+in the container -- works from any ref").
+
+**So the trade is real and should be made deliberately**: run-from-any-ref
+convenience against an escaping stack with a 3-incident history. The
+recommendation is to take the file-backed form for anything that will be
+re-run, and keep the embedded form only for genuine one-shots where the
+code will never be touched again.
+
+## FU-52 — the local test gate was a subset of the real gate (closed, noted)
+
+**Filed 2026-10-21.** CI rejected #591 on `ruff F541` (an f-string with
+no placeholders) after a local run that had passed. The cause: **I ran
+`pytest` but not `ruff`, and the repo lints in CI** -- so the local gate
+was a strict subset of the real gate, and a green local run carried less
+information than it appeared to.
+
+**This is the same shape as a check that cannot fail**
+(`docs/superpowers/decisions/2026-09-08-checks-that-cannot-fail.md`): a
+gate that cannot reject what the real gate rejects is not that gate. The
+fix is to run `ruff check .` alongside `pytest` locally; the reason it
+sticks is that "my local gate must be a superset of CI's, not a subset"
+generalises to any pre-flight check, not just this one.
