@@ -122,6 +122,96 @@ a fresh 60d trailing baseline on 2026-08-03 (baseline for pre/post
 comparison), plus the 8-day observed window figure. Do NOT quote the
 +0.228% snapshot as the current expected value.
 
+## AMENDMENT 2026-10-21 — criterion #1 evaluated. Ladder still flat.
+
+**This is the amendment paragraph the ratification promised** ("When the
+corrected 1h model lands, this doc gets an amendment paragraph").
+
+**Criterion #1 does not trigger. The flat-ladder verdict stands, now on
+the corrected resolver rather than the hypothetical-2R model.**
+
+First, why this took until October: the resolver correction landed on
+2026-07-29 (v3, actual TP/SL) and the native-TF fix on 2026-07-30 (v5),
+**but the TP_R ladder itself was dropped from the script in the same
+evolution.** No `TP_R` constant or ladder loop survived into v5, so from
+2026-07-30 onward this document carried a reversal criterion that
+nothing could evaluate. Restored in #582.
+
+### Result — PRIMARY, criterion-bearing: top20 @ 1h, n=96
+
+Floor 0.1804R (2x the paired SE of the fixed 0.5R-vs-2.0R endpoint
+pair; paired because every rung is evaluated on the same trades).
+
+| TP_R | implied_WR% | exp_R | exp_R_fee |
+|---|---|---|---|
+| 0.5 | 34.4 | **-0.484** | -0.536 |
+| 0.75 | 26.0 | -0.544 | -0.596 |
+| 1.0 | 25.0 | -0.500 | -0.552 |
+| 1.25 | 19.8 | **-0.555** | -0.607 |
+| 1.5 | 19.8 | -0.505 | -0.557 |
+| 2.0 | 16.7 | -0.500 | -0.552 |
+
+**Range 0.0703R against the 0.15R criterion -> still FLAT.** Note how
+close that is to v2's 0.077R: correcting the resolver did not change the
+flatness.
+
+### Threshold discipline applied deliberately
+
+0.15R was set against this doc's n=166. A larger-n population has a
+smaller noise floor, so applying the July threshold to the current
+~100-symbol fleet would make it easier to clear -- goalpost movement in
+our own favour. **The criterion was therefore applied to top20 @ 1h and
+nothing else.** The fleet is reported for relevance only, against a floor
+computed from its own n.
+
+**SECONDARY (full fleet, n=685)**: floor 0.0639R, range **0.0781R,
+marginally exceeding its own floor**, with 0.5R best (-0.531) degrading
+to 1.5R (-0.609) and 2.0R recovering (-0.567) -- a shallow hook, not a
+monotone gradient. A weak sub-0.1R preference for tighter TP, worth
+~0.11%/trade gross, while every rung sits at -0.685R to -0.764R after
+fees. Choosing between losses.
+
+### Two caveats that matter more than the verdict
+
+1. **Underpowered relative to its own threshold.** At n=96 the floor
+   (0.1804R) **exceeds** the criterion (0.15R), so a true 0.15R effect
+   could not have been resolved here. The observed 0.0703R is well under
+   both, so the conclusion holds -- but a near-threshold reading at this
+   n must not be treated as decisive.
+2. **The reality gap did not close.** Directional agreement is **84.7%**
+   on the criterion population, *below* the 91.6% this doc cites for v2,
+   and the model-vs-actual gross pnl gap runs **+0.83% to +2.91%** by
+   slice. The model is ~1%/trade too pessimistic, which is why every
+   rung reads about -0.5R while realised population expectancy is
+   ~+0.02%. v3 was built to close this and did not. **Absolute levels
+   from this probe are not trustworthy. The RANGE is the robust
+   statistic, and that is what the criterion uses.**
+
+### Why the ladder is flat — the arithmetic, not an accident
+
+`exp_R = WR*k - (1 - WR)`, with the loss rung pinned at -1R by
+construction. The implied win rate falls almost exactly in proportion as
+`k` rises: on the fleet, WR goes 31.2% -> 14.5% as TP_R goes 0.5 -> 2.0,
+and that arithmetic reproduces the measured `exp_R` to within 0.002R at
+both ends. **Moving the take-profit cannot move expectancy, because it
+moves the required hit rate and the achieved hit rate together.**
+
+This sharpens the doc's original "the scoring line matters more than the
+exit line" into something more specific: **the binding constraint is the
+STOP**, which sets R and therefore the hit rate. `exp_R ~ -0.5R` at every
+rung means the stop is taken ~70% of the time wherever the TP sits.
+Confirmed independently by the exit decomposition (30d to 2026-10-21,
+n=2098): STOP_LOSS **70.50%** at **-1.4100%**, TAKE_PROFIT **28.31%** at
+**+3.5577%**, TIMEOUT 1.19% at +0.4658% -- expectancy **+0.019%**, against
+a break-even hit rate at R=2.523 of **28.38%** versus an actual 28.31%.
+The strategy sits on the knife edge to within 0.07pp, by its geometry.
+
+**Criteria #2 and #3 are now also resolved and neither re-opens this**:
+the Aug 3-10 validation was cancelled, and the breakeven mechanic
+reversed (see `2026-10-21-breakeven-reversal.md`). Criterion #4 (signal
+distribution shift) is arguably met by the 31-August universe expansion,
+which is why the fleet ladder is reported above -- and it is flat too.
+
 ## Reversal criteria
 
 Re-open the geometry question if any of the following changes:
