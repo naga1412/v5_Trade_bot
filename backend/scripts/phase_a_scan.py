@@ -60,6 +60,14 @@ MAX_SNAPSHOT_AGE_H = {"oi": 24.0, "funding": 24.0, "depth": 48.0}
 # is ~170 calls/min -- well inside it.
 FETCH_CONCURRENCY = 5
 
+# Progress cadence. The first run of this scan died after ~50 min with
+# `client_loop: send disconnect: Broken pipe` and ssh exit 255 -- NOT a
+# Python error. The fetch loop printed nothing for the whole window, so
+# the ssh channel sat silent and the connection was dropped. Concurrency
+# alone would not have fixed that; silence was the cause. Anything that
+# runs for minutes over `ssh ... docker compose exec` must keep writing.
+PROGRESS_EVERY = 100
+
 
 @dataclass
 class Row:
@@ -376,6 +384,12 @@ async def main() -> int:
     failures: list[tuple[int, str, str]] = []
     no_bars: list[int] = []
 
+    def _tick() -> None:
+        """Keep the ssh channel alive and make progress visible."""
+        done["n"] += 1
+        if done["n"] % PROGRESS_EVERY == 0 or done["n"] == requested:
+            print(f"    fetched {done['n']}/{requested}", flush=True)
+
     async def _one(client: httpx.AsyncClient, r: Row) -> Row | None:
         """Fetch + measure one trade.
 
@@ -395,10 +409,12 @@ async def main() -> int:
             except Exception as e:  # noqa: BLE001
                 failures.append(
                     (r.trade_id, r.symbol, f"{type(e).__name__}: {e}"))
+                _tick()
                 return None
         bars = [b for b in bars if r.opened_ms <= b.ts_ms <= r.closed_ms]
         if not bars or r.r_unit <= 0:
             no_bars.append(r.trade_id)
+            _tick()
             return None
         r.bars = bars
         r.mfe_r = max((b.high - r.entry_price) / r.r_unit for b in bars)
@@ -411,8 +427,10 @@ async def main() -> int:
             r.model_outcome = "loss"
         else:
             r.model_outcome = "timeout"
+        _tick()
         return r
 
+    done = {"n": 0}
     requested = len(rows)
     async with httpx.AsyncClient() as client:
         settled = await asyncio.gather(
