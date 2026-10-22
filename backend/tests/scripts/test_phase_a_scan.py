@@ -222,7 +222,8 @@ def _rows_for_split(values):
         out.append(Row(
             trade_id=i, symbol="X", timeframe="1h", opened_ms=0, closed_ms=0,
             entry_price=100.0, stop_loss=90.0, take_profit=120.0,
-            entry_score=0.4, mtf_agreement=4, funding_directional_adj=v,
+            entry_score=0.4, mtf_agreement=4, bars_held=10,
+            funding_directional_adj=v,
             oi_24h_delta=None, oi_age_h=None, funding_rate=None,
             funding_age_h=None, depth_0_5pct_usdt=None, depth_age_h=None,
             pnl_pct=float(i), exit_reason="STOP_LOSS", closed_at=i,

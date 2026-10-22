@@ -81,6 +81,7 @@ class Row:
     take_profit: float
     entry_score: float
     mtf_agreement: int | None
+    bars_held: int | None
     funding_directional_adj: float | None
     oi_24h_delta: float | None
     oi_age_h: float | None
@@ -108,6 +109,7 @@ SELECT s.id, s.symbol, s.timeframe,
        (EXTRACT(EPOCH FROM s.closed_at) * 1000)::bigint AS closed_ms,
        s.entry_price, s.stop_loss, s.take_profit, s.entry_score,
        s.mtf_agreement, s.funding_directional_adj,
+       s.bars_held,
        s.pnl_pct, s.exit_reason, s.closed_at,
        ff.oi_24h_delta,
        EXTRACT(EPOCH FROM (s.opened_at - ff.captured_at)) / 3600.0 AS oi_age_h,
@@ -379,6 +381,7 @@ async def main() -> int:
             take_profit=float(r.take_profit),
             entry_score=float(r.entry_score),
             mtf_agreement=r.mtf_agreement,
+            bars_held=r.bars_held,
             funding_directional_adj=(
                 float(r.funding_directional_adj)
                 if r.funding_directional_adj is not None else None
@@ -616,6 +619,69 @@ async def main() -> int:
                  "(its baseline was retracted) and is not carried forward.",
             halves=halves,
         )
+    # ---- CONFOUND CONTROL: duration and symbol concentration --------
+    # MFE is a MAXIMUM OVER THE HOLDING PERIOD, so a longer hold
+    # accumulates more of it mechanically. Flat MAE argues against pure
+    # duration (on a martingale both grow ~sqrt(t)) but does not rule it
+    # out. Until this is excluded the A1a result is not actionable.
+    #
+    # bars_observed is the direct mechanical driver of a maximum -- more
+    # bars, more chances -- so it is the control that matters, reported
+    # alongside the DB's own bars_held and wall-clock hours.
+    def _dur_rows(pred):
+        return [r for r in rows if r.mtf_agreement is not None and pred(r)]
+
+    print("")
+    print("  --- CONFOUND CONTROL: duration + symbol concentration -------")
+    for lbl, pred in (("mtf<4", lambda r: r.mtf_agreement < 4),
+                      ("mtf>=4", lambda r: r.mtf_agreement >= 4)):
+        sub = _dur_rows(pred)
+        if not sub:
+            continue
+        nbars = cell([float(len(r.bars)) for r in sub])
+        hrs = cell([(r.closed_ms - r.opened_ms) / 3_600_000.0 for r in sub])
+        bh = [float(r.bars_held) for r in sub if r.bars_held is not None]
+        bhc = cell(bh) if bh else {"mean": float("nan")}
+        syms: dict[str, int] = {}
+        for r in sub:
+            syms[r.symbol] = syms.get(r.symbol, 0) + 1
+        top = sorted(syms.items(), key=lambda kv: -kv[1])[:5]
+        top_share = 100.0 * sum(c for _, c in top) / len(sub)
+        print(f"    {lbl:<7} n={len(sub):<5} bars_observed={nbars['mean']:.2f}"
+              f"  hold_h={hrs['mean']:.2f}  bars_held={bhc['mean']:.2f}"
+              f"  distinct_symbols={len(syms)}")
+        print(f"            top5={', '.join(f'{k}:{v}' for k, v in top)}"
+              f"  (={top_share:.1f}% of cell)")
+    print("    If bars_observed differs materially between cells, the MFE")
+    print("    gain may be mechanical. The within-band split below settles")
+    print("    it: a gain that survives inside each duration band is NOT")
+    print("    duration.")
+
+    # Within-duration-band re-split. Bands are TERCILES OF bars_observed
+    # over the whole population, so each band holds duration roughly
+    # fixed and the mtf contrast is measured inside it.
+    obs = sorted(float(len(r.bars)) for r in rows)
+    if len(obs) >= 9:
+        t1 = obs[len(obs) // 3]
+        t2 = obs[2 * len(obs) // 3]
+        bands = (
+            ("SHORT holds", lambda r: len(r.bars) < t1),
+            ("MID holds", lambda r: t1 <= len(r.bars) < t2),
+            ("LONG holds", lambda r: len(r.bars) >= t2),
+        )
+        print("")
+        print(f"    duration terciles of bars_observed: <{t1:.0f} / "
+              f"{t1:.0f}-{t2:.0f} / >={t2:.0f}")
+        for bname, bpred in bands:
+            bsub = [r for r in rows if bpred(r) and r.mtf_agreement is not None]
+            lo_b = [r.mfe_r for r in bsub if r.mtf_agreement < 4]
+            hi_b = [r.mfe_r for r in bsub if r.mtf_agreement >= 4]
+            report_split(
+                f"A1a within {bname} [CONFOUND CONTROL]", "MFE_R", lo_b, hi_b,
+                lo_desc="mtf<4", hi_desc="mtf>=4",
+                note="duration held roughly fixed; not one of the 12",
+            )
+
     # VALIDITY DIAGNOSTIC, NOT A 13TH HYPOTHESIS. A1a passed on MFE_R,
     # but its high-mtf cell also has the larger sd (1.457 vs 1.060), so
     # the gain could be nothing more than selecting more volatile trades
