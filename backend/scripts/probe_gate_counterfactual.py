@@ -1,12 +1,11 @@
 import asyncio
 import statistics as st
 import sys
-from datetime import datetime, timezone
+from datetime import timezone
 
 sys.path.insert(0, "/app")
 
 import httpx
-import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -127,7 +126,7 @@ def pct(xs, p):
 
 async def main():
     from app.config import get_settings
-    from app.core.gates.entry_quality import AllowDecision, open_position_gate
+    from app.core.gates.entry_quality import open_position_gate
 
     real_settings = get_settings()
     print("=== deployed gate flags (real prod settings) ===", flush=True)

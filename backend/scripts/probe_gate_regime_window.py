@@ -61,7 +61,7 @@ async def main():
     for r in rows:
         print(f"  {r.direction}: {r.n}", flush=True)
 
-    print(f"\n=== regime, real compute_market_regime(), walk-forward, last ~30 calendar days ===", flush=True)
+    print("\n=== regime, real compute_market_regime(), walk-forward, last ~30 calendar days ===", flush=True)
 
     async with httpx.AsyncClient() as client:
         hist = await fetch_klines_df(client, "BTCUSDT", "1d", 1000)

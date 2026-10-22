@@ -366,10 +366,10 @@ async def section3(session) -> list[dict]:
     for r in rows:
         fire_counts[r.trap_id] = fire_counts.get(r.trap_id, 0) + 1
 
-    known_trap_sql = """
-        SELECT DISTINCT jsonb_array_elements(layer_scores -> 'traps_fired') ->> 'trap_id' AS tid
-        FROM predictions WHERE jsonb_typeof(layer_scores -> 'traps_fired') = 'array'
-    """
+    # NOTE: a DISTINCT-trap_id query used to sit here, assigned and never
+    # executed. It was an abandoned approach: the full known-trap registry
+    # is app.core.scoring.traps.ALL_TRAPS, Python-side and not DB-queryable,
+    # which is exactly what the print below says. Removed rather than wired.
     findings = []
     if not fire_counts:
         print("  No trap fires recorded in the last 30 days at all (or "

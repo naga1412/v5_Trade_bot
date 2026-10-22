@@ -57,7 +57,6 @@ async def main():
     engine = create_async_engine(db_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    settings_bl = None
     async with session_factory() as session:
         rows = (await session.execute(sa.text(
             """

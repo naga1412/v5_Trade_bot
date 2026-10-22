@@ -106,7 +106,7 @@ async def main() -> None:
             "layer_scores": layer_scores,
         })
 
-    print(f"population: LONG, entry_score>=0.36, blacklist-excluded, top-20-at-trade, atr_bound", flush=True)
+    print("population: LONG, entry_score>=0.36, blacklist-excluded, top-20-at-trade, atr_bound", flush=True)
     print(f"n (90d) = {len(trades_90d)}", flush=True)
 
     for window_days in (90, 60):

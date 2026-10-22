@@ -259,7 +259,7 @@ async def _part_b_and_c(session_factory, multipliers: dict[str, float]) -> None:
     n_d, wr_d, wr_se_d, avg_d, avg_se_d = stats_d
     print("\nAFTER CALIBRATION -- population split:")
     print(f"  SURVIVES (still clears +-{ENTRY_THRESHOLD}): " + _fmt_stat("", *stats_s))
-    print(f"  DROPPED  (no longer clears):        " + _fmt_stat("", *stats_d))
+    print("  DROPPED  (no longer clears):        " + _fmt_stat("", *stats_d))
     for d in ("LONG", "SHORT"):
         sub_s = [r for r in survives if r.direction == d]
         sub_d = [r for r in dropped if r.direction == d]

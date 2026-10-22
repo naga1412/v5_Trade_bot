@@ -241,7 +241,7 @@ async def main() -> None:
             )
 
         # ---- Simple formula cross-check, at the tier thresholds themselves
-        print(f"\n=== Back-of-envelope cross-check (order_usdt / depth_usdt, at the exact tier value) ===", flush=True)
+        print("\n=== Back-of-envelope cross-check (order_usdt / depth_usdt, at the exact tier value) ===", flush=True)
         for tier in DEPTH_TIERS:
             frac = ORDER_SIZE_USDT / tier
             print(
