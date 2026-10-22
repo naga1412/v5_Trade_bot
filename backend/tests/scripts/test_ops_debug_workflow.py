@@ -25,10 +25,16 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ops-debug.yml"
 SCRIPTS_DIR = REPO_ROOT / "backend" / "scripts"
 
-# The 19 prod probes migrated to file-backed scripts. Listed explicitly
-# rather than derived, so that silently reverting one to an embedded
-# script fails here instead of shrinking a derived set to match.
+# Every prod probe that runs a COMMITTED script rather than an embedded
+# base64 blob. Listed explicitly rather than derived, so that silently
+# reverting one to an embedded script fails here instead of shrinking a
+# derived set to match.
+#
+# This started as the 19 migrated by PR #600 and is now the invariant
+# set: a NEW file-backed probe belongs here too, or nothing stops it
+# being reverted to an embedded script later.
 MIGRATED_PROBES = (
+    "a0-escalation",
     "brain-nan-stablecoin-repro",
     "brain-nan-warmstart-repro",
     "brain-sharpe-diagnosis",
