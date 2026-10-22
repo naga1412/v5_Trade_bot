@@ -152,6 +152,16 @@ range and the contrast the entry bar destroys.
 Deciding this now rather than after seeing a null is the entire
 difference between a pre-registered escalation and a post-hoc rescue.
 
+**AMENDED 2026-10-22, still before the escalation probe existed:**
+`2026-10-22-a0-escalation-amendment.md` fixes HOW — the nominated
+criterion-bearing horizon (10 bars), **cluster-robust SEs by symbol**
+(hourly `predictions` rows overlap, so the naive SE would have
+manufactured a tidy false positive), the population question that
+#590's literal "never became trades" wording would have decided
+wrongly, and the 14-comparison bar of 3.73 sigma. It also records a
+structural correction: `final_score`'s realised LONG range is
+**0.0500 to 0.5642**, not "roughly 0-1" as stated above.
+
 **Its own caveat, also pre-registered:** hypothetical entries are a
 **different population** from real shadow entries — unfilled, unselected,
 and not subject to whatever the entry bar was implicitly selecting for.
