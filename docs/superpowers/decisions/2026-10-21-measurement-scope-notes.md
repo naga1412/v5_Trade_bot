@@ -1,7 +1,8 @@
-# Three measurement facts worth not re-deriving
+# Four measurement facts worth not re-deriving
 
 Written 2026-10-21 because each was found the hard way and each will
-otherwise be rediscovered or, worse, mis-cited.
+otherwise be rediscovered or, worse, mis-cited. A fourth was added
+2026-10-22.
 
 ## 1. A random policy reads −2.30σ through the BOOST/SUPPRESS harness
 
@@ -85,3 +86,46 @@ entry-timing f estimate by ~24% (289 vs the true 356 crossings for
 1h/LONG) before it was caught. Pick the threshold that matches the
 question: 0.30 for "what did shadow do", 0.36 for "what would the
 operator have seen".
+
+## 4. ~0.5% of shadow trades are modelled on fills a book that thin could not have provided
+
+**Bounded, known contamination of every measurement in this project.**
+Filed so it is never rediscovered as news, and so any result with a thin
+margin accounts for it. **Not a reason to re-run anything.**
+
+Five symbols were retained in `live_fleet_universe` while their recorded
+order-book depth was *severely* below the liquidity floor -- down to
+**$9,274, 18.5% of the $50k floor** (ZKPUSDT, held across 51 snapshots
+and four weeks). Shadow modelled entries and exits on those symbols at
+prices that book could not have filled at the sizes assumed. **PR #601**
+has why no alarm fired: the #514 severity check sat on one of the three
+paths by which such a symbol can be retained, so the condition was met
+76 times in production in silence.
+
+**The number, measured rather than estimated:**
+
+| | trades | share of 8,111 closed shadow trades |
+|---|---|---|
+| opened **during** a recorded severe window | **38** | **0.47%** |
+| on those symbols at **any** time | 192 | 2.37% |
+
+**0.47% is the contamination; 2.37% is not.** The 192 figure counts every
+trade those symbols ever produced, the overwhelming majority taken when
+their books were healthy, and it was the first number to hand. Using it
+would overstate the problem fivefold.
+
+**Read 0.47% as a LOWER bound and 2.37% as an upper one, with the truth
+near the lower.** Two reasons the lower bound is soft, both structural:
+
+- `live_fleet_universe` samples roughly every 6 hours, so a book could
+  have collapsed and recovered between snapshots without ever being
+  recorded as severe.
+- The table only begins **2026-08-31**, so contamination before that date
+  is not measurable at all.
+
+**The operative rule: any future result whose margin is thinner than
+~0.5% of the population must account for this.** Above that it is
+noise against the effect. For reference, nothing this project has
+measured has turned on a margin that thin -- Phase A's cells are whole
+percentage points apart -- so this is a caveat to carry, not a
+correction to apply.
