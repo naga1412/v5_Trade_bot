@@ -52,9 +52,10 @@ variable whose realised LONG range is **0.0500 to 0.5642**.
 ### Finding 1, which is structural and belongs on the record now
 
 **`final_score` has an effective ceiling near 0.57, and a floor at
-|0.05|.** The in-band truncation was always described as "a 0.19-wide
-span of a variable whose full range is roughly 0-1". **That framing was
-wrong.** The scorer does not produce scores near 1; across 44,606 LONG
+|0.05|.** The pre-registration described the in-band truncation as "a
+0.19-wide span of a variable whose full range is roughly 0-1", and **the
+operator has recorded that framing as their own error.** It was
+wrong. The scorer does not produce scores near 1; across 44,606 LONG
 rows and 279 symbols over 60 days the maximum is 0.5642, and |score| <
 0.05 is labelled NEUTRAL by construction. So the real contrast available
 to *any* score-based test, ever, is ~0.05-0.56 — not 0-1. The entry bar
@@ -175,6 +176,19 @@ SE_diff (0.0867 on cells of 536 and 1,592) rather than assumed.
 calculation says 7x; the clustering eats most of it, and the naive
 calculation is the wrong one. Stating both is the point — a future
 reader who sees only the 7x will over-read whatever comes back.
+
+**REQUIRED IN THE PROBE'S OUTPUT HEADER, operator instruction:** the
+probe must print **~2.5x the in-band contrast** and **~1.5 R/unit
+detectable slope** at the top of its own output, before any estimate, so
+that a null is read as *"tested at the power actually available"* and not
+as a strong closure. A reader who meets the null without those two
+numbers will over-read it.
+
+**And the escalation RUNS regardless of the worsened prior.** The prior
+got worse between pre-commitment and execution -- the contrast gain is
+2.5x, not 7x. Declining to run a pre-registered escalation because its
+prior now looks weaker is **selective execution**, which is the exact
+failure mode pre-registration exists to prevent. It runs.
 
 **So: this test can detect a slope of roughly 1.5 R per score unit over
 a 0.27-unit contrast.** A real effect smaller than that will not clear
