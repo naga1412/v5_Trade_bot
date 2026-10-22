@@ -209,6 +209,54 @@ estimates are reported with their SEs, not discarded.**
   **This one can produce a wrong-sign result**, so it is printed before
   any estimate.
 
+## THE CONTROL FIRED IN PRODUCTION — the worked example
+
+**Added 2026-10-22, after the run. This is the single best demonstration
+in this project that pre-registration earns its cost.**
+
+The rule above was written before the data existed:
+
+> **A RESULT SIGNIFICANT ONLY ON THE NAIVE SE IS NOT A FINDING and will
+> be reported as a failure of this test.**
+
+It then rejected two results that would otherwise have been announced:
+
+| horizon | naive σ | clustered σ | what would have been said | what was said |
+|---|---|---|---|---|
+| 20 | **+4.79** | +2.86 | PASS at the corrected bar | **FAIL — naive-only** |
+| 40 | **+3.39** | +1.54 | clears 3.0, SUGGESTIVE | **FAIL — naive-only** |
+
+**+4.79σ at horizon 20 clears the corrected 3.729 bar comfortably.** With
+an ordinary two-sample SE it is a finding. It is not a finding, and the
+probe printed its own pre-declared failure for it rather than leaving
+that judgement to whoever read the output.
+
+**The rejection was automatic and adversarial to its author.** Nobody
+had to notice; the rule had already been committed, and the probe was
+built to enforce it against itself.
+
+### The prediction came in low, and that is worth keeping too
+
+The amendment estimated the design effect at **~9×**, from a guessed
+within-symbol correlation of ρ≈0.05 at an average cluster size of ~160.
+Measured: **3.48×** at horizon 10 (range 2.81–4.83 across horizons), so
+the naive SE was too small by **1.87×**, not the ~3× predicted.
+
+**A stated prior that came in low is more useful than a vague worry that
+came in right.** The over-estimate is recoverable — the direction was
+right, the magnitude was conservative, and the gap is now measured
+rather than assumed, so the next design can use 3.5× instead of a guess.
+Had the amendment said only "the rows overlap, so be careful", there
+would be nothing to correct and nothing to carry forward.
+
+### And the clustering self-validated
+
+The non-overlapping thinned subset returned a design effect of
+**1.12×** — essentially 1. **The inflation disappears exactly when the
+dependence does**, which is the degenerate-case check applied to the
+whole apparatus rather than to the estimator alone: the correction is
+large where windows overlap and vanishes where they do not.
+
 ## Outcomes, fixed in advance
 
 - **Score predicts MFE_R at the nominated horizon, clustered, over the
