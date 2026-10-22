@@ -1829,3 +1829,59 @@ gate that cannot reject what the real gate rejects is not that gate. The
 fix is to run `ruff check .` alongside `pytest` locally; the reason it
 sticks is that "my local gate must be a superset of CI's, not a subset"
 generalises to any pre-flight check, not just this one.
+
+## FU-53 — bar-fetching defaults to SPOT klines, and futures-only symbols break wherever that default is used (open, THIRD instance)
+
+**Filed 2026-10-22. Three incidents is where per-instance care stops
+being the answer.**
+
+The codebase has no single bar-fetch entry point. Each caller reaches for
+Binance klines on its own, and **every one of them defaults to the SPOT
+endpoint** (`https://api.binance.com/api/v3/klines`). The live fleet has
+been futures-first since Phase 4, so any symbol without a spot listing
+returns **400 Bad Request** — silently, per-symbol, mid-loop.
+
+**The three instances:**
+
+1. **`run_live_prediction`'s seed (#539)** — seeded from spot, so the
+   entire futures-only cohort was **100% dead** until the 2026-09-01
+   fix.
+2. **`app.ml.validator`'s fetch** — same default, same class.
+3. **`a0_escalation`'s helper (2026-10-22)** — reused
+   `mfe_mae_curve._fetch_bars_at_tf`, which is spot-only. **60 of 279
+   symbols 400'd**, resolving 37,682 of 44,525 rows (84.6%).
+
+**The dropped cohort is systematically `futures_poll`**, which is the
+whole point: this is not random attrition. The newest, thinnest,
+most-recently-listed symbols are exactly the ones with no spot pair, so
+every measurement built on a spot fetch silently excludes them.
+
+**Consequence for already-reported work:** the A0 full-range escalation
+result (`2026-10-22-a0-escalation-result.md`) is measured on the
+**spot-listed subset**, 217 of 279 symbols. It is not wrong, but its
+population is narrower than its pre-registration stated, and
+`futures_poll` is **unmeasured** in it — and would be unmeasured in any
+future result built the same way.
+
+### The structural fix
+
+**ONE shared fetch helper that selects the endpoint by cohort**, plus
+**a guard asserting that no bar-fetching path reaches spot klines for a
+futures-only symbol.**
+
+Same shape as the two consolidations this project has already made:
+
+- **`HISTORY_BARS`** — the same constant re-derived per call site until
+  the divergence became a defect.
+- **the probe migration (#600)** — 19 embedded scripts collapsed to
+  committed files once the escaping stack had cost three incidents.
+
+In both cases the trigger was the third occurrence, and in both the fix
+was consolidation plus a structural guard rather than more care at each
+site. The guard matters as much as the helper: a shared helper that
+callers can still bypass is a convention, and this codebase has
+demonstrated three times that conventions do not hold here.
+
+**Not built. Filed with its scope**, because the next measurement to
+reuse a spot fetch will lose the same cohort without anyone noticing,
+and because the cohort it loses is the one the fleet expansion was for.
