@@ -82,8 +82,15 @@ remove.
 
 ## How the rule gets defeated: a plausible-sounding reassurance
 
-**This is the worked example, and it is the most useful part of this
-document.** The decile-stratified estimate came out at **+0.3125 R**
+**AN ADJUSTMENT THAT LEAVES THE ESTIMATE WHERE IT WAS HAS TWO READINGS:
+*the confound was small*, or *the adjustment did not address the
+confound*. The agreement cannot distinguish them.** That is the rule,
+and it is the most useful thing in this document. A sensitivity analysis
+whose reassurance is structurally guaranteed is **a check that cannot
+fail wearing a sensitivity analysis as a costume** — see
+`2026-09-08-checks-that-cannot-fail.md`, which is where it is filed.
+
+The instance. The decile-stratified estimate came out at **+0.3125 R**
 against the unadjusted **+0.3357 R** — agreement to within 7%. That
 closeness was stated as evidence that duration accounted for only ~7% of
 the effect, i.e. as a **bound on the collider bias**.
@@ -91,16 +98,13 @@ the effect, i.e. as a **bound on the collider bias**.
 **It bounds nothing.** Both estimates are computed on
 **outcome-dependent windows**. The adjustment redistributed rows between
 strata; it never changed what was being measured inside them. Two
-estimates that share a contamination will agree with each other about as
-closely as their shared contamination is stable — and their agreement is
-then a measure of that stability, not of its absence.
+estimates that share a contamination agree with each other about as
+closely as their shared contamination is stable — so their agreement
+measures that stability, not its absence.
 
 **Agreement between two contaminated estimates is not evidence of
-cleanliness.** Generalised: an adjustment that leaves the estimate
-roughly where it was has two readings — *the confound was small*, or
-*the adjustment did not address the confound*. Those are not
-distinguishable from the agreement itself. You need a measurement that
-does not share the defect, and here that was a window fixed by design.
+cleanliness.** To break the tie you need a measurement that does not
+share the defect, and here that was a window fixed by design.
 
 **Worth recording plainly, because it is the whole lesson:** the
 reassurance was produced in the *same turn* that correctly flagged

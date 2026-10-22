@@ -95,11 +95,14 @@ observation. Per the power note: **reported with its SE, not discarded,
 not acted on.** The volatility and symbol-concentration controls stand
 and are unaffected.
 
-### The n a future re-test would need, and why we are not scheduling one
+### CLOSED PENDING ~MAY 2027, NO WATCH SET
 
-Recorded so a future session can decide **deliberately**, from numbers,
-rather than inheriting a standing "revisit when data accumulates" item
-that nobody owns. **No watch, no reminder, no cron. This rests here.**
+Not "revisit later" — **closed pending ~May 2027, no watch set.** An
+open item with no owner and no date is the thing that becomes a
+phantom, so this one carries both: the date below, and nobody. **No
+watch, no reminder, no cron.** The numbers are recorded so that a
+future session decides **deliberately**, from them, rather than
+inheriting a standing "revisit when data accumulates" item.
 
 Holding the current point estimates, the n multiple needed to reach
 3.68 sigma:
@@ -202,8 +205,11 @@ gap.
   was a score informative about reach that the exit discards. At ~2 sigma
   sub-bar there is nothing to build a TP-distance by hold-horizon grid
   on. The design remains correct in shape if something ever passes.
-- **`mtf_agreement >= 4` is not a lever.** Not reopened on aggregates,
-  not reopened on the realised-window figure, and not scheduled.
+- **`mtf_agreement >= 4` is not a lever. CLOSED PENDING ~MAY 2027, NO
+  WATCH SET.** Not reopened on aggregates, not reopened on the
+  realised-window figure, and **not reopened by widening the window to
+  full history — that is a re-measurement wearing replication's
+  clothes**, 45% of its rows being the ones already used.
 
 ## Related
 
