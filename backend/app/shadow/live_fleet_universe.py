@@ -204,13 +204,32 @@ SEVERE_DEPTH_RATIO: float = 0.5   # depth < 50% of DEPTH_FLOOR_USDT = collapse
 SEVERE_SPREAD_RATIO: float = 2.0  # spread > 2x SPREAD_MAX_BPS = blown out
 
 
+def _is_severe(*, depth_0_5pct_usdt: float, spread_bps: float) -> bool:
+    """The severity threshold arithmetic, on bare numbers.
+
+    Factored out 2026-10-22 because it was needed in THREE places and
+    existed in one. The fast-exit path below had it; the two
+    open-position override paths -- a fresh rescue sample, and numbers
+    carried forward for a symbol that was not sampled at all this cycle
+    -- did not, so a severely illiquid symbol held open through either of
+    those produced no severity alarm. Verified against prod: 76
+    `live_fleet_universe` rows have depth under the severe threshold,
+    down to $9,274 (18.5% of the floor), and every one of them reached
+    the table through a path that never ran this check.
+    """
+    return (
+        depth_0_5pct_usdt < DEPTH_FLOOR_USDT * SEVERE_DEPTH_RATIO
+        or spread_bps > SPREAD_MAX_BPS * SEVERE_SPREAD_RATIO
+    )
+
+
 def _is_severe_failure(check: LiquidityCheck) -> bool:
     """True when depth or spread is catastrophically outside the floor --
     not a marginal miss. See the constants' comment above for the
     reasoning and the exclusion of volume from this check."""
-    return (
-        check.depth_0_5pct_usdt < DEPTH_FLOOR_USDT * SEVERE_DEPTH_RATIO
-        or check.spread_bps > SPREAD_MAX_BPS * SEVERE_SPREAD_RATIO
+    return _is_severe(
+        depth_0_5pct_usdt=check.depth_0_5pct_usdt,
+        spread_bps=check.spread_bps,
     )
 
 Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
@@ -547,6 +566,34 @@ async def refresh_live_fleet_universe(
                         "an open position -- operator cannot cleanly exit this "
                         "symbol right now. Investigate immediately.", sym,
                     )
+                elif _is_severe(
+                    depth_0_5pct_usdt=prior[sym].depth_0_5pct_usdt,
+                    spread_bps=prior[sym].spread_bps,
+                ):
+                    # 2026-10-22: the symbol is NOT in fast_exited, which
+                    # means the sampling loop never ran for it this cycle
+                    # -- it dropped below the QVOL_FLOOR_USDT pre-filter
+                    # and never entered `candidates`, or every sample
+                    # errored. So the fast-exit trigger could not fire,
+                    # and the numbers being carried forward are THEMSELVES
+                    # already severe. That is the worse case, not the
+                    # milder one: a symbol whose 24h volume has collapsed
+                    # below the pre-filter is MORE likely to be
+                    # unexitable, not less, and this was the branch that
+                    # carried it at log.info -- indistinguishable from a
+                    # routine marginal-miss retention.
+                    log.error(
+                        "live_fleet_universe: %s is retained ONLY because it has "
+                        "an open position, was NOT sampled this cycle (below the "
+                        "$%.0f qvol pre-filter, or every sample errored, so the "
+                        "fast-exit trigger never ran), and its LAST-KNOWN numbers "
+                        "are already SEVERELY outside the floor (depth=$%.0f "
+                        "spread=%.1fbps vs floor depth=$%.0f spread<=%.1fbps). "
+                        "Operator cannot cleanly exit this symbol. Investigate "
+                        "immediately.",
+                        sym, QVOL_FLOOR_USDT, prior[sym].depth_0_5pct_usdt,
+                        prior[sym].spread_bps, DEPTH_FLOOR_USDT, SPREAD_MAX_BPS,
+                    )
                 else:
                     log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
                 results[sym] = prior[sym]  # last-known-good numbers, not re-sampled
@@ -568,6 +615,30 @@ async def refresh_live_fleet_universe(
                         "rescue path must never invent a classification)",
                         sym, rescue_cohort,
                     )
+                    # 2026-10-22: the rescue branch stores whatever the
+                    # fresh sample says, pass or fail, and never ran the
+                    # severity check -- so an open position on a collapsed
+                    # book arrived with only the routine rescue warning
+                    # above. This is the branch every one of prod's 76
+                    # severe-depth rows came through. The warning stays
+                    # (it carries the cohort decision); the error is
+                    # ADDITIVE, so nothing is lost.
+                    if _is_severe(
+                        depth_0_5pct_usdt=check.depth_0_5pct_usdt,
+                        spread_bps=check.spread_bps,
+                    ):
+                        log.error(
+                            "live_fleet_universe: %s has an open position, no "
+                            "prior snapshot entry, and its fresh rescue sample is "
+                            "SEVERELY outside the floor (depth=$%.0f "
+                            "spread=%.1fbps vs floor depth=$%.0f "
+                            "spread<=%.1fbps) -- retained because the override "
+                            "never strands a live position, but the operator "
+                            "cannot cleanly exit this symbol right now. "
+                            "Investigate immediately.",
+                            sym, check.depth_0_5pct_usdt, check.spread_bps,
+                            DEPTH_FLOOR_USDT, SPREAD_MAX_BPS,
+                        )
                 except Exception as e:  # noqa: BLE001
                     log.error(
                         "live_fleet_universe: %s has an open position, no prior "

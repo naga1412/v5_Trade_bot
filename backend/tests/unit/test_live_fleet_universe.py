@@ -1302,3 +1302,180 @@ async def test_load_live_fleet_universe_filters_by_cohort(session_factory) -> No
 
         futures_only = await load_live_fleet_universe(session, cohort="futures_poll")
         assert {e.symbol for e in futures_only} == {"CUSDT"}
+
+
+# ---------------------------------------------------------------------
+# 4b. Fast-exit severity coverage on the OPEN-POSITION OVERRIDE paths
+#     (2026-10-22). The severity check existed on the fast-exit path
+#     only. The two override paths -- a fresh rescue sample, and numbers
+#     carried forward for a symbol never sampled this cycle -- retained
+#     severely illiquid symbols with no severity alarm at all.
+#     Verified against prod: 76 live_fleet_universe rows sit under the
+#     severe depth threshold, down to $9,274 (18.5% of the floor), and
+#     every one reached the table through a path that never ran the
+#     check. ZKPUSDT alone held 51 such snapshots across four weeks.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rescue_sample_severely_off_floor_logs_error(session_factory, caplog) -> None:
+    """An open position on a symbol with NO prior entry whose fresh
+    rescue sample is severely illiquid must produce an ERROR.
+
+    This is the branch prod's severe rows came through. Before the fix it
+    emitted only the routine "rescued with a fresh sample" WARNING --
+    indistinguishable from a healthy rescue -- so four weeks of a $9k
+    book under an open position raised nothing.
+
+    MUTATION RUN: deleted the _is_severe block in the rescue branch ->
+    red.
+    """
+    import logging
+
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('RESCUESEV/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "RESCUESEVUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["RESCUESEVUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_thin_book,  # severe
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    with caplog.at_level(logging.INFO, logger="app.shadow.live_fleet_universe"):
+        entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    assert "RESCUESEVUSDT" in {e.symbol for e in entries}  # never stranded
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("RESCUESEVUSDT" in r.getMessage() for r in errors), (
+        "a severely illiquid rescue sample produced no ERROR"
+    )
+    assert any("Investigate immediately" in r.getMessage() for r in errors)
+    # The rescue WARNING is additive, not replaced -- it carries the
+    # cohort decision, which the error does not.
+    assert any("rescued with a fresh sample" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_rescue_sample_marginally_off_floor_logs_no_error(session_factory, caplog) -> None:
+    """NEGATIVE CONTROL. A rescue sample that misses the floor but is NOT
+    severe (~$39k, 78% of the floor) must stay at WARNING. Without this,
+    an always-true severity check would pass the test above.
+
+    MUTATION RUN: made _is_severe return True unconditionally -> red.
+    """
+    import logging
+
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('RESCUEMARG/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "RESCUEMARGUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["RESCUEMARGUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_marginal_thin_book,  # off-floor, not severe
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    with caplog.at_level(logging.INFO, logger="app.shadow.live_fleet_universe"):
+        entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    assert "RESCUEMARGUSDT" in {e.symbol for e in entries}
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not any("RESCUEMARGUSDT" in r.getMessage() for r in errors), (
+        "a marginal rescue miss must not raise the severity alarm"
+    )
+    assert any("rescued with a fresh sample" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_unsampled_retention_with_severe_prior_logs_error(session_factory, caplog) -> None:
+    """A symbol held open that was NEVER SAMPLED this cycle -- it fell
+    below the QVOL_FLOOR_USDT pre-filter, so it never entered
+    candidates and the fast-exit trigger could not run -- whose
+    carried-forward numbers are themselves severe, must produce an ERROR.
+
+    This is the worse branch, not the milder one: a symbol whose 24h
+    volume has collapsed below the pre-filter is MORE likely to be
+    unexitable, not less, and it was being carried at log.info,
+    indistinguishable from a routine marginal-miss retention.
+
+    MUTATION RUN: deleted the elif _is_severe(...) branch -> red.
+    """
+    import logging
+
+    async with session_factory() as session:
+        # prior entry with SEVERE stored numbers -- depth $9,274, the
+        # real worst value observed in prod (ZKPUSDT).
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('COLLAPSEDUSDT', 'liquidity_added_spot', 25000000, 4.45, 9274, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO shadow_open_positions (symbol) VALUES ('COLLAPSEDUSDT')"
+        ))
+        await session.commit()
+
+    # quoteVolume BELOW the $20M pre-filter -> never a candidate, never sampled.
+    tickers = [{"symbol": "COLLAPSEDUSDT", "quoteVolume": "1000000"}]
+    transport = _mock_transport(
+        futures_symbols=["COLLAPSEDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_deep_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    with caplog.at_level(logging.INFO, logger="app.shadow.live_fleet_universe"):
+        entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    assert "COLLAPSEDUSDT" in {e.symbol for e in entries}  # never stranded
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("COLLAPSEDUSDT" in r.getMessage() for r in errors), (
+        "severe carried-forward numbers produced no ERROR"
+    )
+    assert any("NOT sampled this cycle" in r.getMessage() for r in errors)
+    assert any("Investigate immediately" in r.getMessage() for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_unsampled_retention_with_healthy_prior_logs_info(session_factory, caplog) -> None:
+    """NEGATIVE CONTROL for the branch above: identical setup, healthy
+    stored numbers, so the retention stays at INFO.
+
+    MUTATION RUN: made _is_severe return True unconditionally -> red.
+    """
+    import logging
+
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('HEALTHYHELDUSDT', 'liquidity_added_spot', 25000000, 2.0, 60000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO shadow_open_positions (symbol) VALUES ('HEALTHYHELDUSDT')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "HEALTHYHELDUSDT", "quoteVolume": "1000000"}]
+    transport = _mock_transport(
+        futures_symbols=["HEALTHYHELDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_deep_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+
+    with caplog.at_level(logging.INFO, logger="app.shadow.live_fleet_universe"):
+        entries = await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    assert "HEALTHYHELDUSDT" in {e.symbol for e in entries}
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not any("HEALTHYHELDUSDT" in r.getMessage() for r in errors)
+    assert any("retaining HEALTHYHELDUSDT past exit" in r.getMessage()
+               for r in caplog.records)
