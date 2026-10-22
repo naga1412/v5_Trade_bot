@@ -273,3 +273,55 @@ def test_median_split_refuses_a_genuinely_constant_variable() -> None:
                                 "pnl_pct")
     assert lo == [] and hi == []
     assert cut != cut  # nan
+
+
+# --- fixed-horizon MFE must be pre-treatment ---------------------------
+
+def test_horizons_are_a_fixed_design_constant() -> None:
+    """The horizons must be constants, not derived from any trade's
+    realised duration -- that is the whole point of using them.
+
+    MUTATION: set MFE_HORIZONS from observed hold lengths -> this stops
+    being a tuple of ints and goes red.
+    """
+    from scripts.phase_a_scan import MFE_HORIZONS
+    assert MFE_HORIZONS == (5, 10, 20, 40)
+    assert all(isinstance(h, int) and h > 0 for h in MFE_HORIZONS)
+
+
+def test_horizon_fetch_reaches_past_the_longest_horizon() -> None:
+    """The fetch window must extend beyond the exit, or a trade that
+    exited early has no forward bars and its long horizons silently
+    vanish -- the #585 trap.
+
+    Asserted against the source because the window is computed inside an
+    async closure that needs a live client to exercise.
+    """
+    import io
+    from pathlib import Path
+    src = io.open(
+        Path(__file__).resolve().parents[2] / "scripts" / "phase_a_scan.py",
+        encoding="utf-8",
+    ).read()
+    assert "horizon_end = r.opened_ms + (max(MFE_HORIZONS) + 1) * bar_ms" in src
+    assert "max(r.closed_ms, horizon_end)" in src, (
+        "fetch must span whichever is later: the exit or the longest horizon"
+    )
+
+
+def test_short_horizon_mfe_cannot_exceed_a_longer_one() -> None:
+    """Monotonicity: a maximum over more bars cannot be smaller.
+
+    This is the invariant that catches an off-by-one in the slicing --
+    if seg were fwd[h:] instead of fwd[:h], ordering would break.
+    """
+    from scripts.phase_a_scan import Bar
+    entry, r_unit = 100.0, 10.0
+    highs = [101.0, 103.0, 102.0, 108.0, 104.0, 115.0]
+    mfes = []
+    for h in (2, 4, 6):
+        seg = [Bar(ts_ms=i, high=v, low=99.0, close=v)
+               for i, v in enumerate(highs)][:h]
+        mfes.append(max((b.high - entry) / r_unit for b in seg))
+    assert mfes == sorted(mfes), "MFE must be non-decreasing in horizon"
+    assert mfes[0] == 0.3 and mfes[2] == 1.5
