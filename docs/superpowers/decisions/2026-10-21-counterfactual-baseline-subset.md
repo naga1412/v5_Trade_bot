@@ -134,5 +134,10 @@ moved" is a detector, not an observation.**
 - `2026-09-08-checks-that-cannot-fail.md` — the parent rule. This is the
   same family: a measurement that cannot fail for the reason it exists,
   here because its population guarantees a non-zero answer.
+- `2026-10-22-measurement-window-rule.md` -- the sibling, found one day
+  later and one layer in. Here the population was wrong; there the
+  **measurement window** is, because the treatment sets its length.
+  Together they are the two ways a correctly-computed estimate can fail
+  to be the quantity it claims: wrong rows, or wrong window.
 - `2026-07-29-study-1-flat-geometry-ladder.md` — the amendment that
   closed the take-profit term; the stop-width test closed the other.

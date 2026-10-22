@@ -362,6 +362,27 @@ DB-confirmed stop-outs -- same data, one filter apart -- and two
 independent artifacts were both inflating that same false positive at
 once.
 
+## The third sibling: the measurement WINDOW set by the treatment
+
+See `2026-10-22-measurement-window-rule.md`. **When the target is a
+maximum, a sum, or any accumulation over a window, check whether the
+treatment sets the window's length.** If it does, the target is
+post-treatment and the comparison is contaminated -- and stratifying ON
+the window length does not fix it, because that conditions on the
+collider instead of removing it. Only a window fixed by design does.
+The instance: an `mtf_agreement >= 4` MFE finding read **+5.78 sigma**
+over each trade's realised holding window and **+2.03 sigma** over a
+window fixed at 10 bars, because 47% of the headline was the high cell
+simply being held longer (13.04 bars against 9.60).
+
+Its own worked example is the more useful half: the duration-adjusted
+estimate agreed with the unadjusted one to within 7%, and that agreement
+was cited as a BOUND on the bias. **It bounds nothing** -- both were
+measured on outcome-dependent windows, so their agreement measured the
+stability of a shared contamination, not its absence. That is the shape
+of a check that cannot fail, wearing the costume of a sensitivity
+analysis.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration
