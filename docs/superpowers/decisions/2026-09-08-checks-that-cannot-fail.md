@@ -383,6 +383,131 @@ stability of a shared contamination, not its absence. That is the shape
 of a check that cannot fail, wearing the costume of a sensitivity
 analysis.
 
+## THE MIRROR CASE: a check that cannot PASS
+
+**Status: standing rule, and the exact inverse of this document.** Added
+2026-10-22 after producing one.
+
+A mutation harness read pass/fail by grepping pytest's output for the
+word `passed`. The configuration in use suppresses the summary line, so
+the grep matched nothing and **every test reported RED, including on a
+clean tree.** It briefly made one mutation look as though it turned five
+tests red when it turned exactly one red.
+
+```
+harness verdict on a KNOWN-GOOD tree:  all RED
+actual state of that tree:             32 passed
+```
+
+**This is less dangerous than a check that cannot fail, and it is not
+harmless.** All-red is noticeable and all-green is not, so it gets
+caught sooner — but while it is live it destroys the signal just as
+completely, because a harness that reports RED for everything
+distinguishes nothing. A false negative hides a defect; a false positive
+of this kind hides *which* defect, which is the entire output of a
+mutation run.
+
+### The fix is the same as the parent rule's
+
+**Verify the harness against a KNOWN state before trusting it on an
+unknown one.** Run it once on the clean tree and confirm it says
+*green*; run it once on an obviously-broken tree and confirm it says
+*red*. The parent rule says to break the guard and watch the test go
+red. This says the same thing about the thing *doing the watching*.
+
+Concretely, and worth stating as a rule of its own:
+
+**Read a subprocess's verdict from its EXIT CODE, not from its output
+text.** An exit code is part of the contract; output formatting is not.
+`-q`, `--no-header`, a plugin, a version bump or a `tail` can all change
+what the text says while the exit code keeps meaning exactly what it
+meant. Every harness in this repo that greps for `passed`, `OK`, `FAIL`
+or `ERROR` is one formatting change away from this bug.
+
+### Why it belongs in this family
+
+Both failure modes are a measurement that cannot do its job, shipped
+because nobody measured the measurement:
+
+| | verdict it cannot produce | how it hides |
+|---|---|---|
+| a check that cannot fail | RED | looks like passing work |
+| a check that cannot pass | green | looks like failing work, and erases which part failed |
+
+## THE ACCIDENTAL MUTANT: the best evidence a guard can get
+
+**Record this as a method, not an anecdote.**
+
+A drift guard was written to catch divergence between a hand-written
+SQLite test fixture and the Postgres migration it mirrors. It was tested
+deliberately, and it passed those tests. Then a session ended **between
+applying a fixture mutation and restoring it**, so a renamed column
+reached disk by accident. On the next run the guard failed and named the
+exact difference:
+
+```
+fixture/migration drift -- only in migration: ['spread_bps'];
+                           only in fixture:   ['spread_bpsX']
+```
+
+**That is better evidence than the deliberate test, and the reason
+generalises: nobody arranged it.** A rehearsed mutation is applied by
+the same person who wrote the guard, in the shape the guard anticipates.
+An accident arrives in whatever shape the accident takes, at whatever
+moment it happens, with no one having set the stage. When a guard
+catches one of those, it has been exercised against the real failure
+distribution rather than the author's model of it.
+
+So: **when a guard catches something nobody planted, write it down.**
+These are rare and they are worth more than the test suite that
+surrounds them.
+
+### The verification that makes it safe to keep
+
+An accidental mutant is only a good story if you then prove the tree is
+clean. This one was followed by a byte-for-byte comparison of both
+touched files against off-disk backups, plus a repo-wide search for
+every mutation sentinel:
+
+```
+2026_10_22_0043_liquidity_severity_events.py   identical-to-backup=True
+test_live_fleet_universe.py                    identical-to-backup=True
+mutant sentinels present: none
+```
+
+**Without that step the anecdote is a liability** -- "a mutant reached
+disk" and "we are not sure what is on disk" are one sentence apart. Back
+the files up off-disk BEFORE mutating, restore per-mutant rather than at
+the end of a batch, and verify identity afterwards. A long mutation run
+in a single process is a window in which an interruption strands a
+mutant in the working tree.
+
+## "All tests green" and "the guard is load-bearing" are different claims
+
+The clearest example this project has produced, from the same work.
+
+A drift guard sat alongside four tests that exercised the same table.
+Mutating the **fixture** turned all five red, so the guard looked
+redundant -- anything it caught, the others caught too. Then the
+inverse mutation: add a `NOT NULL` column to the **migration** only.
+
+```
+column added to the migration only:
+  drift guard        RED
+  all four others    pass
+```
+
+Every persistence test passes **because the INSERT statement does not
+name the new column.** Nothing in the suite touches it. In production
+that column would reject every insert on the table.
+
+**That single mutation is the guard's entire justification, and without
+it the guard was only redundantly covered.** A green suite told us
+nothing about whether the guard was carrying weight; only a mutation
+aimed at the gap it alone covers could. **For every guard, ask: what
+breaks that ONLY this catches? If the answer is "nothing", it is
+decoration, however green it is.**
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration
