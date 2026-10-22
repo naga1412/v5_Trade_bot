@@ -232,6 +232,61 @@ def _is_severe_failure(check: LiquidityCheck) -> bool:
         spread_bps=check.spread_bps,
     )
 
+SEVERITY_PATH_SAMPLED = "sampled_severe"
+SEVERITY_PATH_RESCUE = "rescue"
+SEVERITY_PATH_QVOL_PREFILTER = "qvol_prefilter"
+
+
+@dataclass(frozen=True)
+class SeverityEvent:
+    """One firing of the severity predicate, for `liquidity_severity_events`.
+
+    `path` records WHICH of the three routes produced it, because they
+    have different meanings: `sampled_severe` is the guard working as
+    designed, `rescue` and `qvol_prefilter` are the two routes that had
+    no severity check at all before 2026-10-22 and account for every one
+    of prod's 76 historical severe rows.
+    """
+    symbol: str
+    path: str
+    cohort: str | None
+    depth_0_5pct_usdt: float
+    spread_bps: float
+
+
+def _severity_rows(
+    events: list[SeverityEvent], *, now, retained: set[str],
+) -> list[dict]:
+    """Rows for `liquidity_severity_events`, self-describing.
+
+    The floor values and ratios in force are stored WITH the
+    measurement, so a later threshold change cannot silently
+    reinterpret history. The two `*_is_severe` flags are stored
+    separately because the predicate is an OR and the arms have very
+    different track records -- as of 2026-10-22 the spread arm had never
+    fired in production on any of 30 consecutive days, and nothing
+    should later cite "the guard" as though both halves were exercised.
+    """
+    return [
+        {
+            "occurred_at": now,
+            "symbol": e.symbol,
+            "path": e.path,
+            "cohort": e.cohort,
+            "depth": e.depth_0_5pct_usdt,
+            "spread": e.spread_bps,
+            "depth_floor": DEPTH_FLOOR_USDT,
+            "spread_max": SPREAD_MAX_BPS,
+            "depth_ratio": SEVERE_DEPTH_RATIO,
+            "spread_ratio": SEVERE_SPREAD_RATIO,
+            "depth_sev": e.depth_0_5pct_usdt < DEPTH_FLOOR_USDT * SEVERE_DEPTH_RATIO,
+            "spread_sev": e.spread_bps > SPREAD_MAX_BPS * SEVERE_SPREAD_RATIO,
+            "retained": e.symbol in retained,
+        }
+        for e in events
+    ]
+
+
 Cohort = Literal["established_top20", "liquidity_added_spot", "futures_poll"]
 
 
@@ -428,6 +483,10 @@ async def refresh_live_fleet_universe(
     # override loop below logs loudly, not silently, when it re-adds one
     # of these (operator's explicit "flag it loudly" instruction).
     fast_exited: set[str] = set()
+    # Durable severity record (2026-10-22). Accumulated here and
+    # written with the snapshot, because override_retained is not
+    # knowable until `results` is final.
+    severity_events: list[SeverityEvent] = []
     for sym in candidates:
         currently_in = sym in prior
         if not prior:
@@ -487,6 +546,15 @@ async def refresh_live_fleet_universe(
                         sym, last_check.depth_0_5pct_usdt, last_check.spread_bps,
                         DEPTH_FLOOR_USDT, SPREAD_MAX_BPS, N_SAMPLES,
                     )
+                    severity_events.append(SeverityEvent(
+                        symbol=sym, path=SEVERITY_PATH_SAMPLED,
+                        cohort=_classify_cohort(
+                            sym, baseline=baseline_symbols,
+                            futures_only=futures_only,
+                        ),
+                        depth_0_5pct_usdt=last_check.depth_0_5pct_usdt,
+                        spread_bps=last_check.spread_bps,
+                    ))
                 else:
                     keep = pass_count > EXIT_MAX_PASSES  # anything but unanimous failure
             else:
@@ -594,6 +662,12 @@ async def refresh_live_fleet_universe(
                         sym, QVOL_FLOOR_USDT, prior[sym].depth_0_5pct_usdt,
                         prior[sym].spread_bps, DEPTH_FLOOR_USDT, SPREAD_MAX_BPS,
                     )
+                    severity_events.append(SeverityEvent(
+                        symbol=sym, path=SEVERITY_PATH_QVOL_PREFILTER,
+                        cohort=prior[sym].cohort,
+                        depth_0_5pct_usdt=prior[sym].depth_0_5pct_usdt,
+                        spread_bps=prior[sym].spread_bps,
+                    ))
                 else:
                     log.info("live_fleet_universe: retaining %s past exit -- open position", sym)
                 results[sym] = prior[sym]  # last-known-good numbers, not re-sampled
@@ -639,6 +713,12 @@ async def refresh_live_fleet_universe(
                             sym, check.depth_0_5pct_usdt, check.spread_bps,
                             DEPTH_FLOOR_USDT, SPREAD_MAX_BPS,
                         )
+                        severity_events.append(SeverityEvent(
+                            symbol=sym, path=SEVERITY_PATH_RESCUE,
+                            cohort=rescue_cohort,
+                            depth_0_5pct_usdt=check.depth_0_5pct_usdt,
+                            spread_bps=check.spread_bps,
+                        ))
                 except Exception as e:  # noqa: BLE001
                     log.error(
                         "live_fleet_universe: %s has an open position, no prior "
@@ -657,6 +737,23 @@ async def refresh_live_fleet_universe(
                 {"sym": entry.symbol, "cohort": entry.cohort, "qvol": entry.qvol_24h,
                  "spread": entry.spread_bps, "depth": entry.depth_0_5pct_usdt, "ts": now},
             )
+        # Severity events last, in the SAME transaction as the snapshot
+        # they describe -- a row here with no corresponding snapshot, or
+        # the reverse, would be unreadable afterwards.
+        for row in _severity_rows(severity_events, now=now, retained=set(results)):
+            await session.execute(
+                sa.text(
+                    "INSERT INTO liquidity_severity_events "
+                    "(occurred_at, symbol, path, cohort, depth_0_5pct_usdt, "
+                    "spread_bps, depth_floor_usdt, spread_max_bps, "
+                    "severe_depth_ratio, severe_spread_ratio, depth_is_severe, "
+                    "spread_is_severe, override_retained) "
+                    "VALUES (:occurred_at, :symbol, :path, :cohort, :depth, "
+                    ":spread, :depth_floor, :spread_max, :depth_ratio, "
+                    ":spread_ratio, :depth_sev, :spread_sev, :retained)"
+                ),
+                row,
+            )
         await session.commit()
 
     return list(results.values())
@@ -665,6 +762,8 @@ async def refresh_live_fleet_universe(
 __all__ = [
     "N_SAMPLES", "SAMPLE_GAP_SECONDS", "ENTRY_MIN_PASSES", "EXIT_MAX_PASSES",
     "SEVERE_DEPTH_RATIO", "SEVERE_SPREAD_RATIO",
+    "SEVERITY_PATH_SAMPLED", "SEVERITY_PATH_RESCUE",
+    "SEVERITY_PATH_QVOL_PREFILTER", "SeverityEvent",
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
     "load_baseline_symbols", "load_live_fleet_universe", "refresh_live_fleet_universe",
     "fetch_futures_and_futures_only_symbols",

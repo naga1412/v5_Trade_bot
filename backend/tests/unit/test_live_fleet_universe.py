@@ -19,7 +19,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.data.ratelimit import RateLimitedClient, TokenBucket
 from app.shadow import live_fleet_universe as lfu_mod
+from app.data.futures_liquidity import DEPTH_FLOOR_USDT, SPREAD_MAX_BPS
 from app.shadow.live_fleet_universe import (
+    SEVERE_DEPTH_RATIO,
+    SEVERE_SPREAD_RATIO,
     get_open_position_symbols,
     has_open_position,
     load_live_fleet_universe,
@@ -65,6 +68,23 @@ async def session_factory():
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "symbol TEXT NOT NULL, "
             "status TEXT NOT NULL DEFAULT 'closed')"
+        ))
+        await conn.execute(sa.text(
+            "CREATE TABLE liquidity_severity_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "occurred_at TEXT NOT NULL, "
+            "symbol TEXT NOT NULL, "
+            "path TEXT NOT NULL, "
+            "cohort TEXT, "
+            "depth_0_5pct_usdt REAL NOT NULL, "
+            "spread_bps REAL NOT NULL, "
+            "depth_floor_usdt REAL NOT NULL, "
+            "spread_max_bps REAL NOT NULL, "
+            "severe_depth_ratio REAL NOT NULL, "
+            "severe_spread_ratio REAL NOT NULL, "
+            "depth_is_severe BOOLEAN NOT NULL, "
+            "spread_is_severe BOOLEAN NOT NULL, "
+            "override_retained BOOLEAN NOT NULL)"
         ))
         await conn.execute(sa.text(
             "CREATE TABLE shadow_open_positions ("
@@ -1479,3 +1499,243 @@ async def test_unsampled_retention_with_healthy_prior_logs_info(session_factory,
     assert not any("HEALTHYHELDUSDT" in r.getMessage() for r in errors)
     assert any("retaining HEALTHYHELDUSDT past exit" in r.getMessage()
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------
+# 4c. Durable severity persistence (2026-10-22). The ERROR logs are for
+#     a human reading live; `liquidity_severity_events` answers "has
+#     this happened, and when" after the log retention window has
+#     closed. This project has shipped log-only instrumentation three
+#     times (FU-47, the entry-timing recon's eight lost days, #447's
+#     detector streaks) and the output was unreadable every time.
+# ---------------------------------------------------------------------
+
+
+async def _severity_rows_in(session_factory) -> list[dict]:
+    async with session_factory() as session:
+        rows = (await session.execute(sa.text(
+            "SELECT symbol, path, cohort, depth_0_5pct_usdt, spread_bps, "
+            "depth_floor_usdt, spread_max_bps, severe_depth_ratio, "
+            "severe_spread_ratio, depth_is_severe, spread_is_severe, "
+            "override_retained FROM liquidity_severity_events "
+            "ORDER BY symbol"
+        ))).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_fixture_schema_matches_the_migration(session_factory) -> None:
+    """DRIFT GUARD. The SQLite fixture above hand-mirrors the Postgres
+    migration, so the two can diverge silently -- the suite would stay
+    green while prod failed on a missing or renamed column.
+
+    This EXECUTES the migration's real ``upgrade()`` against a scratch
+    SQLite database and compares the column set it produces against the
+    fixture's. An earlier version parsed the migration's text; that was
+    replaced, because a wrong parser makes a text-based guard vacuous
+    and this project has a standing rule about checks that cannot fail.
+
+    It is the ONLY test here that catches a column added to the
+    MIGRATION but not the fixture: the INSERT does not name such a
+    column, so every other test passes while a NOT NULL column in prod
+    would reject the insert.
+
+    MUTATIONS RUN: a column renamed in the fixture only -> red; a column
+    added to the migration only -> red, and red HERE ALONE.
+    """
+    import importlib.util
+    import pathlib
+
+    import alembic
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    mig_path = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "alembic" / "versions"
+        / "2026_10_22_0043_liquidity_severity_events.py"
+    )
+    assert mig_path.is_file(), f"migration not found at {mig_path}"
+
+    engine = sa.create_engine("sqlite://")
+    with engine.begin() as conn:
+        ops = Operations(MigrationContext.configure(conn))
+        saved = getattr(alembic, "op", None)
+        alembic.op = ops  # the migration does `from alembic import op`
+        try:
+            spec = importlib.util.spec_from_file_location("_mig0043_guard", mig_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.upgrade()
+        finally:
+            alembic.op = saved
+        migration_cols = {
+            r[1] for r in conn.exec_driver_sql(
+                "PRAGMA table_info(liquidity_severity_events)")
+        }
+        # the migration must also chain correctly and clean up after itself
+        assert mod.down_revision == "0042_symsrc_null"
+        mod_op_saved = getattr(alembic, "op", None)
+        alembic.op = ops
+        try:
+            mod.downgrade()
+        finally:
+            alembic.op = mod_op_saved
+        left = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'liquidity_severity%'"
+        ).fetchall()
+    assert left == [], f"downgrade left objects behind: {left}"
+
+    async with session_factory() as session:
+        info = (await session.execute(
+            sa.text("PRAGMA table_info(liquidity_severity_events)")
+        )).all()
+    fixture_cols = {r[1] for r in info}
+
+    assert len(migration_cols) >= 10, (
+        f"migration produced only {migration_cols} -- it did not really run"
+    )
+    assert fixture_cols == migration_cols, (
+        f"fixture/migration drift -- only in migration: "
+        f"{sorted(migration_cols - fixture_cols)}; only in fixture: "
+        f"{sorted(fixture_cols - migration_cols)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rescue_severity_is_persisted_with_path_and_floors(session_factory) -> None:
+    """The rescue path writes one self-describing row.
+
+    MUTATION RUN: deleted the severity_events.append in the rescue branch
+    -> red.
+    """
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('PERSRESC/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "PERSRESCUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["PERSRESCUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_thin_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+    await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    rows = await _severity_rows_in(session_factory)
+    assert len(rows) == 1, rows
+    r = rows[0]
+    assert r["symbol"] == "PERSRESCUSDT"
+    assert r["path"] == "rescue"
+    # self-describing: the thresholds in force are stored WITH the reading
+    assert r["depth_floor_usdt"] == DEPTH_FLOOR_USDT
+    assert r["spread_max_bps"] == SPREAD_MAX_BPS
+    assert r["severe_depth_ratio"] == SEVERE_DEPTH_RATIO
+    assert r["severe_spread_ratio"] == SEVERE_SPREAD_RATIO
+    # which ARM fired, recorded separately -- the spread arm has never
+    # fired in production and must not be implied by a bare "severe"
+    assert r["depth_is_severe"]
+    assert not r["spread_is_severe"]
+    # the override never strands a live position
+    assert r["override_retained"]
+
+
+@pytest.mark.asyncio
+async def test_qvol_prefilter_severity_is_persisted(session_factory) -> None:
+    """The unsampled-retention path writes its own distinct path label.
+
+    MUTATION RUN: deleted the severity_events.append in the elif branch
+    -> red.
+    """
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('PERSHELDUSDT', 'liquidity_added_spot', 25000000, 4.45, 9274, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.execute(sa.text(
+            "INSERT INTO shadow_open_positions (symbol) VALUES ('PERSHELDUSDT')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "PERSHELDUSDT", "quoteVolume": "1000000"}]
+    transport = _mock_transport(
+        futures_symbols=["PERSHELDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_deep_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+    await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    rows = await _severity_rows_in(session_factory)
+    assert len(rows) == 1, rows
+    assert rows[0]["path"] == "qvol_prefilter"
+    assert rows[0]["depth_0_5pct_usdt"] == 9274
+    assert rows[0]["override_retained"]
+
+
+@pytest.mark.asyncio
+async def test_fast_exit_without_open_position_persists_retained_false(
+    session_factory,
+) -> None:
+    """THE ROW THAT HAS NEVER BEEN OBSERVED IN PRODUCTION: the guard
+    fires and the symbol is actually DROPPED, because nothing holds it
+    open. `override_retained` must be False -- that is the difference
+    between the guard working and the guard being overridden, and
+    without this column the table could not tell them apart.
+
+    MUTATION RUN: hardcoded `retained` to True in _severity_rows -> red.
+    """
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_fleet_universe "
+            "(symbol, cohort, qvol_24h, spread_bps, depth_0_5pct_usdt, snapshot_at) "
+            "VALUES ('DROPPEDUSDT', 'liquidity_added_spot', 25000000, 2.0, 60000, "
+            "'2026-08-16T00:00:00')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "DROPPEDUSDT", "quoteVolume": "25000000"}]
+    provider = _pattern_depth_provider({
+        "DROPPEDUSDT": [False, False, False, False, False],
+    }, fail_book=_severe_depth_book)
+    transport = _mock_transport(
+        futures_symbols=["DROPPEDUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=provider,
+    )
+    http = httpx.AsyncClient(transport=transport)
+    entries = await refresh_live_fleet_universe(
+        session_factory, http, _rate_client(transport))
+
+    assert "DROPPEDUSDT" not in {e.symbol for e in entries}  # actually dropped
+    rows = await _severity_rows_in(session_factory)
+    assert len(rows) == 1, rows
+    assert rows[0]["path"] == "sampled_severe"
+    assert not rows[0]["override_retained"]
+
+
+@pytest.mark.asyncio
+async def test_marginal_failure_persists_nothing(session_factory) -> None:
+    """NEGATIVE CONTROL. A retention that is off-floor but NOT severe
+    must write no row at all -- off-floor retention is routine (1-16
+    rows/day in prod) and logging it here would bury the ~2/month
+    signal this table exists to preserve.
+
+    MUTATION RUN: made _is_severe return True unconditionally -> red.
+    """
+    async with session_factory() as session:
+        await session.execute(sa.text(
+            "INSERT INTO live_trades (symbol, status) VALUES ('PERSMARG/USDT', 'open')"
+        ))
+        await session.commit()
+
+    tickers = [{"symbol": "PERSMARGUSDT", "quoteVolume": "30000000"}]
+    transport = _mock_transport(
+        futures_symbols=["PERSMARGUSDT"], spot_symbols=[],
+        tickers=tickers, depth_provider=_marginal_thin_book,
+    )
+    http = httpx.AsyncClient(transport=transport)
+    await refresh_live_fleet_universe(session_factory, http, _rate_client(transport))
+
+    assert await _severity_rows_in(session_factory) == []
