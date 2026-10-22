@@ -163,11 +163,48 @@ four horizons, two clustering axes and a non-overlapping replication.
 The answer is no, and the reason is now mechanistic rather than
 statistical.
 
-**What is NOT closed:** whether the scorer's own **0.05–0.56 effective
-ceiling** is the constraint. A variable that never exceeds 0.57 across
-44,525 observations may lack the dynamic range to express direction at
-all. That is a question about building a different scorer, not about
-measuring this one harder.
+### The 0.05–0.56 ceiling is NOT the constraint, and that question is closed
+
+**Retracted 2026-10-22, same day it was raised.** The pre-registration
+framed the compressed output range as a possible limit, the result
+document repeated it, and it is wrong on its own terms.
+
+**Every test here was a DECILE SPLIT, and deciles are invariant under any
+monotonic transformation.** Deciles of `tanh(raw/3.0)` *are* deciles of
+`raw`. A compressed output range cannot hide a rank-order relationship
+from a rank-based test, so the +8.62σ MAE result and the +3.69σ MFE
+result are unaffected by the compression.
+
+**What the narrow range actually affected was expressing the result as a
+slope per score unit** — `+1.251 R/unit` divides by a contrast that a
+rescaling would change. That is a **presentation choice, not a power
+limit**, and treating the two as the same thing is what made the ceiling
+look like an open question.
+
+**So rescaling cannot help.** And the other half — *could a different
+COMBINATION of the same inputs do better* — is already measured: that is
+precisely what the brain asked, and it **failed out-of-sample with the
+sign reversed** (in-sample +15.66σ against held-out −1.19σ).
+
+**A DIFFERENT SCORER OVER THE SAME INPUTS IS CLOSED, on two independent
+arguments:** rank-invariance retires rescaling, and the brain's
+out-of-sample failure retires recombination.
+
+### What remains genuinely open: NEW INPUTS
+
+Not a re-measurement of anything here, and each one is a new pipeline
+rather than a new split:
+
+- **order flow** — the flow-feature snapshots exist but were never
+  scored.
+- **cross-sectional ranking** — every test in this project scores a
+  symbol against a fixed threshold, never against the rest of the fleet
+  at the same instant.
+- **longer timeframes** — everything here is 1h and 15m.
+
+**That is the honest boundary of the do-not-reopen.** Re-splitting,
+rescaling or recombining the current inputs is closed. Adding an input
+the scorer has never seen is not, and is also not cheap.
 
 ## Related
 
