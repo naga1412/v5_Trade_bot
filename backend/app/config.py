@@ -267,6 +267,22 @@ class Settings(BaseSettings):
     # Validated against 89 SHORT trades / WR 19.1% vs 74 LONG / WR 27.0% —
     # the model's score distribution lacks a high-conviction SHORT tail.
     MIN_ENTRY_SCORE_LONG: float | None = None
+    # MIN_ENTRY_SCORE_SHORT: the SHORT-side mirror of the bar above.
+    # None (default) = no bar on shorts, which is TODAY'S BEHAVIOUR and
+    # the reason flipping DISABLE_SHORT_SIGNALS alone is not safe: the
+    # SHORT half would arrive ungated. Set to 0.36 for symmetry with
+    # MIN_ENTRY_SCORE_LONG.
+    #
+    # THIS IS A VOLUME CONTROL, NOT A QUALITY ONE. entry_score measured
+    # 0.33 sigma against realised outcome -- it does not separate winners
+    # from losers well enough to be called a filter. Raising the bar cuts
+    # the number of cards the operator has to verify by hand; it should
+    # not be expected to improve win rate, and nobody should later read
+    # it as having done so.
+    #
+    # Deliberately a separate setting from DISABLE_SHORT_SIGNALS so the
+    # bar and the shorts flag can be reverted independently of each other.
+    MIN_ENTRY_SCORE_SHORT: float | None = None
     DISABLE_SHORT_SIGNALS: bool = False
     SHADOW_ALLOW_SHORTS: bool = False
     # SHADOW_IGNORE_MIN_SCORE: when True, the shadow worker overrides a

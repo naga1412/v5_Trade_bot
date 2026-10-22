@@ -197,9 +197,72 @@ def _check_adx(signal: Any, settings: Any) -> _CheckResult:
     )
 
 
+def _check_min_score_short(signal: Any, settings: Any) -> _CheckResult:
+    """SHORT-side mirror of the score bar, in magnitude terms.
+
+    A short's entry_score is negative, so its conviction is -entry_score.
+    L2 agreement strengthens a short (more negative), which in magnitude
+    terms is +boost -- the same arithmetic as LONG once the sign is
+    folded out, which is why this mirrors rather than duplicates.
+    """
+    threshold = getattr(settings, "MIN_ENTRY_SCORE_SHORT", None)
+    entry_score = getattr(signal, "entry_score", None)
+    if threshold is None or entry_score is None:
+        return _CheckResult(
+            False, False, None,
+            "MIN_ENTRY_SCORE_SHORT unset or entry_score missing -- no short bar",
+        )
+    magnitude = -float(entry_score)
+    boost_detail: str | None = None
+    if getattr(settings, "PATTERN_BOOST_ENABLED", False):
+        min_conf = float(getattr(settings, "PATTERN_BOOST_MIN_CONFIDENCE", 0.6))
+        boost = float(getattr(settings, "PATTERN_BOOST_AMOUNT", 0.10))
+        penalty = float(getattr(settings, "PATTERN_PENALTY_AMOUNT", 0.15))
+        if _layer2_agrees_with_signal("SHORT", signal, min_conf):
+            magnitude = min(1.0, magnitude + boost)
+            boost_detail = f"L2_boost={boost:.2f}"
+        elif _layer2_opposes_signal("SHORT", signal, min_conf):
+            magnitude = max(-1.0, magnitude - penalty)
+            boost_detail = f"L2_penalty={penalty:.2f}"
+    if magnitude < float(threshold):
+        legacy = (
+            f"below_short_threshold ({boost_detail})"
+            if boost_detail is not None else "below_short_threshold"
+        )
+        verbose = f"|effective_score|={magnitude:.3f} < {float(threshold):.3f}"
+        if boost_detail is not None:
+            verbose += f" ({boost_detail})"
+        return _CheckResult(True, True, legacy, verbose)
+    return _CheckResult(
+        False, False, None,
+        f"|effective_score|={magnitude:.3f} >= {float(threshold):.3f}",
+    )
+
+
 def _check_min_score(direction: str, signal: Any, settings: Any) -> _CheckResult:
-    if direction != "LONG":
-        return _CheckResult(False, False, None, "direction != LONG")
+    """Score bar, applied per direction.
+
+    LONG compares effective_score against MIN_ENTRY_SCORE_LONG. SHORT
+    compares its MAGNITUDE (-entry_score, since a short's score is
+    negative) against MIN_ENTRY_SCORE_SHORT, which defaults to None =
+    no bar, preserving the behaviour that existed before this was added.
+
+    Before 2026-10-21 this returned early for any direction != LONG, so
+    shorts faced no score bar at all. That is harmless while
+    DISABLE_SHORT_SIGNALS is True and becomes the dominant fact the
+    moment it is flipped: measured on the real dispatch stream
+    (predictions, 30d, deduped per symbol per 12h), LONG at >=0.36 runs
+    16.07/day while SHORT with NO bar runs 124.10/day. Flipping the
+    shorts flag alone would take the operator from ~16 cards/day to
+    ~140 -- for someone who verifies every card by hand.
+
+    THE BAR IS A VOLUME CONTROL, NOT A QUALITY ONE: entry_score measured
+    0.33 sigma against realised outcome.
+    """
+    if direction not in ("LONG", "SHORT"):
+        return _CheckResult(False, False, None, "direction not LONG or SHORT")
+    if direction == "SHORT":
+        return _check_min_score_short(signal, settings)
     long_threshold = getattr(settings, "MIN_ENTRY_SCORE_LONG", None)
     entry_score = getattr(signal, "entry_score", None)
     if long_threshold is None or entry_score is None:
