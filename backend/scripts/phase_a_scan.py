@@ -68,6 +68,13 @@ FETCH_CONCURRENCY = 5
 # runs for minutes over `ssh ... docker compose exec` must keep writing.
 PROGRESS_EVERY = 100
 
+# Fixed bar horizons from entry, for the PRE-TREATMENT dose-response.
+# Realised duration is POST-TREATMENT -- it is decided by when a barrier
+# was hit -- so stratifying on it conditions on a collider: a trade that
+# runs fast hits TP early (short hold), one that goes nowhere times out
+# (long hold). A horizon fixed by design carries no such dependence.
+MFE_HORIZONS = (5, 10, 20, 40)
+
 
 @dataclass
 class Row:
@@ -94,6 +101,7 @@ class Row:
     closed_at: object
     # filled after bars are fetched
     mfe_r: float = 0.0
+    mfe_at: dict = field(default_factory=dict)
     mae_r: float = 0.0
     model_outcome: str = "unknown"
     bars: list[Bar] = field(default_factory=list)
@@ -433,16 +441,36 @@ async def main() -> int:
         async with sem:
             try:
                 _iv, bar_ms = _TF_TO_INTERVAL.get(r.timeframe, ("1h", 3600000))
+                # Fetch to the LONGEST fixed horizon, not just to the exit.
+                # A trade that exited at bar 3 still needs bars 4..40 for
+                # its 40-bar horizon. Clipping to closed_at is what made
+                # the stop-width test unanswerable (#585); same trap.
+                horizon_end = r.opened_ms + (max(MFE_HORIZONS) + 1) * bar_ms
                 bars = await _fetch_bars_at_tf(
                     client, r.symbol, r.opened_ms - bar_ms,
-                    r.closed_ms + bar_ms, timeframe=r.timeframe,
+                    max(r.closed_ms, horizon_end) + bar_ms,
+                    timeframe=r.timeframe,
                 )
             except Exception as e:  # noqa: BLE001
                 failures.append(
                     (r.trade_id, r.symbol, f"{type(e).__name__}: {e}"))
                 _tick()
                 return None
-        bars = [b for b in bars if r.opened_ms <= b.ts_ms <= r.closed_ms]
+        # Realised-path window (unchanged): MFE_R / MAE_R are properties
+        # of what actually happened, so they stay clipped to the hold.
+        fetched = bars
+        bars = [b for b in fetched if r.opened_ms <= b.ts_ms <= r.closed_ms]
+        # Fixed-horizon window: first N bars from entry, exit ignored.
+        fwd = sorted(
+            (b for b in fetched if b.ts_ms >= r.opened_ms),
+            key=lambda b: b.ts_ms,
+        )
+        if r.r_unit > 0:
+            for h in MFE_HORIZONS:
+                seg = fwd[:h]
+                if len(seg) == h:
+                    r.mfe_at[h] = max(
+                        (b.high - r.entry_price) / r.r_unit for b in seg)
         if not bars or r.r_unit <= 0:
             no_bars.append(r.trade_id)
             _tick()
@@ -681,6 +709,45 @@ async def main() -> int:
                 lo_desc="mtf<4", hi_desc="mtf>=4",
                 note="duration held roughly fixed; not one of the 12",
             )
+
+    # ---- PRE-TREATMENT DOSE-RESPONSE: MFE at FIXED horizons ---------
+    # The realised-duration dose-response below conditions on a
+    # post-treatment variable (a collider), so "the advantage rises with
+    # hold length" cannot be read causally from it. These horizons are
+    # fixed BY DESIGN and therefore pre-treatment.
+    #
+    # NOTE ON INTERPRETATION: for a trade that exited early this includes
+    # price action AFTER our exit, so it is NOT capturable P&L. It
+    # measures what the SIGNAL knew about the path, which is the question
+    # -- but it must not be read as achievable return.
+    print("")
+    print("  --- PRE-TREATMENT DOSE-RESPONSE: MFE at fixed bar horizons --")
+    print("  Realised duration is post-treatment (decided by which barrier")
+    print("  was hit first), so stratifying on it conditions on a collider.")
+    print("  A horizon fixed by design does not. If the advantage WIDENS")
+    print("  across fixed horizons the compounding claim is established; if")
+    print("  it is FLAT here while rising across realised-duration strata,")
+    print("  the dose-response was the collider talking.")
+    mh = [r for r in rows if r.mtf_agreement is not None]
+    print("")
+    print("    horizon | n_lo  n_hi | mfe_lo   mfe_hi  |     diff      SE   sigma")
+    for h in MFE_HORIZONS:
+        a_ = [r.mfe_at[h] for r in mh
+              if r.mtf_agreement < 4 and h in r.mfe_at]
+        b_ = [r.mfe_at[h] for r in mh
+              if r.mtf_agreement >= 4 and h in r.mfe_at]
+        c_ = contrast(a_, b_)
+        if not c_.get("ok"):
+            print(f"    {h:>7} | insufficient cells "
+                  f"(n_lo={len(a_)} n_hi={len(b_)})")
+            continue
+        print(f"    {h:>7} | {c_['lo']['n']:>4}  {c_['hi']['n']:>4} | "
+              f"{c_['lo']['mean']:>7.4f} {c_['hi']['mean']:>8.4f} | "
+              f"{c_['diff']:>+8.4f} {c_['se_diff']:>7.4f} "
+              f"{c_['sigma']:>+6.2f}")
+    print("    (n shrinks with horizon: a trade too recent to have 40 bars")
+    print("     of forward data is excluded from that horizon, not")
+    print("     zero-filled.)")
 
     # ---- DURATION-ADJUSTED ESTIMATE (stratified) --------------------
     # The tercile bands are too coarse to settle duration: the top band
