@@ -508,6 +508,177 @@ aimed at the gap it alone covers could. **For every guard, ask: what
 breaks that ONLY this catches? If the answer is "nothing", it is
 decoration, however green it is.**
 
+## THE LIMIT OF MUTATION TESTING: a test that correctly enforces a FALSE property
+
+**Status: standing rule, and it bounds the whole discipline this
+document recommends.** Added 2026-10-22.
+
+**MUTATION TESTING CANNOT CATCH A TEST THAT CORRECTLY ENFORCES A FALSE
+PROPERTY.** Break the implementation and such a test goes red, so it
+looks load-bearing. **It IS load-bearing — it is bearing the wrong
+load.** It would pass every mutation, and it would have actively
+resisted a correct implementation.
+
+This is **worse than a check that cannot fail.** A check that cannot
+fail is inert: it protects nothing. A test enforcing a false property is
+hostile: it pins a wrong belief in place and fails anyone who tries to
+fix it.
+
+### The instance
+
+A probe's entire statistical content was a cluster-robust standard
+error. Its central test asserted *"clustering inflates the SE when rows
+within a cluster resemble each other"*, with treatment **balanced**
+inside each cluster. Worked through analytically, that construction
+makes the clustered SE **smaller**, correctly, because the per-cluster
+contrast is then very precisely estimated.
+
+**The test was coherent, it would have gone red on any mutation to the
+estimator, and the property it enforced was false.** Had it shipped, the
+probe would have carried a test pinning a wrong belief about the
+estimator every one of its results depended on.
+
+### The only detector that works
+
+**Derive the property analytically, or construct a case whose answer is
+known independently of the code.** Nothing downstream substitutes:
+
+- mutation testing asks *"does my test notice when the code changes?"*
+- this asks *"is the thing my test demands actually true?"*
+
+**Mutation is downstream of believing the right thing. It cannot supply
+it.** No amount of coverage, mutation score or review catches a false
+premise shared by the code and its test, because every one of those
+techniques compares the two against each other.
+
+So, for any test that encodes a *claim about behaviour* rather than a
+*fixture-level fact*: **work the claim out on paper first.** If it cannot
+be derived, find a limiting case whose answer is known for independent
+reasons — see the degenerate-case pattern below.
+
+## The true mechanism, recorded because it is the design's justification
+
+Not abstract — it is why the probe clusters by symbol at all.
+
+**Clustering inflates a standard error when TREATMENT IS CORRELATED WITH
+CLUSTER, not when rows within a cluster resemble each other.** When
+treatment correlates with cluster, the contrast is carried by
+differences **between** clusters, and there are only **G** of those, not
+N. Balanced treatment inside clusters has the opposite effect: it makes
+the clustered SE **smaller**, which is exactly what the original wrong
+fixture accidentally demonstrated.
+
+**Why it binds in this case specifically:** extreme `entry_score`
+deciles concentrate in particular symbols, so "top decile vs bottom
+decile" is partly "these symbols vs those symbols". That correlation is
+the entire justification for symbol-clustering being primary rather than
+a precaution.
+
+## PREFER AN ESTIMATOR WITH A VERIFIABLE DEGENERATE CASE
+
+**A standing preference, and the pattern worth imitating.**
+
+The CR1 cluster-robust sandwich was written out by hand rather than
+fitted, which made one property checkable: **at G = N — every row its
+own cluster — it reduces EXACTLY to the naive independent-rows SE.** The
+algebra collapses to `SS0/N0^2 + SS1/N1^2`, identically, not
+approximately.
+
+That identity is what makes the reported **design effect**
+interpretable. Without it, a large clustered SE has two explanations —
+real within-symbol correlation, or an artefact of having switched
+estimators — and nothing distinguishes them. With it, the second is
+excluded by construction, so the inflation is **purely** the
+correlation.
+
+**Same family as the deconfounded stop-width filter**
+(`2026-10-21-counterfactual-baseline-subset.md`): on DB-confirmed
+stop-outs the baseline reads **−0.9887R**, and a stop-out is −1R by
+construction, so the filter provably selects what it claims. Both earn
+trust by **having a known answer at a known limit**.
+
+So, when choosing between estimators or filters of similar merit:
+**prefer the one with a limit where the answer is known in advance, and
+then check it there.** It converts "this looks right" into "this is
+right at a point I can verify", and that point is usually enough to
+anchor everything else.
+
+## PREFER ASSERTIONS AGAINST INDEPENDENTLY-DERIVED EXACT VALUES OVER INEQUALITIES
+
+**Standing rule, and the generalisable form of "a test that survives its
+own target mutation is asserting less than it claims".**
+
+The *corrected* version of the test above asserted
+`clustered_se > singleton_se` — and **survived the very mutation it
+existed to catch** (keying the sandwich's meat by row instead of by
+cluster). The reason is instructive: the CR1 finite-sample factor
+depends only on G, and on that fixture it alone supplies the inequality
+— **1.5556 against 1.3333** — no matter how the meat is keyed. **The
+inequality was satisfied by a mechanism other than the one under test.**
+
+The fix divides CR1 out of both sides and asserts the raw sandwich
+variances against hand-derived values:
+
+```
+singleton meat = SS0/N0^2 + SS1/N1^2 = 17/16 + 37/16 = 3.375
+clustered meat = 104/16 - 2*(1/4)*(1/2)*72 + (1/4)*72 = 6.5
+ratio                                                 = 1.926x
+```
+
+Under the mutation **both collapse to 3.375**, the ratio becomes 1.0,
+and the test reds.
+
+**An exact value can generally only be produced by the correct
+mechanism; an inequality can be satisfied accidentally.** An inequality
+leaves a whole half-line of wrong answers that still pass, and some of
+those are reachable by mechanisms adjacent to the one you meant to test.
+
+**So: assert the number, not the direction**, whenever the number can be
+derived independently. Reserve inequalities for properties that are
+genuinely ordinal (monotonicity across a ladder, a bar being stricter
+than another), and even then pin at least one exact point.
+
+## ENUMERATING GUARDS DO NOT COVER THE NEXT ADDITION
+
+The same shape, one layer out from the tests.
+
+A structural guard listed the probes that must run a committed script by
+**enumerating** them — "the 19 migrated by #600". A new file-backed
+probe added afterwards was **not** in the list, so nothing stopped it
+being reverted to an embedded script later. The guard was not wrong; its
+scope was a historical snapshot rather than a rule.
+
+Rewritten as the rule — **"every prod probe that runs a committed
+script"** — it covers additions by construction. And the difference was
+established the only way it can be: **by mutation.** Reverting the new
+probe to `PY_SCRIPT_B64` now reds the guard and names it; before, it
+passed.
+
+**A guard that enumerates its subjects silently stops covering the
+system as the system grows.** When writing one, ask whether the list is
+a rule or a snapshot, and prefer deriving membership from the property
+that made the list worth having.
+
+## Postscript: three test defects in one file, two of them inside the fix for the first
+
+Worth recording because of who it happened to and how fast.
+
+Within an hour of this document gaining the "check that cannot pass"
+entry, its author shipped, in a single test file:
+
+1. two fixtures with zero residual variance, so the estimator correctly
+   refused and the tests failed for a reason unrelated to what they
+   claimed to test;
+2. a test enforcing a **false property** of the estimator (the section
+   above);
+3. a **replacement** for (2) that survived its own target mutation
+   (the section above that).
+
+**All three were found by RUNNING the mutation, not by reasoning about
+it** — and (3) was found only because the mutation table was read row by
+row instead of glanced at for a count. The rules in this document are
+not a description of other people's mistakes.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration
