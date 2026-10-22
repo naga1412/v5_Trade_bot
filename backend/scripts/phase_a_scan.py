@@ -682,6 +682,72 @@ async def main() -> int:
                 note="duration held roughly fixed; not one of the 12",
             )
 
+    # ---- DURATION-ADJUSTED ESTIMATE (stratified) --------------------
+    # The tercile bands are too coarse to settle duration: the top band
+    # is OPEN-ENDED, so residual confounding is worst exactly where the
+    # effect looked strongest. This stratifies on DECILES of
+    # bars_observed, measures the mtf contrast inside each stratum, and
+    # pools them n-weighted -- the standard way to remove a confounder
+    # you can measure. Also prints each stratum's per-cell mean
+    # bars_observed, so RESIDUAL imbalance inside a stratum is visible
+    # rather than assumed away.
+    print("")
+    print("  --- DURATION-ADJUSTED (stratified on bars_observed deciles) --")
+    mrows = [r for r in rows if r.mtf_agreement is not None]
+    obs_all = sorted(float(len(r.bars)) for r in mrows)
+    if len(obs_all) >= 20:
+        cuts = [obs_all[int(len(obs_all) * i / 10)] for i in range(1, 10)]
+        print("    stratum | n_lo  n_hi | obs_lo obs_hi | diff      SE     sigma")
+        num = den = 0.0
+        var_acc = 0.0
+        shown = 0
+        for k in range(10):
+            lo_b = cuts[k - 1] if k > 0 else float("-inf")
+            hi_b = cuts[k] if k < 9 else float("inf")
+            st_rows = [r for r in mrows
+                       if lo_b <= float(len(r.bars)) < hi_b]
+            a = [r for r in st_rows if r.mtf_agreement < 4]
+            b = [r for r in st_rows if r.mtf_agreement >= 4]
+            if len(a) < 2 or len(b) < 2:
+                continue
+            ca = cell([r.mfe_r for r in a])
+            cb = cell([r.mfe_r for r in b])
+            se = (ca["se"] ** 2 + cb["se"] ** 2) ** 0.5
+            d = cb["mean"] - ca["mean"]
+            if se <= 0:
+                continue
+            w = 1.0 / (se ** 2)          # inverse-variance weighting
+            num += w * d
+            den += w
+            var_acc += w
+            oa = cell([float(len(r.bars)) for r in a])["mean"]
+            ob = cell([float(len(r.bars)) for r in b])["mean"]
+            print(f"    {k:>7} | {len(a):>4}  {len(b):>4} | "
+                  f"{oa:>6.1f} {ob:>6.1f} | {d:>+8.4f} {se:>6.4f} "
+                  f"{d / se:>+6.2f}")
+            shown += 1
+        if den > 0 and shown >= 2:
+            pooled = num / den
+            pooled_se = (1.0 / var_acc) ** 0.5
+            print("")
+            print(f"    POOLED duration-adjusted diff = {pooled:+.4f} R  "
+                  f"SE={pooled_se:.4f}  -> {pooled / pooled_se:+.2f} sigma")
+            print(f"    bar 3s={3 * pooled_se:.4f}  "
+                  f"corrected(3.68s)={3.68 * pooled_se:.4f}")
+            verdict_txt = (
+                "SURVIVES duration adjustment"
+                if abs(pooled) >= 3.68 * pooled_se else
+                "does NOT survive the corrected bar after adjustment")
+            print(f"    => {verdict_txt}")
+            print("    (unadjusted pooled diff was +0.3357 R at +5.78 sigma;")
+            print("     a materially smaller adjusted figure means the")
+            print("     unadjusted one was substantially duration.)")
+            print("    Watch obs_lo vs obs_hi per stratum: if they still")
+            print("    differ inside a stratum, residual duration remains and")
+            print("    even this estimate is an upper bound.")
+        else:
+            print("    insufficient overlapping strata")
+
     # VALIDITY DIAGNOSTIC, NOT A 13TH HYPOTHESIS. A1a passed on MFE_R,
     # but its high-mtf cell also has the larger sd (1.457 vs 1.060), so
     # the gain could be nothing more than selecting more volatile trades
