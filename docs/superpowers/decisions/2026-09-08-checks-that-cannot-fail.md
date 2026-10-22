@@ -659,6 +659,78 @@ system as the system grows.** When writing one, ask whether the list is
 a rule or a snapshot, and prefer deriving membership from the property
 that made the list worth having.
 
+## A MUTATION SCORE IS NOT THE EVIDENCE — THE PER-MUTANT ATTRIBUTION IS
+
+**Standing rule on the discipline itself.** Added 2026-10-22, and it is
+the one that would have defeated this family's own primary control.
+
+**Every mutant must be caught by the test it TARGETS, named. A mutant
+caught by a different test is a RED for the one it was aimed at, however
+green the total looks.** A score of 18/18 is an aggregate, and aggregates
+hide attribution: the targeted test can be entirely unprotected while
+the count reports perfect health.
+
+This is the same shape as every other finding in this document — **a
+healthy-looking number sitting in front of a broken thing.**
+
+### The instance, and the detail that makes it actionable
+
+Three mutation harnesses were written in one session. Two scored a
+mutant as caught if **any** test went red:
+
+```python
+missed = [lbl for lbl, c in rows if "RED" not in c.values()]
+print("ALL MUTATIONS CAUGHT" if not missed else ...)
+```
+
+The third scored against the **target** column only:
+
+```python
+missed = [r for r in results if r[2] != "RED"]   # r[2] is the TARGET test
+print("ALL MUTATIONS CAUGHT BY THEIR TARGET TEST" if not missed else ...)
+```
+
+**Only the third could detect a misattribution, and it immediately
+did** — reporting `target=pass file=RED` for the mutant that keyed a
+cluster-robust sandwich's meat by row instead of by cluster. The
+inflation test, which existed precisely to catch that, passed; unrelated
+tests caught the mutant and would have carried the aggregate to 18/18.
+
+**So the weakness is in the harness's pass criterion, not in how
+carefully the table is read.** A harness scoring "caught by at least one
+test" cannot report a misattribution no matter how attentively its
+output is examined, because it never computed the thing that would show
+one. Reading row by row rescued this case only because the right columns
+had been printed.
+
+### Applying it backwards
+
+The rule is only worth having if it is applied to work already shipped.
+Re-scored from the recorded tables under the strong criterion:
+
+- **persistence, 11 mutants** — every one red exactly the test it
+  targeted (`rescue append` → the rescue test alone; `migration-only
+  column` → the drift guard alone; and so on). Attribution clean.
+- **fast-exit severity, 6 mutants** — these are predicate mutations that
+  several tests legitimately cover, so "target" is many-to-one and the
+  criterion applies in its other direction: does each test claiming to
+  protect the predicate go red for something? One did not.
+  `test_fast_exit_does_not_apply_to_entry_candidates` survived **all
+  six** — it pins the `currently_in` scoping, not the threshold — which
+  is why the record says **four tests protect that predicate, not
+  five.** That conclusion came from reading the per-mutant grid, and no
+  aggregate could have produced it.
+
+### The two directions, both required
+
+| question | what it catches |
+|---|---|
+| did each mutant red **its own target**? | a test that is not protecting what it claims |
+| did each test red for **some** mutant? | a test that protects nothing at all |
+
+A harness reporting a single score answers neither. **Print the grid,
+score against the target, and state which test caught what.**
+
 ## Postscript: three test defects in one file, two of them inside the fix for the first
 
 Worth recording because of who it happened to and how fast.
@@ -675,9 +747,15 @@ entry, its author shipped, in a single test file:
    (the section above that).
 
 **All three were found by RUNNING the mutation, not by reasoning about
-it** — and (3) was found only because the mutation table was read row by
-row instead of glanced at for a count. The rules in this document are
-not a description of other people's mistakes.
+it.** (3) was found because the harness for that file scored each
+mutant against the test it TARGETED rather than against the whole
+suite — the two harnesses written earlier in the same session used the
+weaker "caught by any test" criterion and could not have surfaced it
+at all. See the attribution rule above: the rescue was the harness's
+pass criterion, not attentive reading.
+
+The rules in this document are not a description of other people's
+mistakes.
 
 ## Related
 
