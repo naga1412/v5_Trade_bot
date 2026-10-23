@@ -89,3 +89,45 @@ reasons:
 **Cost it before proposing it** was the instruction, and the cost is
 the answer: a year of accrual to confirm a post-hoc subgroup of a
 failed pre-registration is not worth the lane. Leave it.
+
+## THE REVERSAL SURVIVED A NAMED, PRE-COMMITTED CHALLENGE (2026-10-23)
+
+**This is the useful part for whoever reads it next, and it is why this
+closure is stronger than one that was never challenged.**
+
+A specific mechanism was proposed by which the reversal could have been
+a measurement artifact rather than a real effect:
+
+> The breakeven arming threshold is **R-denominated** (0.40R / 0.50R).
+> Shadow caps `R` at 5% of entry; live does not. So on cap-bound trades
+> shadow armed breakeven at a **tighter price level** than live would
+> have — and a tighter arming level is more likely to be touched out. If
+> the post-expansion cohort were higher-ATR, it would be more
+> cap-bound, so shadow would have armed even earlier on exactly the
+> cohort that produced the negative read.
+
+**The decision rule was written before the data was pulled:** materially
+higher cap-bind post-expansion would mean the reversal had an artifact
+explanation and the withdrawal was premature; similar rates across
+cohorts would mean the reversal stands.
+
+**Measured, 1h lane:** cap-bind **11.84% pre-expansion** against
+**8.54% post**. On 15m, **2.45%** against **1.34%**. **Lower
+post-expansion on both lanes — the mechanism runs OPPOSITE to the
+hypothesis.**
+
+More cap-binding *pre*-expansion means shadow armed breakeven earlier on
+the **pre** cohort, which biases the **+0.65%** figure downward rather
+than the post figure. Correcting for it would, if anything, **widen**
+the gap the reversal reports.
+
+**The premise also failed at its first link.** The challenge assumed the
+post-expansion cohort was noisier. Per-trade `pnl_pct` sd on the 1h lane
+is **5.048 pre** against **5.050 post** — identical to three figures.
+The SE difference that motivated "noisier" (0.73 vs 0.46) comes from
+**n, not variance**: 684 rows against 480, differing by sqrt(n) alone.
+
+**So: a result that has defeated a specific, named, pre-committed
+attempt to explain it away is worth more than one nobody tried to
+explain away.** The withdrawal stands, and it now stands on a stronger
+footing than when it was made.
