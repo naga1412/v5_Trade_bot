@@ -276,12 +276,21 @@ rather than an arbitrary lookahead. That is luck, not design.
 **Two honest qualifications, because the property is weaker than it
 first looks:**
 
-1. **It matches the MEANS, not the medians.** Median hold is 4 bars to a
-   stop and 7 to a target (the pooled median was not measured), so
-   horizon 10 is roughly **1.4-2.5x the per-exit medians** and
-   **1.17x the all-exit mean**. The distribution is heavily right-skewed; "matches
-   the holding period" is true of its centre of mass and not of its
-   typical trade.
+1. **It matches the MEANS, not the medians -- so the band describes a
+   window LONGER than most trades actually occupy.** Median hold is 4
+   bars to a stop and 7 to a target (the pooled median was not
+   measured), against a horizon of 10: roughly **1.4-2.5x the per-exit
+   medians** and **1.17x the all-exit mean**. The distribution is
+   heavily right-skewed.
+
+   **This is not a defect** -- the measurement was taken at horizon 10
+   and the band is the band. But *"describes the exposure window"* is
+   true of the **centre of mass** and **not of the typical trade**, and
+   someone will eventually read it the looser way. For a median trade
+   the band describes a window about twice as long as the trade lasts,
+   so the realised swing on such a trade will usually be **smaller**
+   than the band -- not because the band is wrong, but because the trade
+   ended first.
 2. **The figures that motivated this check were the 15m lane's.** The
    recalled numbers were 8.1 bars to a stop and 12.0 to a target; 15m
    measures **8.28 / 13.63**, and 1h measures **6.78 / 11.06**. The

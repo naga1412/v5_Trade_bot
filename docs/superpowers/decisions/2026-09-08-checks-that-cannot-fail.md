@@ -781,6 +781,52 @@ immediately. **So write rates with their denominator attached**, not
 because it is more rigorous but because it makes this error impossible
 to commit silently.
 
+### THE MECHANICAL FORM: a figure without its population attached is not quotable
+
+**The rule above is a principle, and a principle was not enough.** Four
+instances in one week, and the rule's own author violated it **within a
+day of writing it**. That is sufficient evidence it cannot survive as
+something to remember.
+
+**So attach the population AT THE POINT OF RECORDING, not at the point
+of quoting:**
+
+```
+BAD   6.78 bars
+GOOD  6.78 bars (1h LONG closed, n=831)
+
+BAD   cap-bind 4.12%
+GOOD  cap-bind 4.12% (all LONG shadow trades, n=4,713)
+```
+
+The point is not politeness about provenance. **It is that a bare figure
+looks safe to reuse and an annotated one visibly does not.** "6.78
+bars" can be dropped into any sentence; "6.78 bars (1h LONG closed,
+n=831)" resists being dropped into a sentence about 15m, because the
+mismatch is sitting in the quote.
+
+### The four instances
+
+| figure | computed over | applied to | correct value |
+|---|---|---|---|
+| cap-bind **4.12%** | all LONG shadow trades | the 1h card lane | **10.48%** |
+| **0/81** symbols met the severity condition | one day's snapshot | the whole recorded history | **76 occurrences** |
+| hold **8.1 / 12.0** bars | the **15m** lane | the 1h card lane | **6.78 / 11.06** |
+| four horizons agreeing | nested windows on the same rows | four independent confirmations | **one** observation |
+
+The fourth is the same family at one remove: not a population mismatch
+but a **dependence** mismatch, where the figure was applied beyond the
+independence its computation assumed. The failure mode is identical --
+a number used outside the scope that produced it.
+
+**The fourth instance occurred inside an attempt to validate a horizon
+choice**, and the third inside an attempt to record a rule. **The error
+does not avoid the work of being careful; it attaches to it.** Which is
+the argument for the mechanical form over the principle: annotation is
+checkable by a reader who knows nothing about the figure's history,
+whereas "name the population" requires the person quoting to remember a
+rule at the moment they are least likely to.
+
 ## AN ENV FLIP IS NOT APPLIED UNTIL THE RUNNING OBJECT HAS BEEN READ BACK
 
 **Standing rule.** The configuration-layer member of this family, and
