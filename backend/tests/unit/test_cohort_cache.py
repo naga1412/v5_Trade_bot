@@ -77,16 +77,21 @@ async def test_load_baseline_cache_once_raises_on_failure_and_stays_unset(
 async def test_refresh_futures_only_cache_success_updates_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_fetch(_http: httpx.AsyncClient) -> tuple[set[str], set[str]]:
-        return {"BTCUSDT", "XPLUSDT"}, {"XPLUSDT"}
+    async def fake_fetch(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
+        return {"BTCUSDT", "XPLUSDT"}, {"XPLUSDT"}, {"BTCUSDT"}
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_futures_and_futures_only_symbols", fake_fetch,
+        cohort_cache, "fetch_market_listings", fake_fetch,
     )
 
     result = await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert result == {"XPLUSDT"}
     assert cohort_cache.get_futures_only_cache() == {"XPLUSDT"}
+    # The SPOT listing lands in the same cycle (FU-53). app.data.bar_fetch
+    # resolves an endpoint by POSITIVE membership in one set or the other,
+    # so a populated futures_only cache with an empty spot cache would make
+    # every spot-listed symbol unresolvable.
+    assert cohort_cache.get_spot_listed_cache() == {"BTCUSDT"}
     assert cohort_cache.get_futures_only_cache_age_seconds() is not None
     assert cohort_cache.get_futures_only_cache_age_seconds() < 5.0
 
@@ -99,37 +104,43 @@ async def test_refresh_futures_only_cache_failure_preserves_prior_value(
     must NOT wipe a good cache down to None -- that would turn every
     position open for the next 24h into a forced NULL until the next
     successful cycle, over one blip."""
-    async def fake_fetch_ok(_http: httpx.AsyncClient) -> tuple[set[str], set[str]]:
-        return {"BTCUSDT", "XPLUSDT"}, {"XPLUSDT"}
+    async def fake_fetch_ok(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
+        return {"BTCUSDT", "XPLUSDT"}, {"XPLUSDT"}, {"BTCUSDT"}
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_futures_and_futures_only_symbols", fake_fetch_ok,
+        cohort_cache, "fetch_market_listings", fake_fetch_ok,
     )
     await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert cohort_cache.get_futures_only_cache() == {"XPLUSDT"}
 
-    async def fake_fetch_fails(_http: httpx.AsyncClient) -> tuple[set[str], set[str]]:
+    async def fake_fetch_fails(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
         raise httpx.ConnectError("network down")
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_futures_and_futures_only_symbols", fake_fetch_fails,
+        cohort_cache, "fetch_market_listings", fake_fetch_fails,
     )
     result = await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert result is None
     # Prior value untouched.
     assert cohort_cache.get_futures_only_cache() == {"XPLUSDT"}
+    # And the spot listing is preserved on the same rule. The two sets must
+    # fail together, because a half-wiped pair would answer "neither" for
+    # symbols one of them still knew about -- which bar_fetch would
+    # correctly, and uselessly, raise on.
+    assert cohort_cache.get_spot_listed_cache() == {"BTCUSDT"}
 
 
 @pytest.mark.asyncio
 async def test_refresh_futures_only_cache_failure_before_any_success_stays_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_fetch_fails(_http: httpx.AsyncClient) -> tuple[set[str], set[str]]:
+    async def fake_fetch_fails(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
         raise httpx.ConnectError("network down")
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_futures_and_futures_only_symbols", fake_fetch_fails,
+        cohort_cache, "fetch_market_listings", fake_fetch_fails,
     )
     result = await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert result is None
     assert cohort_cache.get_futures_only_cache() is None
+    assert cohort_cache.get_spot_listed_cache() is None

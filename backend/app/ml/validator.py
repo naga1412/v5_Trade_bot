@@ -28,7 +28,7 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.data.adapters.binance import BinanceClient
+from app.data.bar_fetch import UnresolvedMarket, fetch_bars_by_symbol
 from app.ops.heartbeat import record_heartbeat
 
 log = logging.getLogger(__name__)
@@ -115,15 +115,33 @@ def _classify_correct(
 async def _fetch_close_at(
     http: httpx.AsyncClient, symbol: str, timeframe: str, ts: datetime,
 ) -> float | None:
-    """Fetch the closing price for the bar whose open-time equals ``ts``."""
+    """Fetch the closing price for the bar whose open-time equals ``ts``.
+
+    Propagates :class:`UnresolvedMarket` on purpose -- see below.
+    """
     binance_sym = symbol.replace("/", "")
-    client = BinanceClient(http=http)
     # Pull a window around the target so we don't lose a few-millisecond drift.
     start_ms = int(ts.timestamp() * 1000)
     try:
-        # fetch_klines is symbol/timeframe based; we accept the small
-        # over-fetch and pick the bar that matches our target open-time.
-        bars = await client.fetch_klines(binance_sym, timeframe, limit=3)
+        # FU-53: was BinanceClient.fetch_klines -- i.e. SPOT for every
+        # symbol, so every futures-only symbol silently validated against
+        # a market it is not listed on and returned nothing.
+        # prediction_validations carries no symbol_source column, so this
+        # asks the Binance listing caches instead.
+        #
+        # UnresolvedMarket is deliberately NOT caught here. The listing
+        # caches answer by positive membership only, so "cannot resolve"
+        # means the market is genuinely unknown -- and the one thing we
+        # must not do with an unknown market is pick spot, which is #539.
+        # Letting it propagate leaves the row pending for the next 60s
+        # cycle (the correct outcome: unknown now, probably known once
+        # app.workers.futures_only_refresh completes a cycle) and surfaces
+        # the reason in validate_pending's per-row log, carrying the
+        # exception's full argument. Converting it to a None return here
+        # would be a second skip path for a caller to forget.
+        bars = await fetch_bars_by_symbol(
+            binance_sym, timeframe, http=http, limit=3,
+        )
     except (httpx.HTTPStatusError, httpx.HTTPError) as e:
         log.info("validator fetch_klines failed for %s/%s: %s", symbol, timeframe, e)
         return None
@@ -192,12 +210,35 @@ async def validate_pending(
                     {"now": now, "lim": batch_limit},
                 )
             ).all()
+            unresolved: list[str] = []
             for row in pending:
                 try:
                     if await _validate_one(session, http, row):
                         updated += 1
+                except UnresolvedMarket:
+                    # Named, not swallowed by the broad handler below. The
+                    # reason it gets its own arm is volume: the listing
+                    # caches are process-global, so a cold cache makes
+                    # EVERY row in the batch unresolvable and the broad
+                    # handler would emit up to batch_limit near-identical
+                    # warnings every 60s. One aggregated ERROR per pass
+                    # names the scale instead, which is the number that
+                    # distinguishes "one freshly-listed symbol" from
+                    # "prediction validation has stopped".
+                    unresolved.append(f"{row.symbol}/{row.timeframe}")
                 except Exception as e:  # noqa: BLE001
                     log.warning("validate_one failed for id=%s: %s", row.id, e)
+            if unresolved:
+                log.error(
+                    "validator_market_unresolved: %d of %d pending rows could "
+                    "not be placed on a market and stay PENDING (will retry "
+                    "next cycle): %s. If this count equals the batch and "
+                    "persists, app.workers.futures_only_refresh has never "
+                    "completed a cycle and prediction validation is STOPPED, "
+                    "not slow. If it is a handful, those symbols were listed "
+                    "after the last 24h listing refresh.",
+                    len(unresolved), len(pending), ", ".join(unresolved[:10]),
+                )
             await session.commit()
     finally:
         if close_http:

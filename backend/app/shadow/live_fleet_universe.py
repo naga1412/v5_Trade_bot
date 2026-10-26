@@ -407,14 +407,22 @@ async def load_live_fleet_universe(
     ]
 
 
-async def fetch_futures_and_futures_only_symbols(
+async def fetch_market_listings(
     http: httpx.AsyncClient,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     """Two raw exchangeInfo calls -- (all USDT-perp futures symbols,
-    futures-listed-but-not-spot-listed symbols). Extracted (2026-08-30,
-    item 0) so `app.shadow.cohort_cache`'s daily futures_only refresh
-    can reuse this without duplicating the Binance-call logic. Pure
-    listing data -- no liquidity sampling, no cohort decision, no DB."""
+    futures-listed-but-not-spot-listed symbols, all USDT spot symbols).
+
+    The SPOT set is returned rather than discarded (FU-53) because
+    `app.data.bar_fetch` needs a POSITIVE spot answer. "Not in the
+    futures-only set" is not evidence that a symbol is spot-listed: it is
+    equally what a brand-new listing looks like to a cache refreshed up
+    to 24h ago, and what a typo looks like. Choosing an endpoint from
+    that absence IS the silent spot default FU-53 exists to delete, so
+    callers are handed both sets and no absence to infer from.
+
+    Pure listing data -- no liquidity sampling, no cohort decision, no DB.
+    """
     futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
     futures_resp.raise_for_status()
     fut_symbols = {
@@ -429,7 +437,25 @@ async def fetch_futures_and_futures_only_symbols(
         s["symbol"] for s in spot_resp.json()["symbols"]
         if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
     }
-    return fut_symbols, fut_symbols - spot_symbols
+    return fut_symbols, fut_symbols - spot_symbols, spot_symbols
+
+
+async def fetch_futures_and_futures_only_symbols(
+    http: httpx.AsyncClient,
+) -> tuple[set[str], set[str]]:
+    """(all USDT-perp futures symbols, futures-only symbols).
+
+    A thin wrapper over :func:`fetch_market_listings`, kept at its
+    original two-element shape on purpose: `refresh_live_fleet_universe`
+    and its tests do not need the spot set, and widening a return tuple
+    silently breaks every unpack site that does not happen to be in the
+    same test sweep (this project has paid for that once already -- PR
+    #266's 8->9 tuple bump broke three integration call sites that the
+    unit suite did not cover). The wrapper costs one delegation and keeps
+    FU-53's diff off the fleet-refresh path entirely.
+    """
+    fut_symbols, futures_only, _spot_symbols = await fetch_market_listings(http)
+    return fut_symbols, futures_only
 
 
 async def refresh_live_fleet_universe(
@@ -767,4 +793,5 @@ __all__ = [
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
     "load_baseline_symbols", "load_live_fleet_universe", "refresh_live_fleet_universe",
     "fetch_futures_and_futures_only_symbols",
+    "fetch_market_listings",
 ]

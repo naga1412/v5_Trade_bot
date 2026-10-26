@@ -53,6 +53,7 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.data.bar_fetch import UnresolvedMarket
 from scripts.mfe_mae_curve import Bar, _fetch_bars_at_tf
 from scripts.phase_a_scan import cell, decile_of, deciles
 
@@ -85,6 +86,7 @@ EXPECTED_DETECTABLE_SLOPE: str = "~1.5 R per score unit clustered (in-band was ~
 
 _SQL = f"""
 SELECT p.symbol,
+       p.symbol_source,
        (EXTRACT(EPOCH FROM p.ts) * 1000)::bigint AS ts_ms,
        p.ts,
        p.final_score,
@@ -107,6 +109,7 @@ ORDER BY p.symbol, p.ts
 @dataclass
 class Row:
     symbol: str
+    symbol_source: str      # FU-53: picks the klines endpoint
     ts_ms: int
     day: str
     score: float
@@ -325,6 +328,7 @@ async def _load_rows(session_factory) -> list[Row]:
     for r in res:
         out.append(Row(
             symbol=r.symbol.replace("/", ""),
+            symbol_source=r.symbol_source,
             ts_ms=int(r.ts_ms),
             day=r.ts.astimezone(timezone.utc).strftime("%Y-%m-%d"),
             score=float(r.final_score),
@@ -347,7 +351,11 @@ async def _resolve_symbol(
     """
     lo = min(r.ts_ms for r in rows) - (ATR_PERIOD + 2) * BAR_MS
     hi = max(r.ts_ms for r in rows) + (max(HORIZONS) + 2) * BAR_MS
-    bars = await _fetch_bars_at_tf(client, symbol, lo, hi, timeframe=TIMEFRAME)
+    bars = await _fetch_bars_at_tf(
+        client, symbol, lo, hi, timeframe=TIMEFRAME,
+        # Every row here shares one symbol, so one cohort.
+        symbol_source=rows[0].symbol_source,
+    )
     if len(bars) < ATR_PERIOD + 2:
         return 0
     trs = true_ranges(bars)
@@ -503,6 +511,18 @@ async def main() -> None:
             async with sem:
                 try:
                     n = await _resolve_symbol(client, sym, by_symbol[sym])
+                except (UnresolvedMarket, ValueError):
+                    # PROPAGATE. This arm exists to get OUT of the broad
+                    # handler below, which is there for flaky symbols and
+                    # transient HTTP -- the right call for a 279-symbol
+                    # sweep that must not die on one bad response. An
+                    # endpoint we cannot resolve is a different animal: it
+                    # is a bug in the sweep's own cohort data, and
+                    # continuing would silently drop symbols from the
+                    # denominator. FU-53 cost this very script 60 of its
+                    # 279 symbols exactly that way, and the loss was
+                    # invisible because the run still printed a total.
+                    raise
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! {sym}: {e}", flush=True)
                     n = 0

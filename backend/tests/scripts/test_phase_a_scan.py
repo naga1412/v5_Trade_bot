@@ -220,7 +220,8 @@ def _rows_for_split(values):
     out = []
     for i, v in enumerate(values):
         out.append(Row(
-            trade_id=i, symbol="X", timeframe="1h", opened_ms=0, closed_ms=0,
+            trade_id=i, symbol="X", symbol_source="established_top20",
+            timeframe="1h", opened_ms=0, closed_ms=0,
             entry_price=100.0, stop_loss=90.0, take_profit=120.0,
             entry_score=0.4, mtf_agreement=4, bars_held=10,
             funding_directional_adj=v,

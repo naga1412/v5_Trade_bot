@@ -80,6 +80,7 @@ MFE_HORIZONS = (5, 10, 20, 40)
 class Row:
     trade_id: int
     symbol: str
+    symbol_source: str      # FU-53: picks the klines endpoint
     timeframe: str
     opened_ms: int
     closed_ms: int
@@ -112,7 +113,7 @@ class Row:
 
 
 _SQL = f"""
-SELECT s.id, s.symbol, s.timeframe,
+SELECT s.id, s.symbol, s.symbol_source, s.timeframe,
        (EXTRACT(EPOCH FROM s.opened_at) * 1000)::bigint AS opened_ms,
        (EXTRACT(EPOCH FROM s.closed_at) * 1000)::bigint AS closed_ms,
        s.entry_price, s.stop_loss, s.take_profit, s.entry_score,
@@ -383,7 +384,8 @@ async def main() -> int:
         fr, fr_age = _bounded(r.funding_rate, r.funding_age_h, "funding")
         dp, dp_age = _bounded(r.depth_0_5pct_usdt, r.depth_age_h, "depth")
         rows.append(Row(
-            trade_id=r.id, symbol=r.symbol, timeframe=str(r.timeframe),
+            trade_id=r.id, symbol=r.symbol, symbol_source=r.symbol_source,
+            timeframe=str(r.timeframe),
             opened_ms=int(r.opened_ms), closed_ms=int(r.closed_ms),
             entry_price=float(r.entry_price), stop_loss=float(r.stop_loss),
             take_profit=float(r.take_profit),
@@ -450,6 +452,7 @@ async def main() -> int:
                     client, r.symbol, r.opened_ms - bar_ms,
                     max(r.closed_ms, horizon_end) + bar_ms,
                     timeframe=r.timeframe,
+                    symbol_source=r.symbol_source,
                 )
             except Exception as e:  # noqa: BLE001
                 failures.append(
