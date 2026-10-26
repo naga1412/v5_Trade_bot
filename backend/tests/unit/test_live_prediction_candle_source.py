@@ -36,29 +36,45 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.data.adapters._base import Candle
 from app.ws.live_prediction import run_live_prediction
 
 
-class _FakeBinanceClient:
-    """Stands in for BinanceClient so the REST history-seed step never
-    touches the real rate-limited HTTP path (see module docstring)."""
+class _SeedResp:
+    def raise_for_status(self) -> None:
+        return None
 
-    def __init__(self, *_: Any, **__: Any) -> None:
-        pass
+    def json(self) -> list[list[str | int]]:
+        return [[1767225600000, "1.0", "1.0", "1.0", "1.0", "1.0"]]
 
-    async def fetch_klines(self, *_: Any, **__: Any) -> list[Candle]:
-        return [
-            Candle(
-                ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
-            ),
-        ]
+
+class _SeedingRateClient:
+    """Intercepts the history seed at the seam FU-53 introduced.
+
+    These tests are about CANDLE SOURCE, not the seed, so the seed only has
+    to return one usable bar without touching the network. It used to be
+    stubbed by patching ``live_prediction.BinanceClient``; FU-53 routes the
+    seed through ``app.data.bar_fetch``, so that patch silently stopped
+    intercepting anything and these tests began reaching the real HTTP
+    path. Patching the app's own rate client is the seam that survives,
+    because every seed goes through it (FU-40).
+    """
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    async def request(self, _method: str, url: str, **_: Any) -> _SeedResp:
+        self.urls.append(url)
+        return _SeedResp()
+
+
+def _seed_patch() -> Any:
+    adapter = type("FakeAdapter", (), {"rate_client": _SeedingRateClient()})()
+    return patch("app.data.adapters.get_intermarket_adapter", return_value=adapter)
 
 
 @pytest.mark.asyncio
 async def test_ws_path_constructs_own_stream_when_no_candle_source_given():
-    with patch("app.ws.live_prediction.BinanceClient", _FakeBinanceClient), \
+    with _seed_patch(), \
          patch("app.ws.live_prediction.BinanceKlineStream") as mock_stream_cls:
         mock_stream = mock_stream_cls.return_value
 
@@ -78,7 +94,6 @@ async def test_injected_candle_source_is_consumed_instead_of_ws():
     constructed — proves the two paths are mutually exclusive, not that
     one silently falls back to the other."""
     from app.shadow.multi_stream import MultiStreamCandle
-    from datetime import datetime, timezone
 
     candle = MultiStreamCandle(
         symbol="SOLUSDT", timeframe="1h",
@@ -89,7 +104,7 @@ async def test_injected_candle_source_is_consumed_instead_of_ws():
     async def one_candle():
         yield candle
 
-    with patch("app.ws.live_prediction.BinanceClient", _FakeBinanceClient), \
+    with _seed_patch(), \
          patch("app.ws.live_prediction.BinanceKlineStream") as mock_stream_cls, \
          patch("app.ws.live_prediction.build_prediction", new_callable=AsyncMock) as mock_build, \
          patch("app.ws.live_prediction._persist_prediction_and_schedule_validation", new_callable=AsyncMock), \
@@ -133,56 +148,20 @@ async def test_injected_candle_source_is_consumed_instead_of_ws():
 # docs/superpowers/decisions/2026-09-01-futures-poll-seed-was-spot-only.md.
 
 
-@pytest.mark.asyncio
-async def test_futures_poll_symbol_source_seeds_from_futures_rest_not_spot():
-    """The one assertion that would have caught the original bug: for
-    symbol_source="futures_poll", the SPOT BinanceClient must never be
-    constructed, and the futures seed helper must be called instead."""
-    futures_candle = Candle(
-        ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
-    )
-
-    async def fake_futures_seed(*_: Any, **__: Any) -> list[Candle]:
-        return [futures_candle]
-
-    fake_rate_client = object()
-    fake_adapter = type("FakeAdapter", (), {"rate_client": fake_rate_client})()
-
-    async def empty_stream():
-        return
-        yield  # pragma: no cover — makes this an async generator
-
-    with patch("app.ws.live_prediction.BinanceClient") as mock_spot_client_cls, \
-         patch("app.ws.futures_poll.fetch_futures_seed_klines", fake_futures_seed) as mock_futures_seed, \
-         patch("app.data.adapters.get_intermarket_adapter", return_value=fake_adapter), \
-         patch("app.ws.live_prediction.BinanceKlineStream") as mock_stream_cls:
-        mock_stream = mock_stream_cls.return_value
-        mock_stream.stream = lambda: empty_stream()
-
-        await run_live_prediction(
-            symbol_pair="ZORA/USDT", timeframe="1h", symbol_source="futures_poll",
-        )
-
-    mock_spot_client_cls.assert_not_called()
-    assert mock_futures_seed is fake_futures_seed  # sanity: patch target resolved
-
-
-@pytest.mark.asyncio
-async def test_default_symbol_source_still_seeds_from_spot_not_futures():
-    """Inverse of the above: every existing caller (symbol_source unset or
-    "established_top20") must keep using the original SPOT seed path — the
-    futures branch must never fire for the spot-WS fleet."""
-    async def empty_stream():
-        return
-        yield  # pragma: no cover — makes this an async generator
-
-    with patch("app.ws.live_prediction.BinanceClient", _FakeBinanceClient), \
-         patch("app.ws.futures_poll.fetch_futures_seed_klines") as mock_futures_seed, \
-         patch("app.ws.live_prediction.BinanceKlineStream") as mock_stream_cls:
-        mock_stream = mock_stream_cls.return_value
-        mock_stream.stream = lambda: empty_stream()
-
-        await run_live_prediction(symbol_pair="BTC/USDT", timeframe="1h")
-
-    mock_futures_seed.assert_not_called()
+# ---------------------------------------------------------------------------
+# THE TWO SEED-PATH TESTS THAT LIVED HERE ARE SUPERSEDED BY
+# tests/unit/test_live_prediction_seed_endpoint.py (FU-53).
+#
+# They asserted the seed path by PROXY: that the spot adapter CLASS was not
+# constructed, and that a named futures helper WAS called. FU-53 routes the
+# seed through app.data.bar_fetch, so neither proxy observes the seed any
+# more -- and the spot-direction one had become a check that CANNOT FAIL:
+# it asserted `fetch_futures_seed_klines` was not called, and that helper is
+# now called for no cohort at all, so it passed vacuously and would have
+# kept passing had the spot cohort started seeding from fapi.
+#
+# The replacements assert the URL the request was actually made to, in both
+# directions, which is strictly stronger and survives this kind of refactor:
+#   test_futures_only_cohort_seeds_from_the_futures_endpoint
+#   test_spot_cohorts_still_seed_from_the_spot_endpoint
+# ---------------------------------------------------------------------------

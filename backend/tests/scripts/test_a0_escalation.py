@@ -348,7 +348,11 @@ def test_mae_is_reported_as_a_positive_magnitude() -> None:
 # --- the non-overlapping replication subset -----------------------------
 
 def _row(sym: str, hour: int, score: float = 0.5) -> Row:
-    return Row(symbol=sym, ts_ms=hour * 3_600_000, day="2026-10-01",
+    # symbol_source is REQUIRED on Row (FU-53): the cohort picks the klines
+    # endpoint, and a default would be the silent-spot-default that cost this
+    # very probe 60 of its 279 symbols.
+    return Row(symbol=sym, symbol_source="established_top20",
+               ts_ms=hour * 3_600_000, day="2026-10-01",
                score=score, confidence=1.0, became_trade=False)
 
 

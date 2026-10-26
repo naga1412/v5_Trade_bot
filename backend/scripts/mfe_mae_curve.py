@@ -74,13 +74,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import text
 
 from app.config import get_settings
+from app.data.bar_fetch import resolve_klines_url
 from app.db.session import get_session_factory
 from app.shadow.exit_monitor import TIMEOUT_BARS_PER_TF
 
 
 BREAKEVEN_TRIGGERS: list[float] = [0.4, 0.5, 0.75, 1.0]
 FEE_ROUND_TRIP_PCT: float = 0.001  # 10 bps taker × 2
-BINANCE_SPOT_KLINES: str = "https://api.binance.com/api/v3/klines"
 INTERVAL_1H: str = "1h"
 FETCH_DELAY_S: float = 0.1
 BAR_MS_1H: int = 60 * 60 * 1000
@@ -237,6 +237,7 @@ async def _fetch_bars_at_tf(
     end_ms: int,
     *,
     timeframe: str,
+    symbol_source: str,
 ) -> list[Bar]:
     """v5: fetch bars at the trade's OWN timeframe (15m or 1h).
 
@@ -245,6 +246,12 @@ async def _fetch_bars_at_tf(
     """
     if timeframe not in _TF_TO_INTERVAL:
         return []
+    # FU-53: endpoint from the cohort, not the hardcoded spot URL. This was
+    # instance #3 -- a futures-only symbol fetched spot klines, got an empty
+    # payload, and was silently dropped: it cost the A0 escalation 60 of its
+    # 279 symbols. `symbol_source` is REQUIRED rather than defaulted, so a
+    # new caller cannot inherit the wrong market by omission.
+    url = resolve_klines_url(symbol_source)
     interval, bar_ms = _TF_TO_INTERVAL[timeframe]
     bars: list[Bar] = []
     cursor = start_ms
@@ -257,7 +264,7 @@ async def _fetch_bars_at_tf(
             "limit": 1000,
         }
         try:
-            resp = await client.get(BINANCE_SPOT_KLINES, params=params, timeout=15.0)
+            resp = await client.get(url, params=params, timeout=15.0)
             resp.raise_for_status()
             payload = resp.json()
         except Exception as e:  # noqa: BLE001
@@ -583,6 +590,7 @@ async def _fetch_all_native_tf(
         end_ms = max(t.closed_at_ms, horizon_end_ms) + bar_ms
         fetched = await _fetch_bars_at_tf(
             client, t.symbol, start_ms, end_ms, timeframe=t.timeframe,
+            symbol_source=t.symbol_source,
         )
         # bars: unchanged clipped window, so every pre-existing report
         # (baseline model, agreement, TP ladder, breakeven sim) is untouched.

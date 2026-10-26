@@ -28,7 +28,7 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.data.adapters.binance import BinanceClient
+from app.data.bar_fetch import fetch_bars_by_symbol
 from app.ops.heartbeat import record_heartbeat
 
 log = logging.getLogger(__name__)
@@ -117,15 +117,28 @@ async def _fetch_close_at(
 ) -> float | None:
     """Fetch the closing price for the bar whose open-time equals ``ts``."""
     binance_sym = symbol.replace("/", "")
-    client = BinanceClient(http=http)
     # Pull a window around the target so we don't lose a few-millisecond drift.
     start_ms = int(ts.timestamp() * 1000)
     try:
-        # fetch_klines is symbol/timeframe based; we accept the small
-        # over-fetch and pick the bar that matches our target open-time.
-        bars = await client.fetch_klines(binance_sym, timeframe, limit=3)
+        # FU-53: was BinanceClient.fetch_klines -- i.e. SPOT for every
+        # symbol, so every futures-only symbol silently validated against
+        # a market it is not listed on and returned nothing.
+        # prediction_validations carries no symbol_source column, so this
+        # asks the futures-only listing cache instead. None means the
+        # market could not be determined and we SKIP: guessing spot is
+        # precisely what made #539 invisible.
+        bars = await fetch_bars_by_symbol(
+            binance_sym, timeframe, http=http, limit=3,
+        )
     except (httpx.HTTPStatusError, httpx.HTTPError) as e:
         log.info("validator fetch_klines failed for %s/%s: %s", symbol, timeframe, e)
+        return None
+    if bars is None:
+        log.info(
+            "validator skipped %s/%s: futures-only cache unpopulated, market "
+            "undetermined -- not guessing spot",
+            symbol, timeframe,
+        )
         return None
     if not bars:
         return None

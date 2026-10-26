@@ -5,7 +5,6 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,7 +17,7 @@ from app.core.scoring import _pattern_stats_cache as pattern_stats_cache
 from app.core.scoring.layer8_convlstm import GhostInput
 from app.core.scoring.vol_normalization import HISTORY_SEED_BARS_1H
 from app.data.adapters import get_intermarket_adapter
-from app.data.adapters.binance import BinanceClient, BinanceKlineStream
+from app.data.adapters.binance import BinanceKlineStream
 from app.data.futures_liquidity import check_liquidity
 from app.db.dispatch_decisions import record_dispatch_decision
 from app.db.payload_builders import build_predictions_payload
@@ -160,26 +159,31 @@ async def run_live_prediction(
     """
     binance_symbol = symbol_pair.replace("/", "")
 
-    if symbol_source == "futures_poll":
-        # Local imports: matches this module's own existing convention
-        # (see app.ws.futures_poll._default_futures_runner) of deferring
-        # DB-session-factory / shared-client construction to call time,
-        # and avoids a circular import (futures_poll.py imports
-        # run_live_prediction from this module at its own top level).
-        from app.data.adapters import get_intermarket_adapter
-        from app.ws.futures_poll import fetch_futures_seed_klines
+    # FU-53: ONE seed path, with the endpoint chosen from the cohort by
+    # app.data.bar_fetch. The branch this replaces had the SPOT fetch as
+    # its `else`, so a cohort nobody had taught it about silently fetched
+    # spot and got an empty list back -- #539 exactly. fetch_bars raises
+    # on an unknown cohort rather than defaulting.
+    #
+    # Local import: matches this module's own existing convention (see
+    # app.ws.futures_poll._default_futures_runner) of deferring
+    # shared-client construction to call time, and avoids a circular
+    # import (futures_poll.py imports run_live_prediction from this
+    # module at its own top level).
+    from app.data.adapters import get_intermarket_adapter
+    from app.data.bar_fetch import fetch_bars
 
-        rate_client = get_intermarket_adapter().rate_client
-        assert rate_client is not None
-        history = await fetch_futures_seed_klines(
-            symbol_pair, timeframe, rate_client=rate_client, limit=HISTORY_SEED_BARS,
-        )
-    else:
-        async with httpx.AsyncClient() as http:
-            client = BinanceClient(http=http)
-            history = await client.fetch_klines(
-                binance_symbol, timeframe, limit=HISTORY_SEED_BARS,
-            )
+    # The app's OWN rate client, never a fresh one: RateLimitedClient
+    # holds the Binance weight budget as instance state, so a per-call
+    # client shares no budget with the app (FU-40).
+    rate_client = get_intermarket_adapter().rate_client
+    assert rate_client is not None
+    history = await fetch_bars(
+        binance_symbol, timeframe,
+        symbol_source=symbol_source,
+        rate_client=rate_client,
+        limit=HISTORY_SEED_BARS,
+    )
     bars = pd.DataFrame([c.__dict__ for c in history])
     bars["ts"] = pd.to_datetime(bars["ts"], utc=True)
     bars = bars.set_index("ts")[["open", "high", "low", "close", "volume"]]
