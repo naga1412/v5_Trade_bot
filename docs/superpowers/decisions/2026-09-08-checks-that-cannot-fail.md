@@ -930,6 +930,117 @@ when all three hold:
 reversal breaks something loudly does not need protecting; a decision
 whose reversal degrades something silently does.
 
+## INSTANCE 10 — THE PASS STRING AND THE NOT-APPLICABLE STRING WERE IDENTICAL
+
+The purest form of the family seen so far, because the discipline's own two
+sentences came out word-for-word the same.
+
+`evaluate_all_gates` renders a `_CheckResult` with `evaluated=False` as the
+verdict `"not_evaluated"`. The SHORT score bar's **pass** branch returned
+`evaluated=False`. So did its **bar-absent** branch:
+
+| fact | logged verdict |
+|---|---|
+| bar applied, magnitude >= threshold | `not_evaluated` |
+| bar absent (threshold is None) | `not_evaluated` |
+
+Write the two sentences the rule asks for — "what does the check say when
+the thing holds" and "what does it say when the thing does not apply" — and
+they are the same sentence. There is nothing an observer can do with the
+log to tell the cases apart, so the log cannot fail to look fine.
+
+**Measured on prod, 2026-10-26, live 1h SHORT, 3 days post-flip:**
+`min_score` verdicts were `block=2607`, `not_evaluated=266`, **`pass=0`** —
+while **110 cards were sent**. All 266 carried a reason of the form
+`|effective_score|=X >= 0.360`; zero carried the unset reason. **A gate that
+fired 266 times recorded zero firings**, in the one artefact built to answer
+"did the gate fire".
+
+Two things make this worth more than a tidy-up:
+
+1. **It was load-bearing at that moment.** Part of why the SHORT overshoot
+   could not be attributed to the bar versus the score distribution is that
+   the bar's own firings were unauditable.
+2. **The fix is one argument; the test is the asset.** Asserting "pass means
+   pass" alone is satisfiable by a constant. The test that matters asserts
+   the three facts map to **three distinct strings**, as a set — because a
+   pairwise chain can pass while two of the three collapse.
+
+## A JOIN THAT CANNOT SUCCEED LOOKS EXACTLY LIKE A COHORT WITH NO DATA
+
+New shape, same family, and it nearly produced a published finding.
+
+Joining `dispatch_decisions` to cohort tags, I wrote
+`ON c.sym = replace(d.symbol, '/', '')` — a transform copied from a
+`shadow_trades` join, where it is correct. It is wrong here:
+
+| table | symbol format |
+|---|---|
+| `predictions` | `WLD/USDT` |
+| `dispatch_decisions` | `WLD/USDT` |
+| `shadow_trades` | `WLDUSDT` |
+
+The join matched **zero** rows and reported all 135 symbols as
+`(unmatched)` — which reads as "the cohort column is not populated" or "no
+cohort has dispatch activity", both plausible-sounding findings. The result
+was not an error; it was a clean table of zeros.
+
+**The tell, and the general rule:** a join whose every row lands in the
+fallback bucket has not measured a population — it has measured its own key.
+Before reading a grouped join, check that the *largest* group is not the
+unmatched one, and sample both key columns rather than inferring the
+transform from a neighbouring query. Three tables, two formats, and the
+transform travelled between them unexamined.
+
+## THE EXIT-CODE FIX IS STRUCTURAL NOW, NOT A RESOLUTION
+
+Twice in one session a verdict was taken from a shell pipeline's status
+rather than pytest's:
+
+```
+python -m pytest ... | tail -45 ; echo "EXIT=$?"     # tail's code -> 0
+python -m pytest ... > out.txt 2>&1 ; tail out.txt   # "exited with code 0"
+```
+
+Both printed success while pytest was failing. Twice is not a discipline
+problem, so the answer is not more care: `backend/tests/run_suite.py` runs
+pytest via `subprocess.run` with a **list argv and `shell=False`**, so there
+is no shell to pipe in, and returns `Result(code, output)` — the real code
+*and* the readable tail, removing the trade-off that produced the habit.
+
+The mutation harness had always worked this way, which is exactly why its
+verdicts were never exposed to this. Everything else now looks like the
+mutation harness.
+
+**Verified on known states before being trusted:** the runner is asserted to
+return 0 on a file that cannot fail and non-zero on a file asserting
+`1+1==3`. One direction is not enough — a runner hardwired to 0 passes the
+first check, one hardwired to 1 passes the second. A separate test asserts
+`shell=False` is still pinned, because reintroducing a shell would restore
+the defect one layer down.
+
+**And the other half of that failure:** the pre-push routine ran `ruff` but
+not `mypy`, which CI runs on the very next line. A pre-push check that omits
+a check CI performs cannot fail in the only way that matters. `--lint` now
+runs both, always, and reports both.
+
+## AN ALLOWLIST THAT CAN GROW IS A CANNOT-FAIL CHECK IN WAITING
+
+A guard built around an exemption list has a failure mode the guard itself
+cannot see: the next instance of the defect does not fail the guard, it gets
+**appended** to the guard. The exemption then arrives as an inherited
+default rather than as a decision — which is how all four known instances of
+the FU-53 defect entered the tree in the first place.
+
+So the FU-53 guard pins its allowlist contents as separate literals and
+asserts the working sets equal them, plus **hand-counted integers**
+(`len(...) == 9`, not `len(x) == len(x)`, which is a tautology). Widening an
+exemption now requires editing two places in one commit, and the count line
+changes — a diff a reviewer cannot skim past.
+
+The duplication is the point. It is the only remaining form in which the
+change is visible.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration

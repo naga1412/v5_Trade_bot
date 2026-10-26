@@ -233,8 +233,23 @@ def _check_min_score_short(signal: Any, settings: Any) -> _CheckResult:
         if boost_detail is not None:
             verbose += f" ({boost_detail})"
         return _CheckResult(True, True, legacy, verbose)
+    # evaluated=True. The LONG sibling's pass branch returns True here; this
+    # one returned False, which evaluate_all_gates renders as
+    # "not_evaluated" -- the SAME verdict string it emits when the bar is
+    # ABSENT (threshold is None). So a SHORT that was checked and passed was
+    # indistinguishable in the dispatch log from one the bar never applied
+    # to, and the log exists precisely to answer "did the gate fire".
+    #
+    # Measured on prod 2026-10-26, live 1h SHORT, 3 days post-flip:
+    # min_score verdicts were block=2607, not_evaluated=266, pass=0 -- while
+    # 110 cards were sent. All 266 carried a reason of the form
+    # "|effective_score|=X >= 0.360", i.e. every one had been applied and
+    # passed. Zero carried the unset reason.
+    #
+    # NO BEHAVIOUR CHANGE: open_position_gate branches on r.blocked only;
+    # `evaluated` is read solely by evaluate_all_gates for the log.
     return _CheckResult(
-        False, False, None,
+        True, False, None,
         f"|effective_score|={magnitude:.3f} >= {float(threshold):.3f}",
     )
 
