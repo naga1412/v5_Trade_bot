@@ -155,7 +155,8 @@ CLOSED_FETCH_KLINES = frozenset({
     "app/data/intermarket_correlations.py",
 })
 CLOSED_UNMIGRATED_FETCH_KLINES = frozenset({
-    "app/shadow/worker.py",
+    # app/shadow/worker.py removed 2026-10-26 on migration. The count going
+    # 2 -> 1 is the diff line a reviewer should see.
     "app/scanner/batch.py",
 })
 
@@ -209,12 +210,17 @@ def test_the_closed_counts_are_what_review_signed_off() -> None:
     assert len(CLOSED_SPOT_URL) == 9, len(CLOSED_SPOT_URL)
     assert len(CLOSED_UNMIGRATED_SPOT_URL) == 4, len(CLOSED_UNMIGRATED_SPOT_URL)
     assert len(CLOSED_FETCH_KLINES) == 2, len(CLOSED_FETCH_KLINES)
-    assert len(CLOSED_UNMIGRATED_FETCH_KLINES) == 2, (
+    # 2 -> 1 on 2026-10-26: app/shadow/worker.py migrated. This number is
+    # the whole point of the count assertion -- it made the removal a
+    # deliberate, reviewable edit rather than a quiet set change.
+    assert len(CLOSED_UNMIGRATED_FETCH_KLINES) == 1, (
         len(CLOSED_UNMIGRATED_FETCH_KLINES)
     )
-    # 4 unmigrated URL sites + 2 unmigrated adapter callers = 6 known-open
-    # instances of the defect. A fix that migrates one MUST lower this.
-    assert len(CLOSED_UNMIGRATED_SPOT_URL) + len(CLOSED_UNMIGRATED_FETCH_KLINES) == 6
+    # 4 unmigrated URL sites + 1 unmigrated adapter caller = 5 known-open
+    # instances of the defect. A fix that migrates one MUST lower this, and
+    # on 2026-10-26 one did: app/shadow/worker.py, 6 -> 5. This assertion
+    # working as advertised is why the number is trustworthy.
+    assert len(CLOSED_UNMIGRATED_SPOT_URL) + len(CLOSED_UNMIGRATED_FETCH_KLINES) == 5
 
 
 def _py_files() -> list[Path]:
@@ -345,12 +351,18 @@ ALLOWED_FETCH_KLINES_CALLERS = {
 }
 
 KNOWN_UNMIGRATED_FETCH_KLINES = {
-    # SPOT, cohort-blind. LIVE-AFFECTING, OPEN FINDING. The shadow worker's
-    # history seed, and the shadow universe includes futures_poll symbols.
-    # Not fixed here: routing it changes which symbols can open shadow
-    # trades, i.e. the measurement population, which needs an operator
-    # decision rather than a drive-by edit.
-    "app/shadow/worker.py",
+    # app/shadow/worker.py WAS HERE AND IS NOW MIGRATED (2026-10-26,
+    # operator-authorised). It was the fifth wrong-endpoint instance and the
+    # last live entry whose stated reason amounted to "not done yet" -- which
+    # is exactly the growable-allowlist risk this file exists to prevent, so
+    # it was removed rather than re-justified. The seed now resolves each
+    # symbol's own market via fetch_bars_by_symbol and reports unresolvable
+    # symbols at ERROR with the scale attached.
+    #
+    # IT CHANGES SHADOW COMPOSITION: futures_poll symbols can now seed, so
+    # they can finally open shadow trades. Boundary timestamp and the
+    # split-or-label rule are recorded in
+    # docs/superpowers/decisions/2026-10-26-shadow-seed-migration-boundary.md.
     # SPOT, cohort-blind. Scanner card path -- lower blast radius than the
     # above (it feeds a UI list, not scoring or dispatch) but same defect.
     "app/scanner/batch.py",

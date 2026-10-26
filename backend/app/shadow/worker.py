@@ -37,14 +37,15 @@ from app.core.scoring.vol_normalization import (
     HISTORY_SEED_BARS_1H,
     min_bars_for_vol,
 )
-from app.data.adapters.binance import BinanceClient
 from app.db.session import get_session_factory
 from app.ops.alert_routing import alert_admin
 from app.ops.heartbeat import record_heartbeat
+from app.data.bar_fetch import UnresolvedMarket, fetch_bars_by_symbol
 from app.shadow.cohort_cache import (
     get_baseline_cache,
     get_futures_only_cache,
     load_baseline_cache_once,
+    refresh_futures_only_cache,
 )
 from app.shadow.engine import (
     PositionGate,
@@ -296,8 +297,35 @@ class ShadowWorker:
 
         cache_hits = 0
         rest_fetched = 0
+        unresolved_syms: set[str] = set()
         async with httpx.AsyncClient() as http:
-            client = BinanceClient(http=http)
+            # FU-53 instance 5 (2026-10-26): this seed used
+            # BinanceClient.fetch_klines, i.e. SPOT for every symbol, so
+            # a futures_poll symbol got NOTHING and the 400/404 was
+            # swallowed at log.debug with the reason spelled out in the
+            # message. Same class as #539 and the validator's 53-day
+            # block; it was the last live entry on the bar-fetch
+            # allowlist, whose stated reason was "not done yet".
+            #
+            # THE CACHE IS ENSURED BEFORE THE LOOP, NOT DURING IT.
+            # resolve_klines_url_for_symbol answers only by POSITIVE
+            # listing membership and raises otherwise, which is the whole
+            # point -- but setup() runs once at worker start and races
+            # futures_only_refresh_task's first cycle. A cold cache would
+            # therefore raise for EVERY symbol and seed zero buffers,
+            # which is strictly worse than the silent per-symbol
+            # degradation being fixed. One bounded round-trip here
+            # removes the race rather than hoping the ordering holds.
+            if get_futures_only_cache() is None:
+                try:
+                    await refresh_futures_only_cache(http)
+                except Exception as e:  # noqa: BLE001
+                    log.error(
+                        "shadow_worker: listing-cache refresh failed at "
+                        "setup (%s) -- symbols that cannot be placed on a "
+                        "market will be reported below and left unseeded, "
+                        "never guessed onto spot.", e,
+                    )
             for tf in self.timeframes:
                 for sym in self.symbols:
                     # 1. Try the MTF cache first (raw kline rows).
@@ -311,22 +339,34 @@ class ShadowWorker:
                         cache_hits += 1
                         continue
 
-                    # 2. Cache miss → REST-fetch via the worker's existing
-                    #    Candle-based client. Convert + seed bars buffer.
+                    # 2. Cache miss → REST-fetch on the symbol's OWN
+                    #    market. Convert + seed bars buffer.
                     try:
-                        history = await client.fetch_klines(
-                            sym, tf, limit=HISTORY_BARS,
+                        history = await fetch_bars_by_symbol(
+                            sym.replace("/", ""), tf,
+                            http=http, limit=HISTORY_BARS,
                         )
+                    except UnresolvedMarket:
+                        # NOT a debug-level skip. The symbol is in
+                        # neither Binance listing, so there is no market
+                        # to ask -- and the one thing we must not do with
+                        # an unknown market is pick spot (#539).
+                        # Aggregated into one ERROR after the loop: a
+                        # cold cache makes EVERY symbol unresolvable and
+                        # per-symbol lines would bury the scale, which is
+                        # the number that distinguishes "one freshly
+                        # listed coin" from "the listing cache never
+                        # loaded".
+                        unresolved_syms.add(sym)
+                        continue
                     except httpx.HTTPStatusError as e:
-                        if e.response.status_code in (400, 404):
-                            log.debug(
-                                "seed skip %s/%s (not on Binance Spot): %s",
-                                sym, tf, e.response.status_code,
-                            )
-                        else:
-                            log.warning(
-                                "seed history failed for %s/%s: %s", sym, tf, e,
-                            )
+                        # A 400/404 on the CORRECT market is a real
+                        # anomaly now, not an expected miss, so it is no
+                        # longer whispered at debug.
+                        log.warning(
+                            "seed history failed for %s/%s: HTTP %s %s",
+                            sym, tf, e.response.status_code, e,
+                        )
                         continue
                     except Exception as e:  # noqa: BLE001
                         log.warning(
@@ -353,6 +393,17 @@ class ShadowWorker:
                         log.debug(
                             "MTF cache populate failed for %s/%s: %s", sym, tf, e,
                         )
+        if unresolved_syms:
+            log.error(
+                "shadow_worker_seed_market_unresolved: %d of %d symbols "
+                "could not be placed on a Binance market and were left "
+                "UNSEEDED: %s. If this count equals the symbol count the "
+                "listing cache never loaded and the seed is BROKEN, not "
+                "degraded; if it is a handful, those coins were listed "
+                "after the last 24h listing refresh.",
+                len(unresolved_syms), len(self.symbols),
+                ", ".join(sorted(unresolved_syms)[:10]),
+            )
         log.info(
             "shadow_worker: setup done (%d cache-hit, %d REST-fetched buffers)",
             cache_hits, rest_fetched,
