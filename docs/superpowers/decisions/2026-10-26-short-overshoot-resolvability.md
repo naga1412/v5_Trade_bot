@@ -96,3 +96,63 @@ effective G, and the date, and decide deliberately.
 
 When it is re-run, re-derive **G_eff**, not G: if exposure stays uneven the
 nominal count will keep overstating it.
+
+---
+
+# PRE-REGISTRATION, filed 2026-10-26 — before any further data arrives
+
+Filed deliberately ahead of the data, so the decision rule cannot be chosen
+after seeing the numbers. Nothing below has been measured.
+
+## THE BETTER TEST AT 2026-11-03 IS THE RATIO'S BEHAVIOUR, NOT THE OVERSHOOT'S SIGMA
+
+The overshoot's own σ is the weaker instrument, for the reason this whole
+document exists: it needs G≈15 and is dominated by single clusters. The
+ratio does not.
+
+Two hypotheses, two distinguishable predictions:
+
+| hypothesis | prediction as regime reverts |
+|---|---|
+| **Unification** — one bearish location shift | LONG/day returns toward **~17.6**, SHORT/day falls toward **~16**, total toward **~33** |
+| **Structural asymmetry** | SHORT stays **≈2× LONG at equal thresholds**, REGARDLESS of the regime label |
+
+**The discriminator is whether the ratio moves WITH regime.** That is a
+sign-and-direction question about a quantity measured on both sides of the
+same window, not a significance question about a single effect size. **It
+does not need 3σ on the overshoot.**
+
+So at 2026-11-03 the first table to build is SHORT/day ÷ LONG/day per
+regime-day, against the regime label — not another clustered mean of the
+SHORT rate.
+
+## THE TRAP, WRITTEN DOWN BECAUSE IT WILL READ THE WRONG WAY
+
+**A non-arrival at 3σ must NOT be read as a failed measurement.**
+
+Decay is the **PREDICTED OUTCOME** of the leading hypothesis. If the
+unification account is right, the overshoot *shrinks*, and the clustered
+estimate therefore drifts toward non-significance as more data arrives. A
+future session that reads "still not significant" as "inconclusive, keep
+waiting" will have mistaken the confirmation for an absence of evidence.
+
+Concretely, at 2026-11-03:
+
+- SHORT/day falling toward ~16 with the ratio tracking regime ⇒
+  **unification CONFIRMED.** Card load decays on its own and
+  **the threshold must NOT be retuned.**
+- SHORT/day holding ≈2× LONG while the regime label changes ⇒
+  **structural asymmetry**, and the SHORT bar belongs higher than LONG.
+- Opposite actions. Which is why the ratio, not the σ, is the thing to read.
+
+Without this paragraph in the document, the expected shape of a confirmed
+hypothesis is indistinguishable from a measurement that never landed — the
+same family as [[checks_that_cannot_fail_rule]], one level up: not a check
+that cannot fail, but a **result whose confirming form looks like its own
+null**.
+
+## Verification bar, unchanged
+
+Mutants attributed to the test that targets them; verdicts from exit codes
+through `backend/tests/run_suite.py`; expected values hand-derived, not
+read off the code's own output.
