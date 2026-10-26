@@ -37,7 +37,7 @@ fails in CI the moment it is written.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -110,18 +110,24 @@ def resolve_klines_url_for_symbol(binance_symbol: str) -> str | None:
     return FUTURES_KLINES_URL if binance_symbol in cache else SPOT_KLINES_URL
 
 
-def _to_candles(rows: list[list[object]]) -> list[Candle]:
-    """Parse klines rows. Spot and futures share an identical 12-element row."""
+def _to_candles(rows: list[list[Any]]) -> list[Candle]:
+    """Parse klines rows. Spot and futures share an identical 12-element row.
+
+    ``list[list[Any]]`` is the honest type: this is decoded JSON whose row
+    mixes an int open-time with stringified decimals, and Binance returns
+    the same shape on both endpoints. A narrower annotation would only buy
+    a row of ``type: ignore`` comments.
+    """
     from app.data.adapters.binance import Candle
 
     return [
         Candle(
-            ts=datetime.fromtimestamp(int(r[0]) / 1000, tz=timezone.utc),  # type: ignore[arg-type]
-            open=float(r[1]),  # type: ignore[arg-type]
-            high=float(r[2]),  # type: ignore[arg-type]
-            low=float(r[3]),  # type: ignore[arg-type]
-            close=float(r[4]),  # type: ignore[arg-type]
-            volume=float(r[5]),  # type: ignore[arg-type]
+            ts=datetime.fromtimestamp(int(r[0]) / 1000, tz=timezone.utc),
+            open=float(r[1]),
+            high=float(r[2]),
+            low=float(r[3]),
+            close=float(r[4]),
+            volume=float(r[5]),
         )
         for r in rows
     ]
