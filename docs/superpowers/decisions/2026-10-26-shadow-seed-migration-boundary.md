@@ -14,9 +14,37 @@ Binance market at the deploy of the commit carrying this document.**
 
 | | |
 |---|---|
-| **merged to main** | *(recorded on merge — see the PR's merge commit)* |
-| **effective in prod** | the first `ShadowWorker.setup()` after that deploy |
+| **merged to main** | **2026-10-26T19:17:55Z** (PR #614, squash `7bd1675`) |
+| **EFFECTIVE IN PROD** | **2026-10-26T19:18:55Z** |
 | **mechanism** | `BinanceClient.fetch_klines` (spot, cohort-blind) → `fetch_bars_by_symbol` (per-symbol market, no default) |
+
+The effective instant is the `shadow_worker: setup done` line, 60 seconds
+after the merge. **Use 19:18:55Z, not the merge time**, for any split: the
+seed runs at worker start, so nothing changed until that restart.
+
+### Verified at the boundary
+
+```
+19:18:55 ERROR shadow_worker_seed_market_unresolved: 1 of 30 symbols could not be
+  placed on a Binance market and were left UNSEEDED: TONUSDT.
+19:18:55 INFO  shadow_worker: setup done (30 cache-hit, 29 REST-fetched buffers)
+```
+
+**1 of 30, not 30 of 30** — so the cache-ensure did its job and the
+"listing cache never loaded ⇒ the seed is BROKEN, not degraded" branch
+did not fire. That discriminator existing is why one line of log settles
+which of the two states this is.
+
+59 of 60 (symbol, timeframe) buffers seeded. The missing one is
+TONUSDT/15m — its 1h was a warm MTF-cache hit, which is taken before the
+fetch, so only the 15m slot reached the resolver.
+
+**NEW FINDING, not fixed here: `TONUSDT` resolves on NEITHER Binance
+listing.** It is in the shadow universe and in neither the spot nor the
+futures-only cache, so it is most likely delisted or renamed. Before this
+migration it failed silently on spot at `log.debug`; it is now loud. That
+is the migration working, and the symbol itself is a separate question —
+a universe-membership stale entry, not a bar-fetch defect.
 
 The seed runs once per worker start, so the boundary is the **first
 restart after the deploy**, not the merge. `deploy.yml` recreates the
