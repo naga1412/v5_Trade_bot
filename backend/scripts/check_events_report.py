@@ -21,10 +21,10 @@ findings are in the output.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/app")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import sqlalchemy as sa  # noqa: E402
 
@@ -112,5 +112,4 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("ENV", "production")
     raise SystemExit(asyncio.run(main()))
