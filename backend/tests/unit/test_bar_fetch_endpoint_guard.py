@@ -409,19 +409,26 @@ async def test_unclassifiable_symbol_returns_None_not_an_empty_list() -> None:
     from app.shadow import cohort_cache
 
     cohort_cache._reset_for_tests()
-    assert cohort_cache.get_futures_only_cache() is None, (
-        "precondition: the cache must be unpopulated for this test to mean "
-        "anything -- a populated cache would route normally and the test "
-        "would pass without exercising the unclassifiable path"
-    )
+    try:
+        assert cohort_cache.get_futures_only_cache() is None, (
+            "precondition: the cache must be unpopulated for this test to mean "
+            "anything -- a populated cache would route normally and the test "
+            "would pass without exercising the unclassifiable path"
+        )
 
-    bars = await fetch_bars_by_symbol("ANYUSDT", "1h", limit=3)
-    assert bars is None, (
-        f"got {bars!r}. An unclassifiable symbol must return None, never [] "
-        "-- [] is what a wrong-market fetch returns, and conflating the two "
-        "is exactly how #539 stayed invisible for the futures_poll cohort's "
-        "entire existence."
-    )
+        bars = await fetch_bars_by_symbol("ANYUSDT", "1h", limit=3)
+        assert bars is None, (
+            f"got {bars!r}. An unclassifiable symbol must return None, never "
+            "[] -- [] is what a wrong-market fetch returns, and conflating "
+            "the two is exactly how #539 stayed invisible for the "
+            "futures_poll cohort's entire existence."
+        )
+    finally:
+        # Leave the module-level cache in its pristine state even if an
+        # assertion above fails. This test deliberately mutates process-wide
+        # state, and a guard suite that makes OTHER tests order-dependent
+        # would be trading one silent failure class for another.
+        cohort_cache._reset_for_tests()
 
 
 def test_every_declared_cohort_is_routed() -> None:
