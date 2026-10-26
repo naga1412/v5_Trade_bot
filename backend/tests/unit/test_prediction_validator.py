@@ -229,3 +229,72 @@ async def test_validate_pending_swallows_close_fetch_failure(
         )
     # Only ETH got validated; BTC stays pending.
     assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_market_leaves_the_row_pending_and_logs_the_SCALE(
+    validations_factory, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """FU-53: UnresolvedMarket must not be mistaken for "no bars".
+
+    ``_fetch_close_at`` propagates it rather than returning None, because
+    "I cannot tell which market this symbol trades on" and "that market
+    had no bar" are different facts and only one of them means the row
+    will never validate. The row stays PENDING either way -- the
+    difference is that this one says so.
+
+    The assertion on the COUNT is the load-bearing half. A cold listing
+    cache makes every row in the batch unresolvable, so the number in the
+    log is what separates "one symbol listed yesterday" from "prediction
+    validation has stopped" -- the distinction this codebase has twice
+    failed to notice because an absence looks like quiet success.
+    """
+    from app.data.bar_fetch import UnresolvedMarket
+
+    factory = validations_factory
+    anchor = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    target = anchor + timedelta(hours=1)
+
+    async with factory() as session:
+        for sym in ("NEWLISTUSDT/USDT", "ETH/USDT"):
+            await validator.record_pending_validation(
+                session,
+                prediction_id=None, user_id=1,
+                symbol=sym, timeframe="1h", direction="LONG",
+                score=0.4, confidence=0.7,
+                anchor_ts=anchor, anchor_close=100.0,
+            )
+        await session.commit()
+
+    async def _one_unresolvable(
+        _http: Any, sym: str, _tf: str, _ts: datetime,
+    ) -> float | None:
+        if sym == "NEWLISTUSDT/USDT":
+            raise UnresolvedMarket("in neither Binance listing cache")
+        return 105.0
+
+    with caplog.at_level("ERROR"), \
+            patch.object(validator, "_fetch_close_at", _one_unresolvable):
+        n = await validator.validate_pending(
+            factory, http=object(),  # type: ignore[arg-type]
+            now=target + timedelta(minutes=5),
+        )
+
+    # The unresolvable row did not block the resolvable one. A cold cache
+    # must not stop the whole subsystem from validating what it still can.
+    assert n == 1
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1, (
+        f"expected exactly ONE aggregated ERROR, got {len(errors)}. One line "
+        "per row would emit up to batch_limit near-identical records every "
+        "60s on a cold cache, and a log nobody can read is not loud."
+    )
+    msg = errors[0].getMessage()
+    assert "validator_market_unresolved" in msg
+    assert "1 of 2" in msg, (
+        f"the ERROR must carry the scale, got: {msg!r}. Without the "
+        "denominator the reader cannot tell a freshly-listed symbol from a "
+        "validator that has stopped -- a count without its population, "
+        "which is the error this project has on file four times."
+    )

@@ -467,16 +467,20 @@ def test_an_unknown_cohort_raises_rather_than_defaulting_to_spot() -> None:
         _routed_url("a_cohort_that_does_not_exist")
 
 
-def test_symbol_routing_uses_the_futures_only_listing_cache() -> None:
+def test_symbol_routing_uses_the_listing_caches() -> None:
     """The cohort-free entry point, for callers with no symbol_source column.
 
     ``app.ml.validator`` reads ``prediction_validations``, which has no
-    cohort column, so it asks the futures-only listing cache instead.
+    cohort column, so it asks the Binance listing caches instead. BOTH
+    caches are populated here because both answers are now positive
+    facts: futures-only membership routes to fapi, spot membership routes
+    to spot, and nothing else routes at all.
     """
     from app.data import bar_fetch
     from app.shadow import cohort_cache
 
     cohort_cache._futures_only_cache = {"PERPONLYUSDT"}
+    cohort_cache._spot_listed_cache = {"BTCUSDT"}
     try:
         assert bar_fetch.resolve_klines_url_for_symbol("PERPONLYUSDT") == (
             bar_fetch.FUTURES_KLINES_URL
@@ -488,38 +492,190 @@ def test_symbol_routing_uses_the_futures_only_listing_cache() -> None:
         cohort_cache._reset_for_tests()
 
 
+def test_a_symbol_IN_NEITHER_LISTING_raises_rather_than_assuming_spot() -> None:
+    """THE NO-DEFAULT PROPERTY. This is instance five's shape.
+
+    The three known instances (#539's seed, the validator, mfe_mae_curve)
+    all sent a *known* futures-only symbol to spot. Every guard above
+    catches that. The next one arrives differently: a symbol the caches
+    have simply never heard of.
+
+    Both caches are LOADED here and the symbol is in neither -- which is
+    what a pair listed after the last 24h refresh looks like, and what a
+    typo looks like. The tempting implementation,
+    ``FUTURES if sym in futures_only else SPOT``, returns spot here with
+    total confidence. For a futures-only pair that is #539 reproduced
+    inside the fix for #539, and it would read as "no data yet" forever.
+    """
+    from app.data import bar_fetch
+    from app.shadow import cohort_cache
+
+    cohort_cache._futures_only_cache = {"PERPONLYUSDT"}
+    cohort_cache._spot_listed_cache = {"BTCUSDT"}
+    try:
+        with pytest.raises(bar_fetch.UnresolvedMarket, match="neither Binance"):
+            bar_fetch.resolve_klines_url_for_symbol("LISTEDYESTERDAYUSDT")
+    finally:
+        cohort_cache._reset_for_tests()
+
+
+def test_a_COLD_CACHE_raises_rather_than_assuming_spot() -> None:
+    """The other unresolvable state: nothing loaded at all.
+
+    ``get_*_cache()`` returns None until the first SUCCESSFUL refresh
+    since process start, and that refresh is a network call. A startup
+    window is benign; a persistently failing refresh is not, and in both
+    cases the honest answer to "which market?" is that we do not know.
+    """
+    from app.data import bar_fetch
+    from app.shadow import cohort_cache
+
+    cohort_cache._reset_for_tests()
+    try:
+        assert cohort_cache.get_futures_only_cache() is None
+        assert cohort_cache.get_spot_listed_cache() is None
+        with pytest.raises(bar_fetch.UnresolvedMarket, match="unloaded"):
+            bar_fetch.resolve_klines_url_for_symbol("BTCUSDT")
+    finally:
+        cohort_cache._reset_for_tests()
+
+
+def test_the_resolver_is_STRUCTURALLY_incapable_of_defaulting() -> None:
+    """The no-default property asserted against the AST, not the behaviour.
+
+    The behavioural tests above cover the inputs we thought of. This one
+    covers the shape, because the defect IS a shape: a resolver with any
+    unguarded exit has a default, and whichever endpoint that exit names
+    becomes the thing you get when nobody decided. Four assertions, each
+    forbidding one way to write a default:
+
+    1. **no ternary.** The previous implementation was literally
+       ``return FUTURES_KLINES_URL if sym in cache else SPOT_KLINES_URL``.
+       A one-line conditional expression is the most natural way to write
+       this function and it is exactly the bug, so the form is banned
+       outright rather than re-reviewed each time.
+    2. **no ``else``.** An ``else`` arm is a default spelled over two
+       lines instead of one.
+    3. **every return is guarded by a positive membership test** (``in``).
+       This is the actual property: an endpoint may be returned only on
+       evidence that the symbol IS in a listing, never on the absence of
+       evidence that it is not.
+    4. **the last statement is a ``raise``.** So the fall-through case
+       cannot be a return at all.
+
+    A reviewer who wants to add a default now has to delete an assertion
+    that explains why it must not exist.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from app.data import bar_fetch
+
+    src = textwrap.dedent(inspect.getsource(bar_fetch.resolve_klines_url_for_symbol))
+    fn = ast.parse(src).body[0]
+    assert isinstance(fn, ast.FunctionDef)
+
+    # Scoped to the ROUTING statements: everything except the raise. The
+    # first version of this assertion walked the whole function and went
+    # red on the two ternaries inside the exception MESSAGE
+    # ("unloaded" if cache is None else len(cache)), which are formatting,
+    # not routing. A raise cannot return a URL, so excluding its subtree
+    # costs the guard nothing -- whereas deleting the assertion to make it
+    # pass, or dropping the diagnostic counts from the message, would both
+    # have been the wrong repair.
+    routing = [s for s in fn.body if not isinstance(s, ast.Raise)]
+    ternaries = [
+        n for s in routing for n in ast.walk(s) if isinstance(n, ast.IfExp)
+    ]
+    assert not ternaries, (
+        "resolve_klines_url_for_symbol routes through a conditional "
+        "EXPRESSION. `FUTURES if sym in futures_only else SPOT` cannot "
+        "distinguish 'spot-listed' from 'never heard of it' and silently "
+        "resolves both to spot -- #539's mechanism, re-entering through "
+        "#539's fix. Route on positive membership in each listing and raise "
+        "on neither."
+    )
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If):
+            assert not node.orelse, (
+                "resolve_klines_url_for_symbol has an `else` branch. Whatever "
+                "it returns is the value you get when no listing could place "
+                "the symbol -- i.e. a default, which is the defect FU-53 "
+                "exists to delete. The fall-through must be the raise."
+            )
+
+    guarded: list[ast.Return] = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If) and any(
+            isinstance(c, ast.Compare)
+            and any(isinstance(op, ast.In) for op in c.ops)
+            for c in ast.walk(node.test)
+        ):
+            guarded.extend(n for n in ast.walk(node) if isinstance(n, ast.Return))
+    all_returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    assert all_returns, "no returns at all -- the guard would be vacuous"
+    assert len(guarded) == len(all_returns), (
+        f"{len(all_returns) - len(guarded)} of {len(all_returns)} returns in "
+        "resolve_klines_url_for_symbol are NOT guarded by an `in` test. An "
+        "endpoint may only be returned on positive evidence that the symbol "
+        "is in a listing; returning one on the ABSENCE of contrary evidence "
+        "is the silent default."
+    )
+
+    assert isinstance(fn.body[-1], ast.Raise), (
+        f"resolve_klines_url_for_symbol ends in {type(fn.body[-1]).__name__}, "
+        "not a raise. The final statement is the one that runs when no "
+        "listing matched, so if it can return, it is a default."
+    )
+
+
 @pytest.mark.asyncio
-async def test_unclassifiable_symbol_returns_None_not_an_empty_list() -> None:
-    """``None`` and ``[]`` must not be the same answer, and this is the crux.
+async def test_unclassifiable_symbol_RAISES_and_never_returns_an_empty_list() -> None:
+    """"cannot place this symbol" and "no bars" must not be the same answer.
 
     #539's whole invisibility came from the two being indistinguishable: a
     spot fetch for a futures-only symbol returned ``[]``, which every caller
     read as "no bars yet" rather than "you asked the wrong market". So when
-    the market cannot be determined at all, the answer must be a value no
-    caller can mistake for data.
+    the market cannot be determined at all, the answer must be something no
+    caller can mistake for data, and must not be ignorable by omission.
 
-    Asserted with ``is None`` rather than falsiness on purpose -- ``[]`` is
-    falsy too, so ``assert not bars`` would pass on the exact bug this
-    test exists to catch. That is a check that cannot fail.
+    This asserted ``is None`` until 2026-10-26. ``None`` is unmistakable for
+    data, so it fixed the #539 conflation -- but it still relies on every
+    caller remembering a second return mode, and a skip path that must be
+    remembered is the thing this project keeps forgetting. A raise cannot
+    be forgotten.
+
+    The ``not isinstance(..., list)`` arm matters: ``[]`` is falsy, so
+    ``assert not bars`` would pass on the exact bug this test exists to
+    catch. That is a check that cannot fail.
     """
-    from app.data.bar_fetch import fetch_bars_by_symbol
+    from app.data.bar_fetch import UnresolvedMarket, fetch_bars_by_symbol
     from app.shadow import cohort_cache
 
     cohort_cache._reset_for_tests()
     try:
         assert cohort_cache.get_futures_only_cache() is None, (
-            "precondition: the cache must be unpopulated for this test to mean "
-            "anything -- a populated cache would route normally and the test "
-            "would pass without exercising the unclassifiable path"
+            "precondition: the caches must be unpopulated for this test to mean "
+            "anything -- populated caches would route normally and the test "
+            "would pass without exercising the unresolvable path"
         )
+        assert cohort_cache.get_spot_listed_cache() is None
 
-        bars = await fetch_bars_by_symbol("ANYUSDT", "1h", limit=3)
-        assert bars is None, (
-            f"got {bars!r}. An unclassifiable symbol must return None, never "
-            "[] -- [] is what a wrong-market fetch returns, and conflating "
-            "the two is exactly how #539 stayed invisible for the "
-            "futures_poll cohort's entire existence."
-        )
+        result: object = "not-set"
+        try:
+            result = await fetch_bars_by_symbol("ANYUSDT", "1h", limit=3)
+        except UnresolvedMarket:
+            pass
+        else:
+            raise AssertionError(
+                f"fetch_bars_by_symbol returned {result!r} for a symbol no "
+                "listing can place, instead of raising UnresolvedMarket. If "
+                "that value is [] it is indistinguishable from a successful "
+                "fetch that found no bars, which is exactly how #539 stayed "
+                "invisible for the futures_poll cohort's entire existence."
+            )
     finally:
         # Leave the module-level cache in its pristine state even if an
         # assertion above fails. This test deliberately mutates process-wide

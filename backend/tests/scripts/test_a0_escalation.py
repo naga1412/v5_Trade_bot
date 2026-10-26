@@ -405,3 +405,76 @@ def test_nominated_horizon_is_one_of_the_measured_horizons() -> None:
     """Guards the config itself: nominating a horizon the probe never
     computes would make the primary silently empty."""
     assert NOMINATED_HORIZON in HORIZONS
+
+
+def test_an_unresolvable_endpoint_PROPAGATES_past_the_per_symbol_handler() -> None:
+    """FU-53: the sweep's broad handler must not swallow a routing bug.
+
+    The per-symbol ``except Exception`` is correct and stays: a 279-symbol
+    run must not die because one symbol returned a bad response. But an
+    endpoint that cannot be resolved is a different animal -- it is a bug
+    in the sweep's own cohort data, and continuing past it drops symbols
+    from the DENOMINATOR while the run still prints a total. FU-53 cost
+    this very script 60 of its 279 symbols exactly that way, and the loss
+    was invisible precisely because the run completed.
+
+    Two properties, and the ORDER is the one that matters. Python matches
+    handlers top-down, so a specific arm placed after ``except Exception``
+    is dead code that reads as protection. Asserting only "a handler for
+    UnresolvedMarket exists" would pass on that dead version -- a check
+    that cannot fail.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    import scripts.a0_escalation as a0
+
+    src = textwrap.dedent(inspect.getsource(a0.main))
+    tries = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Try)]
+
+    def _names(handler: ast.ExceptHandler) -> set[str]:
+        t = handler.type
+        if t is None:
+            return set()
+        parts = t.elts if isinstance(t, ast.Tuple) else [t]
+        return {p.id for p in parts if isinstance(p, ast.Name)}
+
+    matching = [
+        t for t in tries
+        if any("UnresolvedMarket" in _names(h) for h in t.handlers)
+    ]
+    assert matching, (
+        "no handler in a0_escalation.main mentions UnresolvedMarket. The "
+        "per-symbol `except Exception` therefore swallows an unresolvable "
+        "klines endpoint into `n = 0`, dropping that symbol from the "
+        "denominator while the run still prints a total -- which is how "
+        "FU-53 removed 60 of 279 symbols without anyone noticing."
+    )
+
+    for t in matching:
+        idx_specific = next(
+            i for i, h in enumerate(t.handlers)
+            if "UnresolvedMarket" in _names(h)
+        )
+        broad = [
+            i for i, h in enumerate(t.handlers)
+            if "Exception" in _names(h) or h.type is None
+        ]
+        for i in broad:
+            assert idx_specific < i, (
+                f"the UnresolvedMarket handler is at position {idx_specific}, "
+                f"AFTER a broad handler at {i}. Python matches top-down, so "
+                "the specific arm never runs and the re-raise is dead code "
+                "that reads like protection."
+            )
+        body = t.handlers[idx_specific].body
+        assert len(body) == 1 and isinstance(body[0], ast.Raise), (
+            "the UnresolvedMarket handler must re-raise and do nothing else. "
+            "Logging and continuing turns a routing bug back into a silently "
+            "shrinking denominator."
+        )
+        assert body[0].exc is None, (
+            "re-raise bare (`raise`), not `raise SomethingElse(...)` -- the "
+            "original traceback names the symbol and the cache state."
+        )

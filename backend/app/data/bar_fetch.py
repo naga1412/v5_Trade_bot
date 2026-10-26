@@ -21,11 +21,24 @@ permanent empty result, on every call, forever. Both the adapter and the
 range fetchers swallow that into an empty list rather than raising, which
 is why all three instances ran unnoticed for weeks.
 
-THE SILENT DEFAULT IS THE DEFECT, not the endpoint. So
-:func:`resolve_klines_url` **raises** on a cohort it was not taught,
-rather than falling back to spot. A cohort added to
-``app.shadow.live_fleet_universe.Cohort`` without being taught here fails
-loudly at the first fetch instead of inheriting the #539 behaviour.
+THE SILENT DEFAULT IS THE DEFECT, not the endpoint. So **neither
+resolver has one**, and both raise:
+
+- :func:`resolve_klines_url` raises on a cohort it was not taught, so a
+  cohort added to ``app.shadow.live_fleet_universe.Cohort`` without
+  being taught here fails loudly at the first fetch rather than
+  inheriting the #539 behaviour.
+- :func:`resolve_klines_url_for_symbol` raises unless a Binance listing
+  cache places the symbol by POSITIVE membership. The three known
+  instances all came from a *known* futures-only symbol reaching spot;
+  the fourth arrives via an *unknown* one -- a symbol newer than the
+  last 24h listing refresh, a cold cache, a typo -- and only a raise
+  catches that. "Not in the futures-only set" is not evidence of a spot
+  listing, which is why the obvious
+  ``futures if sym in futures_only else spot`` is itself the defect.
+
+Every endpoint this module returns is therefore backed by an explicit
+positive fact, and everything else is an exception.
 
 The load-bearing half of this fix is not this module -- a helper callers
 can bypass is a convention, and the convention has already failed three
@@ -59,6 +72,19 @@ SPOT_BACKED_COHORTS: frozenset[str] = frozenset(
 )
 
 
+class UnresolvedMarket(RuntimeError):
+    """A symbol's market could not be established from positive evidence.
+
+    A distinct type, not a bare ``RuntimeError``, so callers can handle
+    *this* without widening to every exception. The two that matter:
+    ``app.ml.validator`` lets it propagate (a row stays pending and
+    retries, which is the correct answer to "which market?" when nothing
+    can answer it), and ``scripts/a0_escalation`` re-raises it past its
+    per-symbol network-error handler, because an unresolvable endpoint is
+    a bug in the sweep rather than a flaky symbol.
+    """
+
+
 def resolve_klines_url(symbol_source: str) -> str:
     """The klines endpoint for one cohort, or ``ValueError``.
 
@@ -87,27 +113,63 @@ def is_futures_only(symbol_source: str) -> bool:
     return resolve_klines_url(symbol_source) == FUTURES_KLINES_URL
 
 
-def resolve_klines_url_for_symbol(binance_symbol: str) -> str | None:
-    """Endpoint for a symbol whose caller has no cohort tag, or ``None``.
+def resolve_klines_url_for_symbol(binance_symbol: str) -> str:
+    """Endpoint for a symbol whose caller has no cohort tag. NO DEFAULT.
 
     Some call sites genuinely do not carry a cohort: ``app.ml.validator``
     reads ``prediction_validations``, which has no ``symbol_source``
-    column. They can still ask the question that actually matters -- is
-    this symbol futures-only? -- from the futures-only cache, a
-    near-static Binance listing property refreshed on a 24h cadence.
+    column. They ask the Binance listing caches instead.
 
-    ``None`` means NOT CLASSIFIABLE (the cache has never been populated),
-    and callers must **skip** rather than fetch. That follows
-    ``app.shadow.cohort_cache``'s NO-DEFAULT-ON-FAILURE rule, and here it
-    is the whole point: guessing "spot" is #539, and guessing is what a
-    returned URL would invite.
+    **Every return requires POSITIVE membership in a listing** -- the
+    futures-only set, or the spot set. There is no ``else`` branch, and
+    that absence is the entire design:
+
+    - a cold cache (never refreshed since process start) answers
+      "neither", and raises;
+    - a symbol listed since the last 24h refresh is in neither set, and
+      raises;
+    - a typo'd or delisted symbol is in neither set, and raises.
+
+    An earlier version of this function returned
+    ``FUTURES_KLINES_URL if sym in futures_only else SPOT_KLINES_URL``.
+    That ``else`` is a silent spot default wearing a conditional: it
+    cannot distinguish "spot-listed" from "the cache has not heard of
+    this symbol", and it resolves both to spot -- which is #539's
+    mechanism exactly, re-entering through the fix for #539. The three
+    known instances all came from a KNOWN futures-only symbol reaching
+    spot; the fourth will come from an UNKNOWN symbol, and only a raise
+    catches that.
+
+    Raises:
+        UnresolvedMarket: neither listing can place this symbol.
     """
-    from app.shadow.cohort_cache import get_futures_only_cache
+    from app.shadow.cohort_cache import (
+        get_futures_only_cache,
+        get_spot_listed_cache,
+    )
 
-    cache = get_futures_only_cache()
-    if cache is None:
-        return None
-    return FUTURES_KLINES_URL if binance_symbol in cache else SPOT_KLINES_URL
+    futures_only = get_futures_only_cache()
+    if futures_only is not None and binance_symbol in futures_only:
+        return FUTURES_KLINES_URL
+
+    spot_listed = get_spot_listed_cache()
+    if spot_listed is not None and binance_symbol in spot_listed:
+        return SPOT_KLINES_URL
+
+    raise UnresolvedMarket(
+        f"cannot determine which market {binance_symbol!r} trades on: it is "
+        f"in neither Binance listing cache "
+        f"(futures_only={'unloaded' if futures_only is None else len(futures_only)}, "
+        f"spot={'unloaded' if spot_listed is None else len(spot_listed)}). "
+        "NOT defaulting to spot, deliberately. A futures-only symbol fetching "
+        "/api/v3/klines gets an empty list on every call forever, which reads "
+        "as 'no data yet' -- that is how #539 cost the futures_poll cohort "
+        "every prediction it should have made, undetected for weeks. If both "
+        "caches read 'unloaded', app.workers.futures_only_refresh has not "
+        "completed a cycle since process start and this is transient; if they "
+        "are loaded, this symbol was listed after the last 24h refresh, or it "
+        "does not exist."
+    )
 
 
 def _to_candles(rows: list[list[Any]]) -> list[Candle]:
@@ -175,18 +237,21 @@ async def fetch_bars_by_symbol(
     rate_client: object | None = None,
     http: httpx.AsyncClient | None = None,
     limit: int = 500,
-) -> list[Candle] | None:
-    """:func:`fetch_bars` for callers with no cohort tag. ``None`` = skip.
+) -> list[Candle]:
+    """:func:`fetch_bars` for callers with no cohort tag.
 
-    Returns ``None`` -- never an empty list -- when the market cannot be
-    determined, so a caller cannot confuse "unclassifiable" with "no bars
-    returned". That distinction is the one #539 destroyed: a spot fetch
-    for a futures-only symbol returned ``[]``, which read as "no data
-    yet" for the cohort's entire existence.
+    Raises :class:`UnresolvedMarket` rather than returning a sentinel
+    when the market cannot be determined. An earlier version returned
+    ``None`` for "unclassifiable", which is better than an empty list but
+    still asks every caller to remember a second return mode -- and the
+    one thing this project knows about an easily-forgotten skip path is
+    that it gets forgotten. A raise cannot be ignored by omission.
+
+    The distinction being protected is the one #539 destroyed: a spot
+    fetch for a futures-only symbol returned ``[]``, which read as "no
+    data yet" for the cohort's entire existence.
     """
     url = resolve_klines_url_for_symbol(symbol.replace("/", ""))
-    if url is None:
-        return None
     return await _fetch_at(url, symbol, timeframe,
                            rate_client=rate_client, limit=limit, http=http)
 
@@ -223,6 +288,7 @@ __all__ = [
     "FUTURES_ONLY_COHORTS",
     "SPOT_BACKED_COHORTS",
     "SPOT_KLINES_URL",
+    "UnresolvedMarket",
     "fetch_bars",
     "fetch_bars_by_symbol",
     "is_futures_only",

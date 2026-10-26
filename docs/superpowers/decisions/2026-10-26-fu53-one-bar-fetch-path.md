@@ -83,12 +83,92 @@ falling back to spot. #539 was not really a wrong endpoint — it was a
 added to `live_fleet_universe.Cohort` without being taught here now fails
 loudly at the first fetch instead of inheriting #539.
 
-The same reasoning drives `fetch_bars_by_symbol` returning **`None`, never
-`[]`**, when the market cannot be determined. `None` and `[]` being
-indistinguishable is the whole of #539's invisibility: a wrong-market fetch
-returned `[]`, which every caller read as "no bars yet". The test asserts
-`is None` rather than falsiness on purpose — `assert not bars` would pass on
-the exact bug it exists to catch.
+## The first version still had a default (operator ruling, 2026-10-26)
+
+The helper originally resolved a cohort-less symbol like this:
+
+```python
+cache = get_futures_only_cache()
+if cache is None:
+    return None
+return FUTURES_KLINES_URL if binance_symbol in cache else SPOT_KLINES_URL
+```
+
+Held, and correctly. **That `else` is a silent spot default wearing a
+conditional.** It cannot distinguish "spot-listed" from "the cache has
+never heard of this symbol", and it resolves both to spot. For a
+futures-only pair that is #539's mechanism re-entering *through the fix
+for #539*.
+
+The operator's framing is the part worth keeping: the three known
+instances all sent a **known** futures-only symbol to spot, and every
+guard written for them catches that. Instance five arrives from an
+**unknown** one — a pair listed since the last 24h refresh, a cold cache,
+a typo — and only a raise catches it.
+
+Two candidate fixes were rejected:
+
+| option | why it fails |
+|---|---|
+| keep the cache, document the miss | a cold or stale cache silently selecting spot is precisely the defect, now behind a helper that *looks* authoritative |
+| join `predictions` for `symbol_source` | **silently wrong before 2026-09-03 18:00Z.** Every pre-boundary row carries the uniform `established_top20` default, so a futures-only symbol in a historical window resolves to spot — the defect reintroduced through the fix |
+
+The design that survives has **no default at all**: every returned
+endpoint requires POSITIVE membership in a Binance listing, and anything
+else raises `UnresolvedMarket`. That converts every lookup source from
+SILENTLY WRONG to LOUDLY MISSING, which is what makes the cache
+dependency acceptable and the join unnecessary. `fetch_market_listings`
+now returns the spot set it previously computed and discarded, so a spot
+answer is a positive fact rather than an inferred absence — at zero extra
+network cost, since both sets come out of the same two `exchangeInfo`
+calls, and they refresh together so the pair can never answer "neither"
+for a symbol one of them knew about.
+
+`fetch_bars_by_symbol` raises for the same reason it previously returned
+`None`, only harder. `None` and `[]` being indistinguishable is the whole
+of #539's invisibility: a wrong-market fetch returned `[]`, which every
+caller read as "no bars yet". `None` fixed that conflation but still
+asks every caller to remember a second return mode — and a skip path that
+must be remembered is the thing this project keeps forgetting. A raise
+cannot be ignored by omission.
+
+Callers handle it explicitly, never a bare `except: continue` (cf. #447,
+which deleted three of those):
+
+- **`app.ml.validator`** — propagates out of `_fetch_close_at`; the pass
+  loop catches it in a *named* arm and emits ONE aggregated ERROR
+  carrying `%d of %d`. The count is the load-bearing part: the caches are
+  process-global, so a cold cache makes every row unresolvable, and the
+  denominator is what separates "one symbol listed yesterday" from
+  "prediction validation has stopped".
+- **`scripts/a0_escalation`** — re-raises *past* its per-symbol
+  `except Exception`. That broad handler is right for flaky symbols, but
+  an unresolvable endpoint shrinks the denominator while the run still
+  prints a total, which is exactly how FU-53 cost this script 60 of its
+  279 symbols invisibly. The guard asserts handler ORDER, because a
+  specific arm placed after `except Exception` is dead code that reads
+  like protection.
+- **`app.ws.live_prediction`** — propagates. Raising beats #539's
+  forever-400, which produced zero predictions silently.
+- **`app.core.scoring.mtf_confluence`** — NOT migrated here; see the
+  mtf-confluence decision record. Routing it changes the live mtf value
+  for 26 symbols, which is a dispatch change and is gated on the
+  decision-flip screen, not on this PR.
+
+### The guard asserts the no-default property structurally
+
+Behavioural tests cover the inputs we thought of; the defect is a
+*shape*, so one test parses the resolver's AST and forbids four ways to
+write a default: no ternary (the original form), no `else`, every
+`return` guarded by an `in` test, and the final statement must be a
+`raise`. Adding a default now means deleting an assertion that explains
+why it must not exist.
+
+That assertion's first version was over-broad — it banned ternaries
+anywhere in the function and went red on two inside the exception
+*message* (`"unloaded" if cache is None else len(cache)`). The right
+repair was to scope it to the routing statements, not to delete it and
+not to strip the diagnostic counts out of the message.
 
 And `symbol_source` is a **required** keyword on the migrated range fetcher.
 A required argument is stronger than a convention: the three callers could

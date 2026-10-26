@@ -53,6 +53,7 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.data.bar_fetch import UnresolvedMarket
 from scripts.mfe_mae_curve import Bar, _fetch_bars_at_tf
 from scripts.phase_a_scan import cell, decile_of, deciles
 
@@ -510,6 +511,18 @@ async def main() -> None:
             async with sem:
                 try:
                     n = await _resolve_symbol(client, sym, by_symbol[sym])
+                except (UnresolvedMarket, ValueError):
+                    # PROPAGATE. This arm exists to get OUT of the broad
+                    # handler below, which is there for flaky symbols and
+                    # transient HTTP -- the right call for a 279-symbol
+                    # sweep that must not die on one bad response. An
+                    # endpoint we cannot resolve is a different animal: it
+                    # is a bug in the sweep's own cohort data, and
+                    # continuing would silently drop symbols from the
+                    # denominator. FU-53 cost this very script 60 of its
+                    # 279 symbols exactly that way, and the loss was
+                    # invisible because the run still printed a total.
+                    raise
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! {sym}: {e}", flush=True)
                     n = 0

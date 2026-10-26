@@ -37,7 +37,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shadow.live_fleet_universe import (
-    fetch_futures_and_futures_only_symbols,
+    fetch_market_listings,
     load_baseline_symbols,
 )
 
@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 
 _baseline_cache: set[str] | None = None
 _futures_only_cache: set[str] | None = None
+_spot_listed_cache: set[str] | None = None
 _futures_only_cache_loaded_at: datetime | None = None
 
 
@@ -85,14 +86,27 @@ async def refresh_futures_only_cache(http: httpx.AsyncClient) -> set[str] | None
     Binance hiccup, which would turn every position open for the next
     24h into a forced NULL until the next successful cycle. Returns the
     new set on success, None on failure (mirroring get_futures_only_cache's
-    contract so callers can log/heartbeat off the return value directly)."""
-    global _futures_only_cache, _futures_only_cache_loaded_at
+    contract so callers can log/heartbeat off the return value directly).
+
+    It populates the SPOT-listed cache in the same cycle (FU-53). Both
+    sets come out of the same pair of exchangeInfo calls, so this costs
+    no extra request, and they must be refreshed together or not at all:
+    `app.data.bar_fetch` resolves an endpoint by requiring POSITIVE
+    membership in one set or the other, and two sets from different
+    moments could answer "neither" for a symbol that one of them knew
+    about. The name still says futures_only because that is the cycle's
+    purpose and its 24h cadence; the spot set is a by-product of the
+    same two calls.
+    """
+    global _futures_only_cache, _spot_listed_cache, _futures_only_cache_loaded_at
     try:
-        _, futures_only = await fetch_futures_and_futures_only_symbols(http)
+        _, futures_only, spot_listed = await fetch_market_listings(http)
         _futures_only_cache = futures_only
+        _spot_listed_cache = spot_listed
         _futures_only_cache_loaded_at = _utc_now()
         log.info(
-            "cohort_cache: futures_only refreshed (%d symbols)", len(futures_only),
+            "cohort_cache: futures_only refreshed (%d symbols, "
+            "%d spot-listed)", len(futures_only), len(spot_listed),
         )
         return futures_only
     except Exception as e:  # noqa: BLE001
@@ -113,6 +127,20 @@ def get_futures_only_cache() -> set[str] | None:
     return _futures_only_cache
 
 
+def get_spot_listed_cache() -> set[str] | None:
+    """Sync, zero-I/O read of the USDT SPOT listing. None means the
+    refresh has never succeeded since process start.
+
+    This exists so a symbol's market can be established by POSITIVE
+    evidence. Absence from `get_futures_only_cache()` is NOT that
+    evidence -- it is also what a listing newer than the last refresh
+    looks like -- so `app.data.bar_fetch` consults both and raises when
+    neither answers. Deriving "spot" from the absence is the silent
+    default FU-53 removes.
+    """
+    return _spot_listed_cache
+
+
 def get_futures_only_cache_age_seconds() -> float | None:
     """None if never loaded; otherwise seconds since the last successful
     refresh. Used by the healer/heartbeat to flag a cache that's gone
@@ -126,9 +154,11 @@ def get_futures_only_cache_age_seconds() -> float | None:
 def _reset_for_tests() -> None:
     """Test-only: clear all module state between tests. Never called
     from production code."""
-    global _baseline_cache, _futures_only_cache, _futures_only_cache_loaded_at
+    global _baseline_cache, _futures_only_cache, _spot_listed_cache
+    global _futures_only_cache_loaded_at
     _baseline_cache = None
     _futures_only_cache = None
+    _spot_listed_cache = None
     _futures_only_cache_loaded_at = None
 
 
@@ -137,5 +167,6 @@ __all__ = [
     "get_baseline_cache",
     "refresh_futures_only_cache",
     "get_futures_only_cache",
+    "get_spot_listed_cache",
     "get_futures_only_cache_age_seconds",
 ]
