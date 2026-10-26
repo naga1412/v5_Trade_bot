@@ -221,6 +221,33 @@ def _vote_for_tf(klines: list[list[Any]]) -> tuple[int, float]:
 # ---------------------------------------------------------------------------
 
 
+# --- fail-open observability (2026-10-26) ---------------------------------
+# A counter, not just a log line. This repo has shipped log-only
+# instrumentation repeatedly and then had no retrieval path when the
+# question came up (FU-47's class), so the count is readable in-process by
+# a probe or heartbeat without grepping a container's log buffer -- which is
+# truncated on every redeploy anyway.
+_fetch_failures: dict[str, int] = {}
+
+
+def _record_fetch_failure(symbol: str, tf: str) -> None:
+    _fetch_failures[symbol] = _fetch_failures.get(symbol, 0) + 1
+
+
+def get_fetch_failure_counts() -> dict[str, int]:
+    """Per-symbol MTF kline-fetch failures since process start.
+
+    A symbol appearing here at all means its MTF vote has been degraded to
+    zero-agreement at least once; a count that tracks the number of scoring
+    cycles means it is degraded permanently, not intermittently.
+    """
+    return dict(_fetch_failures)
+
+
+def _reset_fetch_failures_for_tests() -> None:
+    _fetch_failures.clear()
+
+
 async def _fetch_one_tf(
     http: httpx.AsyncClient,
     symbol: str,
@@ -248,7 +275,24 @@ async def _fetch_one_tf(
         resp.raise_for_status()
         klines: list[list[Any]] = resp.json()
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
-        log.warning("mtf fetch %s/%s failed: %s", symbol, tf, exc)
+        _record_fetch_failure(symbol, tf)
+        # ERROR, not WARNING, and counted. This is a FAIL-OPEN path: the
+        # caller turns None into a zero-vote degradation, so a symbol whose
+        # fetch always fails scores as though no higher timeframe agreed
+        # with it -- indistinguishable from genuine disagreement. For the
+        # futures_poll cohort that is not intermittent, it is permanent:
+        # those symbols have no spot pair, so this spot URL can never
+        # return bars for them (FU-53, same class as #539).
+        #
+        # Fail-open-silently is the defect regardless of what the correct
+        # value turns out to be, which is why the severity and the counter
+        # ship now while the routing fix waits to be measured.
+        log.error(
+            "mtf_kline_fetch_failed: symbol=%s tf=%s failures_for_symbol=%d "
+            "-- FAIL-OPEN, this symbol scores as zero-agreement for this tf: "
+            "%s",
+            symbol, tf, _fetch_failures.get(symbol, 0), exc,
+        )
         return None
 
     cache_set(symbol, tf, klines)
