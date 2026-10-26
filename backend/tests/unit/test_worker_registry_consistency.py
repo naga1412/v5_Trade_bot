@@ -61,6 +61,7 @@ WORKER_SOURCE_MODULES: dict[str, str] = {
     "live_fleet_universe_refresh_task": "app/shadow/universe_refresh_scheduler.py",
     "pattern_stats_refresh": "app/workers/pattern_stats_refresh.py",
     "futures_only_refresh_task": "app/workers/futures_only_refresh.py",
+    "check_events_flush_task": "app/workers/check_events_flush.py",
 }
 
 
@@ -218,6 +219,11 @@ _NATURAL_CADENCE_SECONDS: dict[str, int] = {
     # 24h nightly (item 0, 2026-08-30) -- listing data, deliberately NOT
     # coupled to live_fleet_universe_refresh_task's 6h cadence above.
     "futures_only_refresh_task": 24 * 60 * 60,
+    # 5 min (work order item 3, 2026-10-26). The fastest cadence in this
+    # map: it mirrors an in-process counter, so its cost is one small
+    # UPSERT per cycle and its value is bounded by how stale the answer
+    # may be when a human asks.
+    "check_events_flush_task": 5 * 60,
 }
 
 

@@ -175,6 +175,23 @@ async def patch_rl_checkpoint(
                 metric="sharpe",
             )
             if not cc.challenger_wins:
+                # See admin_ml.py's twin: a bootstrap refusal and a lost
+                # comparison are different events. This is the path #571
+                # named as still open when it closed register_brain.py's
+                # copy of the same branch.
+                if cc.gate_outcome == "bootstrap_blocked":
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "bootstrap_blocked: no active champion for "
+                            f"model={existing.model_name}, so this "
+                            "checkpoint is unopposed rather than proven "
+                            f"(challenger_sharpe={cc.challenger_mae}). "
+                            "Activating the first checkpoint of a model is "
+                            "a deliberate act: pass ?force=true to do it, "
+                            "which is logged for the audit trail."
+                        ),
+                    )
                 raise HTTPException(
                     status_code=422,
                     detail=(

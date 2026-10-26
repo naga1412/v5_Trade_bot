@@ -131,16 +131,25 @@ async def test_sharpe_3pct_better_loses_5pct_bar(session, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sharpe_first_checkpoint_no_champion_auto_passes(
+async def test_sharpe_first_checkpoint_no_champion_REFUSES(
     session, monkeypatch,
 ) -> None:
-    """No active champion → bootstrap path returns wins=True regardless of Sharpe."""
+    """No active champion → refuse, regardless of Sharpe.
+
+    REVERSED 2026-10-26, previously
+    ``test_sharpe_first_checkpoint_no_champion_auto_passes``, whose
+    docstring read "returns wins=True regardless of Sharpe" -- an
+    accurate description of the defect, asserted as the requirement.
+    This is the RL-brain reach of the branch #571 closed in
+    register_brain.py, and the one the admin route and the ConvLSTM
+    promotion path share.
+    """
     from app.ml import champion_challenger as cc
 
     challenger_id = await _insert_rl_checkpoint(session, version="v1-001")
 
     async def fake_sharpe(_session, checkpoint_id: int) -> float:
-        return 0.3  # mediocre — would lose against any champion
+        return 0.3  # mediocre -- would lose against any champion
 
     monkeypatch.setattr(cc, "_evaluate_sharpe", fake_sharpe)
 
@@ -150,7 +159,37 @@ async def test_sharpe_first_checkpoint_no_champion_auto_passes(
     )
     assert result.champion_metric is None
     assert result.challenger_metric == pytest.approx(0.3)
+    assert result.challenger_wins is False
+    assert result.gate_outcome == "bootstrap_blocked"
+
+
+@pytest.mark.asyncio
+async def test_sharpe_bootstrap_passes_with_explicit_opt_in(
+    session, monkeypatch,
+) -> None:
+    """THE POSITIVE CONTROL for the reversal above.
+
+    A hardcoded ``challenger_wins=False`` would pass the reversed test
+    while making the first RL checkpoint unpromotable forever. This
+    asserts the opt-in opens the gate, so what shipped is a gate and
+    not a wall.
+    """
+    from app.ml import champion_challenger as cc
+
+    challenger_id = await _insert_rl_checkpoint(session, version="v1-001")
+
+    async def fake_sharpe(_session, checkpoint_id: int) -> float:
+        return 0.3
+
+    monkeypatch.setattr(cc, "_evaluate_sharpe", fake_sharpe)
+
+    result = await cc.evaluate_challenger(
+        session, challenger_checkpoint_id=challenger_id,
+        table="rl_checkpoints", metric="sharpe",
+        allow_bootstrap=True,
+    )
     assert result.challenger_wins is True
+    assert result.gate_outcome == "bootstrap"
 
 
 @pytest.mark.asyncio

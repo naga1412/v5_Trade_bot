@@ -151,14 +151,21 @@ async def test_delete_unknown_id_returns_404(admin_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_patch_without_force_runs_champion_challenger_gate(
+async def test_patch_without_force_REFUSES_a_first_checkpoint(
     admin_client, monkeypatch,
 ) -> None:
-    """Without ?force=true, evaluate_challenger() runs.
+    """Without ?force=true, a FIRST checkpoint is refused, not activated.
 
-    For the FIRST checkpoint (no champion), the bootstrap path returns
-    challenger_wins=True automatically — even without force. This test
-    verifies the no-force path on a first checkpoint succeeds.
+    REVERSED 2026-10-26. The previous docstring stated the defect as the
+    requirement: "the bootstrap path returns challenger_wins=True
+    automatically — even without force". That made "there is no
+    incumbent" the most permissive state the gate had, which is the
+    branch #571 closed in register_brain.py after it installed untested
+    brains for 64 nights.
+
+    This is the THIRD test that pinned the auto-pass (the other two are
+    unit tests over evaluate_challenger itself); the count is the reason
+    the enumeration mattered before touching the branch.
     """
     # Stub _evaluate_sharpe so we don't hit the backtester.
     from app.ml import champion_challenger as cc
@@ -172,6 +179,41 @@ async def test_patch_without_force_runs_champion_challenger_gate(
     cid = create.json()["id"]
     r = await admin_client.patch(
         f"/api/v1/admin/rl-checkpoints/{cid}",   # no force
+        json={"is_active": True},
+    )
+    assert r.status_code == 422
+    # The OUTCOME must be named in the body. Asserting only the 422
+    # would also pass for a lost comparison, which is a different event
+    # with a different operator response, and whose "needs 5%
+    # improvement" wording is meaningless with no champion to improve on.
+    detail = r.json()["detail"]
+    assert "bootstrap_blocked" in detail, detail
+    assert "5% improvement" not in detail, detail
+
+
+@pytest.mark.asyncio
+async def test_patch_WITH_force_still_activates_a_first_checkpoint(
+    admin_client, monkeypatch,
+) -> None:
+    """THE POSITIVE CONTROL for the reversal above.
+
+    A route that refused every first checkpoint unconditionally would
+    satisfy the reversed test while making a brand-new model impossible
+    to promote through the API at all. ?force=true is the deliberate,
+    WARNING-logged act that the refusal redirects the operator to, so it
+    has to still work — otherwise the guard is a wall.
+    """
+    from app.ml import champion_challenger as cc
+    async def fake_sharpe(session, checkpoint_id):  # noqa: ARG001
+        return 1.5
+    monkeypatch.setattr(cc, "_evaluate_sharpe", fake_sharpe)
+
+    create = await admin_client.post(
+        "/api/v1/admin/rl-checkpoints", json=_valid_body(),
+    )
+    cid = create.json()["id"]
+    r = await admin_client.patch(
+        f"/api/v1/admin/rl-checkpoints/{cid}?force=true",
         json={"is_active": True},
     )
     assert r.status_code == 200
