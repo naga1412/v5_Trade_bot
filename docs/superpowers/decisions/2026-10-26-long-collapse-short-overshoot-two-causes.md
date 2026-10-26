@@ -115,3 +115,114 @@ because regime has been constant.
   copied from a `shadow_trades` join silently matched **zero** rows here and
   reported every row as `(unmatched)` — a join that cannot succeed, which
   looks exactly like a cohort with no data. Three tables, two formats.
+
+---
+
+# AMENDMENT — the DAILY series, and the ratio discriminator answered early
+
+**Added:** 2026-10-26, same day. **Status:** measured, read-only. No action.
+
+## Why this amendment exists
+
+The operator's order for this measurement asked for two things. Part 1
+above delivered the first: one location-shift parameter, fitted, and
+whether it reconciles both the 0.284x and 2.29x ratios. It does at the
+scoring layer (delta = -0.0145 vs -0.0144, disagreement 0.0001) and does
+not at the dispatch layer.
+
+It did **not** deliver the second: *"Daily counts >= +0.36 and <= -0.36
+with the distribution's location, same population as the projection,
+spanning well before the flip."* Part 1 used two aggregate buckets
+(7.000 d pre, 3.001 d post), not a daily series. **Status reported
+honestly: the fit was done, the daily series was outstanding.** It is
+below.
+
+## The series
+
+`predictions`, `timeframe='1h'`, all cohorts, signed `final_score`, 46
+UTC days **2026-09-11 -> 2026-10-26**, **n = 87,503**. Spans well before
+the 2026-10-23 flip, as ordered.
+
+Pooled over the whole window: **954** rows at `fs >= +0.36`, **846** at
+`fs <= -0.36`. **S/L = 0.887** -- over 46 days the LONG tail is
+*slightly larger* than the SHORT tail.
+
+## This answers the 2026-11-03 pre-registration's discriminator, early
+
+The pre-registration
+(`2026-10-26-short-overshoot-resolvability.md`) set the test as **the
+ratio's behaviour, not the overshoot's sigma**, with two competing
+predictions:
+
+| hypothesis | prediction |
+|---|---|
+| unification / distribution shift | the ratio moves **WITH** regime |
+| structural asymmetry | SHORT stays **~2x** LONG at equal thresholds **REGARDLESS** of the regime label |
+
+Split the 46 days by the **sign of the daily location** (`mean
+final_score`), at the same symmetric +-0.36 thresholds throughout:
+
+| day group | days | n | LONG tail | SHORT tail | **S/L** |
+|---|---|---|---|---|---|
+| location > 0 | 25 | 50,400 | 765 | 138 | **0.180** |
+| location <= 0 | 21 | 37,103 | 189 | 708 | **3.746** |
+
+**A 20.8x difference in the ratio between the two regime groups.**
+
+Per-day, regressing `log((S+0.5)/(L+0.5))` on the daily mean
+`final_score` (Haldane correction keeps zero cells finite):
+
+- Pearson **r = -0.9023**, **t = -13.879** on df = 44
+- slope **-25.89** log-ratio per unit `final_score`
+- **R^2 = 0.814** -- **81.4%** of the ratio's day-to-day variation is
+  explained by the location **alone**
+
+Restricting to the 30 days carrying **>= 20 tail events** (so a ratio is
+not a 1-vs-0 artefact), the finite S/L range is **0.00 to 33.00**, with a
+further two days at LONG = 0 (infinite). And the **dominant tail matches
+the location's sign on 41 of 46 days**, exact one-sided binomial
+**p = 2.2e-08**.
+
+### The structural hypothesis made a falsifiable prediction and it failed
+
+This is not a check that cannot fail. "SHORT ~2x LONG **regardless of
+regime**" predicts a SHORT **floor** on positive-location days. Observed
+on those 25 days: **S/L = 0.180**, i.e. LONG outnumbers SHORT **5.5:1**.
+There is no floor. The prediction was testable, was tested on 50,400 rows
+of positive-location data, and is **falsified as a regardless-of-regime
+claim**.
+
+What survives is the honest version: a location shift mechanically moves
+the two tails in opposite directions, so **the asymmetry is a location
+phenomenon**. That is a confirmation of the mechanism rather than a
+surprise, and it is stated that way deliberately.
+
+## What this does and does not replace
+
+**DOES answer:** the operator's decision question -- *does 42 cards/day
+decay on its own, or persist?* The SHORT excess tracks a location that is
+currently negative but has **crossed zero repeatedly** on a 2-5 day
+timescale (10-20 is +0.020 with 36 LONG / 7 SHORT; 10-22 is -0.115 with 3
+LONG / 32 SHORT; 10-23 is -0.057 with 27 LONG / 20 SHORT). September ran
+predominantly **positive**. There is no evidence of a persistent negative
+location, so **the distributional component should revert**.
+
+**DOES NOT replace the 2026-11-03 read.** That read is about the
+overshoot's magnitude once the post-flip window has accumulated. This
+measures the ratio's *dependence on location* using regime variation that
+already exists in the data rather than waiting for more of it. The two are
+complementary, and **the 11-03 date stands**.
+
+**AND THE TRAP STILL APPLIES**, restated because it is easy to lose: a
+non-arrival at 3 sigma on 11-03 must **not** be read as a failed
+measurement. Decay is the **predicted** outcome of the leading
+hypothesis, and this amendment strengthens that hypothesis rather than
+weakening it. "Still not significant" will be the **confirmation**.
+
+## The standing decision is unchanged
+
+**Do not raise the SHORT bar.** Part 1's reason (the dominant 57% term is
+a LONG conversion collapse downstream of scoring) still holds, and the
+daily series adds a second: retuning the bar now would fit it to a
+location that oscillates across zero on a few-day timescale, which is the
+definition of fitting to a component expected to revert.

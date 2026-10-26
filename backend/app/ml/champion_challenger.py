@@ -2,9 +2,26 @@
 
 A challenger checkpoint must beat the currently-active champion by at least
 ``IMPROVEMENT_BAR`` (5%) on a fixed held-out window before the admin
-promotion route swaps it in. The first-ever checkpoint (no champion to
-beat) auto-passes — the operator still has to PATCH ``is_active=true``
-to trigger evaluation, and ``?force=true`` always bypasses the gate.
+promotion route swaps it in.
+
+THE NO-CHAMPION CASE REFUSES BY DEFAULT (2026-10-26). It used to
+auto-pass, which made "there is no incumbent" the most permissive state
+this gate had: whatever was presented got promoted with no quality check
+of any kind. #571 closed the identical branch in ``register_brain.py``
+after it silently installed untested brains for 64 nights and was then
+tripped by its own verification probe; this is the same family, reached
+through the admin routes and the ConvLSTM promotion path instead of the
+nightly cron. Pass ``allow_bootstrap=True`` to opt in deliberately.
+
+The outcome is NAMED rather than inferred from ``challenger_wins``:
+  * ``compared``          — a champion existed and the bar was applied.
+  * ``bootstrap_blocked`` — no champion, no opt-in. ``challenger_wins``
+    is False. This is the default.
+  * ``bootstrap``         — no champion AND ``allow_bootstrap=True``.
+
+``?force=true`` on either admin route still bypasses the gate entirely
+(logged at WARNING), so no operator capability is removed — the bypass
+is just no longer the silent default.
 
 The "MAE" metric is computed by ``_evaluate_mae`` from a deterministic
 backtest over the held-out window (currently a thin wrapper around
@@ -46,6 +63,12 @@ HELD_OUT_DAYS: int = 30
 
 Metric = Literal["mae", "sharpe"]
 Table = Literal["ml_checkpoints", "rl_checkpoints"]
+# Why a named outcome and not just ``challenger_wins``: a False from the
+# bootstrap branch and a False from a genuinely-losing challenger demand
+# different operator responses, and the 422 that reports "needs 5%
+# improvement" is actively misleading when there was no champion to
+# improve on. The name is what the routes render.
+GateOutcome = Literal["compared", "bootstrap", "bootstrap_blocked"]
 
 
 def sharpe_passes(challenger: float, champion: float) -> bool:
@@ -93,6 +116,7 @@ class ChampionChallengerResult:
     challenger_mae: float
     challenger_wins: bool
     metric: Metric = "mae"
+    gate_outcome: GateOutcome = "compared"
 
     @property
     def champion_metric(self) -> float | None:
@@ -109,6 +133,7 @@ async def evaluate_challenger(
     challenger_checkpoint_id: int,
     table: Table = "ml_checkpoints",
     metric: Metric = "mae",
+    allow_bootstrap: bool = False,
 ) -> ChampionChallengerResult:
     """Compare a challenger checkpoint against the active champion.
 
@@ -125,8 +150,10 @@ async def evaluate_challenger(
         challenger wins iff ``challenger > champion * SHARPE_IMPROVEMENT_BAR``
         (strict 5% improvement; HIGHER is better).
 
-    The first-checkpoint case (no active champion) auto-passes for
-    both metrics — the bootstrap path stays the same.
+    The first-checkpoint case (no active champion) REFUSES unless
+    ``allow_bootstrap=True`` is passed explicitly, for both metrics.
+    See the module docstring for why the previous auto-pass was the
+    defect and not the feature.
 
     Raises ``LookupError`` when the challenger row is missing; the
     admin route translates that to a 404.
@@ -158,12 +185,15 @@ async def evaluate_challenger(
         challenger_value = await _evaluate_mae(session, challenger_checkpoint_id)
 
     if champion_row is None:
-        # Bootstrap: no incumbent — any model beats no model.
+        # No incumbent. "Any model beats no model" was the old reading and
+        # it is wrong: nothing here has established that the challenger is
+        # any good, only that it is unopposed. Refuse unless asked.
         return ChampionChallengerResult(
             champion_mae=None,
             challenger_mae=challenger_value,
-            challenger_wins=True,
+            challenger_wins=allow_bootstrap,
             metric=metric,
+            gate_outcome="bootstrap" if allow_bootstrap else "bootstrap_blocked",
         )
 
     if metric == "sharpe":
@@ -177,6 +207,7 @@ async def evaluate_challenger(
         challenger_mae=challenger_value,
         challenger_wins=challenger_wins,
         metric=metric,
+        gate_outcome="compared",
     )
 
 

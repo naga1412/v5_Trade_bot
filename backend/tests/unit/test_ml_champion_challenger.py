@@ -128,14 +128,26 @@ async def test_challenger_2pct_better_loses_5pct_bar(session, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_no_champion_any_challenger_wins(session, monkeypatch) -> None:
-    """No active champion → challenger always wins (any model > none)."""
+async def test_no_champion_REFUSES_by_default(session, monkeypatch) -> None:
+    """No active champion → refuse, do NOT auto-pass.
+
+    REVERSED 2026-10-26. This test previously asserted
+    ``challenger_wins is True`` under the name
+    ``test_no_champion_any_challenger_wins``, pinning the auto-pass as
+    correct. It is the same branch #571 closed in register_brain.py
+    after that one installed untested brains for 64 nights. "Any model
+    beats no model" confuses UNOPPOSED with PROVEN: nothing in this
+    path has measured the challenger against anything at all.
+    """
     from app.ml import champion_challenger
 
     challenger_id = await _insert_checkpoint(session, version="0.1.0")
 
     async def fake_mae(_session, checkpoint_id: int) -> float:
-        return 0.020  # Doesn't matter — there's no champion to compare to.
+        # Deliberately excellent. Quality is NOT what is under test: an
+        # unopposed challenger is refused for the absence of a
+        # comparison, however good it looks on its own.
+        return 0.001
 
     monkeypatch.setattr(champion_challenger, "_evaluate_mae", fake_mae)
 
@@ -143,8 +155,55 @@ async def test_no_champion_any_challenger_wins(session, monkeypatch) -> None:
         session, challenger_checkpoint_id=challenger_id,
     )
     assert result.champion_mae is None
-    assert result.challenger_mae == pytest.approx(0.020)
+    assert result.challenger_mae == pytest.approx(0.001)
+    assert result.challenger_wins is False
+    assert result.gate_outcome == "bootstrap_blocked"
+
+
+@pytest.mark.asyncio
+async def test_no_champion_passes_with_explicit_opt_in(
+    session, monkeypatch,
+) -> None:
+    """THE POSITIVE CONTROL for the reversal above.
+
+    Without this, ``challenger_wins = False`` hardcoded into the
+    bootstrap branch -- a gate that can never be opened, so the first
+    checkpoint of any model could never be promoted through this path
+    at all -- would satisfy the reversed test and read as a fix. This
+    asserts the opt-in actually opens it.
+    """
+    from app.ml import champion_challenger
+
+    challenger_id = await _insert_checkpoint(session, version="0.1.0")
+
+    async def fake_mae(_session, checkpoint_id: int) -> float:
+        return 0.020
+
+    monkeypatch.setattr(champion_challenger, "_evaluate_mae", fake_mae)
+
+    result = await champion_challenger.evaluate_challenger(
+        session,
+        challenger_checkpoint_id=challenger_id,
+        allow_bootstrap=True,
+    )
+    assert result.champion_mae is None
     assert result.challenger_wins is True
+    assert result.gate_outcome == "bootstrap"
+
+
+def test_bootstrap_opt_in_DEFAULTS_to_refusing() -> None:
+    """The default IS the fix, so assert the default itself.
+
+    Both behavioural tests above pass an explicit value, so a later edit
+    that flips the default back to True would leave them both green.
+    Reading the signature pins the thing a forgetful caller gets.
+    """
+    import inspect
+
+    from app.ml.champion_challenger import evaluate_challenger
+
+    sig = inspect.signature(evaluate_challenger)
+    assert sig.parameters["allow_bootstrap"].default is False
 
 
 @pytest.mark.asyncio

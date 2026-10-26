@@ -171,6 +171,23 @@ async def patch_checkpoint(
                 session, challenger_checkpoint_id=checkpoint_id,
             )
             if not cc.challenger_wins:
+                # The two refusals are not the same event and must not
+                # render the same sentence: "needs 5% improvement" is
+                # meaningless when champion_mae is None because there was
+                # no champion. Report which gate actually refused.
+                if cc.gate_outcome == "bootstrap_blocked":
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "bootstrap_blocked: no active champion for "
+                            f"model={existing.model_name}, so this "
+                            "checkpoint is unopposed rather than proven "
+                            f"(challenger_mae={cc.challenger_mae}). "
+                            "Activating the first checkpoint of a model is "
+                            "a deliberate act: pass ?force=true to do it, "
+                            "which is logged for the audit trail."
+                        ),
+                    )
                 raise HTTPException(
                     status_code=422,
                     detail=(

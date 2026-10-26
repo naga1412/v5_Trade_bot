@@ -480,6 +480,28 @@ WORKER_REGISTRY: tuple[WorkerSpec, ...] = (
         max_staleness_seconds=26 * 60 * 60,
         stateful=False,  # safe to auto-restart
     ),
+    # Item 3 of the 2026-10-26 work order -- the retrieval path for
+    # guards, probes and counters (`check_events`). Registered here for
+    # the same reason pattern_stats_refresh is: the watchdog has to be
+    # able to see it stop. A silence detector whose own silence is
+    # unwatched is the first instance of its own bug class, and this
+    # project has shipped that shape five times.
+    WorkerSpec(
+        name="check_events_flush_task",
+        description=(
+            "Flushes in-process check counters to check_events every 5 "
+            "min and logs any registry entry that has gone silent. "
+            "DETECTION ONLY -- takes no remediating action."
+        ),
+        liveness_query=HEARTBEAT,
+        # 5 min cadence; 20 min = four missed cycles, matching the
+        # max_silence this worker's own registry entry declares in
+        # app.ops.check_events.EXPECTED_CHECKS.
+        max_staleness_seconds=20 * 60,
+        stateful=False,  # safe to auto-restart -- the delta snapshot is
+        # rebuilt from the counter it mirrors, and a cancelled cycle
+        # rolls back inside an uncommitted session.
+    ),
 )
 
 

@@ -57,6 +57,7 @@ from app.shadow.universe_refresh_scheduler import (
 # Item 0 (2026-08-30): daily futures_only listing cache, decoupled from
 # the 6h live_fleet_universe cadence above -- see that module's
 # docstring for why the two must not share a refresh interval.
+from app.workers.check_events_flush import start_check_events_flush_task
 from app.workers.futures_only_refresh import start_futures_only_refresh_task
 from app.db.session import get_engine, get_session_factory
 from app.ml.checkpoints import load_active_checkpoint
@@ -168,6 +169,7 @@ async def lifespan(_app: FastAPI):
     futures_poll_worker = None  # Phase 4 Task 17
     live_fleet_universe_refresh_task = None  # Phase 4 Task 5c
     futures_only_refresh_task = None  # Item 0, 2026-08-30
+    check_events_flush_task = None  # work order item 3, 2026-10-26
     mtf_cache_prewarm_task = None
     mtf_cache_ttl_refresh_task = None
     symbol_allowlist_task = None
@@ -317,6 +319,15 @@ async def lifespan(_app: FastAPI):
         # own WorkerSpec -- decoupled from the 6h fleet-membership
         # refresh above (see app.workers.futures_only_refresh's
         # docstring for why coupling them was rejected).
+        # Work-order item 3 (2026-10-26): give #610's in-process counter
+        # a retrieval path, and report any check that has gone silent.
+        # Shares this block's `worker_enabled` condition rather than the
+        # autonomous-trading gate -- an observability writer must not be
+        # off in exactly the configuration where something is wrong.
+        check_events_flush_task = _wrap(
+            "check_events_flush_task",
+            lambda: start_check_events_flush_task(get_session_factory()),
+        )
         futures_only_refresh_task = _wrap(
             "futures_only_refresh_task",
             lambda: start_futures_only_refresh_task(get_session_factory()),
@@ -761,6 +772,8 @@ async def lifespan(_app: FastAPI):
             prediction_validator_task.cancel()
         if live_fleet_universe_refresh_task is not None:
             live_fleet_universe_refresh_task.cancel()
+        if check_events_flush_task is not None:
+            check_events_flush_task.cancel()
         if futures_only_refresh_task is not None:
             futures_only_refresh_task.cancel()
         if ws_keepalive_task is not None:
