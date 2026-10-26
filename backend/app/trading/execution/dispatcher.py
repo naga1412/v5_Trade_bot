@@ -526,6 +526,11 @@ async def _send_telegram_signal(
         mtf_agreement=proposal.mtf_agreement,
         mtf_dominant_tf=proposal.mtf_dominant_tf,
         mtf_directions=proposal.mtf_directions,
+        # 2026-10-23: drives the expected-movement band. Passed
+        # EXPLICITLY -- SignalCandidate defaults it to None, and the
+        # cohort fields noted below were silently defaulted for weeks
+        # for exactly that reason.
+        entry_score=proposal.entry_score,
         # 2026-09-08: these four were NEVER passed, so SignalCandidate's
         # own `symbol_source` default ("established_top20") always won at
         # render time and the cohort banner could not render on ANY real
