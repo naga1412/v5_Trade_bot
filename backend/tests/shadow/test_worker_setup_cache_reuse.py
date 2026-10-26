@@ -70,12 +70,34 @@ def _make_kline_rows(n: int, close_base: float = 100.0) -> list[list[Any]]:
     return rows
 
 
+def _stub_seed_fetch(fetch_mock):
+    """Patch the seed's bar fetch AND neutralise the listing-cache ensure.
+
+    TWO patches, and the second one is not optional. After the 2026-10-26
+    FU-53 migration the seed resolves each symbol's own market, and
+    `setup()` ensures the Binance listing cache first (once, guarded on
+    the cache being unset) so a cold start cannot raise
+    UnresolvedMarket for every symbol. In a test that ensure would make a
+    REAL network call to Binance, so it is stubbed to a no-op here --
+    leaving it live would make this suite depend on an external service
+    and fail in a sandbox.
+
+    Previously these tests patched `app.shadow.worker.BinanceClient` and
+    set `.return_value.fetch_klines`. That class is gone with its last
+    caller: it WAS the spot default.
+    """
+    return (
+        patch("app.shadow.worker.fetch_bars_by_symbol", fetch_mock),
+        patch("app.shadow.worker.refresh_futures_only_cache", AsyncMock()),
+    )
+
+
 @pytest.mark.asyncio
 async def test_setup_reuses_warm_mtf_cache_and_skips_rest_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache warm with ≥HISTORY_BARS klines → setup() uses them; no
-    BinanceClient.fetch_klines call for that (sym, tf)."""
+    bar fetch for that (sym, tf)."""
     from app.shadow.worker import HISTORY_BARS
 
     # Pre-populate MTF cache with enough klines for the worker
@@ -94,10 +116,10 @@ async def test_setup_reuses_warm_mtf_cache_and_skips_rest_fetch(
         timeframes=["1h"],
     )
 
-    # Track whether BinanceClient.fetch_klines was called
+    # Track whether the seed's bar fetch was called
     fetch_mock = AsyncMock(return_value=[])
-    with patch("app.shadow.worker.BinanceClient") as MockClient:
-        MockClient.return_value.fetch_klines = fetch_mock
+    _fetch_patch, _cache_patch = _stub_seed_fetch(fetch_mock)
+    with _fetch_patch, _cache_patch:
         await w.setup()
 
     assert ("BTCUSDT", "1h") in w.bars
@@ -142,8 +164,8 @@ async def test_setup_cache_miss_rest_fetches_and_populates_cache(
     ]
 
     fetch_mock = AsyncMock(return_value=fake_candles)
-    with patch("app.shadow.worker.BinanceClient") as MockClient:
-        MockClient.return_value.fetch_klines = fetch_mock
+    _fetch_patch, _cache_patch = _stub_seed_fetch(fetch_mock)
+    with _fetch_patch, _cache_patch:
         await w.setup()
 
     # REST fetch WAS called since cache was cold
@@ -184,8 +206,8 @@ async def test_setup_cache_with_insufficient_klines_falls_back_to_rest() -> None
     )
 
     fetch_mock = AsyncMock(return_value=[])
-    with patch("app.shadow.worker.BinanceClient") as MockClient:
-        MockClient.return_value.fetch_klines = fetch_mock
+    _fetch_patch, _cache_patch = _stub_seed_fetch(fetch_mock)
+    with _fetch_patch, _cache_patch:
         await w.setup()
 
     fetch_mock.assert_called_once()
