@@ -757,6 +757,179 @@ pass criterion, not attentive reading.
 The rules in this document are not a description of other people's
 mistakes.
 
+## A POOLED FIGURE APPLIED TO A SUBPOPULATION
+
+**Standing rule.** Three instances in one week, all the same shape.
+
+**Before quoting a rate, name the population it was computed over and
+the population it will be applied to, and check they are the same one.**
+
+| quoted | computed over | applied to | real value |
+|---|---|---|---|
+| cap-bind **4.12%** | all LONG shadow trades | the **1h** card lane | **10.48%** |
+| **0/81 symbols** met the severity condition | one day's snapshot | the whole recorded history | **76 occurrences** |
+| four horizons agreeing | nested windows on the same rows | treated as four confirmations | **one** observation |
+
+The first was mine, quoted to a build decision. The pooled figure was
+diluted by a 15m lane three times the size of the 1h one, so the number
+was correct about a population nobody was asking about.
+
+**The tell is that the denominator is never stated beside the rate.** A
+rate written as "4.12%" carries no population; written as "4.12% of all
+LONG shadow trades" the mismatch with "the 1h card lane" is visible
+immediately. **So write rates with their denominator attached**, not
+because it is more rigorous but because it makes this error impossible
+to commit silently.
+
+### THE MECHANICAL FORM: a figure without its population attached is not quotable
+
+**The rule above is a principle, and a principle was not enough.** Four
+instances in one week, and the rule's own author violated it **within a
+day of writing it**. That is sufficient evidence it cannot survive as
+something to remember.
+
+**So attach the population AT THE POINT OF RECORDING, not at the point
+of quoting:**
+
+```
+BAD   6.78 bars
+GOOD  6.78 bars (1h LONG closed, n=831)
+
+BAD   cap-bind 4.12%
+GOOD  cap-bind 4.12% (all LONG shadow trades, n=4,713)
+```
+
+The point is not politeness about provenance. **It is that a bare figure
+looks safe to reuse and an annotated one visibly does not.** "6.78
+bars" can be dropped into any sentence; "6.78 bars (1h LONG closed,
+n=831)" resists being dropped into a sentence about 15m, because the
+mismatch is sitting in the quote.
+
+### The four instances
+
+| figure | computed over | applied to | correct value |
+|---|---|---|---|
+| cap-bind **4.12%** | all LONG shadow trades | the 1h card lane | **10.48%** |
+| **0/81** symbols met the severity condition | one day's snapshot | the whole recorded history | **76 occurrences** |
+| hold **8.1 / 12.0** bars | the **15m** lane | the 1h card lane | **6.78 / 11.06** |
+| four horizons agreeing | nested windows on the same rows | four independent confirmations | **one** observation |
+
+The fourth is the same family at one remove: not a population mismatch
+but a **dependence** mismatch, where the figure was applied beyond the
+independence its computation assumed. The failure mode is identical --
+a number used outside the scope that produced it.
+
+**The fourth instance occurred inside an attempt to validate a horizon
+choice**, and the third inside an attempt to record a rule. **The error
+does not avoid the work of being careful; it attaches to it.** Which is
+the argument for the mechanical form over the principle: annotation is
+checkable by a reader who knows nothing about the figure's history,
+whereas "name the population" requires the person quoting to remember a
+rule at the moment they are least likely to.
+
+## AN ENV FLIP IS NOT APPLIED UNTIL THE RUNNING OBJECT HAS BEEN READ BACK
+
+**Standing rule.** The configuration-layer member of this family, and
+the most operationally expensive one so far.
+
+**Reading the `.env` file establishes only what the file says.** It
+establishes nothing about what the process loaded.
+
+### The instance
+
+`DISABLE_SHORT_SIGNALS=false` and `MIN_ENTRY_SCORE_SHORT=0.36` were
+written to `/opt/trading-radar/.env`, verified by `grep` (lines 45-46,
+no duplicates), and the backend was restarted with
+`docker compose restart backend`. The restart succeeded. The container
+was healthy. **Both values were still stale on the running object.**
+
+```
+MIN_ENTRY_SCORE_SHORT = None     <- expected 0.36
+DISABLE_SHORT_SIGNALS = True     <- expected False
+```
+
+**`docker compose restart` preserves the container's existing
+environment. Only `up -d` re-reads the env file.** Nothing announces the
+difference: no error, no unhealthy status, nothing in the logs, and the
+file on disk is genuinely correct. Running the edit a second time
+changed nothing, because the edit had never been the problem.
+
+**And the correct verb was already in the codebase.** The repo's own
+`shadow-allow-shorts-enable` probe uses `docker compose up -d backend`,
+for exactly this reason. We reached past a solved instance of the
+problem.
+
+### Why it belongs in this family
+
+**A healthy signal in front of an unchanged system.** Identical in shape
+to the two other members found the same week:
+
+- **`extra="ignore"`** (pydantic): an unknown env key is accepted and
+  discarded, so a typo'd variable name produces a correct-looking `.env`
+  and no effect.
+- **FU-53** (spot klines): a fetch 400s per-symbol mid-loop, so a
+  measurement silently excludes an entire cohort and still reports a
+  clean population count.
+
+In all three the *observable* is healthy and the *system* is unchanged.
+Verifying the input never catches any of them; only reading back the
+realised state does.
+
+### The rule, operationally
+
+1. **Flip the value.**
+2. **Reload so the process re-reads it** (`up -d`, not `restart` —
+   `prod-env-reload`, not `prod-restart-only`).
+3. **Read the value back off the running object** (`settings-check`), and
+   treat the flip as unapplied until that read agrees.
+
+Step 3 is not optional diligence. With `extra="ignore"` it is the **only**
+step that can distinguish "applied" from "accepted and discarded", and
+with `restart` it is the only step that can distinguish "reloaded" from
+"still running the old environment". **Two independent silent-failure
+paths, one check closing both.**
+
+## A MUTATION CAN HOLD A DECISION, NOT ONLY CODE
+
+**Standing pattern.** Named 2026-10-23, from the movement-card build.
+
+**Where a decision was reached by argument and could plausibly be
+re-proposed, a test plus a mutation can make it mechanically
+unrevertable.**
+
+Two editorial decisions on one card field were settled by argument, and
+both are now held by tests that go red if the decision is undone:
+
+| decision | why it was reached | the mutation that holds it |
+|---|---|---|
+| **no response guidance** -- "Consider sizing down" dropped | it prescribes one response among several when none was measured | re-adding the phrase |
+| **the adverse leg leads** -- `-3.2% / +3.9%`, not the reverse | favourable-first puts the LARGER number first, and the larger number is the WEAKER evidence (+3.69 sigma vs +8.62), so a quick read says "more upside than downside" -- the conviction misreading delivered by ordering alone | swapping the legs back |
+
+**Neither is a correctness property.** Both renderings "work"; both would
+pass any test about numbers. What the mutations protect is a
+*conclusion* -- and conclusions are exactly what gets quietly reverted,
+because the next person sees an odd-looking choice, no reason beside it,
+and tidies it.
+
+**An unexplained decision invites being fixed.** A comment explains it
+to a reader who stops to read; a test explains it to one who does not.
+
+### When to reach for this
+
+Not for every judgement call -- that would be paralysing. Reach for it
+when all three hold:
+
+1. the decision was reached **by argument**, not by measurement, so no
+   number will contradict a reversal;
+2. the reverted form looks **more natural**, so the reversal will seem
+   like an improvement;
+3. the cost of the reversal is **invisible** -- here, a subtly
+   misleading card, which no error will ever surface.
+
+**Condition 3 is the one that makes it worth the test.** A decision whose
+reversal breaks something loudly does not need protecting; a decision
+whose reversal degrades something silently does.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration

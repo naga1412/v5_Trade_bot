@@ -236,3 +236,31 @@ churn.
 - [[aug_validation_top_20_only]] — Aug 3-10 methodology memo.
 - `docs/superpowers/decisions/2026-07-28-fleet-cap-top-20-ratified.md`
   — the fleet-cap decision.
+
+## SECOND VINDICATION OF range-NOT-level (2026-10-23)
+
+The criterion was a **range** across rungs, not a level at any rung.
+That choice was made for iso-expectancy reasons; it turned out to also
+make the criterion immune to a denominator error discovered much later.
+
+Shadow caps `R` at 5% of entry while the live path does not
+(`2026-10-23-shadow-live-geometry-divergence.md`), and on the **1h lane
+the cap binds on 10.48% of trades** — inflating `MFE_R` for those rows,
+because a smaller `R` is a smaller denominator.
+
+**Why the span survives it: the inflation is a property of the ROWS, not
+of the RUNG.** A cap-bound trade carries its smaller `R` at *every*
+take-profit level tested, so its inflated contribution shifts **every
+rung in the same direction by roughly the same amount.** The *levels*
+move together; the **range** barely moves.
+
+So the statistic the criterion was built on is **structurally
+insensitive to a subset-denominator error**, while a level-based
+criterion would not have been. Measured span 0.0703R against a 0.15R
+bar — far outside what a ~10% subset could shift a *range* by, however
+much it shifts the levels.
+
+**The general form worth carrying: prefer a criterion built on a
+DIFFERENCE between conditions over one built on an absolute level,
+because a bias shared by all conditions cancels in the difference and
+does not cancel in the level.**

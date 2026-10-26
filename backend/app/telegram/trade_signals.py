@@ -293,6 +293,11 @@ async def _re_render_and_edit(
         direction=payload["direction"],
         entry_price=float(payload["entry_price"]),
         stop_loss_price=float(payload["stop_loss_price"]),
+        # 2026-10-23: .get, not [], because cards persisted before
+        # this field existed have no such key -- those re-render
+        # without the band, which is the correct outcome rather
+        # than a KeyError on an edit.
+        entry_score=payload.get("entry_score"),
         take_profit_price=float(payload["take_profit_price"]),
         confidence_pct=float(payload["confidence_pct"]),
         layer_summary=payload.get("layer_summary", {}),

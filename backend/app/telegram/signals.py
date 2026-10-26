@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from app.telegram.movement_band import band_for, render_band
 from app.trading.leverage import (
     liquidation_distance_pct,
     loss_at_stop_loss_usdt,
@@ -103,6 +104,13 @@ class SignalCandidate:
     qvol_24h: float | None = None
     spread_bps: float | None = None
     depth_0_5pct_usdt: float | None = None
+    # 2026-10-23: drives the expected-movement band (movement_band.py).
+    # Defaulted so legacy callers and fixtures keep constructing a valid
+    # candidate -- but a default means a caller that forgets to pass it
+    # silently omits the field, which is exactly how the cohort banner
+    # stayed invisible for weeks (see dispatcher.py's note at its
+    # SignalCandidate call). test_dispatcher_passes_entry_score guards it.
+    entry_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -352,6 +360,14 @@ def render_message(
                 f"─────────────────────────────────────\n"
             )
 
+    # Expected-movement band. Renders ONLY where it was measured (LONG,
+    # spot-listed, 1h); omitted entirely otherwise, with no placeholder,
+    # because a missing field is informative and an extrapolated band is
+    # not. See movement_band.band_for for each omission condition.
+    _band = band_for(candidate)
+    _band_text = render_band(_band)
+    movement_block = f"{_band_text}\n" if _band_text else ""
+
     body = (
         cohort_banner +
         f"{direction_emoji} {candidate.direction}  •  {candidate.symbol}  "
@@ -390,6 +406,7 @@ def render_message(
         f"Buffer:       {safety_buffer_x:.1f}× safety vs SL\n"
         f"Funding rate: "
         f"{_format_funding_text(candidate.funding_rate_daily, candidate.direction)}\n"
+        f"{movement_block}"
         f"─────────────────────────────────────\n"
         f"🔗 View chart on Binance:\n"
         f"{candidate.chart_url}\n"
@@ -532,6 +549,10 @@ def build_signal_payload(
         "rendered_at": rendered_at.isoformat(),
         "initial_leverage": initial_leverage,
         "hard_cap": hard_cap,
+        # 2026-10-23: the edit path reconstructs a SignalCandidate from
+        # this payload, so the band would vanish on the first edit if
+        # the score were not persisted here.
+        "entry_score": candidate.entry_score,
         "mtf_agreement": candidate.mtf_agreement,
         "mtf_dominant_tf": candidate.mtf_dominant_tf,
         "mtf_directions": candidate.mtf_directions,
