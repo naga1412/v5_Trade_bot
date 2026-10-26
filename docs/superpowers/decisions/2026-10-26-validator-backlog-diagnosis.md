@@ -19,7 +19,8 @@ anyone looked.
 | | time (UTC) | due-but-unvalidated |
 |---|---|---|
 | **T0** | 2026-10-26 16:46:33 | **94,053** |
-| **T1** | 2026-10-26 17:46:35 | *(see §6)* |
+| **T1** | 2026-10-26 17:46:55 | **90,124** |
+| | **delta** | **−3,929 over 1.006 h = −3,905/hr NET** |
 
 ## 2. WHEN it started: 2026-09-03
 
@@ -98,7 +99,95 @@ days of total non-validation generated no alarm of any kind. This is the
 same family as the cannot-fail rule — the condition that distinguishes
 healthy from dead was never computed, so it could never be observed.
 
-## 4. What restarted it today
+## 4. ATTRIBUTED: the poisoned head is FUTURES-ONLY, and #609 closed it
+
+**Confirmed. The 53-day outage and the four-instance wrong-endpoint class
+are ONE story.**
+
+The test: among rows that came due **before** the cohort-tag boundary —
+so while the validator was demonstrably healthy at 0.0 h lag — which
+ones were *never* validated in real time? A symbol that could never be
+validated has `validated_realtime = 0` across every row it ever had.
+
+| symbol | first due | rows | **validated in real time** | drained today |
+|---|---|---|---|---|
+| 1000PEPE/USDT | 2026-09-02 18:00 | 24 | **0** | 24 |
+| 1000SHIB/USDT | 2026-09-02 18:00 | 24 | **0** | 24 |
+| HYPE/USDT | 2026-09-02 18:00 | 24 | **0** | 24 |
+| USELESS/USDT | 2026-09-02 18:00 | 24 | **0** | 24 |
+| UAI/USDT | 2026-09-02 18:00 | 18 | **0** | 18 |
+| SKR/USDT | 2026-09-02 21:00 | 15 | **0** | 15 |
+| | | **129** | | |
+
+Every other symbol in the same window looks completely different —
+BTC/USDT 2,611 real-time validations, ETH/USDT 2,609, ADA/USDT 1,384 —
+each with exactly **12** late rows, the 12-hour tail caught *after* the
+block formed. The six above are a distinct population with a distinct
+signature.
+
+**129 rows against `batch_limit=100`.** Once those 129 sat at the head of
+an oldest-first queue, the 100-row batch was entirely poison and the
+queue stopped. The arithmetic is exact and it is the whole mechanism.
+
+### They are futures-only, confirmed from the cohort tag
+
+| symbol | `established_top20` window | `futures_poll` from |
+|---|---|---|
+| 1000PEPE/USDT | 09-02 17:00 → 09-03 18:00 (26 rows) | **09-03 19:00** (1,268 rows) |
+| 1000SHIB/USDT | 09-02 17:00 → 09-03 18:00 (26) | **09-03 19:00** (1,175) |
+| USELESS/USDT | 09-02 17:00 → 09-03 18:00 (26) | **09-03 19:00** (1,170) |
+| HYPE/USDT | 09-02 17:00 → 09-03 18:00 (26) | **09-03 19:00** (503), then `liquidity_added_spot` from 09-24 18:00 |
+| UAI/USDT | 09-02 17:00 → 09-03 10:00 (18) | **09-04 05:00** (172) |
+| SKR/USDT | 09-02 20:00 → 09-03 18:00 (17) | **09-03 19:00** (27) |
+
+Independently re-confirmed a third way: the item-2 flip-screen probe
+resolved all 22 symbols in its NULL set through #609's no-default
+resolver and got **22/22 fapi, 0 spot, 0 unresolved** against the live
+Binance listing.
+
+`1000PEPE` and `1000SHIB` cannot exist on spot *by construction* — the
+`1000x` prefix is a Binance **futures** contract convention; spot lists
+`PEPEUSDT` and `SHIBUSDT`. The validator was asking
+`api.binance.com/api/v3/klines`. It got nothing, forever.
+
+### THE BOUNDARY ANSWER, which matters more than it looks
+
+The operator asked which side of the 2026-09-03 18:00Z cohort-tag
+boundary the first un-validatable row falls on.
+
+**BEFORE — by 24 hours.** First poison `target_ts` is
+**2026-09-02 18:00Z**.
+
+So every poison row carries the uniform pre-boundary
+`established_top20` default, and that default is **wrong**: the
+post-boundary rows prove all six are `futures_poll`. **`symbol_source`
+could never have identified the cause** — it actively says these were
+established top-20 spot symbols. Anyone diagnosing from the cohort tag
+would have been pointed away from the answer. The known
+"`predictions` join is silently wrong before 2026-09-03 18:00Z" artefact
+is not merely a data gap here; it *conceals* the causal symbols.
+
+### The 2026-09-24 blip, fully accounted for
+
+That stray 185-row day was the mechanism proving itself:
+
+- **HYPE/USDT: 15 rows**, `target_ts` 09-02 18:00 → 09-03 08:00. HYPE
+  gained a spot pair on 2026-09-24 (its tag flips to
+  `liquidity_added_spot` at 09-24 18:00), so its head rows became
+  fetchable on spot for the first time.
+- **Every other symbol: exactly 3 rows**, all `target_ts` 09-03 06:00 →
+  08:00.
+
+HYPE's 15 validations freed 15 slots in the 100-row batch, the queue
+advanced exactly **3 hours** for everyone else — 3 × ~57 symbols ≈ 170 —
+and **15 + 170 = 185**. Then it re-blocked: the five remaining poison
+symbols still held 105 rows, plus HYPE's own 9 later rows, so
+**114 ≥ 100** and the batch was poison again.
+
+A queue that advances precisely as far as the freed slots allow and then
+stops is a head-of-line block and cannot be anything else.
+
+## 5. What restarted it today
 
 Validation resumed in the **14:00 UTC hour** on 2026-10-26, after 53 days
 of silence. Two deploys land in that window: **#610 at 14:06:37Z** and
@@ -119,7 +208,7 @@ consistent with the timing and they are distinguishable:
 **The discriminator is free and already running:** if the drain walks
 cleanly past 2026-09-09 into the futures-heavy period and keeps going,
 the routing fix is doing it. If it stalls at a date, the restart merely
-bought a partial drain and the defect is still live. §6 reports which.
+bought a partial drain and the defect is still live. §7 reports which.
 
 One thing ruled out: the head of the queue at 16:50 was **BTC/USDT,
 ETH/USDT, ADA/USDT, DOGE/USDT, BNB/USDT** — mainstream spot-listed names.
@@ -128,7 +217,7 @@ are merely queued behind an advancing frontier rather than blocked. I
 note it because a composition read taken mid-drain invites exactly that
 misreading.
 
-## 5. The volume step that set this up
+## 6. The volume step that set this up
 
 `prediction_validations` row volume per due-day:
 
@@ -143,19 +232,37 @@ failure mode was a silent skip, but **consistency is not proof** and I did
 not establish which specific rows formed the poisoned head — the drain
 had already passed them by the time I looked.
 
-## 6. The delta, and which case it is
+## 7. The delta: FALLING, and the frontier cleared 09-09
 
-*(T1 read at 2026-10-26 17:46:35Z — filled in below.)*
+The order named three cases. **It is the first one.**
 
-The order named three cases:
+| case | predicted | observed |
+|---|---|---|
+| **falling ~5,500/hr** | draining, benign | **−3,905/hr NET** ✅ |
+| flat | not committing | no |
+| growing | report immediately | no |
 
-- **falling ~5,500/hr** → historical accumulation draining, benign
-- **flat** → not committing; `batch_limit` irrelevant, defect elsewhere
-- **growing** → neither; report immediately
+Gross drain is **3,968–4,001/hr** once the 62–96/hr fill is added back.
+That is below the nominal 6,000/hr because a pass is not 60 s: it fetches
+a kline per row over the network, so ~100 rows at ~0.4 s plus the 60 s
+sleep is ~100 s/pass ≈ 3,600/hr. The nominal figure assumed a free pass.
 
-<!-- T1-RESULT -->
+**ETA to clear: ~23.1 h** from 17:46:55Z, i.e. around 2026-10-27 17:00Z.
 
-## 7. What was deliberately NOT done
+### AND THIS SETTLES THE ATTRIBUTION FROM THE SECOND DIRECTION
+
+`oldest_pending_due` moved from **2026-09-08 ~07:00** (T0) to
+**2026-09-10 08:00** (T1) — about **49 h of due-time in 1 h of
+wall-clock**, straight **past 2026-09-09** and into the futures-heavy
+period.
+
+That was the free discriminator: had a bare restart been the only thing
+that changed, the queue would have re-blocked the moment the frontier
+reached the futures-only rows again. It did not. **#609's market routing
+is the fix.** §4 reaches the same conclusion from the symbol
+evidence, and the two are independent.
+
+## 8. What was deliberately NOT done
 
 - `batch_limit` **not** raised. §3 explains why it would not help.
 - Backlog **not** manually drained. No DB write of any kind.
@@ -165,7 +272,7 @@ The order named three cases:
   blocking the rows behind it — **not** more throughput. That is a
   behaviour change to a live worker and is left for explicit direction.
 
-## 8. Consequence for the rest of this work order
+## 9. Consequence for the rest of this work order
 
 **Item 2's outcome arm has no data because of this outage.** Every row in
 the 30-day `futures_poll` bar-clearing cohort has a validation row and

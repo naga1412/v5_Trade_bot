@@ -456,21 +456,66 @@ def test_this_module_can_only_ever_write_to_check_events() -> None:
     assert "CHECK_EVENTS" in joined
 
 
+# Action-shaped verbs. Matched on IDENTIFIER COMPONENTS, never as raw
+# substrings -- see _looks_like_an_action.
+_BANNED_VERBS = (
+    "repair", "heal", "fix", "retry", "activate", "deactivate",
+    "disable", "enable", "restart", "promote", "remediate",
+)
+
+
+def _looks_like_an_action(name: str) -> bool:
+    """True if any underscore-delimited component IS a banned verb.
+
+    COMPONENT MATCHING, NOT SUBSTRING MATCHING, and the distinction is
+    not cosmetic: the first version of this guard used
+    ``word not in name.lower()`` and went red on
+    ``QUEUE_PROGRESS_PREFIX`` because "fix" is inside "pre-FIX". A
+    substring assertion that fires on an unrelated word is the
+    substring-assertion weakness in the cannot-fail family, and the
+    repair is to make the predicate precise rather than to rename the
+    constant to dodge it.
+
+    Scope stated honestly: this catches the realistic additions, which in
+    this codebase's naming are underscore-delimited (``heal_x``,
+    ``retry_x``, ``fix_x``). A run-together spelling like ``autofix``
+    would pass, so this guard is a tripwire on the obvious case and not
+    a proof of absence. The proof of absence is
+    ``test_this_module_can_only_ever_write_to_check_events``, which
+    constrains what the code can DO rather than what it is called.
+    """
+    parts = [p for p in name.lower().split("_") if p]
+    return any(p in _BANNED_VERBS for p in parts)
+
+
+def test_the_action_name_guard_is_itself_calibrated() -> None:
+    """Positive AND negative control on the predicate above.
+
+    Without the negative half, ``return True`` passes the real guard's
+    intent inverted and flags everything; without the positive half,
+    ``return False`` makes the guard decorative. Both halves are the
+    reason the substring bug was caught at all.
+    """
+    # MUST flag
+    for bad in ("heal_silent_checks", "retry_failed", "repair_queue",
+                "activate_checkpoint", "HEAL", "promote_now"):
+        assert _looks_like_an_action(bad), bad
+    # MUST NOT flag
+    for ok in ("QUEUE_PROGRESS_PREFIX", "record_queue_pass",
+               "find_silent_checks", "STALL_ALARM_PASSES", "record_daily"):
+        assert not _looks_like_an_action(ok), ok
+
+
 def test_no_remediation_entrypoint_is_exported() -> None:
     """__all__ must expose only recording and detection.
 
-    A name like `repair`, `heal`, `fix`, `retry`, `activate`, `disable`
-    appearing here would be the first sign the module had grown an
-    action. Cheap to assert, and it fails the moment someone adds one.
+    A name like `repair`, `heal`, `retry` or `activate` appearing here
+    would be the first sign the module had grown an action.
     """
-    banned = ("repair", "heal", "fix", "retry", "activate", "deactivate",
-              "disable", "enable", "restart", "promote", "remediate")
     for name in ce.__all__:
-        low = name.lower()
-        for word in banned:
-            assert word not in low, (
-                f"{name!r} in __all__ looks like an action, not a detection"
-            )
+        assert not _looks_like_an_action(name), (
+            f"{name!r} in __all__ looks like an action, not a detection"
+        )
 
 
 def test_every_registry_entry_has_a_positive_max_silence() -> None:

@@ -58,10 +58,13 @@ __all__ = [
     "ExpectedCheck",
     "Granularity",
     "SilentCheck",
+    "QUEUE_PROGRESS_PREFIX",
+    "STALL_ALARM_PASSES",
     "find_silent_checks",
     "flush_mtf_fetch_failures",
     "record_daily",
     "record_event",
+    "record_queue_pass",
 ]
 
 
@@ -349,6 +352,99 @@ async def flush_mtf_fetch_failures(
     return written
 
 
+QUEUE_PROGRESS_PREFIX = "queue_progress"
+# Consecutive stalled passes before the onset is escalated. 3 passes at
+# the validator's 60s cadence is ~3 minutes: long enough that a single
+# slow or contended pass is not an alarm, short enough that nothing
+# approaching 53 days is possible. The DAILY row records every stalled
+# pass regardless, so the threshold only governs escalation, never
+# whether the data is kept.
+STALL_ALARM_PASSES: int = 3
+
+
+async def record_queue_pass(
+    session: "AsyncSession",
+    worker: str,
+    *,
+    selected: int,
+    advanced: int,
+    now: _dt.datetime | None = None,
+) -> int:
+    """Record one queue-draining pass. Returns the consecutive-stall streak.
+
+    LIVENESS IS NOT PROGRESS, and that distinction is the whole reason
+    this function exists. The 2026-09-03 validator outage was never
+    silent at the liveness level: the task ran every 60 seconds for 53
+    days and heartbeated ``status="ok"`` every single time. It was
+    silent at the PROGRESS level -- alive and stuck. #612's
+    :func:`find_silent_checks` cannot see that, by construction: it
+    detects a check that FAILED TO EMIT, and this one emitted
+    faithfully throughout.
+
+    ``advanced == 0`` ALONE IS NOT AN ALARM. It is the correct state of
+    an idle queue, and the old heartbeat already carried it
+    (``validated_in_tick: 0``) for every one of those 53 days. The
+    diagnostic quantity is the PAIR: ``selected > 0 and advanced == 0``
+    means work was available and none of it moved, which no healthy
+    state produces.
+
+    GRANULARITY, per the same rule that made the mtf counter daily: a
+    pass happens every 60s, so passes are written as DAILY aggregates
+    (two subjects -- ``''`` counts all passes, ``'stalled'`` counts the
+    stalled ones), while the rare ONSET of a stall gets its own
+    ``event`` row so the first moment is durable rather than averaged
+    into a day. A per-pass row would be 1,440 writes/worker/day.
+
+    Takes no action. Returns the streak so the caller can log; the
+    caller is a worker, and a worker deciding to heal itself is
+    `register_brain.py:205`.
+    """
+    stamp = now or _dt.datetime.now(_dt.timezone.utc)
+    name = f"{QUEUE_PROGRESS_PREFIX}:{worker}"
+    stalled = selected > 0 and advanced == 0
+
+    # Every pass, so that a day with rows proves the worker ran.
+    await record_daily(
+        session, name, kind="counter",
+        status="violation" if stalled else "ok",
+        subject="", increment=1,
+        detail={"selected": selected, "advanced": advanced,
+                "stalled": stalled},
+        now=stamp,
+    )
+    if stalled:
+        await record_daily(
+            session, name, kind="counter", status="violation",
+            subject="stalled", increment=1,
+            detail={"selected": selected, "advanced": advanced},
+            now=stamp,
+        )
+        _stall_streak[worker] = _stall_streak.get(worker, 0) + 1
+    else:
+        _stall_streak[worker] = 0
+
+    streak = _stall_streak[worker]
+    if stalled and streak == STALL_ALARM_PASSES:
+        # ONSET ONLY -- written once per stall episode, at the moment the
+        # threshold is crossed, not on every pass afterwards. A sparse
+        # alarm gets a per-event row; see record_event.
+        await record_event(
+            session, name, kind="counter", status="violation",
+            subject="stall_onset",
+            detail={"selected": selected, "advanced": advanced,
+                    "consecutive_passes": streak},
+            now=stamp,
+        )
+    return streak
+
+
+# Consecutive stalled passes per worker. In-memory on purpose: the streak
+# is about THIS process's recent behaviour, and a restart genuinely does
+# reset it. The durable record is the daily row, where a stall that
+# outlives a restart shows up as stalled == total passes on consecutive
+# days -- which is what 53 days of this would have looked like.
+_stall_streak: dict[str, int] = {}
+
 # Mirrors mtf_confluence's own module-level counter; see
 # flush_mtf_fetch_failures for why a snapshot is required.
 _last_flushed: dict[str, int] = {}
@@ -356,3 +452,4 @@ _last_flushed: dict[str, int] = {}
 
 def _reset_for_tests() -> None:
     _last_flushed.clear()
+    _stall_streak.clear()
