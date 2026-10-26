@@ -37,18 +37,57 @@ The three partial failures are **AAVEUSDT, BNBUSDT, GTCUSDT**.
 at **6**, not <6, so they are **not** in the confirmed-transient set —
 they remain ambiguous. The confirmed-transient set is AAVE/BNB/GTC.
 
-### The second cycle is not available yet, and that is expected
+### THE SECOND CYCLE LANDED — the partition RESOLVES
 
-All 20 rows share `first_seen_at == last_seen_at == 18:05:24`, and
-`check_events` has stood at 22 rows for 45 minutes. The counter is
-per-scoring-cycle and cycles are **hourly**, so the next data point
-arrives at ~19:05Z. Nothing is wrong with the flusher — its heartbeat row
-advanced to 18:31:44 on schedule, which is exactly the distinction
-`record_daily(increment=0)` exists to make.
+Second flush at **19:01:44Z**. Cycle-1 total 111 → **204**, delta **+93**.
+The criterion is the one `get_fetch_failure_counts`' own docstring names:
+*a count that tracks the number of scoring cycles means it is degraded
+permanently, not intermittently.*
 
-**The 2.0s timeout is NOT raised.** Transience is established for three
-symbols; that it is a *timeout* specifically is not, and the next cycle
-costs nothing.
+| class | n | signature | symbols |
+|---|---|---|---|
+| **PERMANENT** | **15** | 6 → **12** = 2 cycles × 6 TFs, tracks the cycle count exactly | 1000PEPE, 1000SHIB, AKE, **ARB**, BR, CAP, CT, DODOX, DOOD, GRASS, IRYS, ORDER, PONS, USELESS, VVV |
+| **TRANSIENT** | **4** | failed cycle 1, **succeeded** cycle 2 (count unchanged) | AAVE, **ETC**, GTC, IOST |
+| **PERSISTENT PARTIAL** | **1** | 3 → **6**: recurs every cycle, but only 3 of 6 TFs | **BNB** |
+
+Arithmetic: 15 × 12 + 3 × 6 + 2 × 3 = **204** ✓.
+
+**CORRECTION TO MY OWN FLAG, AGAIN.** I grouped "ETC/ARB" as one puzzle.
+They land in **opposite** classes: **ARB is PERMANENT** (6/6 both cycles)
+and **ETC is TRANSIENT** (one cycle only). Pairing them was a guess from
+both being spot-listed majors, and the second cycle separates them
+cleanly.
+
+### BNB is the interesting case, and it refines the operator's rule
+
+The first-cycle heuristic was *count < 6 ⇒ transient*. BNB shows
+**partial ≠ transient**: it fails **the same 3 of 6 timeframes every
+cycle**. Not a listing problem (3 succeed), not transient (it recurs).
+That is the signature of specific timeframes consistently exceeding the
+2.0 s `TF_FETCH_TIMEOUT_S` — plausibly the long-history ones (1w/1d/4h),
+which return the most data.
+
+**The 2.0 s timeout is still NOT raised, because "timeout" is still not
+ESTABLISHED** — and the reason is an instrumentation gap worth naming:
+
+```python
+def _record_fetch_failure(symbol: str, tf: str) -> None:
+    _fetch_failures[symbol] = _fetch_failures.get(symbol, 0) + 1
+```
+
+**`tf` is accepted and discarded.** The counter is keyed on symbol alone,
+so "which 3 timeframes" and "which exception class" exist at the call
+site and are thrown away. Keying on `(symbol, tf)` — or recording
+`type(exc).__name__` — would settle timeout-vs-404 directly. That is a
+small change to #610's counter and it is the right next step, ahead of
+touching any threshold.
+
+At the first read all 20 rows shared
+`first_seen_at == last_seen_at == 18:05:24` and `check_events` had stood
+at 22 rows for 45 minutes. That was **not** a stalled flusher — the
+counter is per-scoring-cycle, cycles are hourly, and the heartbeat row
+kept advancing (18:31:44) throughout. `record_daily(increment=0)` exists
+to make exactly that distinction readable, and it did.
 
 ## 2. The veto's real non-coverage — fleet-wide, not cohort-restricted
 
