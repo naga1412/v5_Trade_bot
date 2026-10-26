@@ -36,7 +36,12 @@ async def validations_factory():
             "anchor_ts TIMESTAMP NOT NULL, anchor_close REAL NOT NULL, "
             "target_ts TIMESTAMP NOT NULL, target_close REAL, "
             "was_correct BOOLEAN, pnl_pct REAL, validated_at TIMESTAMP, "
-            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            # alembic 0045 -- attempt counter + terminal dead-letter.
+            # test_validator_deadletter.py asserts this mirror has not
+            # drifted from the real migration.
+            "validation_attempts INTEGER NOT NULL DEFAULT 0, "
+            "last_attempt_at TIMESTAMP, unvalidatable_reason TEXT)"
         ))
     yield factory
     await engine.dispose()

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -29,6 +30,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.data.bar_fetch import UnresolvedMarket, fetch_bars_by_symbol
+from app.ops.check_events import record_queue_pass
 from app.ops.heartbeat import record_heartbeat
 
 log = logging.getLogger(__name__)
@@ -36,6 +38,14 @@ log = logging.getLogger(__name__)
 VALIDATOR_INTERVAL_SECONDS: int = 60
 NEUTRAL_EPSILON_PCT: float = 0.1  # below this absolute % move, NEUTRAL is "correct"
 WORKER_NAME: str = "prediction_validator_task"
+# How many non-validating attempts a row gets before it is dead-lettered.
+# 6 attempts at VALIDATOR_INTERVAL_SECONDS=60 is ~6 minutes, which is
+# generous for a transient Binance/network blip and fast enough that a
+# genuinely un-validatable row stops blocking the queue within one
+# scoring cycle. Deliberately a module constant and NOT an env var: an
+# env flip is operator-only, and this value needs no tuning knob -- the
+# failure it bounds is permanent-vs-transient, not a threshold to fit.
+MAX_VALIDATION_ATTEMPTS: int = 6
 
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
@@ -179,17 +189,58 @@ async def _validate_one(
     return True
 
 
-async def validate_pending(
+@dataclass(frozen=True)
+class ValidationPass:
+    """What one validator pass actually did.
+
+    SELECTED IS THE FIELD THAT WAS MISSING. The loop already recorded
+    ``validated_in_tick`` on every heartbeat, so ``advanced == 0`` was
+    visible for all 53 days of the 2026-09-03 outage -- and meant
+    nothing, because zero validations is the correct and expected state
+    when nothing is due. Only the PAIR is diagnostic:
+    ``selected > 0 and advanced == 0`` is a stuck queue and cannot be
+    anything else.
+    """
+
+    selected: int
+    advanced: int
+    skipped: int
+    dead_lettered: int
+    unresolved: int
+
+    @property
+    def stalled(self) -> bool:
+        """Work was available and none of it progressed."""
+        return self.selected > 0 and self.advanced == 0
+
+
+async def validate_pending_detailed(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     http: httpx.AsyncClient | None = None,
     now: datetime | None = None,
     batch_limit: int = 100,
-) -> int:
-    """Run one validator pass. Returns the count of rows updated.
+) -> ValidationPass:
+    """Run one validator pass and report what it did.
 
-    Pulled out as a standalone function so unit tests can drive it
-    deterministically without spinning up the asyncio loop.
+    SELECTION NOW EXCLUDES DEAD-LETTERED ROWS. A row whose
+    ``unvalidatable_reason`` is set has exhausted
+    ``MAX_VALIDATION_ATTEMPTS`` and is permanently out of the eligible
+    set, so it can no longer sit at the head of an oldest-first queue
+    and starve everything behind it. That starvation is the actual
+    defect; see migration 0045's docstring for the measured 129-row
+    poison against ``batch_limit=100``.
+
+    EVERY NON-VALIDATING ATTEMPT IS COUNTED. The old code's
+    ``return False`` was indistinguishable from "nothing to do" at every
+    layer above it. Now the attempt lands in the row's own
+    ``validation_attempts``, and the pass total lands in the returned
+    :class:`ValidationPass`.
+
+    ``validate_pending`` remains the int-returning entry point for every
+    existing caller -- a deliberately thin wrapper, because widening a
+    return type in place is how PR #266's 8->9 tuple bump broke three
+    integration unpack sites.
     """
     now = now or datetime.now(timezone.utc)
     close_http = False
@@ -197,24 +248,76 @@ async def validate_pending(
         http = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
         close_http = True
     updated = 0
+    skipped = 0
+    dead_lettered = 0
+    selected = 0
     try:
         async with session_factory() as session:
             pending = (
                 await session.execute(
                     sa.text(
                         "SELECT id, symbol, timeframe, direction, anchor_close, "
-                        "target_ts FROM prediction_validations "
-                        "WHERE validated_at IS NULL AND target_ts <= :now "
+                        "target_ts, validation_attempts "
+                        "FROM prediction_validations "
+                        "WHERE validated_at IS NULL "
+                        "  AND unvalidatable_reason IS NULL "
+                        "  AND target_ts <= :now "
                         "ORDER BY target_ts ASC LIMIT :lim"
                     ),
                     {"now": now, "lim": batch_limit},
                 )
             ).all()
+            selected = len(pending)
             unresolved: list[str] = []
+
+            async def _note_attempt(row: sa.Row, reason: str) -> None:
+                """Count the attempt; dead-letter once it is hopeless.
+
+                The threshold is what converts an invisible permanent
+                stall into a bounded, attributed write-off.
+                """
+                nonlocal dead_lettered
+                attempts = int(row.validation_attempts or 0) + 1
+                if attempts >= MAX_VALIDATION_ATTEMPTS:
+                    await session.execute(
+                        sa.text(
+                            "UPDATE prediction_validations "
+                            "SET validation_attempts = :a, last_attempt_at = :t, "
+                            "    unvalidatable_reason = :r "
+                            "WHERE id = :id"
+                        ),
+                        {"a": attempts, "t": now,
+                         "r": f"{reason} after {attempts} attempts", "id": row.id},
+                    )
+                    dead_lettered += 1
+                    log.error(
+                        "validator_dead_letter: id=%s %s/%s target_ts=%s "
+                        "reason=%s after %d attempts -- EXCLUDED from further "
+                        "selection so it cannot block the queue behind it. "
+                        "Re-open with unvalidatable_reason = NULL.",
+                        row.id, row.symbol, row.timeframe, row.target_ts,
+                        reason, attempts,
+                    )
+                else:
+                    await session.execute(
+                        sa.text(
+                            "UPDATE prediction_validations "
+                            "SET validation_attempts = :a, last_attempt_at = :t "
+                            "WHERE id = :id"
+                        ),
+                        {"a": attempts, "t": now, "id": row.id},
+                    )
+
             for row in pending:
                 try:
                     if await _validate_one(session, http, row):
                         updated += 1
+                    else:
+                        # The silent skip, now counted. This branch is
+                        # what ran ~100 times a minute for 53 days while
+                        # every heartbeat said "ok".
+                        skipped += 1
+                        await _note_attempt(row, "close_unavailable")
                 except UnresolvedMarket:
                     # Named, not swallowed by the broad handler below. The
                     # reason it gets its own arm is volume: the listing
@@ -226,8 +329,11 @@ async def validate_pending(
                     # distinguishes "one freshly-listed symbol" from
                     # "prediction validation has stopped".
                     unresolved.append(f"{row.symbol}/{row.timeframe}")
+                    await _note_attempt(row, "market_unresolved")
                 except Exception as e:  # noqa: BLE001
                     log.warning("validate_one failed for id=%s: %s", row.id, e)
+                    skipped += 1
+                    await _note_attempt(row, "validate_one_error")
             if unresolved:
                 log.error(
                     "validator_market_unresolved: %d of %d pending rows could "
@@ -243,7 +349,32 @@ async def validate_pending(
     finally:
         if close_http:
             await http.aclose()
-    return updated
+    return ValidationPass(
+        selected=selected, advanced=updated, skipped=skipped,
+        dead_lettered=dead_lettered, unresolved=len(unresolved),
+    )
+
+
+async def validate_pending(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    http: httpx.AsyncClient | None = None,
+    now: datetime | None = None,
+    batch_limit: int = 100,
+) -> int:
+    """Run one validator pass. Returns the count of rows updated.
+
+    THIN WRAPPER, kept at its original signature and return type on
+    purpose. Every existing caller and test passes through here
+    unchanged; :func:`validate_pending_detailed` carries the new
+    ``(selected, advanced)`` pair for anything that needs it. Widening
+    this return in place is the pitfall that broke three integration
+    unpack sites when PR #266 bumped a tuple from 8 to 9.
+    """
+    result = await validate_pending_detailed(
+        session_factory, http=http, now=now, batch_limit=batch_limit,
+    )
+    return result.advanced
 
 
 async def _loop(
@@ -257,13 +388,53 @@ async def _loop(
     )
     while True:
         try:
-            n = await validate_pending(session_factory)
+            res = await validate_pending_detailed(session_factory)
+            # BOTH NUMBERS, ALWAYS. The old heartbeat carried only
+            # validated_in_tick, so the 53-day stall of 2026-09-03
+            # reported status="ok" with validated_in_tick=0 every 60s --
+            # which is also exactly what a healthy idle validator
+            # reports. `selected` is what separates them.
             await record_heartbeat(
                 session_factory, WORKER_NAME,
-                status="ok", details={"validated_in_tick": n},
+                status="error" if res.stalled else "ok",
+                details={
+                    "validated_in_tick": res.advanced,
+                    "selected": res.selected,
+                    "advanced": res.advanced,
+                    "skipped": res.skipped,
+                    "dead_lettered": res.dead_lettered,
+                    "unresolved": res.unresolved,
+                    "stalled": res.stalled,
+                },
             )
-            if n > 0:
-                log.info("prediction_validator: validated %d row(s) this tick", n)
+            try:
+                async with session_factory() as s2:
+                    streak = await record_queue_pass(
+                        s2, WORKER_NAME,
+                        selected=res.selected, advanced=res.advanced,
+                    )
+                    await s2.commit()
+            except Exception as e:  # noqa: BLE001
+                # Observability must never take the worker down with it.
+                log.warning("validator queue-progress record failed: %s", e)
+                streak = 0
+            if res.stalled:
+                log.error(
+                    "validator_STALLED: selected=%d advanced=0 skipped=%d "
+                    "dead_lettered=%d unresolved=%d -- consecutive stalled "
+                    "passes=%d. Work was available and none of it "
+                    "progressed. This is the head-of-line signature; it is "
+                    "NOT an idle queue (that reports selected=0).",
+                    res.selected, res.skipped, res.dead_lettered,
+                    res.unresolved, streak,
+                )
+            elif res.advanced > 0:
+                log.info(
+                    "prediction_validator: validated %d of %d selected "
+                    "this tick (skipped=%d, dead_lettered=%d)",
+                    res.advanced, res.selected, res.skipped,
+                    res.dead_lettered,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -281,7 +452,10 @@ __all__ = [
     "NEUTRAL_EPSILON_PCT",
     "VALIDATOR_INTERVAL_SECONDS",
     "WORKER_NAME",
+    "MAX_VALIDATION_ATTEMPTS",
+    "ValidationPass",
     "record_pending_validation",
     "validate_pending",
+    "validate_pending_detailed",
     "start_prediction_validator_task",
 ]
