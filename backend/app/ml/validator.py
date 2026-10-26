@@ -134,9 +134,26 @@ async def _fetch_close_at(
         log.info("validator fetch_klines failed for %s/%s: %s", symbol, timeframe, e)
         return None
     if bars is None:
-        log.info(
-            "validator skipped %s/%s: futures-only cache unpopulated, market "
-            "undetermined -- not guessing spot",
+        # LOUD, not log.info. get_futures_only_cache() returns None until the
+        # first SUCCESSFUL refresh since process start, and that refresh is a
+        # fapi call. If it keeps failing, the cache stays None forever and
+        # every row skips here on every 60s cycle -- i.e. prediction
+        # validation stops entirely, indefinitely. That must never be
+        # discoverable only by noticing an absence, which is how this
+        # codebase has lost whole subsystems before.
+        #
+        # BEHAVIOUR DELTA vs pre-FU-53, stated plainly: this path used to
+        # fetch spot unconditionally and so kept working for spot-listed
+        # symbols. Skipping is the correct answer to "which market?" when
+        # nothing can answer it, but it is NOT behaviour-preserving, and the
+        # honest fix is to read symbol_source from the prediction row rather
+        # than depend on a process-lifetime cache at all.
+        log.error(
+            "validator_market_undetermined: skipped %s/%s -- futures-only "
+            "cache unpopulated (no successful refresh since process start), "
+            "so the listing market is unknown and spot would be a guess. "
+            "Rows stay pending and retry; if this repeats, prediction "
+            "validation is STOPPED, not slow.",
             symbol, timeframe,
         )
         return None

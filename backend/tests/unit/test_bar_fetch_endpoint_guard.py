@@ -120,6 +120,103 @@ KNOWN_UNMIGRATED = {
 }
 
 
+# ===========================================================================
+# G0 -- THE ALLOWLIST IS CLOSED.
+# ===========================================================================
+# An allowlist that can GROW is a cannot-fail check in waiting: the fifth
+# instance of the defect does not fail the guard, it gets appended to the
+# guard. The exemption then arrives as an inherited default rather than as a
+# decision, which is how every instance of this family has entered the
+# codebase so far.
+#
+# So the contents are pinned here as literals. Adding a sixth exempt file is
+# then a deliberate edit to THIS test, visible as a red diff line in review,
+# and the reviewer sees the count change rather than one more line in a
+# 15-line set they would skim.
+CLOSED_SPOT_URL = frozenset({
+    "app/data/bar_fetch.py",
+    "app/data/adapters/binance.py",
+    "app/core/regime/market_regime.py",
+    "app/healer/system_truth_detector.py",
+    "scripts/probe_external_endpoint_healthcheck.py",
+    "scripts/probe_system_truth.py",
+    "scripts/probe_btc_trend_filter_test.py",
+    "scripts/probe_gate_counterfactual.py",
+    "scripts/probe_gate_regime_window.py",
+})
+CLOSED_UNMIGRATED_SPOT_URL = frozenset({
+    "app/core/scoring/mtf_confluence.py",
+    "scripts/shadow_variant_rolling_report.py",
+    "scripts/probe_own_trade_entry_timing.py",
+    "scripts/probe_part3_entry_timing_all_trades.py",
+})
+CLOSED_FETCH_KLINES = frozenset({
+    "app/api/routes/tab1.py",
+    "app/data/intermarket_correlations.py",
+})
+CLOSED_UNMIGRATED_FETCH_KLINES = frozenset({
+    "app/shadow/worker.py",
+    "app/scanner/batch.py",
+})
+
+_CLOSED_MSG = (
+    "\n\nTHE ALLOWLIST IS CLOSED ON PURPOSE. An allowlist that can grow is a "
+    "check that cannot fail: the next instance of the defect would not fail "
+    "this guard, it would be appended to it, and the exemption would arrive "
+    "as an inherited default instead of as a decision. That is how all four "
+    "known instances of this defect entered the tree.\n\n"
+    "If you genuinely need another exemption: change BOTH the working set and "
+    "the CLOSED_* literal above, in one commit, with the reason written next "
+    "to the entry. The duplication is the point -- it makes the change show up "
+    "as a diff a reviewer cannot skim past."
+)
+
+
+def test_the_allowlists_are_closed() -> None:
+    """The working sets must equal the pinned literals, exactly.
+
+    This does not check the codebase. It checks the GUARD -- that nobody
+    widened the exemptions without saying so. Deliberately separate from the
+    scans below, so a widened allowlist is reported as "the guard was
+    weakened" rather than silently making the scans pass.
+    """
+    for name, working, closed in (
+        ("ALLOWED_SPOT_URL", ALLOWED_SPOT_URL, CLOSED_SPOT_URL),
+        ("KNOWN_UNMIGRATED", KNOWN_UNMIGRATED, CLOSED_UNMIGRATED_SPOT_URL),
+        ("ALLOWED_FETCH_KLINES_CALLERS",
+         ALLOWED_FETCH_KLINES_CALLERS, CLOSED_FETCH_KLINES),
+        ("KNOWN_UNMIGRATED_FETCH_KLINES",
+         KNOWN_UNMIGRATED_FETCH_KLINES, CLOSED_UNMIGRATED_FETCH_KLINES),
+    ):
+        added = sorted(set(working) - set(closed))
+        removed = sorted(set(closed) - set(working))
+        assert not added, f"{name} GREW by {added}" + _CLOSED_MSG
+        assert not removed, (
+            f"{name} SHRANK by {removed} -- an exemption was retired but its "
+            f"CLOSED_* literal was not updated. Delete it there too, so the "
+            f"pinned count keeps meaning something." + _CLOSED_MSG
+        )
+
+
+def test_the_closed_counts_are_what_review_signed_off() -> None:
+    """Exact counts, hand-written, not derived from the sets they check.
+
+    ``len(CLOSED_SPOT_URL) == len(CLOSED_SPOT_URL)`` would be a tautology.
+    These integers were counted by hand at review time, so they fail if the
+    pinned sets themselves are edited -- which is the only remaining way to
+    widen the exemptions in a single quiet commit.
+    """
+    assert len(CLOSED_SPOT_URL) == 9, len(CLOSED_SPOT_URL)
+    assert len(CLOSED_UNMIGRATED_SPOT_URL) == 4, len(CLOSED_UNMIGRATED_SPOT_URL)
+    assert len(CLOSED_FETCH_KLINES) == 2, len(CLOSED_FETCH_KLINES)
+    assert len(CLOSED_UNMIGRATED_FETCH_KLINES) == 2, (
+        len(CLOSED_UNMIGRATED_FETCH_KLINES)
+    )
+    # 4 unmigrated URL sites + 2 unmigrated adapter callers = 6 known-open
+    # instances of the defect. A fix that migrates one MUST lower this.
+    assert len(CLOSED_UNMIGRATED_SPOT_URL) + len(CLOSED_UNMIGRATED_FETCH_KLINES) == 6
+
+
 def _py_files() -> list[Path]:
     out: list[Path] = []
     for root in SCAN_ROOTS:
