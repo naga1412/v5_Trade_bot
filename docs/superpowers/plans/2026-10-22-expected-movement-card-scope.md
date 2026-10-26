@@ -304,6 +304,30 @@ window.** That is the thing to know before changing it. It is not a
 reason the horizon is correct -- the horizon is correct because it was
 nominated in advance and the band was measured at it.
 
+### The adverse leg LEADS, and the order is load-bearing
+
+**Ruled 2026-10-23.** The field reads:
+
+```
+Price swing, next ~10h:  about -3.2% / +3.9% of entry  (wider than usual)
+```
+
+**Not** `+3.9% / -3.2%`. Favourable-first puts the **larger** number
+first, and the larger number is the **weaker** evidence -- the
+favourable leg read **+3.69 sigma** and did not clear the corrected
+3.729 bar, while the adverse leg read **+8.62** and did. So a quick read
+of favourable-first is *"more upside than downside"*: the exact
+conviction misreading this field exists to prevent, delivered by the
+ordering alone.
+
+The adverse leg is also the **sizing-relevant** one, being what reaches
+the stop. It leads on both grounds.
+
+**Held by `test_adverse_leg_leads`**, because an unexplained order
+invites someone to "fix" it back to the more natural-looking ascending
+form. See the "a mutation can hold a decision" pattern in
+`2026-09-08-checks-that-cannot-fail.md`.
+
 ## What would falsify it
 
 If the magnitude relationship does not hold **prospectively** — on

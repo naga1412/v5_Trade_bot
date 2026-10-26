@@ -169,6 +169,20 @@ def band_for(candidate: Any) -> MovementBand | None:
 def render_band(band: MovementBand | None) -> str:
     """The card lines, or "" when the field is omitted.
 
+    THE ADVERSE LEG LEADS, and the order is load-bearing rather than
+    stylistic. Favourable-first ("+3.9% / -3.2%") puts the LARGER number
+    first, and the larger number is the WEAKER evidence -- the favourable
+    leg read +3.69 sigma and did not pass the corrected bar, while the
+    adverse leg read +8.62 and did. A quick read of favourable-first is
+    therefore "more upside than downside", which is precisely the
+    conviction misreading this whole field exists to prevent, delivered
+    by the ordering alone.
+
+    The adverse leg also happens to be the sizing-relevant one: it is
+    what reaches the stop. So it leads on both grounds, and
+    `test_adverse_leg_leads` holds the order so nobody "fixes" it back to
+    the more natural-looking ascending form.
+
     NO RESPONSE GUIDANCE. An earlier draft ended with "Consider sizing
     down", which prescribes one response among several when none was
     measured: a wider swing could rationally mean a smaller position, a
@@ -180,7 +194,7 @@ def render_band(band: MovementBand | None) -> str:
         return ""
     return (
         f"Price swing, next {HORIZON_LABEL}: "
-        f"about +{band.favourable_pct:.1f}% / -{band.adverse_pct:.1f}% of entry "
+        f"about -{band.adverse_pct:.1f}% / +{band.favourable_pct:.1f}% of entry "
         f"({band.label})\n"
         "Volatility estimate, not conviction."
     )

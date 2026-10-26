@@ -238,7 +238,7 @@ def test_rendered_text_is_two_sided_and_never_prescribes_a_response() -> None:
     MUTATION RUN: dropped the adverse leg, leaving one number -> red.
     """
     text = render_band(band_for(_Cand(entry_score=0.35)))
-    assert "+3.9%" in text and "-3.2%" in text
+    assert "-3.2%" in text and "+3.9%" in text
     assert "wider than usual" in text
     assert "Volatility estimate, not conviction." in text
     for banned in ("sizing", "size down", "consider", "recommend", "should",
@@ -349,4 +349,30 @@ def test_band_appears_in_a_rendered_card_and_is_absent_on_short() -> None:
         _cand(direction="SHORT"), leverage=3, auto_skip_seconds=600).body
     assert "Price swing" not in short_body, (
         "the band rendered on a SHORT card -- it is LONG-only evidence"
+    )
+
+
+def test_adverse_leg_leads() -> None:
+    """THE ORDER IS LOAD-BEARING, so a test holds it.
+
+    Favourable-first puts the LARGER number first, and the larger number
+    is the WEAKER evidence: the favourable leg read +3.69 sigma and did
+    not pass the corrected 3.729 bar, while the adverse leg read +8.62
+    and did. So a quick read of "+3.9% / -3.2%" is "more upside than
+    downside" -- the exact conviction misreading this field exists to
+    prevent, delivered by the ordering alone. The adverse leg is also
+    the sizing-relevant one, being what reaches the stop.
+
+    An unexplained order invites someone to "fix" it back to the
+    more natural-looking ascending form, which is why this is a test and
+    not only a comment.
+
+    MUTATION RUN: swapped the legs back to favourable-first -> red.
+    """
+    text = render_band(band_for(_Cand(entry_score=0.35)))
+    adverse_at = text.index("-3.2%")
+    favourable_at = text.index("+3.9%")
+    assert adverse_at < favourable_at, (
+        "the favourable leg leads, so a quick read says 'more upside than "
+        "downside' -- the weaker-evidence number must not come first"
     )

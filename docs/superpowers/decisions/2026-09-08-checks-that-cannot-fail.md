@@ -889,6 +889,47 @@ with `restart` it is the only step that can distinguish "reloaded" from
 "still running the old environment". **Two independent silent-failure
 paths, one check closing both.**
 
+## A MUTATION CAN HOLD A DECISION, NOT ONLY CODE
+
+**Standing pattern.** Named 2026-10-23, from the movement-card build.
+
+**Where a decision was reached by argument and could plausibly be
+re-proposed, a test plus a mutation can make it mechanically
+unrevertable.**
+
+Two editorial decisions on one card field were settled by argument, and
+both are now held by tests that go red if the decision is undone:
+
+| decision | why it was reached | the mutation that holds it |
+|---|---|---|
+| **no response guidance** -- "Consider sizing down" dropped | it prescribes one response among several when none was measured | re-adding the phrase |
+| **the adverse leg leads** -- `-3.2% / +3.9%`, not the reverse | favourable-first puts the LARGER number first, and the larger number is the WEAKER evidence (+3.69 sigma vs +8.62), so a quick read says "more upside than downside" -- the conviction misreading delivered by ordering alone | swapping the legs back |
+
+**Neither is a correctness property.** Both renderings "work"; both would
+pass any test about numbers. What the mutations protect is a
+*conclusion* -- and conclusions are exactly what gets quietly reverted,
+because the next person sees an odd-looking choice, no reason beside it,
+and tidies it.
+
+**An unexplained decision invites being fixed.** A comment explains it
+to a reader who stops to read; a test explains it to one who does not.
+
+### When to reach for this
+
+Not for every judgement call -- that would be paralysing. Reach for it
+when all three hold:
+
+1. the decision was reached **by argument**, not by measurement, so no
+   number will contradict a reversal;
+2. the reverted form looks **more natural**, so the reversal will seem
+   like an improvement;
+3. the cost of the reversal is **invisible** -- here, a subtly
+   misleading card, which no error will ever surface.
+
+**Condition 3 is the one that makes it worth the test.** A decision whose
+reversal breaks something loudly does not need protecting; a decision
+whose reversal degrades something silently does.
+
 ## Related
 
 - `2026-07-30-breakeven-stop-mechanic-design.md` — the pre-registration
