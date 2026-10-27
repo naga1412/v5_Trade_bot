@@ -82,6 +82,15 @@ ALLOWED_SPOT_URL = {
     "app/healer/system_truth_detector.py",
     "scripts/probe_external_endpoint_healthcheck.py",
     "scripts/probe_system_truth.py",
+    # AUDITS THE LISTING COMPUTATION ITSELF (2026-10-26). It compares
+    # fetch_market_listings' filtered sets against RAW exchangeInfo to
+    # decide whether an UnresolvedMarket raise is a false positive.
+    # Routing it through the resolver would make the audit CIRCULAR --
+    # it would inherit the very filters under test and could not detect
+    # an incomplete set at all. It also fetches klines deliberately, to
+    # read the real status code, which is the only thing separating
+    # 404-not-listed from timeout.
+    "scripts/listing_completeness_audit.py",
     # BTC-only probes, same reason as market_regime: no symbol parameter.
     "scripts/probe_btc_trend_filter_test.py",
     "scripts/probe_gate_counterfactual.py",
@@ -134,6 +143,9 @@ KNOWN_UNMIGRATED = {
 # and the reviewer sees the count change rather than one more line in a
 # 15-line set they would skim.
 CLOSED_SPOT_URL = frozenset({
+    # +1 on 2026-10-26: scripts/listing_completeness_audit.py, which must
+    # name the raw endpoints to audit the resolver without using it.
+    "scripts/listing_completeness_audit.py",
     "app/data/bar_fetch.py",
     "app/data/adapters/binance.py",
     "app/core/regime/market_regime.py",
@@ -207,7 +219,7 @@ def test_the_closed_counts_are_what_review_signed_off() -> None:
     pinned sets themselves are edited -- which is the only remaining way to
     widen the exemptions in a single quiet commit.
     """
-    assert len(CLOSED_SPOT_URL) == 9, len(CLOSED_SPOT_URL)
+    assert len(CLOSED_SPOT_URL) == 10, len(CLOSED_SPOT_URL)
     assert len(CLOSED_UNMIGRATED_SPOT_URL) == 4, len(CLOSED_UNMIGRATED_SPOT_URL)
     assert len(CLOSED_FETCH_KLINES) == 2, len(CLOSED_FETCH_KLINES)
     # 2 -> 1 on 2026-10-26: app/shadow/worker.py migrated. This number is

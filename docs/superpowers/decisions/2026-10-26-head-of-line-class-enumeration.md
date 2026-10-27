@@ -36,7 +36,7 @@ and looked like a clean bill of health.
 | file | verdict | why |
 |---|---|---|
 | `app/ml/validator.py` | **FULL SIGNATURE** | the instance. Fixed by migration 0045 + dead-letter. |
-| `app/ops/telegram_timeout.py` | clear | has the pending marker, oldest-first ordering *and* a per-item skip — but **no `LIMIT`**. It iterates the entire pending set each pass, so a permanently-failing row is retried forever and *cannot starve the others*. The absence of a batch bound is what saves it. |
+| `app/ops/telegram_timeout.py` | **DELETED 2026-10-26** | was clear of this class (pending marker + oldest-first + a skip, but **no `LIMIT`**, so it could never starve). Then found to have no producer and no caller at all and deleted — see `2026-10-26-telegram-timeout-deleted.md`. |
 | `app/data/universe.py` | clear | `LIMIT 1` existence check, not a drain. |
 | `scripts/probe_l9_null_corrected.py` | clear | report query. |
 
