@@ -37,7 +37,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shadow.live_fleet_universe import (
-    fetch_market_listings,
+    fetch_market_listings_full,
     load_baseline_symbols,
 )
 
@@ -46,6 +46,14 @@ log = logging.getLogger(__name__)
 _baseline_cache: set[str] | None = None
 _futures_only_cache: set[str] | None = None
 _spot_listed_cache: set[str] | None = None
+# ROUTING sets (2026-10-27): listed-at-all, minus never-traded
+# statuses. DISTINCT from the tradable sets above because they answer
+# a different question -- 'does this market have bars' rather than
+# 'may I trade this'. A halted (BREAK) or settling (SETTLING) symbol
+# is not tradable but its history still exists, and routing on the
+# tradable predicate refused data that was right there.
+_routable_futures_only_cache: set[str] | None = None
+_routable_spot_cache: set[str] | None = None
 _futures_only_cache_loaded_at: datetime | None = None
 
 
@@ -99,14 +107,25 @@ async def refresh_futures_only_cache(http: httpx.AsyncClient) -> set[str] | None
     same two calls.
     """
     global _futures_only_cache, _spot_listed_cache, _futures_only_cache_loaded_at
+    global _routable_futures_only_cache, _routable_spot_cache
     try:
-        _, futures_only, spot_listed = await fetch_market_listings(http)
+        listings = await fetch_market_listings_full(http)
+        futures_only = set(listings.tradable_futures_only)
+        spot_listed = set(listings.tradable_spot)
         _futures_only_cache = futures_only
         _spot_listed_cache = spot_listed
+        # Same cycle, same two HTTP calls. All FOUR sets must move
+        # together or a routing lookup could consult a tradable set from
+        # one moment against a routable set from another and answer
+        # "neither" for a symbol one of them knew.
+        _routable_futures_only_cache = set(listings.routable_futures_only)
+        _routable_spot_cache = set(listings.routable_spot)
         _futures_only_cache_loaded_at = _utc_now()
         log.info(
-            "cohort_cache: futures_only refreshed (%d symbols, "
-            "%d spot-listed)", len(futures_only), len(spot_listed),
+            "cohort_cache: futures_only refreshed (%d tradable futures-only, "
+            "%d tradable spot | %d routable futures-only, %d routable spot)",
+            len(futures_only), len(spot_listed),
+            len(_routable_futures_only_cache), len(_routable_spot_cache),
         )
         return futures_only
     except Exception as e:  # noqa: BLE001
@@ -141,6 +160,24 @@ def get_spot_listed_cache() -> set[str] | None:
     return _spot_listed_cache
 
 
+def get_routable_futures_only_cache() -> set[str] | None:
+    """Sync, zero-I/O read of the ROUTING futures-only set.
+
+    "Listed on futures and not on spot", where listed means the market
+    knows the symbol -- INCLUDING halted and settling ones, because they
+    still have history. Used ONLY by `app.data.bar_fetch` to choose an
+    endpoint. Cohort and fleet selection must keep using
+    `get_futures_only_cache()`, which is TRADING-only: a settling
+    contract is routable but must not be traded.
+    """
+    return _routable_futures_only_cache
+
+
+def get_routable_spot_cache() -> set[str] | None:
+    """Sync, zero-I/O read of the ROUTING spot set. See the sibling above."""
+    return _routable_spot_cache
+
+
 def get_futures_only_cache_age_seconds() -> float | None:
     """None if never loaded; otherwise seconds since the last successful
     refresh. Used by the healer/heartbeat to flag a cache that's gone
@@ -156,9 +193,12 @@ def _reset_for_tests() -> None:
     from production code."""
     global _baseline_cache, _futures_only_cache, _spot_listed_cache
     global _futures_only_cache_loaded_at
+    global _routable_futures_only_cache, _routable_spot_cache
     _baseline_cache = None
     _futures_only_cache = None
     _spot_listed_cache = None
+    _routable_futures_only_cache = None
+    _routable_spot_cache = None
     _futures_only_cache_loaded_at = None
 
 

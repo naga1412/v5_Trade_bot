@@ -300,6 +300,7 @@ async def flush_mtf_fetch_failures(
     *,
     now: _dt.datetime | None = None,
     counts: dict[str, int] | None = None,
+    detail: dict[tuple[str, str, str], int] | None = None,
 ) -> int:
     """Give #610's in-memory counter a home. Returns symbols written.
 
@@ -314,7 +315,10 @@ async def flush_mtf_fetch_failures(
     ``increment=0``. That row is the only thing distinguishing a healthy
     flusher from a dead one, which is rule 2.
     """
-    from app.core.scoring.mtf_confluence import get_fetch_failure_counts
+    from app.core.scoring.mtf_confluence import (
+        get_fetch_failure_counts,
+        get_fetch_failure_detail,
+    )
 
     stamp = now or _dt.datetime.now(_dt.timezone.utc)
     current = dict(counts) if counts is not None else get_fetch_failure_counts()
@@ -336,6 +340,33 @@ async def flush_mtf_fetch_failures(
         )
         _last_flushed[symbol] = total
         written += 1
+
+    # THE DETAIL SERIES, under its OWN check_name so the symbol-level
+    # series above keeps its continuity -- the 2026-10-26
+    # permanent/transient classification was made from that series.
+    #
+    # subject is "<SYMBOL>/<tf>/<failure>", e.g.
+    # "1000PEPEUSDT/1w/HTTPStatusError_400" vs
+    # "BNBUSDT/1w/ReadTimeout". One query then separates a routing
+    # failure (every timeframe, one status code, persistent) from a
+    # timeout (long timeframes, a transport exception) WITHOUT needing
+    # two manual reads of consecutive hourly cycles.
+    if detail is None:
+        detail = get_fetch_failure_detail()
+    for (sym, tf, kind), total in sorted(detail.items()):
+        dkey = (sym, tf, kind)
+        delta = total - _last_flushed_detail.get(dkey, 0)
+        if delta <= 0:
+            _last_flushed_detail[dkey] = total
+            continue
+        await record_daily(
+            session, "mtf_kline_fetch_failed_detail",
+            kind="counter", status="violation",
+            subject=f"{sym}/{tf}/{kind}", increment=delta,
+            detail={"cumulative_since_process_start": total},
+            now=stamp,
+        )
+        _last_flushed_detail[dkey] = total
 
     # The heartbeat row, ALWAYS written, subject='' so it never collides
     # with a per-symbol row.
@@ -448,8 +479,11 @@ _stall_streak: dict[str, int] = {}
 # Mirrors mtf_confluence's own module-level counter; see
 # flush_mtf_fetch_failures for why a snapshot is required.
 _last_flushed: dict[str, int] = {}
+# Same contract for the (symbol, timeframe, failure) series.
+_last_flushed_detail: dict[tuple[str, str, str], int] = {}
 
 
 def _reset_for_tests() -> None:
     _last_flushed.clear()
+    _last_flushed_detail.clear()
     _stall_streak.clear()

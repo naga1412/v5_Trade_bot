@@ -105,6 +105,11 @@ addopts = "-ra -q --strict-markers --cov=app --cov-report=term-missing"
 markers = [
     "integration: requires database/redis",
     "slow: takes more than 1s",
+    # Opt-in escape hatch for the session-wide outbound-socket block in
+    # tests/conftest.py. --strict-markers is on, so this MUST be
+    # registered here or using it is an error -- which is the point:
+    # granting a test network access is a visible, reviewable edit.
+    "allow_network: test genuinely needs outbound network access",
 ]
 
 [tool.ruff]

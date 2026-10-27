@@ -143,16 +143,59 @@ def resolve_klines_url_for_symbol(binance_symbol: str) -> str:
     Raises:
         UnresolvedMarket: neither listing can place this symbol.
     """
+    # ROUTING sets, not the tradable ones (2026-10-27). The question here
+    # is "does this market have bars for this symbol", NOT "may I trade
+    # it". A halted (BREAK) or settling (SETTLING) symbol is not tradable
+    # but its history still exists, and routing on the TRADING predicate
+    # refused data that was right there -- measured on TONUSDT, HFTUSDT
+    # and VICUSDT, with 390 USDT symbols upstream in a non-TRADING status
+    # (254 spot BREAK, 135 futures SETTLING). Cohort and fleet SELECTION
+    # keep using the tradable sets, which is correct for them.
+    #
+    # This stays necessary even once the universe stops carrying delisted
+    # coins: backfills, historical analysis and the prediction validator
+    # draining a 53-day backlog all legitimately want bars for symbols
+    # that have since delisted.
     from app.shadow.cohort_cache import (
         get_futures_only_cache,
+        get_routable_futures_only_cache,
+        get_routable_spot_cache,
         get_spot_listed_cache,
     )
 
-    futures_only = get_futures_only_cache()
+    # PRECEDENCE IS LAYERED, AND STRICTLY ADDITIVE. The TRADABLE sets are
+    # consulted FIRST so every symbol the pre-2026-10-27 resolver could
+    # place resolves to the SAME endpoint it did before; the ROUTABLE sets
+    # are consulted only for symbols that previously RAISED.
+    #
+    # Resolving on the routable sets alone looked equivalent and was not.
+    # Hand-derived over all status pairings, a symbol BREAK on spot and
+    # TRADING on futures went FUTURES before and would have gone SPOT --
+    # to a HALTED spot pair instead of the healthy trading contract.
+    # Worse data, silently, which is the exact harm this fix was meant to
+    # remove. The subtraction in `routable_futures_only` hides it: a
+    # dual-listed symbol is in neither futures-ONLY set, so it falls
+    # through to whichever spot set answers, and the routable spot set
+    # answers for halted pairs.
+    #
+    # Layering is also what makes the change reviewable: on the old
+    # domain it is provably behaviour-preserving, and the only new
+    # outcomes replace a raise.
+    tradable_futures_only = get_futures_only_cache()
+    if (tradable_futures_only is not None
+            and binance_symbol in tradable_futures_only):
+        return FUTURES_KLINES_URL
+
+    tradable_spot = get_spot_listed_cache()
+    if tradable_spot is not None and binance_symbol in tradable_spot:
+        return SPOT_KLINES_URL
+
+    # --- below here: cases the TRADING-only predicate raised on ---
+    futures_only = get_routable_futures_only_cache()
     if futures_only is not None and binance_symbol in futures_only:
         return FUTURES_KLINES_URL
 
-    spot_listed = get_spot_listed_cache()
+    spot_listed = get_routable_spot_cache()
     if spot_listed is not None and binance_symbol in spot_listed:
         return SPOT_KLINES_URL
 

@@ -229,9 +229,67 @@ def _vote_for_tf(klines: list[list[Any]]) -> tuple[int, float]:
 # truncated on every redeploy anyway.
 _fetch_failures: dict[str, int] = {}
 
+# THE SECOND KEY, added 2026-10-26. The symbol-level counter above
+# ACCEPTED `tf` AND DISCARDED IT, so "which timeframes" and "which
+# failure" -- the only two facts that separate a routing failure from a
+# timeout -- existed at the call site and were thrown away. Classifying
+# ARBUSDT as permanent-vs-transient took two manual reads of consecutive
+# hourly cycles because of it.
+#
+# Keyed (symbol, timeframe, failure) so the shape is readable directly:
+#   routing failure -> every timeframe fails, equally and persistently
+#   timeout         -> concentrates on the longest fetches, or scatters
+#
+# Bounded by symbols x 6 timeframes x failure kinds, aggregated daily, so
+# it stays a few hundred rows a day rather than per-event amplification.
+# The symbol-level series is KEPT UNCHANGED beside it: the 2026-10-26
+# permanent/transient classification was made from that series and
+# re-keying it would have broken the comparison.
+_fetch_failure_detail: dict[tuple[str, str, str], int] = {}
 
-def _record_fetch_failure(symbol: str, tf: str) -> None:
+
+def _failure_kind(exc: BaseException | None) -> str:
+    """A short, groupable label for the failure.
+
+    The HTTP STATUS IS PART OF THE LABEL because that is the whole
+    discriminator: 400/404 means Binance does not have this symbol on
+    this market (routing), while a timeout or 429/418 means the request
+    never got a verdict (transport). Collapsing them to
+    "HTTPStatusError" would throw away the answer a second time.
+    """
+    if exc is None:
+        return "unknown"
+    name = type(exc).__name__
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    if code is not None:
+        return f"{name}_{code}"
+    return name
+
+
+def _record_fetch_failure(
+    symbol: str, tf: str, exc: BaseException | None = None,
+) -> None:
+    """Count one failed per-timeframe fetch.
+
+    `exc` is optional so the existing two-argument call shape stays
+    valid; passing it is what makes the detail counter useful.
+    """
     _fetch_failures[symbol] = _fetch_failures.get(symbol, 0) + 1
+    key = (symbol, tf, _failure_kind(exc))
+    _fetch_failure_detail[key] = _fetch_failure_detail.get(key, 0) + 1
+
+
+def get_fetch_failure_detail() -> dict[tuple[str, str, str], int]:
+    """Per-(symbol, timeframe, failure) counts since process start.
+
+    Deliberately a SEPARATE accessor rather than a widened return from
+    :func:`get_fetch_failure_counts`: that function's `dict[str, int]`
+    shape is consumed by the flusher and its tests, and widening a
+    return in place is the pitfall that broke three integration unpack
+    sites when PR #266 bumped a tuple from 8 to 9.
+    """
+    return dict(_fetch_failure_detail)
 
 
 def get_fetch_failure_counts() -> dict[str, int]:
@@ -246,6 +304,7 @@ def get_fetch_failure_counts() -> dict[str, int]:
 
 def _reset_fetch_failures_for_tests() -> None:
     _fetch_failures.clear()
+    _fetch_failure_detail.clear()
 
 
 async def _fetch_one_tf(
@@ -275,7 +334,7 @@ async def _fetch_one_tf(
         resp.raise_for_status()
         klines: list[list[Any]] = resp.json()
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
-        _record_fetch_failure(symbol, tf)
+        _record_fetch_failure(symbol, tf, exc)
         # ERROR, not WARNING, and counted. This is a FAIL-OPEN path: the
         # caller turns None into a zero-vote degradation, so a symbol whose
         # fetch always fails scores as though no higher timeframe agreed

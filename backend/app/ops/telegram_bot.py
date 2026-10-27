@@ -47,6 +47,20 @@ log = logging.getLogger(__name__)
 TELEGRAM_API_BASE: str = os.environ.get(
     "TELEGRAM_API_BASE", "https://api.telegram.org",
 )
+# NOT ENFORCED ANYWHERE (2026-10-26). These were consumed only by
+# app/ops/telegram_timeout.py, which was deleted after being found to
+# have no producer and no caller -- nothing ever wrote the
+# `pending_approval_until=` marker it walked, and prod held 0 such rows.
+# The 7-day auto-reject they describe was designed for a world where an
+# unapproved brain candidate would otherwise AUTO-ACTIVATE; #571 and #613
+# inverted that default to refuse-unless-opted-in, so an unapproved
+# candidate now sits as an inactive row indefinitely, which is the
+# correct state rather than a leak.
+#
+# Kept as a record of the intended policy, NOT as live configuration.
+# Reading a value here as enforced is the dead-config trap this project
+# has hit repeatedly (trap_enabled, FU-28, FU-19): if you need a timeout
+# on brain approvals, it has to be built, not re-enabled.
 APPROVAL_TIMEOUT_DAYS: int = 7
 REMINDER_INTERVAL_DAYS: int = 1
 HTTP_TIMEOUT_S: float = 15.0

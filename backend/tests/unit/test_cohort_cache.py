@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from app.shadow import cohort_cache
+from app.shadow.live_fleet_universe import MarketListings
 
 
 @pytest.fixture(autouse=True)
@@ -77,11 +78,21 @@ async def test_load_baseline_cache_once_raises_on_failure_and_stays_unset(
 async def test_refresh_futures_only_cache_success_updates_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_fetch(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
-        return {"BTCUSDT", "XPLUSDT"}, {"XPLUSDT"}, {"BTCUSDT"}
+    async def fake_fetch(_http: httpx.AsyncClient) -> MarketListings:
+        # Routable sets carry one extra symbol (HALTEDUSDT) so the
+        # two views are DISTINGUISHABLE here. If the fake returned
+        # identical sets, a refresh that populated only the
+        # tradable slots would still satisfy every assertion.
+        return MarketListings(
+            tradable_futures=frozenset({"BTCUSDT", "XPLUSDT"}),
+            tradable_futures_only=frozenset({"XPLUSDT"}),
+            tradable_spot=frozenset({"BTCUSDT"}),
+            routable_futures_only=frozenset({"XPLUSDT"}),
+            routable_spot=frozenset({"BTCUSDT", "HALTEDUSDT"}),
+        )
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_market_listings", fake_fetch,
+        cohort_cache, "fetch_market_listings_full", fake_fetch,
     )
 
     result = await cohort_cache.refresh_futures_only_cache(AsyncMock())
@@ -104,20 +115,30 @@ async def test_refresh_futures_only_cache_failure_preserves_prior_value(
     must NOT wipe a good cache down to None -- that would turn every
     position open for the next 24h into a forced NULL until the next
     successful cycle, over one blip."""
-    async def fake_fetch_ok(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
-        return {"BTCUSDT", "XPLUSDT"}, {"XPLUSDT"}, {"BTCUSDT"}
+    async def fake_fetch_ok(_http: httpx.AsyncClient) -> MarketListings:
+        # Routable sets carry one extra symbol (HALTEDUSDT) so the
+        # two views are DISTINGUISHABLE here. If the fake returned
+        # identical sets, a refresh that populated only the
+        # tradable slots would still satisfy every assertion.
+        return MarketListings(
+            tradable_futures=frozenset({"BTCUSDT", "XPLUSDT"}),
+            tradable_futures_only=frozenset({"XPLUSDT"}),
+            tradable_spot=frozenset({"BTCUSDT"}),
+            routable_futures_only=frozenset({"XPLUSDT"}),
+            routable_spot=frozenset({"BTCUSDT", "HALTEDUSDT"}),
+        )
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_market_listings", fake_fetch_ok,
+        cohort_cache, "fetch_market_listings_full", fake_fetch_ok,
     )
     await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert cohort_cache.get_futures_only_cache() == {"XPLUSDT"}
 
-    async def fake_fetch_fails(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
+    async def fake_fetch_fails(_http: httpx.AsyncClient) -> MarketListings:
         raise httpx.ConnectError("network down")
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_market_listings", fake_fetch_fails,
+        cohort_cache, "fetch_market_listings_full", fake_fetch_fails,
     )
     result = await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert result is None
@@ -134,11 +155,11 @@ async def test_refresh_futures_only_cache_failure_preserves_prior_value(
 async def test_refresh_futures_only_cache_failure_before_any_success_stays_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_fetch_fails(_http: httpx.AsyncClient) -> tuple[set[str], set[str], set[str]]:
+    async def fake_fetch_fails(_http: httpx.AsyncClient) -> MarketListings:
         raise httpx.ConnectError("network down")
 
     monkeypatch.setattr(
-        cohort_cache, "fetch_market_listings", fake_fetch_fails,
+        cohort_cache, "fetch_market_listings_full", fake_fetch_fails,
     )
     result = await cohort_cache.refresh_futures_only_cache(AsyncMock())
     assert result is None
