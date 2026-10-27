@@ -6,6 +6,48 @@ from datetime import datetime, timezone
 from app.api.routes import tab1
 from app.core.dataquality.validator import Candle
 
+# ---------------------------------------------------------------------------
+# GRANDFATHERED NETWORK ACCESS -- PRE-EXISTING DEBT, NOT APPROVAL.
+# ---------------------------------------------------------------------------
+# This module reaches the real internet. It was already doing so before the
+# suite-wide egress block landed (2026-10-26); the block did not create this
+# dependency, it REVEALED it. 51 tests across 10 files were found this way,
+# all routing through the real build_prediction path, which fetches live
+# market data.
+#
+# WHY MARKED RATHER THAN FIXED HERE: mocking the transport would change what
+# each test actually verifies, across ten files, and that is its own piece
+# of work with its own review. Marking makes the dependency EXPLICIT AND
+# ENUMERATED instead of invisible, and keeps the guard live for every other
+# test -- which is the point: a NEW test that reaches the network now fails
+# immediately instead of waiting to be noticed.
+#
+# PARTITIONED 2026-10-27, BEFORE anyone pays this down: 51 STRUCTURE,
+# 0 VALUE. Every one of the 51 asserts on fixture-injected values (seeded
+# shadow_trades rows, monkeypatched ghost candles, seeded PatternStatsLookup,
+# seeded news with a FROZEN clock) or on a quantity's definitional range.
+# Live data is an INPUT to these tests but cannot change any verdict, so
+# there is NO false-green risk from market movement -- which is the thing
+# that would have made this a project rather than a chore.
+#
+# Cross-checked against CI history: ZERO flakes among the 51 across the last
+# 80 runs (4 failures total -- 2 from the commit that introduced the egress
+# guard, 2 from TimescaleDB service-container startup, none a test in this
+# set).
+#
+# WHAT IT STILL COSTS, so nobody rediscovers it: a fetch failure fails the
+# test, so these cannot run in a sandboxed or offline runner, and CI runners
+# reach Binance from SHARED GitHub IP RANGES -- meaning the suite depends on
+# an external service's tolerance of OTHER TENANTS' traffic. The failure mode
+# is not "our calls are too frequent", it is a 418/429 earned by somebody
+# else. That is why the debt is real rather than cosmetic, even at 0 VALUE.
+#
+# Low risk to pay down: swap the fetch for a fixture and the assertions are
+# unchanged. Removing a file from this list is the goal. Adding one is not.
+# NOTE: marks are PER-TEST below, not module-level. A blanket
+# pytestmark here granted network to 99 tests when 51 need it --
+# the grant must be no broader than the evidence.
+
 
 def _fake_candles(n: int = 250) -> list[Candle]:
     closes = list(np.linspace(100.0, 200.0, n))
@@ -19,6 +61,7 @@ def _fake_candles(n: int = 250) -> list[Candle]:
     ]
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_returns_full_payload(monkeypatch, bot_status_client) -> None:
     async def fake_fetch(symbol: str, timeframe: str, *, limit: int = 500):
@@ -58,6 +101,7 @@ async def test_predict_with_unknown_signal_returns_404(
     assert r.status_code == 404
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_with_valid_signal_attaches_markers(
     monkeypatch, bot_status_client, bot_status_factory,
@@ -158,6 +202,7 @@ async def test_predict_signal_markers_isolated_per_user(
     assert r.status_code == 404
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_without_signal_omits_markers(
     monkeypatch, bot_status_client,
@@ -173,6 +218,7 @@ async def test_predict_without_signal_omits_markers(
     assert r.json()["signal_markers"] is None
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_attaches_ghost_when_active_checkpoint_loaded(
     monkeypatch, bot_status_client,
@@ -210,6 +256,7 @@ async def test_predict_attaches_ghost_when_active_checkpoint_loaded(
     assert body["ghost"]["p95_high"] == 153.0
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_omits_ghost_when_no_active_checkpoint(
     monkeypatch, bot_status_client,
@@ -226,6 +273,7 @@ async def test_predict_omits_ghost_when_no_active_checkpoint(
     assert r.json()["ghost"] is None
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_l8_abstains_by_default_even_with_ghost(
     monkeypatch, bot_status_client,
@@ -259,6 +307,7 @@ async def test_predict_l8_abstains_by_default_even_with_ghost(
     assert body["layer_scores"]["8"] is None  # scoring path untouched
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_predict_l8_scores_when_flag_enabled(
     monkeypatch, bot_status_client,

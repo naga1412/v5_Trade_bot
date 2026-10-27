@@ -23,6 +23,48 @@ import pytest
 
 from app.trading.execution.glue import proposal_from_prediction
 
+# ---------------------------------------------------------------------------
+# GRANDFATHERED NETWORK ACCESS -- PRE-EXISTING DEBT, NOT APPROVAL.
+# ---------------------------------------------------------------------------
+# This module reaches the real internet. It was already doing so before the
+# suite-wide egress block landed (2026-10-26); the block did not create this
+# dependency, it REVEALED it. 51 tests across 10 files were found this way,
+# all routing through the real build_prediction path, which fetches live
+# market data.
+#
+# WHY MARKED RATHER THAN FIXED HERE: mocking the transport would change what
+# each test actually verifies, across ten files, and that is its own piece
+# of work with its own review. Marking makes the dependency EXPLICIT AND
+# ENUMERATED instead of invisible, and keeps the guard live for every other
+# test -- which is the point: a NEW test that reaches the network now fails
+# immediately instead of waiting to be noticed.
+#
+# PARTITIONED 2026-10-27, BEFORE anyone pays this down: 51 STRUCTURE,
+# 0 VALUE. Every one of the 51 asserts on fixture-injected values (seeded
+# shadow_trades rows, monkeypatched ghost candles, seeded PatternStatsLookup,
+# seeded news with a FROZEN clock) or on a quantity's definitional range.
+# Live data is an INPUT to these tests but cannot change any verdict, so
+# there is NO false-green risk from market movement -- which is the thing
+# that would have made this a project rather than a chore.
+#
+# Cross-checked against CI history: ZERO flakes among the 51 across the last
+# 80 runs (4 failures total -- 2 from the commit that introduced the egress
+# guard, 2 from TimescaleDB service-container startup, none a test in this
+# set).
+#
+# WHAT IT STILL COSTS, so nobody rediscovers it: a fetch failure fails the
+# test, so these cannot run in a sandboxed or offline runner, and CI runners
+# reach Binance from SHARED GitHub IP RANGES -- meaning the suite depends on
+# an external service's tolerance of OTHER TENANTS' traffic. The failure mode
+# is not "our calls are too frequent", it is a 418/429 earned by somebody
+# else. That is why the debt is real rather than cosmetic, even at 0 VALUE.
+#
+# Low risk to pay down: swap the fetch for a fixture and the assertions are
+# unchanged. Removing a file from this list is the goal. Adding one is not.
+# NOTE: marks are PER-TEST below, not module-level. A blanket
+# pytestmark here granted network to 99 tests when 51 need it --
+# the grant must be no broader than the evidence.
+
 
 # ---------------------------------------------------------------------------
 # proposal_from_prediction — threading kwarg
@@ -138,6 +180,7 @@ def _make_bars(n: int = 250) -> pd.DataFrame:
     }).set_index("ts")
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_build_prediction_sets_funding_rate_daily_3x_conversion() -> None:
     """build_prediction must populate LivePredictionOut.funding_rate_daily
@@ -166,6 +209,7 @@ async def test_build_prediction_sets_funding_rate_daily_3x_conversion() -> None:
     assert pred.funding_rate_daily == pytest.approx(0.03, abs=1e-9)
 
 
+@pytest.mark.allow_network
 @pytest.mark.asyncio
 async def test_build_prediction_funding_rate_daily_none_when_lookup_returns_none() -> None:
     """When lookup_latest_funding_rate returns None (no rows for symbol,

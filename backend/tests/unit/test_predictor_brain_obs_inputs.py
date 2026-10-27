@@ -15,6 +15,48 @@ import pytest
 
 from app.rl.predictor_glue import BrainHookResult
 
+# ---------------------------------------------------------------------------
+# GRANDFATHERED NETWORK ACCESS -- PRE-EXISTING DEBT, NOT APPROVAL.
+# ---------------------------------------------------------------------------
+# This module reaches the real internet. It was already doing so before the
+# suite-wide egress block landed (2026-10-26); the block did not create this
+# dependency, it REVEALED it. 51 tests across 10 files were found this way,
+# all routing through the real build_prediction path, which fetches live
+# market data.
+#
+# WHY MARKED RATHER THAN FIXED HERE: mocking the transport would change what
+# each test actually verifies, across ten files, and that is its own piece
+# of work with its own review. Marking makes the dependency EXPLICIT AND
+# ENUMERATED instead of invisible, and keeps the guard live for every other
+# test -- which is the point: a NEW test that reaches the network now fails
+# immediately instead of waiting to be noticed.
+#
+# PARTITIONED 2026-10-27, BEFORE anyone pays this down: 51 STRUCTURE,
+# 0 VALUE. Every one of the 51 asserts on fixture-injected values (seeded
+# shadow_trades rows, monkeypatched ghost candles, seeded PatternStatsLookup,
+# seeded news with a FROZEN clock) or on a quantity's definitional range.
+# Live data is an INPUT to these tests but cannot change any verdict, so
+# there is NO false-green risk from market movement -- which is the thing
+# that would have made this a project rather than a chore.
+#
+# Cross-checked against CI history: ZERO flakes among the 51 across the last
+# 80 runs (4 failures total -- 2 from the commit that introduced the egress
+# guard, 2 from TimescaleDB service-container startup, none a test in this
+# set).
+#
+# WHAT IT STILL COSTS, so nobody rediscovers it: a fetch failure fails the
+# test, so these cannot run in a sandboxed or offline runner, and CI runners
+# reach Binance from SHARED GitHub IP RANGES -- meaning the suite depends on
+# an external service's tolerance of OTHER TENANTS' traffic. The failure mode
+# is not "our calls are too frequent", it is a 418/429 earned by somebody
+# else. That is why the debt is real rather than cosmetic, even at 0 VALUE.
+#
+# Low risk to pay down: swap the fetch for a fixture and the assertions are
+# unchanged. Removing a file from this list is the goal. Adding one is not.
+# NOTE: marks are PER-TEST below, not module-level. A blanket
+# pytestmark here granted network to 99 tests when 51 need it --
+# the grant must be no broader than the evidence.
+
 
 def _bars(n: int = 250, end: str = "2026-01-05 10:00", tz: str = "UTC") -> pd.DataFrame:
     closes = list(np.linspace(100.0, 200.0, n))
@@ -45,6 +87,7 @@ async def _capture(monkeypatch: pytest.MonkeyPatch, bars: pd.DataFrame) -> dict:
     return captured
 
 
+@pytest.mark.allow_network
 async def test_brain_layer_scores_include_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
     """Layer scores passed to brain = signed_strength * confidence (not just signed_strength).
 
@@ -58,12 +101,14 @@ async def test_brain_layer_scores_include_confidence(monkeypatch: pytest.MonkeyP
         assert -1.0 <= score <= 1.0
 
 
+@pytest.mark.allow_network
 async def test_brain_atr_pct_is_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
     """atr_pct passed to brain is computed from bars (not hardcoded 0.0)."""
     captured = await _capture(monkeypatch, _bars())
     assert captured["market"].atr_pct > 0.0
 
 
+@pytest.mark.allow_network
 async def test_brain_weekend_true_on_saturday(monkeypatch: pytest.MonkeyPatch) -> None:
     """weekend=True when last bar is on a Saturday (UTC weekday=5). 2026-01-03 = Sat."""
     bars = _bars(end="2026-01-03 12:00")
@@ -71,6 +116,7 @@ async def test_brain_weekend_true_on_saturday(monkeypatch: pytest.MonkeyPatch) -
     assert captured["macro"].weekend is True
 
 
+@pytest.mark.allow_network
 async def test_brain_weekend_false_on_tuesday(monkeypatch: pytest.MonkeyPatch) -> None:
     """weekend=False on a weekday (Tuesday 2026-01-06)."""
     bars = _bars(end="2026-01-06 12:00")
@@ -78,6 +124,7 @@ async def test_brain_weekend_false_on_tuesday(monkeypatch: pytest.MonkeyPatch) -
     assert captured["macro"].weekend is False
 
 
+@pytest.mark.allow_network
 async def test_brain_asia_open_true_at_utc_03(monkeypatch: pytest.MonkeyPatch) -> None:
     """asia_open=True when candle hour is in 00-07 UTC (matching shadow/observation.py)."""
     bars = _bars(end="2026-01-05 03:00")
@@ -85,6 +132,7 @@ async def test_brain_asia_open_true_at_utc_03(monkeypatch: pytest.MonkeyPatch) -
     assert captured["macro"].asia_open is True
 
 
+@pytest.mark.allow_network
 async def test_brain_asia_open_false_at_utc_14(monkeypatch: pytest.MonkeyPatch) -> None:
     """asia_open=False when candle hour is >= 8 UTC."""
     bars = _bars(end="2026-01-05 14:00")
@@ -92,6 +140,7 @@ async def test_brain_asia_open_false_at_utc_14(monkeypatch: pytest.MonkeyPatch) 
     assert captured["macro"].asia_open is False
 
 
+@pytest.mark.allow_network
 async def test_brain_adjust_propagates_to_prediction_extras(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

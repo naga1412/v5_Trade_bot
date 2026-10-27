@@ -503,8 +503,13 @@ def test_symbol_routing_uses_the_listing_caches() -> None:
     from app.data import bar_fetch
     from app.shadow import cohort_cache
 
-    cohort_cache._futures_only_cache = {"PERPONLYUSDT"}
-    cohort_cache._spot_listed_cache = {"BTCUSDT"}
+    # The ROUTING slots, not the tradable ones (2026-10-27). Routing asks
+    # "does this market have bars", so it consults the listed-at-all
+    # sets; a halted or settling symbol is routable but NOT tradable.
+    # Seeding the tradable slots here would let this pass against a
+    # resolver reverted to the buggy predicate.
+    cohort_cache._routable_futures_only_cache = {"PERPONLYUSDT"}
+    cohort_cache._routable_spot_cache = {"BTCUSDT"}
     try:
         assert bar_fetch.resolve_klines_url_for_symbol("PERPONLYUSDT") == (
             bar_fetch.FUTURES_KLINES_URL
@@ -534,8 +539,13 @@ def test_a_symbol_IN_NEITHER_LISTING_raises_rather_than_assuming_spot() -> None:
     from app.data import bar_fetch
     from app.shadow import cohort_cache
 
-    cohort_cache._futures_only_cache = {"PERPONLYUSDT"}
-    cohort_cache._spot_listed_cache = {"BTCUSDT"}
+    # The ROUTING slots, not the tradable ones (2026-10-27). Routing asks
+    # "does this market have bars", so it consults the listed-at-all
+    # sets; a halted or settling symbol is routable but NOT tradable.
+    # Seeding the tradable slots here would let this pass against a
+    # resolver reverted to the buggy predicate.
+    cohort_cache._routable_futures_only_cache = {"PERPONLYUSDT"}
+    cohort_cache._routable_spot_cache = {"BTCUSDT"}
     try:
         with pytest.raises(bar_fetch.UnresolvedMarket, match="neither Binance"):
             bar_fetch.resolve_klines_url_for_symbol("LISTEDYESTERDAYUSDT")

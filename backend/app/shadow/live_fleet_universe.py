@@ -423,21 +423,96 @@ async def fetch_market_listings(
 
     Pure listing data -- no liquidity sampling, no cohort decision, no DB.
     """
+    listings = await fetch_market_listings_full(http)
+    return (
+        set(listings.tradable_futures),
+        set(listings.tradable_futures_only),
+        set(listings.tradable_spot),
+    )
+
+
+# Binance statuses that mean "this symbol has never traded", so there are
+# no historical bars to fetch. Everything else -- TRADING, BREAK (halted),
+# SETTLING (contract winding down) -- HAS history.
+_NO_HISTORY_STATUSES = frozenset({"PRE_TRADING", "PENDING_TRADING"})
+
+
+@dataclass(frozen=True)
+class MarketListings:
+    """Binance listings, split by THE QUESTION BEING ASKED.
+
+    TWO CONSUMERS, TWO QUESTIONS, TWO SETS -- and conflating them was the
+    defect (2026-10-27):
+
+      * `tradable_*` (status == TRADING) answers "MAY I TRADE THIS?",
+        which is the right question for cohort and fleet SELECTION.
+      * `routable_*` (listed at all, minus the never-traded statuses)
+        answers "DOES THIS MARKET HAVE BARS FOR IT?", which is the right
+        question for bar-fetch ROUTING.
+
+    A halted (`BREAK`) or settling (`SETTLING`) symbol is not tradable but
+    its history still exists, so routing on the TRADING predicate refuses
+    data that is right there. Measured 2026-10-27: TONUSDT, HFTUSDT and
+    VICUSDT were all spot=BREAK / futures=SETTLING, and 390 USDT symbols
+    upstream sit in a non-TRADING status (254 spot BREAK, 135 futures
+    SETTLING, 1 PENDING_TRADING).
+
+    Routing on the wider set is needed PERMANENTLY, not just until the
+    universe stops carrying delisted coins: backfills, historical
+    analysis, and the prediction validator draining a 53-day backlog all
+    legitimately want bars for symbols that have since delisted.
+    """
+
+    tradable_futures: frozenset[str]
+    tradable_futures_only: frozenset[str]
+    tradable_spot: frozenset[str]
+    routable_futures_only: frozenset[str]
+    routable_spot: frozenset[str]
+
+
+async def fetch_market_listings_full(
+    http: httpx.AsyncClient,
+) -> MarketListings:
+    """Two raw exchangeInfo calls -> both views. ONE fetch, two questions.
+
+    `fetch_market_listings` stays a thin 3-tuple wrapper over this for
+    `refresh_live_fleet_universe` and its tests, which do not need the
+    routing sets. Widening that return in place is the pitfall that broke
+    three integration unpack sites when PR #266 bumped a tuple from 8
+    to 9.
+    """
     futures_resp = await http.get(f"{_FUTURES_BASE}/fapi/v1/exchangeInfo")
     futures_resp.raise_for_status()
-    fut_symbols = {
-        s["symbol"] for s in futures_resp.json()["symbols"]
-        if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL"
-        and s.get("status") == "TRADING"
-    }
+    fut_rows = [
+        s for s in futures_resp.json()["symbols"]
+        if s.get("quoteAsset") == "USDT"
+        and s.get("contractType") == "PERPETUAL"
+    ]
 
     spot_resp = await http.get(f"{_SPOT_BASE}/api/v3/exchangeInfo")
     spot_resp.raise_for_status()
-    spot_symbols = {
-        s["symbol"] for s in spot_resp.json()["symbols"]
-        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+    spot_rows = [
+        s for s in spot_resp.json()["symbols"]
+        if s.get("quoteAsset") == "USDT"
+    ]
+
+    trad_fut = {s["symbol"] for s in fut_rows if s.get("status") == "TRADING"}
+    trad_spot = {s["symbol"] for s in spot_rows if s.get("status") == "TRADING"}
+    route_fut = {
+        s["symbol"] for s in fut_rows
+        if s.get("status") not in _NO_HISTORY_STATUSES
     }
-    return fut_symbols, fut_symbols - spot_symbols, spot_symbols
+    route_spot = {
+        s["symbol"] for s in spot_rows
+        if s.get("status") not in _NO_HISTORY_STATUSES
+    }
+    return MarketListings(
+        tradable_futures=frozenset(trad_fut),
+        tradable_futures_only=frozenset(trad_fut - trad_spot),
+        tradable_spot=frozenset(trad_spot),
+        routable_futures_only=frozenset(route_fut - route_spot),
+        routable_spot=frozenset(route_spot),
+    )
 
 
 async def fetch_futures_and_futures_only_symbols(
@@ -793,5 +868,7 @@ __all__ = [
     "LiveFleetEntry", "has_open_position", "get_open_position_symbols",
     "load_baseline_symbols", "load_live_fleet_universe", "refresh_live_fleet_universe",
     "fetch_futures_and_futures_only_symbols",
+    "MarketListings",
     "fetch_market_listings",
+    "fetch_market_listings_full",
 ]
