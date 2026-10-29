@@ -5,7 +5,10 @@ attaches mtf_agreement / mtf_dominant_tf / mtf_directions_json to
 the prediction row, but does NOT use them in any gate. PR2 adds
 the dispatcher gate.
 
-Source: Binance SPOT REST /api/v3/klines — geoblock-safe from Hetzner.
+Source: Binance klines REST, endpoint chosen per symbol by
+app.data.bar_fetch.resolve_klines_url_for_symbol — spot for
+spot-listed pairs (geoblock-safe from Hetzner), fapi for
+futures-only contracts. Defect (a), migrated 2026-10-29.
 Cache: module-level dict, TTL per TF tier (5m=60s, 15m=60s, 1h=300s,
        4h/1d/1w=3600s).
 Concurrency: asyncio.gather(return_exceptions=True) — any per-TF
@@ -60,7 +63,10 @@ EMA_SHORT: int = 20
 EMA_LONG: int = 50
 ADX_TREND_FLOOR: float = 20.0  # ADX < floor → no trending signal → vote=0
 
-_BASE_URL = "https://api.binance.com"
+# NO MODULE-LEVEL BASE URL ANY MORE. Defect (a), migrated 2026-10-29.
+# The endpoint is a per-SYMBOL fact, so a module constant could only
+# ever be a default -- and the default was the defect. It is resolved
+# once per symbol by `_resolve_symbol_url` below and passed down.
 
 # --- defect (b): TRANSPORT. Fixed 2026-10-27, independent of defect (a) ---
 #
@@ -416,11 +422,65 @@ def _reset_fetch_failures_for_tests() -> None:
     _fetch_failure_detail.clear()
 
 
+def _resolve_symbol_url(symbol: str, tfs: tuple[str, ...] = TIMEFRAMES) -> str | None:
+    """The klines endpoint for *symbol*, or None having COUNTED the failure.
+
+    DEFECT (a), MIGRATED 2026-10-29. This module used to build
+    `https://api.binance.com/api/v3/klines` for every symbol it scored.
+    For a futures-only contract that request can only ever 400: the
+    prod counter recorded 3,387 of them over 47 cycles, 96.50% of all
+    MTF fetch failures, across 23 symbols failing 6 of 6 timeframes.
+    Each one became a zero-agreement vote through the fail-open path
+    below, indistinguishable from genuine timeframe disagreement.
+
+    ON THE 1000x NAMING, because the next reader will otherwise add a
+    mapping that must not exist. Binance lists some perpetuals at 1000x
+    the underlying: the CONTRACT is `1000PEPEUSDT` while the SPOT PAIR
+    is `PEPEUSDT`. So for `1000PEPEUSDT`, "has no spot pair" is true OF
+    THE CONTRACT STRING and false of the asset -- `PEPEUSDT` is listed
+    and trading.
+
+    THAT IS THE CORRECT BEHAVIOUR AND NEEDS NO NAME MAPPING. We hold a
+    position in the `1000PEPEUSDT` perpetual; its price, its bars and
+    its ADX are the contract's, not the asset's. Routing it to fapi is
+    right. Rewriting the symbol to `PEPEUSDT` to reach spot would fetch
+    bars for a DIFFERENT, 1000x-rescaled instrument -- numerically
+    offset, and on a market we are not trading. Do not add a mapping.
+
+    Returns None rather than raising, because the whole fetch path here
+    is fail-open by an operator-locked contract (see `_fetch_one_tf`).
+    But it returns None *having recorded one failure per timeframe*
+    under the kind `UnresolvedMarket`, so an unplaceable symbol is
+    visible in the same counter series as a 400 or a timeout. Silent
+    fail-open is the defect regardless of which value is correct.
+    """
+    from app.data.bar_fetch import UnresolvedMarket, resolve_klines_url_for_symbol
+
+    try:
+        return resolve_klines_url_for_symbol(symbol.replace("/", ""))
+    except UnresolvedMarket as exc:
+        for tf in tfs:
+            _record_fetch_failure(symbol, tf, exc)
+        # Not an error: the two reachable causes are a cache that has not
+        # completed its first refresh since process start (transient, and
+        # the refresher fires one cycle immediately on boot), and a symbol
+        # listed since the last 24h refresh. Neither is a code defect, and
+        # both are already counted above.
+        log.warning(
+            "mtf_resolve_failed: symbol=%s -- no endpoint from positive "
+            "listing membership, scoring %d timeframes as zero-agreement. "
+            "NOT defaulting to spot: that default is defect (a). %s",
+            symbol, len(tfs), exc,
+        )
+        return None
+
+
 async def _fetch_one_tf(
     http: httpx.AsyncClient,
     symbol: str,
     tf: str,
     *,
+    url: str,
     cache_get: Any = _cache_get,
     cache_set: Any = _cache_set,
 ) -> list[list[Any]] | None:
@@ -429,6 +489,14 @@ async def _fetch_one_tf(
     On HTTP failure or timeout, returns None — caller treats as a
     zero-vote degradation per the fail-open contract.
     Per-TF timeout: TF_FETCH_TIMEOUT_S (2.0s) — operator-locked.
+
+    `url` IS REQUIRED AND KEYWORD-ONLY, with no default. A default would
+    be a spot URL, which is defect (a) re-entering through its own fix --
+    the same shape `bar_fetch.resolve_klines_url_for_symbol` refuses an
+    `else` branch for. Resolving it ONCE per symbol in the three callers,
+    rather than per timeframe here, also makes the endpoint decision
+    structurally per-symbol: all six timeframes of one symbol cannot
+    disagree about which market they came from.
     """
     cached = cache_get(symbol, tf)
     if cached is not None:
@@ -437,7 +505,7 @@ async def _fetch_one_tf(
     try:
         resp = await _get_klines(
             http,
-            f"{_BASE_URL}/api/v3/klines",
+            url,
             params={"symbol": symbol, "interval": tf, "limit": KLINE_LIMIT},
             timeout=TF_FETCH_TIMEOUT_S,
         )
@@ -523,9 +591,18 @@ async def compute_mtf_confluence(
     # per-call socket churn.
     own_http = False
     http = _http if _http is not None else get_rate_client()
+
+    # Resolved ONCE for all six timeframes. On failure the symbol is
+    # already counted per timeframe, and returning None here is the same
+    # answer the all-six-failed branch below gives -- reached without
+    # issuing six requests that cannot succeed.
+    url = _resolve_symbol_url(symbol)
+    if url is None:
+        return None
+
     try:
         results = await asyncio.gather(
-            *[_fetch_one_tf(http, symbol, tf) for tf in TIMEFRAMES],
+            *[_fetch_one_tf(http, symbol, tf, url=url) for tf in TIMEFRAMES],
             return_exceptions=True,
         )
     finally:
@@ -600,10 +677,17 @@ async def prewarm_cache(
                 log.info("mtf_prewarm: deadline reached at sym=%s", sym)
                 break
             remaining = deadline_seconds - elapsed
+            sym_url = _resolve_symbol_url(sym)
+            if sym_url is None:
+                # Counted inside the resolver. `continue`, not `break`:
+                # one unplaceable symbol must not end the prewarm sweep
+                # for every symbol after it.
+                continue
             try:
                 results = await asyncio.wait_for(
                     asyncio.gather(
-                        *[_fetch_one_tf(http, sym, tf) for tf in TIMEFRAMES],
+                        *[_fetch_one_tf(http, sym, tf, url=sym_url)
+                          for tf in TIMEFRAMES],
                         return_exceptions=True,
                     ),
                     timeout=remaining,
@@ -684,8 +768,18 @@ async def run_mtf_cache_refresh_loop(
             if not due:
                 continue
             log.info("mtf_cache_refresh: tick — refreshing %d entries", len(due))
+            # `due` is (symbol, timeframe) pairs, so resolve per DISTINCT
+            # symbol and reuse. Resolving per pair would count an
+            # unplaceable symbol once per due timeframe AND once per
+            # timeframe inside the resolver, inflating the counter by up
+            # to 6x for a symbol that is merely new.
+            urls = {
+                sym: _resolve_symbol_url(sym)
+                for sym in sorted({sym for sym, _ in due})
+            }
             await asyncio.gather(
-                *[_fetch_one_tf(http, sym, tf) for sym, tf in due],
+                *[_fetch_one_tf(http, sym, tf, url=urls[sym])
+                  for sym, tf in due if urls[sym] is not None],
                 return_exceptions=True,
             )
     finally:
