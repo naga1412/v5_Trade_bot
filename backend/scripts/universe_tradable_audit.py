@@ -70,21 +70,59 @@ async def main() -> int:
         snapshot = await load_live_fleet_universe(session)
         open_syms = await get_open_position_symbols(session)
 
-    tradable = set(listings.tradable_futures)
+    # TRADABILITY IS A TWO-MARKET QUESTION, and the first version of
+    # this script got it wrong. It tested `s not in tradable_futures`
+    # alone, which conflates two completely different things:
+    #
+    #   (1) listed as a USDT perp but HALTED or SETTLING -- genuinely
+    #       untradable, the case this audit exists for; and
+    #   (2) NOT A USDT PERP AT ALL -- a spot-only symbol, which is
+    #       perfectly tradable, just not on the market the fleet
+    #       universe is built from.
+    #
+    # Shadow open positions include spot-only symbols, so applying a
+    # futures-membership test to that population reported PEPEUSDT
+    # (spot; the perp is 1000PEPEUSDT) and SOXLBUSDT as untradable when
+    # both are fine. Same shape as the standing pooled-rate rule: name
+    # the population a predicate was defined over AND the one it is
+    # applied to, and if they differ, that IS the defect.
+    tradable_fut = set(listings.tradable_futures)
+    tradable_spot = set(listings.tradable_spot)
     routable = set(listings.routable_futures_only) | set(listings.routable_spot)
     members = {e.symbol: e for e in snapshot}
 
+    def untradable(sym: str) -> bool:
+        """No market will take an order for this symbol, either side."""
+        return sym not in tradable_fut and sym not in tradable_spot
+
+    def where(sym: str) -> str:
+        """Explicit per-market verdict -- never an inference from absence."""
+        bits = []
+        bits.append("futures=TRADING" if sym in tradable_fut else "futures=not-TRADING/absent")
+        bits.append("spot=TRADING" if sym in tradable_spot else "spot=not-TRADING/absent")
+        bits.append("has-history" if sym in routable else "no-history")
+        return " ".join(bits)
+
     print(f"universe snapshot      : {len(members)} symbols")
     print(f"open positions         : {len(open_syms)} symbols")
-    print(f"binance futures TRADING: {len(tradable)} USDT perps")
+    print(f"binance futures TRADING: {len(tradable_fut)} USDT perps")
+    print(f"binance spot TRADING   : {len(tradable_spot)} USDT pairs")
     print()
 
     # The removal set, and the two reasons a symbol can be in it, kept
     # SEPARATE because they have different operator consequences.
-    not_tradable = sorted(s for s in members if s not in tradable)
+    not_tradable = sorted(s for s in members if untradable(s))
     held_open = sorted(s for s in not_tradable if s in open_syms)
     open_not_member = sorted(
-        s for s in open_syms if s not in tradable and s not in members
+        s for s in open_syms if untradable(s) and s not in members
+    )
+    # Reported SEPARATELY and NOT as a finding: an open position on a
+    # symbol that is tradable but is not a USDT perp. Perfectly normal
+    # for a shadow position; it is only interesting that the universe
+    # predicate does not describe it.
+    open_spot_only = sorted(
+        s for s in open_syms
+        if s not in tradable_fut and s in tradable_spot
     )
 
     print("-" * 72)
@@ -94,14 +132,10 @@ async def main() -> int:
         print("  (none -- the universe is fully tradable as of this read)")
     for s in not_tradable:
         e = members[s]
-        flags = []
-        if s in open_syms:
-            flags.append("OPEN POSITION")
-        if s in routable:
-            flags.append("routable (has history)")
+        flags = ["OPEN POSITION"] if s in open_syms else []
         print(
             f"  {s:<16} cohort={e.cohort:<22} qvol=${e.qvol_24h:>14,.0f}"
-            f"  {' | '.join(flags) if flags else ''}"
+            f"  {where(s)}  {' | '.join(flags)}"
         )
 
     print()
@@ -122,7 +156,18 @@ async def main() -> int:
     if not open_not_member:
         print("  (none)")
     for s in open_not_member:
-        print(f"  {s}")
+        print(f"  {s:<16} {where(s)}")
+
+    print()
+    print("-" * 72)
+    print(f"NOT A FINDING -- open position, spot-TRADING, not a USDT perp: "
+          f"{len(open_spot_only)}")
+    print("-" * 72)
+    print("  (tradable; the universe predicate just does not describe them)")
+    if not open_spot_only:
+        print("  (none)")
+    for s in open_spot_only:
+        print(f"  {s:<16} {where(s)}")
 
     print()
     print("=" * 72)
