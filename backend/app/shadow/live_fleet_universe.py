@@ -506,6 +506,32 @@ async def fetch_market_listings_full(
         s["symbol"] for s in spot_rows
         if s.get("status") not in _NO_HISTORY_STATUSES
     }
+    # BOTH `*_futures_only` SETS ARE STRING DIFFERENCES, so they mean
+    # "this CONTRACT has no same-named spot pair" -- NOT "this ASSET has
+    # no spot market". The two readings diverge for Binance numeric
+    # multiplier contracts: the contract is `1000PEPEUSDT` while the spot
+    # pair is `PEPEUSDT`, so the asset is spot-listed and the contract
+    # string is not. Enumerated 2026-10-29 against live exchangeInfo:
+    # exactly SIX of 168 members are such contracts (1000BONK, 1000FLOKI,
+    # 1000LUNC, 1000PEPE, 1000SHIB, 1000XEC), and comparing futures
+    # baseAsset against every spot base asset found ZERO other
+    # naming-divergence families. `1000RATSUSDT` carries the prefix but
+    # RATS has no spot listing, so the prefix is not the test.
+    #
+    # THE CONTRACT READING IS THE ONE EVERY CONSUMER HERE WANTS, which is
+    # why this is a comment and not a fix. Routing sends 1000PEPEUSDT's
+    # bars to fapi (correct -- we hold the 1000x contract, and its price
+    # and ADX are the contract's), the liquidity floor measures the
+    # contract's own book from fapi with no spot join at all, and
+    # `_classify_cohort` tags it futures_poll because the futures poller
+    # is genuinely how it gets its bars.
+    #
+    # What the name invites and must not be read as: "futures_poll" does
+    # NOT imply the asset has no spot market, for those six symbols.
+    # Never add a name mapping -- rewriting 1000PEPEUSDT to PEPEUSDT
+    # fetches a 1000x-rescaled instrument from a market we do not trade.
+    # See docs/superpowers/decisions/2026-10-29-the-1000x-ticker-class.md
+    # and tests/unit/test_mtf_endpoint_routing.py's 1000x tests.
     return MarketListings(
         tradable_futures=frozenset(trad_fut),
         tradable_futures_only=frozenset(trad_fut - trad_spot),
