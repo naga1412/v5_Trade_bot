@@ -155,9 +155,12 @@ async def test_the_shared_client_goes_through_the_BUCKET() -> None:
     worse than before, because the limiter's presence would imply a
     guarantee it was not providing.
     """
+    import time
+
     client = mtf.get_rate_client()
     bucket = client.buckets["default"]
     before = bucket.tokens
+    t0 = time.monotonic()
 
     captured: dict[str, object] = {}
 
@@ -176,9 +179,33 @@ async def test_the_shared_client_goes_through_the_BUCKET() -> None:
         timeout=2.0,
     )
     assert captured["endpoint_key"] == "klines", captured
-    assert bucket.tokens <= before - 2, (
-        f"weight was not consumed: {before} -> {bucket.tokens}. The "
-        "shared client must go through .request(), not .get()."
+
+    # REFILL-ADJUSTED, not a fixed floor. The bucket refills at
+    # refill_per_sec, so between reading `before` and reading tokens
+    # again some tokens come back: a bare `<= before - 2` is a
+    # TIME-DEPENDENT assertion. It passed locally and failed on a
+    # slower CI runner at 1200 -> 1198.0127, i.e. 0.635 ms of refill
+    # at 20 tokens/sec. The allowance is DERIVED from the measured
+    # elapsed time and the bucket's own rate -- no magic tolerance.
+    elapsed = time.monotonic() - t0
+    allowance = elapsed * bucket.refill_per_sec
+    after = bucket.tokens
+    assert after <= before - 2 + allowance, (
+        f"weight was not consumed: {before} -> {after} "
+        f"(elapsed {elapsed*1000:.3f} ms allows {allowance:.4f} "
+        f"tokens of refill, so the ceiling was "
+        f"{before - 2 + allowance:.4f}). The shared client must go "
+        "through .request(), not .get() -- otherwise the limiter is "
+        "present but not consulted, which is worse than its absence "
+        "because it implies a guarantee it is not providing."
+    )
+    # ...and the drop must be REAL, not swallowed by the allowance.
+    # If elapsed were large enough to refund the whole weight this
+    # assertion would pass vacuously, so the consumption is also
+    # checked against the cap: tokens can never EXCEED capacity, so
+    # a strict decrease proves the acquire happened.
+    assert after < before, (
+        f"tokens did not decrease at all: {before} -> {after}"
     )
 
 
