@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +61,114 @@ EMA_LONG: int = 50
 ADX_TREND_FLOOR: float = 20.0  # ADX < floor → no trending signal → vote=0
 
 _BASE_URL = "https://api.binance.com"
+
+# --- defect (b): TRANSPORT. Fixed 2026-10-27, independent of defect (a) ---
+#
+# This module used `httpx.AsyncClient(timeout=TF_FETCH_TIMEOUT_S)` PER CALL
+# and fired 6 concurrent requests with no limiter, no bucket, no weight
+# accounting and no semaphore -- while flow_features, binance,
+# binance_futures_intermarket and bybit all use the shared
+# RateLimitedClient. It was the unthrottled outlier, and
+# KNOWN_ISSUES.md:185 already recorded the per-call construction.
+#
+# WHY THAT IS A HAZARD ON ITS OWN TERMS, regardless of (a): a fresh client
+# per call never reuses a connection, so every scoring cycle opens and
+# discards one socket per request. TIME_WAIT / FD accumulation then
+# produces TRANSPORT failures on ARBITRARY symbols -- intermittently,
+# environment-specifically, and NOT reproducible from a clean machine.
+# That is the leading explanation for ARBUSDT, which is demonstrably
+# healthy: 200 on all six timeframes in 118-189 ms single, and `ok` inside
+# a 180-request production-scale burst, yet the prod counter classed it
+# PERMANENT across two cycles.
+#
+# ENDPOINT SELECTION IS DELIBERATELY UNTOUCHED. Defect (a) -- spot URL for
+# futures-only symbols -- is held pending the status-code split. Fixing
+# the transport does not require fixing the routing, and bundling them
+# would make a narrow operational fix into a scoring change.
+_SHARED_POOL_MAX_CONNECTIONS = 20
+_SHARED_POOL_MAX_KEEPALIVE = 10
+
+# KEYED BY EVENT LOOP, not by process. An httpx.AsyncClient keeps
+# connections bound to the loop that opened them, so reusing one client
+# across loops raises `RuntimeError: Event loop is closed` on the second
+# loop -- verified directly, not assumed.
+#
+# Production has a single loop for the process's life, so a per-process
+# singleton would have been correct there and WRONG in the test suite:
+# pytest-asyncio is function-scoped here
+# (`asyncio_default_fixture_loop_scope = "function"`), and
+# tests/unit/test_predictor.py's network-marked tests each call
+# build_prediction -> compute_mtf_confluence with no injected client. The
+# first would have bound the pool to its loop and the remaining fourteen
+# would have failed on theirs.
+#
+# A WeakKeyDictionary rather than `id(loop)`: an id can be recycled after
+# a loop is collected, which would hand back a client bound to a dead
+# loop -- the same bug with a harder-to-read traceback. Entries vanish
+# with their loop.
+_rate_clients: "weakref.WeakKeyDictionary[Any, Any]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def get_rate_client() -> Any:
+    """The pooled, weight-limited client for MTF klines, per event loop.
+
+    One per loop, built on first use and never closed: closing it after a
+    compute call would reintroduce exactly the per-call socket churn this
+    exists to remove. Bucket parameters mirror
+    `app.data.adapters.binance._default_rate_client` so the two account
+    against Binance's documented per-IP budget shape rather than
+    inventing a second one.
+
+    Requires a running loop. That is deliberate -- a client fetched
+    without one could only be used on a loop it was not built for, which
+    is the failure this keying prevents.
+    """
+    from app.data.ratelimit import RateLimitedClient, TokenBucket
+
+    loop = asyncio.get_running_loop()
+    client = _rate_clients.get(loop)
+    if client is None:
+        client = RateLimitedClient(
+            exchange="binance",
+            http=httpx.AsyncClient(
+                timeout=TF_FETCH_TIMEOUT_S,
+                limits=httpx.Limits(
+                    max_connections=_SHARED_POOL_MAX_CONNECTIONS,
+                    max_keepalive_connections=_SHARED_POOL_MAX_KEEPALIVE,
+                ),
+            ),
+            buckets={"default": TokenBucket(capacity=1200, refill_per_sec=20.0)},
+            endpoint_weights={"klines": 2},
+            sync_header="X-MBX-USED-WEIGHT-1M",
+            sync_capacity=1200.0,
+        )
+        _rate_clients[loop] = client
+    return client
+
+
+def _reset_rate_client_for_tests() -> None:
+    _rate_clients.clear()
+
+
+async def _get_klines(client: Any, url: str, *, params: dict, timeout: float):
+    """One GET, through either a RateLimitedClient or a bare AsyncClient.
+
+    The bare-client path is kept because the existing tests inject an
+    `httpx.AsyncClient` with a mock transport directly into
+    `_fetch_one_tf`, and rewriting that seam would have been a far larger
+    diff than the fix. Dispatch is on TYPE, not on a capability sniff, so
+    a future client that happens to expose `.request` cannot silently
+    take the unthrottled path.
+    """
+    from app.data.ratelimit import RateLimitedClient
+
+    if isinstance(client, RateLimitedClient):
+        return await client.request(
+            "GET", url, endpoint_key="klines", params=params, timeout=timeout,
+        )
+    return await client.get(url, params=params, timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -326,7 +435,8 @@ async def _fetch_one_tf(
         return cached
 
     try:
-        resp = await http.get(
+        resp = await _get_klines(
+            http,
             f"{_BASE_URL}/api/v3/klines",
             params={"symbol": symbol, "interval": tf, "limit": KLINE_LIMIT},
             timeout=TF_FETCH_TIMEOUT_S,
@@ -408,8 +518,11 @@ async def compute_mtf_confluence(
       - Returns None ONLY if ALL 6 TFs failed
       - Otherwise returns a partial result (failed TFs recorded as 0 votes)
     """
-    own_http = _http is None
-    http = _http or httpx.AsyncClient(timeout=TF_FETCH_TIMEOUT_S)
+    # Never closed: the shared client is process-wide, and an injected
+    # one belongs to the caller. Closing either is what produced the
+    # per-call socket churn.
+    own_http = False
+    http = _http if _http is not None else get_rate_client()
     try:
         results = await asyncio.gather(
             *[_fetch_one_tf(http, symbol, tf) for tf in TIMEFRAMES],
@@ -474,8 +587,11 @@ async def prewarm_cache(
         len(TIMEFRAMES),
         deadline_seconds,
     )
-    own_http = _http is None
-    http = _http or httpx.AsyncClient(timeout=TF_FETCH_TIMEOUT_S)
+    # Never closed: the shared client is process-wide, and an injected
+    # one belongs to the caller. Closing either is what produced the
+    # per-call socket churn.
+    own_http = False
+    http = _http if _http is not None else get_rate_client()
     cached_count = 0
     try:
         for sym in symbols:
@@ -550,8 +666,11 @@ async def run_mtf_cache_refresh_loop(
     from app.ops.heartbeat import record_heartbeat
 
     log.info("mtf_cache_refresh: starting (interval=%ds)", interval_s)
-    own_http = _http is None
-    http = _http or httpx.AsyncClient(timeout=TF_FETCH_TIMEOUT_S)
+    # Never closed: the shared client is process-wide, and an injected
+    # one belongs to the caller. Closing either is what produced the
+    # per-call socket churn.
+    own_http = False
+    http = _http if _http is not None else get_rate_client()
     try:
         while True:
             await record_heartbeat(
