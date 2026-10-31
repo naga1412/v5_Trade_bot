@@ -65,6 +65,7 @@ __all__ = [
     "record_daily",
     "record_event",
     "record_queue_pass",
+    "record_universe_tradability",
 ]
 
 
@@ -127,6 +128,22 @@ EXPECTED_CHECKS: dict[str, ExpectedCheck] = {
             "#610's per-symbol MTF kline-fetch counter lives in a "
             "module-level dict that dies with the process. Silence here "
             "means the flusher stopped, NOT that fetches started working."
+        ),
+    ),
+    "universe_tradability": ExpectedCheck(
+        name="universe_tradability",
+        kind="probe",
+        # Produced by the same 5-minute check_events_flush cycle as the
+        # counter above, so the same 20-minute window applies and for
+        # the same reason: four missed cycles, not one slow one.
+        max_silence=_dt.timedelta(minutes=20),
+        why=(
+            "The universe tradability audit shipped 2026-10-29 as an "
+            "on-demand script with nothing scheduling it, while the "
+            "re-open trigger for the universe constraint was stated as "
+            "'when the audit reports non-zero'. Silence here means "
+            "nobody is watching for a universe member that has stopped "
+            "being TRADING -- which is unexitable, not merely illiquid."
         ),
     ),
 }
@@ -381,6 +398,76 @@ async def flush_mtf_fetch_failures(
         now=stamp,
     )
     return written
+
+
+async def record_universe_tradability(
+    session: "AsyncSession",
+    *,
+    now: _dt.datetime | None = None,
+) -> bool:
+    """Run the universe tradability audit and give it a row. Returns has_finding.
+
+    THE ROW IS WRITTEN ON EVERY CYCLE, including clean ones, which is
+    rule 2. The audit shipped on 2026-10-29 with its re-open trigger
+    stated as "when the audit reports non-zero" and nothing able to
+    report at all -- the sixth instance here of instrumentation with no
+    retrieval path. This is the path.
+
+    ``increment`` is 1 on a finding and 0 otherwise, so the daily
+    ``observed_count`` reads as "cycles that saw a finding today" while
+    the row's mere existence says the producer ran.
+
+    AN UNLOADED LISTING CACHE IS AN ``error`` ROW, NOT A PASS. The audit
+    cannot answer without listings, and a check that reports ok when it
+    could not run is the failure mode this whole module exists to
+    remove. It is briefly expected at boot -- the refresher fires one
+    cycle immediately on start -- so the row says so rather than
+    pretending the state is impossible.
+    """
+    from app.shadow.universe_tradability import audit_from_cached_listings
+
+    audit = await audit_from_cached_listings(session)
+    if audit is None:
+        await record_daily(
+            session, "universe_tradability",
+            kind="probe", status="error", increment=0,
+            detail={
+                "error": "listing cache unloaded -- audit could not run",
+                "hint": (
+                    "app.workers.futures_only_refresh has not completed a "
+                    "cycle since process start. Expected for a few seconds "
+                    "after boot; anything longer is a wedged refresher."
+                ),
+            },
+            now=now,
+        )
+        return False
+
+    await record_daily(
+        session, "universe_tradability",
+        kind="probe",
+        status="violation" if audit.has_finding else "ok",
+        increment=1 if audit.has_finding else 0,
+        detail={
+            "not_tradable": list(audit.not_tradable),
+            "held_open": list(audit.held_open),
+            "open_not_member": list(audit.open_not_member),
+            # Reported but NOT a finding: tradable on spot, just not a
+            # USDT perp. Kept in the row so a reader does not have to
+            # wonder whether it was checked.
+            "open_spot_only_NOT_A_FINDING": list(audit.open_spot_only),
+            "members": audit.members,
+            "open_positions": audit.open_positions,
+            "tradable_futures": audit.tradable_futures,
+            "tradable_spot": audit.tradable_spot,
+            # An empty finding over an empty snapshot is a VACUOUS pass,
+            # and the two must be distinguishable in the stored row or
+            # the reader cannot tell them apart later either.
+            "inputs_look_empty": audit.inputs_look_empty,
+        },
+        now=now,
+    )
+    return audit.has_finding
 
 
 QUEUE_PROGRESS_PREFIX = "queue_progress"

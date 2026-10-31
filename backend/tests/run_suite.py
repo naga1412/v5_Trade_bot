@@ -3,6 +3,8 @@
 WHY THIS EXISTS. Twice in one session a verdict was read from
 ``$?`` after a shell pipeline:
 
+    # pytest-pipe-ok: the incident this module was built to prevent,
+    # quoted below so a reader sees the exact shape to avoid
     python -m pytest ... | tail -45 ; echo "EXIT=$?"     # tail's code, 0
     python -m pytest ... > out.txt 2>&1 ; tail out.txt   # "exited with code 0"
 

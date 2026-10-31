@@ -41,6 +41,38 @@ Hysteresis (addendum section (a)):
     INFO-level retention log every other override case gets (operator
     ruling, 2026-08-20: visible, not silent).
 
+    THE RULING EXTENDS TO NON-TRADING STATUS (operator, 2026-10-31),
+    and is recorded here so the question is not re-litigated. The
+    original ruling was decided about severe LIQUIDITY failure -- a
+    book that empties -- and 2026-10-27's routing-predicate work raised
+    a harder case: a symbol whose Binance status is no longer TRADING
+    cannot be entered OR EXITED by anyone, so the position it holds
+    open can never close, and the override therefore re-adds it on
+    every refresh, forever.
+
+    THAT IS STILL THE PREFERRED OUTCOME, and the reason is that no
+    alternative removes the exposure. Dropping the symbol from the
+    universe does not close the position; it only stops the fleet
+    streaming prices for an exposure that still exists, which replaces
+    a visible stuck position with an invisible one. The override is
+    doing the right thing with a bad situation.
+
+    SO NO HARD CONSTRAINT IS BUILT -- no tradability test is added to
+    the override loop. DETECTION is the whole mechanism:
+    `app.shadow.universe_tradability` runs on the 5-minute
+    check_events cycle and `universe_tradability` is in
+    `EXPECTED_CHECKS`, so both a finding AND the detector's own silence
+    surface. A human then decides what to do about a specific stuck
+    position, which is the same division of labour as everywhere else
+    in app.ops.check_events: that module reports and never acts.
+
+    Note on provenance: the decision record this docstring cites for
+    Task 5d, `docs/superpowers/decisions/2026-08-19-live-fleet-
+    universe-never-scheduled-incident.md`, IS NOT IN THE TREE -- the
+    citation is dangling. This docstring is consequently the only
+    durable record of the ruling, which is why the extension is written
+    here rather than appended to a file that does not exist.
+
 Fast-exit severity trigger (2026-08-20, operator ruling following the
 73-vs-42 universe-discrepancy investigation): the unanimous-5-of-5 exit
 rule above was sized for MARGINAL misses -- a symbol sitting just under
@@ -506,6 +538,32 @@ async def fetch_market_listings_full(
         s["symbol"] for s in spot_rows
         if s.get("status") not in _NO_HISTORY_STATUSES
     }
+    # BOTH `*_futures_only` SETS ARE STRING DIFFERENCES, so they mean
+    # "this CONTRACT has no same-named spot pair" -- NOT "this ASSET has
+    # no spot market". The two readings diverge for Binance numeric
+    # multiplier contracts: the contract is `1000PEPEUSDT` while the spot
+    # pair is `PEPEUSDT`, so the asset is spot-listed and the contract
+    # string is not. Enumerated 2026-10-29 against live exchangeInfo:
+    # exactly SIX of 168 members are such contracts (1000BONK, 1000FLOKI,
+    # 1000LUNC, 1000PEPE, 1000SHIB, 1000XEC), and comparing futures
+    # baseAsset against every spot base asset found ZERO other
+    # naming-divergence families. `1000RATSUSDT` carries the prefix but
+    # RATS has no spot listing, so the prefix is not the test.
+    #
+    # THE CONTRACT READING IS THE ONE EVERY CONSUMER HERE WANTS, which is
+    # why this is a comment and not a fix. Routing sends 1000PEPEUSDT's
+    # bars to fapi (correct -- we hold the 1000x contract, and its price
+    # and ADX are the contract's), the liquidity floor measures the
+    # contract's own book from fapi with no spot join at all, and
+    # `_classify_cohort` tags it futures_poll because the futures poller
+    # is genuinely how it gets its bars.
+    #
+    # What the name invites and must not be read as: "futures_poll" does
+    # NOT imply the asset has no spot market, for those six symbols.
+    # Never add a name mapping -- rewriting 1000PEPEUSDT to PEPEUSDT
+    # fetches a 1000x-rescaled instrument from a market we do not trade.
+    # See docs/superpowers/decisions/2026-10-29-the-1000x-ticker-class.md
+    # and tests/unit/test_mtf_endpoint_routing.py's 1000x tests.
     return MarketListings(
         tradable_futures=frozenset(trad_fut),
         tradable_futures_only=frozenset(trad_fut - trad_spot),

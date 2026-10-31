@@ -30,7 +30,11 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.ops.check_events import find_silent_checks, flush_mtf_fetch_failures
+from app.ops.check_events import (
+    find_silent_checks,
+    flush_mtf_fetch_failures,
+    record_universe_tradability,
+)
 from app.ops.heartbeat import record_heartbeat
 
 log = logging.getLogger(__name__)
@@ -55,6 +59,13 @@ async def run_one_flush_cycle(
     try:
         async with session_factory() as session:
             written = await flush_mtf_fetch_failures(session)
+            # ORDERED BEFORE find_silent_checks DELIBERATELY: the audit
+            # writes its own row in this same transaction, so running it
+            # first means a cycle can never report the audit silent
+            # while also having just run it. Reversed, the very first
+            # cycle after deploy would log a spurious
+            # 'has NEVER reported' for a check it is about to produce.
+            tradability_finding = await record_universe_tradability(session)
             silent = await find_silent_checks(session)
             await session.commit()
     except Exception as e:  # noqa: BLE001
@@ -92,6 +103,7 @@ async def run_one_flush_cycle(
         status="ok",
         details={
             "symbols_written": written,
+            "tradability_finding": tradability_finding,
             "silent_checks": len(silent),
             "silent_names": sorted(s.name for s in silent)[:20],
         },
