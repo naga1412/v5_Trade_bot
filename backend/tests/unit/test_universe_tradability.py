@@ -330,10 +330,17 @@ async def test_the_FLUSH_CYCLE_calls_the_recorder(monkeypatch: Any) -> None:
     alarm channel gets ignored. Everything else in this file would still
     pass if nothing ever called the recorder.
 
-    ORDER IS ASSERTED, not just the call. The recorder must run BEFORE
-    find_silent_checks in the same transaction, or the first cycle after
-    deploy logs a spurious 'has NEVER reported' for a check it is about
-    to produce.
+    ORDER IS ASSERTED TWICE, not just the call.
+
+    Before find_silent_checks, or the first cycle after deploy logs a
+    spurious 'has NEVER reported' for a check it is about to produce.
+
+    And before flush_mtf_fetch_failures, which is the one that cost
+    something: that function advances `_last_flushed` /
+    `_last_flushed_detail` as it writes, BEFORE the commit. A fallible
+    call placed after it can roll the rows back while the watermarks
+    stay advanced, and those increments are never written again. I
+    introduced that window by adding the recorder after the flush.
     """
     import app.workers.check_events_flush as cef
 
@@ -382,5 +389,16 @@ async def test_the_FLUSH_CYCLE_calls_the_recorder(monkeypatch: Any) -> None:
     ), (
         "the recorder must run BEFORE find_silent_checks, or the first "
         f"cycle after deploy reports its own check silent. Order: {order}"
+    )
+    assert order.index("record_universe_tradability") < order.index(
+        "flush_mtf"
+    ), (
+        "the recorder must run BEFORE flush_mtf_fetch_failures. That "
+        "function advances its in-process watermarks as it writes and "
+        "BEFORE the commit, so a fallible call placed after it can roll "
+        "the rows back while the watermarks stay advanced -- those "
+        "increments are then never written again, silently "
+        "under-reporting the counter for the life of the process. "
+        f"Order: {order}"
     )
     assert order[-1] == "heartbeat:ok", order
