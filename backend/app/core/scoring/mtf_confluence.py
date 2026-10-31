@@ -475,6 +475,35 @@ def _resolve_symbol_url(symbol: str, tfs: tuple[str, ...] = TIMEFRAMES) -> str |
         return None
 
 
+def _resolve_urls_for_due(
+    due: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+) -> dict[str, str]:
+    """Endpoints for the DISTINCT symbols in *due*, unresolvable ones dropped.
+
+    ONE RESOLVE PER SYMBOL, not per (symbol, timeframe) pair. `due`
+    carries up to six pairs for the same symbol, and
+    :func:`_resolve_symbol_url` records one failure PER TIMEFRAME on an
+    unresolvable symbol -- so resolving per pair would inflate the
+    counter by up to 36x for a symbol that is merely newer than the last
+    listing refresh. That is a named function rather than an inline
+    comprehension so the claim is testable instead of asserted in a
+    comment.
+
+    RETURNS dict[str, str], NOT dict[str, str | None]. The obvious
+    inline form -- `url=urls[sym] for ... if urls[sym] is not None` --
+    reads as safe and does not TYPE as safe: the filter and the subscript
+    are two separate lookups, so mypy cannot narrow across them. It was
+    right to reject it, and CI caught it where a local `ruff`-only check
+    did not. Narrowing once, here, makes the guarantee structural.
+    """
+    out: dict[str, str] = {}
+    for sym in sorted({sym for sym, _ in due}):
+        url = _resolve_symbol_url(sym)
+        if url is not None:
+            out[sym] = url
+    return out
+
+
 async def _fetch_one_tf(
     http: httpx.AsyncClient,
     symbol: str,
@@ -773,13 +802,10 @@ async def run_mtf_cache_refresh_loop(
             # unplaceable symbol once per due timeframe AND once per
             # timeframe inside the resolver, inflating the counter by up
             # to 6x for a symbol that is merely new.
-            urls = {
-                sym: _resolve_symbol_url(sym)
-                for sym in sorted({sym for sym, _ in due})
-            }
+            resolved = _resolve_urls_for_due(due)
             await asyncio.gather(
-                *[_fetch_one_tf(http, sym, tf, url=urls[sym])
-                  for sym, tf in due if urls[sym] is not None],
+                *[_fetch_one_tf(http, sym, tf, url=resolved[sym])
+                  for sym, tf in due if sym in resolved],
                 return_exceptions=True,
             )
     finally:
@@ -886,6 +912,7 @@ __all__ = [
     "_vote_for_tf",
     # Fetch + compute
     "_fetch_one_tf",
+    "_resolve_urls_for_due",
     "compute_mtf_confluence",
     # Prewarm + refresh
     "_entries_due_for_refresh",

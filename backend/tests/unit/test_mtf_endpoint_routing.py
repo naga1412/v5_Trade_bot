@@ -293,3 +293,46 @@ def test_url_is_required_and_has_no_default() -> None:
         "`url` must stay keyword-only so a positional call cannot pass "
         "a timeframe into it by accident."
     )
+
+
+# ===========================================================================
+# The refresh loop's url map -- one resolve per SYMBOL, not per pair
+# ===========================================================================
+
+def test_due_urls_resolve_once_per_SYMBOL_not_per_pair(
+    listings: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`due` carries up to 6 pairs per symbol; the resolver sees it once.
+
+    This matters because `_resolve_symbol_url` records one failure PER
+    TIMEFRAME on an unresolvable symbol. Resolving per pair would record
+    6 x 6 = 36 for a symbol that is merely newer than the last listing
+    refresh, which would make the counter unreadable exactly when it is
+    being used to tell a routing failure from a transport one.
+
+    Hand-derived: 2 distinct symbols across 7 pairs -> exactly 2 calls.
+    """
+    listings(futures_only=set(), spot={"BTCUSDT"})
+    calls: list[str] = []
+    real = mc._resolve_symbol_url
+
+    def counting(symbol: str, *a: Any, **kw: Any) -> Any:
+        calls.append(symbol)
+        return real(symbol, *a, **kw)
+
+    monkeypatch.setattr(mc, "_resolve_symbol_url", counting)
+
+    due = [
+        ("BTCUSDT", "5m"), ("BTCUSDT", "15m"), ("BTCUSDT", "1h"),
+        ("BTCUSDT", "4h"), ("BTCUSDT", "1d"), ("BTCUSDT", "1w"),
+        ("NEVERHEARDUSDT", "1h"),
+    ]
+    resolved = mc._resolve_urls_for_due(due)
+
+    assert calls == ["BTCUSDT", "NEVERHEARDUSDT"], calls
+    assert resolved == {"BTCUSDT": SPOT_KLINES_URL}, resolved
+    # The unresolvable symbol is DROPPED, not mapped to None -- the return
+    # type is dict[str, str] and the call site subscripts it directly.
+    assert "NEVERHEARDUSDT" not in resolved
+    # ...and it was counted once per timeframe by the resolver, exactly once.
+    assert mc.get_fetch_failure_counts() == {"NEVERHEARDUSDT": 6}
