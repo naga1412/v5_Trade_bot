@@ -53,6 +53,14 @@ _spot_listed_cache: set[str] | None = None
 # is not tradable but its history still exists, and routing on the
 # tradable predicate refused data that was right there.
 _routable_futures_only_cache: set[str] | None = None
+# The FULL tradable USDT-perp set (2026-10-31). Distinct from
+# `_futures_only_cache`, which is that set MINUS the dual-listed
+# symbols. Added so a caller can ask the two-market tradability
+# question without reconstructing it from a union -- a union cannot
+# tell a spot-only symbol from a dual-listed one, and that distinction
+# is the whole reason the universe audit has a NOT-A-FINDING category.
+# Free: it comes out of the same two exchangeInfo calls.
+_tradable_futures_cache: set[str] | None = None
 _routable_spot_cache: set[str] | None = None
 _futures_only_cache_loaded_at: datetime | None = None
 
@@ -108,6 +116,7 @@ async def refresh_futures_only_cache(http: httpx.AsyncClient) -> set[str] | None
     """
     global _futures_only_cache, _spot_listed_cache, _futures_only_cache_loaded_at
     global _routable_futures_only_cache, _routable_spot_cache
+    global _tradable_futures_cache
     try:
         listings = await fetch_market_listings_full(http)
         futures_only = set(listings.tradable_futures_only)
@@ -120,6 +129,7 @@ async def refresh_futures_only_cache(http: httpx.AsyncClient) -> set[str] | None
         # "neither" for a symbol one of them knew.
         _routable_futures_only_cache = set(listings.routable_futures_only)
         _routable_spot_cache = set(listings.routable_spot)
+        _tradable_futures_cache = set(listings.tradable_futures)
         _futures_only_cache_loaded_at = _utc_now()
         log.info(
             "cohort_cache: futures_only refreshed (%d tradable futures-only, "
@@ -178,6 +188,17 @@ def get_routable_spot_cache() -> set[str] | None:
     return _routable_spot_cache
 
 
+def get_tradable_futures_cache() -> set[str] | None:
+    """Sync, zero-I/O read of every TRADING USDT perp.
+
+    Not the same as `get_futures_only_cache()`, and the difference is
+    the point: that one excludes dual-listed symbols, so it cannot
+    answer 'is this symbol tradable on futures'. Asking it that
+    question is what reported PEPEUSDT as untradable on 2026-10-29.
+    """
+    return _tradable_futures_cache
+
+
 def get_futures_only_cache_age_seconds() -> float | None:
     """None if never loaded; otherwise seconds since the last successful
     refresh. Used by the healer/heartbeat to flag a cache that's gone
@@ -194,10 +215,12 @@ def _reset_for_tests() -> None:
     global _baseline_cache, _futures_only_cache, _spot_listed_cache
     global _futures_only_cache_loaded_at
     global _routable_futures_only_cache, _routable_spot_cache
+    global _tradable_futures_cache
     _baseline_cache = None
     _futures_only_cache = None
     _spot_listed_cache = None
     _routable_futures_only_cache = None
+    _tradable_futures_cache = None
     _routable_spot_cache = None
     _futures_only_cache_loaded_at = None
 

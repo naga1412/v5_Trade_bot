@@ -41,6 +41,38 @@ Hysteresis (addendum section (a)):
     INFO-level retention log every other override case gets (operator
     ruling, 2026-08-20: visible, not silent).
 
+    THE RULING EXTENDS TO NON-TRADING STATUS (operator, 2026-10-31),
+    and is recorded here so the question is not re-litigated. The
+    original ruling was decided about severe LIQUIDITY failure -- a
+    book that empties -- and 2026-10-27's routing-predicate work raised
+    a harder case: a symbol whose Binance status is no longer TRADING
+    cannot be entered OR EXITED by anyone, so the position it holds
+    open can never close, and the override therefore re-adds it on
+    every refresh, forever.
+
+    THAT IS STILL THE PREFERRED OUTCOME, and the reason is that no
+    alternative removes the exposure. Dropping the symbol from the
+    universe does not close the position; it only stops the fleet
+    streaming prices for an exposure that still exists, which replaces
+    a visible stuck position with an invisible one. The override is
+    doing the right thing with a bad situation.
+
+    SO NO HARD CONSTRAINT IS BUILT -- no tradability test is added to
+    the override loop. DETECTION is the whole mechanism:
+    `app.shadow.universe_tradability` runs on the 5-minute
+    check_events cycle and `universe_tradability` is in
+    `EXPECTED_CHECKS`, so both a finding AND the detector's own silence
+    surface. A human then decides what to do about a specific stuck
+    position, which is the same division of labour as everywhere else
+    in app.ops.check_events: that module reports and never acts.
+
+    Note on provenance: the decision record this docstring cites for
+    Task 5d, `docs/superpowers/decisions/2026-08-19-live-fleet-
+    universe-never-scheduled-incident.md`, IS NOT IN THE TREE -- the
+    citation is dangling. This docstring is consequently the only
+    durable record of the ruling, which is why the extension is written
+    here rather than appended to a file that does not exist.
+
 Fast-exit severity trigger (2026-08-20, operator ruling following the
 73-vs-42 universe-discrepancy investigation): the unanimous-5-of-5 exit
 rule above was sized for MARGINAL misses -- a symbol sitting just under
