@@ -58,14 +58,26 @@ async def run_one_flush_cycle(
     """
     try:
         async with session_factory() as session:
-            written = await flush_mtf_fetch_failures(session)
-            # ORDERED BEFORE find_silent_checks DELIBERATELY: the audit
-            # writes its own row in this same transaction, so running it
-            # first means a cycle can never report the audit silent
-            # while also having just run it. Reversed, the very first
-            # cycle after deploy would log a spurious
-            # 'has NEVER reported' for a check it is about to produce.
+            # ORDER IS LOAD-BEARING TWICE OVER, so both reasons are here.
+            #
+            # 1. BEFORE flush_mtf_fetch_failures, because that function
+            #    advances its in-process watermarks (`_last_flushed`,
+            #    `_last_flushed_detail`) as it writes, BEFORE the commit
+            #    below. So anything fallible placed AFTER it and before
+            #    the commit can roll the rows back while the watermarks
+            #    stay advanced -- and those increments are then never
+            #    written again, silently under-reporting the counter for
+            #    the life of the process. I introduced exactly that
+            #    window on 2026-10-31 by adding this call after the
+            #    flush; running first removes it, and costs nothing.
+            #
+            # 2. BEFORE find_silent_checks, because the audit writes its
+            #    own row in this same transaction. Reversed, the very
+            #    first cycle after deploy would log a spurious
+            #    'has NEVER reported' for a check it is about to
+            #    produce.
             tradability_finding = await record_universe_tradability(session)
+            written = await flush_mtf_fetch_failures(session)
             silent = await find_silent_checks(session)
             await session.commit()
     except Exception as e:  # noqa: BLE001
