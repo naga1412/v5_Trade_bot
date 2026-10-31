@@ -104,15 +104,12 @@ ALLOWED_SPOT_URL = {
 # silent fix to a live scoring path is exactly the kind of change this project
 # requires an operator decision for.
 KNOWN_UNMIGRATED = {
-    # LIVE-AFFECTING, OPEN FINDING. Fetches spot klines per symbol for the
-    # MTF confluence vote and fails OPEN (returns None -> zero-vote
-    # degradation), so the whole futures_poll cohort scores as if no
-    # higher-timeframe agreed. 26 futures_poll symbols were live in prod on
-    # 2026-10-26 with 960 predictions in a 3-day window, so this is active,
-    # not latent. NOT fixed here: routing it to fapi would start producing
-    # real MTF votes for 26 live symbols, which changes live dispatch and
-    # needs an operator decision, not a drive-by edit.
-    "app/core/scoring/mtf_confluence.py",
+    # app/core/scoring/mtf_confluence.py MIGRATED 2026-10-29, on the
+    # operator decision this entry said it was waiting for. The
+    # status-code split read 96.50% HTTPStatusError_400 across 23
+    # symbols failing 6 of 6 timeframes, which is defect (a) by
+    # construction. The count going 4 -> 3 is the diff line a
+    # reviewer should see.
     # MEASUREMENT-INTEGRITY, OPEN FINDING. The variant-lane rolling report
     # fetches spot klines per symbol, so futures_poll trades silently drop
     # out of variant measurement -- the same mechanism that cost the A0
@@ -157,7 +154,7 @@ CLOSED_SPOT_URL = frozenset({
     "scripts/probe_gate_regime_window.py",
 })
 CLOSED_UNMIGRATED_SPOT_URL = frozenset({
-    "app/core/scoring/mtf_confluence.py",
+    # -1 on 2026-10-29: app/core/scoring/mtf_confluence.py, migrated.
     "scripts/shadow_variant_rolling_report.py",
     "scripts/probe_own_trade_entry_timing.py",
     "scripts/probe_part3_entry_timing_all_trades.py",
@@ -220,7 +217,9 @@ def test_the_closed_counts_are_what_review_signed_off() -> None:
     widen the exemptions in a single quiet commit.
     """
     assert len(CLOSED_SPOT_URL) == 10, len(CLOSED_SPOT_URL)
-    assert len(CLOSED_UNMIGRATED_SPOT_URL) == 4, len(CLOSED_UNMIGRATED_SPOT_URL)
+    # 4 -> 3 on 2026-10-29: app/core/scoring/mtf_confluence.py
+    # migrated on the operator decision its entry was waiting for.
+    assert len(CLOSED_UNMIGRATED_SPOT_URL) == 3, len(CLOSED_UNMIGRATED_SPOT_URL)
     assert len(CLOSED_FETCH_KLINES) == 2, len(CLOSED_FETCH_KLINES)
     # 2 -> 1 on 2026-10-26: app/shadow/worker.py migrated. This number is
     # the whole point of the count assertion -- it made the removal a
@@ -228,11 +227,14 @@ def test_the_closed_counts_are_what_review_signed_off() -> None:
     assert len(CLOSED_UNMIGRATED_FETCH_KLINES) == 1, (
         len(CLOSED_UNMIGRATED_FETCH_KLINES)
     )
-    # 4 unmigrated URL sites + 1 unmigrated adapter caller = 5 known-open
+    # 3 unmigrated URL sites + 1 unmigrated adapter caller = 4 known-open
     # instances of the defect. A fix that migrates one MUST lower this, and
-    # on 2026-10-26 one did: app/shadow/worker.py, 6 -> 5. This assertion
-    # working as advertised is why the number is trustworthy.
-    assert len(CLOSED_UNMIGRATED_SPOT_URL) + len(CLOSED_UNMIGRATED_FETCH_KLINES) == 5
+    # it has twice: app/shadow/worker.py 6 -> 5 on 2026-10-26, and
+    # app/core/scoring/mtf_confluence.py 5 -> 4 on 2026-10-29. This
+    # assertion working as advertised is why the number is trustworthy.
+    # 5 -> 4 on 2026-10-29 (mtf_confluence). The running total is the
+    # number to watch: it may only ever go DOWN.
+    assert len(CLOSED_UNMIGRATED_SPOT_URL) + len(CLOSED_UNMIGRATED_FETCH_KLINES) == 4
 
 
 def _py_files() -> list[Path]:

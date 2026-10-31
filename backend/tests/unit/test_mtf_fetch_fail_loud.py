@@ -31,6 +31,13 @@ import pytest
 
 from app.core.scoring import mtf_confluence as mc
 
+# The endpoint is now a REQUIRED argument (defect (a), migrated
+# 2026-10-29). These tests exercise fetch MECHANICS -- cache hits,
+# the failure counter, the log line -- not endpoint selection, so
+# they pass spot explicitly. Routing itself is tested in
+# tests/unit/test_mtf_endpoint_routing.py.
+_SPOT = "https://api.binance.com/api/v3/klines"
+
 
 class _FailingClient:
     """An http client whose every GET raises, like a 400 for a missing pair."""
@@ -61,7 +68,7 @@ async def test_a_failed_fetch_is_counted_per_symbol() -> None:
     exactly when it is wanted.
     """
     http = _FailingClient()
-    await mc._fetch_one_tf(http, "PERPONLYUSDT", "1h",
+    await mc._fetch_one_tf(http, "PERPONLYUSDT", "1h", url=_SPOT,
                            cache_get=lambda *_: None, cache_set=lambda *_: None)
     assert mc.get_fetch_failure_counts() == {"PERPONLYUSDT": 1}
 
@@ -77,7 +84,7 @@ async def test_repeated_failures_accumulate_so_permanent_differs_from_transient(
     """
     http = _FailingClient()
     for tf in ("5m", "15m", "1h", "4h"):
-        await mc._fetch_one_tf(http, "PERPONLYUSDT", tf,
+        await mc._fetch_one_tf(http, "PERPONLYUSDT", tf, url=_SPOT,
                                cache_get=lambda *_: None, cache_set=lambda *_: None)
     assert mc.get_fetch_failure_counts()["PERPONLYUSDT"] == 4
 
@@ -93,7 +100,7 @@ async def test_the_log_is_ERROR_and_names_the_fail_open_consequence(
     """
     http = _FailingClient()
     with caplog.at_level(logging.DEBUG, logger=mc.log.name):
-        await mc._fetch_one_tf(http, "PERPONLYUSDT", "1h",
+        await mc._fetch_one_tf(http, "PERPONLYUSDT", "1h", url=_SPOT,
                                cache_get=lambda *_: None, cache_set=lambda *_: None)
     recs = [r for r in caplog.records if "mtf_kline_fetch_failed" in r.getMessage()]
     assert recs, (
@@ -123,7 +130,7 @@ async def test_a_cache_hit_neither_counts_nor_logs(
     http = _FailingClient()
     with caplog.at_level(logging.DEBUG, logger=mc.log.name):
         got = await mc._fetch_one_tf(
-            http, "BTCUSDT", "1h",
+            http, "BTCUSDT", "1h", url=_SPOT,
             cache_get=lambda *_: [[1, "1", "1", "1", "1", "1"]],
             cache_set=lambda *_: None,
         )
@@ -153,7 +160,7 @@ async def test_a_successful_fetch_neither_counts_nor_logs() -> None:
 
     stored: dict[str, Any] = {}
     got = await mc._fetch_one_tf(
-        _OK(), "BTCUSDT", "1h",
+        _OK(), "BTCUSDT", "1h", url=_SPOT,
         cache_get=lambda *_: None,
         cache_set=lambda s, t, k: stored.update({f"{s}:{t}": k}),
     )
@@ -170,7 +177,7 @@ async def test_the_return_value_is_unchanged_so_behaviour_is_unchanged() -> None
     and an 'observability' commit would have moved live scoring.
     """
     got = await mc._fetch_one_tf(
-        _FailingClient(), "PERPONLYUSDT", "1h",
+        _FailingClient(), "PERPONLYUSDT", "1h", url=_SPOT,
         cache_get=lambda *_: None, cache_set=lambda *_: None,
     )
     assert got is None

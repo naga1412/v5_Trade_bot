@@ -30,6 +30,13 @@ from app.core.scoring.mtf_confluence import (
 )
 from app.core.scoring.types import Direction
 
+# The endpoint is now a REQUIRED argument (defect (a), migrated
+# 2026-10-29). These tests exercise fetch MECHANICS -- cache hits,
+# the failure counter, the log line -- not endpoint selection, so
+# they pass spot explicitly. Routing itself is tested in
+# tests/unit/test_mtf_endpoint_routing.py.
+_SPOT = "https://api.binance.com/api/v3/klines"
+
 
 # ---------------------------------------------------------------------------
 # Kline fixtures
@@ -166,6 +173,38 @@ def test_cache_ttl_get_returns_value_within_ttl() -> None:
     assert result == klines
 
 
+@pytest.fixture(autouse=True)
+def _spot_routing_cache(monkeypatch: pytest.MonkeyPatch):
+    """Seed the SPOT listing cache so routing can place these symbols.
+
+    Defect (a), migrated 2026-10-29: the endpoint now comes from
+    app.data.bar_fetch.resolve_klines_url_for_symbol, which requires
+    POSITIVE membership in a Binance listing cache and has no else
+    branch. Every symbol in this file is a real spot-listed pair, so
+    seeding the spot set is the faithful double.
+
+    WHY THIS IS LOCAL AND NOT IN conftest. The suite-wide
+    _cohort_cache_warm fixture seeds the two caches _classify_cohort
+    reads (baseline, futures_only) with EMPTY sets, which is enough to
+    give that function a real classification. It cannot do the same for
+    routing: an empty spot set still places nothing, so a symbol lands
+    in neither set and raises. The only way to make routing resolve
+    suite-wide would be to invent listing data globally -- which would
+    hide a genuine resolve failure from every test that should have
+    caught one. For a module whose entire defect history is silent
+    endpoint defaults, failing-to-resolve is the correct DEFAULT in a
+    test environment, and tests that need bars say which market they
+    are on.
+    """
+    from app.shadow import cohort_cache
+
+    monkeypatch.setattr(
+        cohort_cache, "_spot_listed_cache",
+        {"BTCUSDT", "ETHUSDT", "BNBUSDT"},
+    )
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Task 4.4b: _fetch_one_tf tests
 # ---------------------------------------------------------------------------
@@ -180,13 +219,13 @@ async def test_fetch_one_tf_caches_on_success() -> None:
         return_value=Response(200, json=_make_uptrend_klines())
     )
     async with httpx.AsyncClient() as http:
-        klines = await _fetch_one_tf(http, "BTCUSDT", "1h")
+        klines = await _fetch_one_tf(http, "BTCUSDT", "1h", url=_SPOT)
     assert klines is not None
     assert len(klines) == 200
 
     # Second call — should hit cache, not make another HTTP request
     async with httpx.AsyncClient() as http:
-        klines2 = await _fetch_one_tf(http, "BTCUSDT", "1h")
+        klines2 = await _fetch_one_tf(http, "BTCUSDT", "1h", url=_SPOT)
     assert klines2 == klines
     assert route.call_count == 1  # only one real request
 
@@ -200,7 +239,7 @@ async def test_fetch_one_tf_timeout_returns_none() -> None:
         side_effect=httpx.TimeoutException("simulated timeout")
     )
     async with httpx.AsyncClient() as http:
-        result = await _fetch_one_tf(http, "BTCUSDT", "5m")
+        result = await _fetch_one_tf(http, "BTCUSDT", "5m", url=_SPOT)
     assert result is None
 
 

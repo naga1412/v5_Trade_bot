@@ -30,6 +30,9 @@ import pytest
 from app.core.scoring import mtf_confluence as mtf
 from app.data.ratelimit import RateLimitedClient
 
+# Spot, named explicitly now that `url` is a required argument.
+_SPOT_URL = "https://api.binance.com/api/v3/klines"
+
 
 SRC = pathlib.Path(mtf.__file__).read_text(encoding="utf-8")
 
@@ -174,7 +177,7 @@ async def test_the_shared_client_goes_through_the_BUCKET() -> None:
 
     client.request = fake_request  # type: ignore[assignment]
     await mtf._get_klines(
-        client, f"{mtf._BASE_URL}/api/v3/klines",
+        client, _SPOT_URL,
         params={"symbol": "BTCUSDT", "interval": "1h", "limit": 200},
         timeout=2.0,
     )
@@ -224,7 +227,7 @@ async def test_a_BARE_client_still_works_for_the_test_seam() -> None:
     )
     async with httpx.AsyncClient(transport=transport) as bare:
         resp = await mtf._get_klines(
-            bare, f"{mtf._BASE_URL}/api/v3/klines",
+            bare, _SPOT_URL,
             params={"symbol": "BTCUSDT", "interval": "1h", "limit": 200},
             timeout=2.0,
         )
@@ -254,19 +257,72 @@ def test_dispatch_is_on_TYPE_not_a_capability_sniff() -> None:
     )
 
 
-def test_the_endpoint_selection_was_NOT_touched() -> None:
-    """Defect (a) is HELD, so the spot URL must still be there.
+def test_the_endpoint_is_RESOLVED_not_hardcoded() -> None:
+    """Defect (a) is MIGRATED, so the hardcoded spot URL must be GONE.
 
-    This is a scope assertion, not an endorsement. Fixing the transport
-    while quietly also changing the endpoint would have turned a narrow
-    operational fix into a scoring change, and the status-code split that
-    decides (a) has not been read yet.
+    THIS TEST REPLACES `test_the_endpoint_selection_was_NOT_touched`,
+    and the replacement is deliberate rather than a test bent to fit a
+    change. That test was a SCOPE assertion with an explicit expiry
+    written into its own docstring -- "the status-code split that
+    decides (a) has not been read yet". The split has now been read
+    (96.50% HTTPStatusError_400, 23 symbols, 6 of 6 timeframes), the
+    pre-registered rule returned MIGRATE, and the operator authorised
+    it. The condition the old test was guarding no longer holds, so
+    keeping it would have been asserting a decision that had been
+    reversed.
+
+    The replacement is STRICTER, not weaker: the old test allowed the
+    spot URL to be hardcoded, this one forbids any hardcoded klines
+    endpoint at all and requires the resolver by name.
     """
-    assert '_BASE_URL = "https://api.binance.com"' in SRC
-    assert "/api/v3/klines" in SRC
-    assert "fapi" not in SRC, (
-        "endpoint selection changed -- defect (a) is held pending the "
-        "status-code split; see 2026-10-27-mtf-status-code-rule.md"
+    # AST, NOT GREP, and the test failing is what caught it. The first
+    # version of this assertion grepped SRC for the spot path and went
+    # red on mtf_confluence's own docstrings, which EXPLAIN the
+    # migration and necessarily quote the URL. The sibling guard
+    # (test_bar_fetch_endpoint_guard) already does it correctly via
+    # _docstring_node_ids, so the right version was one file away.
+    # Fourth instance of the same precision lesson in this repo: a
+    # substring matcher must be calibrated against the text it will
+    # actually meet, not the text its author had in mind.
+    tree = ast.parse(SRC)
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.FunctionDef,
+                             ast.AsyncFunctionDef, ast.ClassDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    literals = [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+    assert not hasattr(mtf, "_BASE_URL"), (
+        "a module-level base URL is back. The endpoint is a per-SYMBOL "
+        "fact; a module constant can only be a default, and the default "
+        "was defect (a)."
+    )
+    offending = [v for v in literals if "api/v3/klines" in v]
+    assert not offending, (
+        "a hardcoded spot klines endpoint is back in mtf_confluence -- "
+        f"this is defect (a) re-entering: {offending}. Route through "
+        "app.data.bar_fetch.resolve_klines_url_for_symbol."
+    )
+    offending_fut = [v for v in literals if "fapi/v1/klines" in v]
+    assert not offending_fut, (
+        "a hardcoded FUTURES klines endpoint is no better than a "
+        f"hardcoded spot one: {offending_fut}. It is the same silent "
+        "default with the other market baked in."
+    )
+    assert "resolve_klines_url_for_symbol" in SRC, (
+        "the endpoint must come from the shared resolver, which is the "
+        "one place that requires POSITIVE listing membership and has no "
+        "else branch."
     )
 
 
