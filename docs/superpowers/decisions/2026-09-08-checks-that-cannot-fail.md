@@ -998,6 +998,8 @@ Twice in one session a verdict was taken from a shell pipeline's status
 rather than pytest's:
 
 ```
+# pytest-pipe-ok: the recorded incident itself -- this document is where
+# the pattern is named as a defect, so it must be able to show it
 python -m pytest ... | tail -45 ; echo "EXIT=$?"     # tail's code -> 0
 python -m pytest ... > out.txt 2>&1 ; tail out.txt   # "exited with code 0"
 ```
